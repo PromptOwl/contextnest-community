@@ -9,6 +9,8 @@ import {
   DEFAULT_NEST_SCOPE,
   restoredNestScope,
   nestRelation,
+  nestRole,
+  nestRelationText,
   type NestScope,
 } from "./dashboard-scope";
 
@@ -114,5 +116,32 @@ describe("nestRelation — what a card says about whose nest it is", () => {
 
   it("legacy rows without is_owner/permission read as owned, matching nestOwned", () => {
     expect(nestRelation({})).toBe("owned");
+  });
+});
+
+describe("nestRole — the role a shared nest's badge and banner name", () => {
+  it("grant roles rank admin > editor > reviewer > viewer, over the permission", () => {
+    expect(nestRole({ roles: ["viewer", "reviewer"], permission: "read" })).toBe("reviewer");
+    expect(nestRole({ roles: ["editor", "admin"], permission: "write" })).toBe("admin");
+  });
+
+  it("falls back to the permission, and owners have no role", () => {
+    expect(nestRole({ permission: "write" })).toBe("editor");
+    expect(nestRole({ permission: "read" })).toBe("viewer");
+    expect(nestRole({ permission: "owner" })).toBeNull();
+    expect(nestRole({})).toBeNull();
+  });
+});
+
+describe("nestRelationText — sidebar tooltip and nest page banner", () => {
+  it("names owner and role for shared, tier for discovered, nothing for mine", () => {
+    expect(
+      nestRelationText({ is_owner: false, permission: "write", roles: ["editor"], owner_email: "a@x.com" }),
+    ).toBe("Shared by a@x.com · Editor");
+    expect(
+      nestRelationText({ is_owner: false, permission: "read", visibility: "org", discovered: true, owner_email: "a@x.com" }),
+    ).toBe("Org-visible · a@x.com");
+    expect(nestRelationText({ is_owner: false, visibility: "public", discovered: true })).toBe("Public");
+    expect(nestRelationText({ is_owner: true, permission: "owner" })).toBeNull();
   });
 });

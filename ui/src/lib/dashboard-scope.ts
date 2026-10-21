@@ -56,6 +56,35 @@ export function nestRelation(n: ScopedNest): NestRelation {
   return nestOwned(n) ? "owned" : "shared";
 }
 
+export type NestRole = "admin" | "editor" | "reviewer" | "viewer";
+
+/** The caller's role on a nest they don't own. Grant roles win over the
+ *  permission fallback (a reviewer reads as 'read'); admin > editor >
+ *  reviewer > viewer. */
+export function nestRole(n: { roles?: string[] | null; permission?: string | null }): NestRole | null {
+  const roles = Array.isArray(n.roles) ? n.roles : [];
+  const ranked = (["admin", "editor", "reviewer", "viewer"] as const).find((r) => roles.includes(r));
+  if (ranked) return ranked;
+  return ({ admin: "admin", write: "editor", read: "viewer" } as Record<string, NestRole>)[n.permission ?? ""] ?? null;
+}
+
+/** One line naming whose nest this is, for nests that aren't mine — the
+ *  sidebar tooltip and the nest page banner. Null for my own. */
+export function nestRelationText(
+  n: ScopedNest & { owner_email?: string | null; roles?: string[] | null },
+): string | null {
+  const relation = nestRelation(n);
+  if (relation === "owned") return null;
+  const owner = n.owner_email ?? null;
+  if (relation === "discovered") {
+    const tier = n.visibility === "public" ? "Public" : "Org-visible";
+    return owner ? `${tier} · ${owner}` : tier;
+  }
+  const role = nestRole(n);
+  const by = owner ? `Shared by ${owner}` : "Shared with you";
+  return role ? `${by} · ${role[0].toUpperCase()}${role.slice(1)}` : by;
+}
+
 /** Does this registered nest belong in the scope? The text query is applied
  *  separately; this is the access rule only. */
 export function nestInScope(n: ScopedNest, scope: NestScope): boolean {

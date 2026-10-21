@@ -22,6 +22,7 @@ import {
   visibleUnsynced,
   nestInScope,
   nestRelation,
+  nestRole,
   DEFAULT_NEST_SCOPE,
   restoredNestScope,
   type NestScope,
@@ -994,24 +995,7 @@ export default function NestsPage() {
                   // A steward editor/reviewer resolves to permission='read'
                   // server-side, so keying off permission alone mislabeled them
                   // "Viewer". Precedence: admin > editor > reviewer > viewer.
-                  const roleList: string[] = Array.isArray(nest.roles)
-                    ? nest.roles
-                    : [];
-                  const effRole = roleList.includes("admin")
-                    ? "admin"
-                    : roleList.includes("editor")
-                      ? "editor"
-                      : roleList.includes("reviewer")
-                        ? "reviewer"
-                        : roleList.includes("viewer")
-                          ? "viewer"
-                          : permission === "admin"
-                            ? "admin"
-                            : permission === "write"
-                              ? "editor"
-                              : permission === "read"
-                                ? "viewer"
-                                : null;
+                  const effRole = nestRole(nest);
                   const canRequestRemoval = canRequestNestRemoval(effRole, canDelete);
                   const roleBadge = effRole
                     ? ({
@@ -1206,7 +1190,7 @@ export default function NestsPage() {
                                 <Building2 className="h-3 w-3 shrink-0" />
                               )}
                               <span className="truncate">
-                                Not shared with you
+                                {nest.visibility === "public" ? "Public" : "Org-visible"}
                                 {nest.owner_email ? (
                                   <>
                                     {" · "}
@@ -1224,6 +1208,7 @@ export default function NestsPage() {
                                   ? `Shared by ${nest.owner_email}`
                                   : "Shared with you"
                               }
+                              data-testid="nest-relation-shared"
                             >
                               <Users className="h-3 w-3 shrink-0" />
                               <span className="truncate">

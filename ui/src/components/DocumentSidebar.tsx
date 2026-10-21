@@ -27,8 +27,10 @@ import {
   Plug,
   Plus,
   Search,
+  Users,
 } from "lucide-react";
 import { reads, useNestMeta } from "../lib/queries";
+import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { useAuth } from "../auth/AuthContext";
@@ -247,10 +249,18 @@ export function DocumentSidebar({
                 <button
                   type="button"
                   onClick={() => onOpenNest(nestTarget(n))}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground"
-                  title={`Open ${n.name}`}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground",
+                    // Readable only through its visibility tier — not mine, not shared.
+                    nestRelation(n) === "discovered" && "italic opacity-70",
+                  )}
+                  title={[`Open ${n.name}`, nestRelationText(n)].filter(Boolean).join(" — ")}
+                  data-relation={nestRelation(n)}
                 >
                   <span className="truncate">{n.name}</span>
+                  {nestRelation(n) === "shared" && (
+                    <Users className="h-3 w-3 shrink-0 text-blue-600" aria-label="Shared with you" />
+                  )}
                   <VisibilityGlyph visibility={n.visibility} />
                 </button>
                 {current && onNewDocument && (
