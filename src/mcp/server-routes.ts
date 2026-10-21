@@ -39,6 +39,7 @@ import {
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -639,8 +640,8 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
-    // Same §9.4 field the per-nest surface advertises.
-    Object.assign(shape, clientToolField);
+    // Same §9.4 and billing-confirm fields the per-nest surface advertises.
+    Object.assign(shape, clientToolField, confirmBillingToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.

@@ -2189,13 +2189,56 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("067_system_accounts");
   }
 
-  // 068: CONTEXT.md revisions (CU-wdqcq05mty). The nest's operating
+  // Public docs sites (CU-wdqcq05jhm). nest_sites holds a nest's site
+  // settings — its custom domain (claimed with a DNS TXT token, served only
+  // once verified) and its SEO settings as JSON. site_paths maps public paths
+  // to documents: 'custom' is a URL the owner chose for a page; 'history' is
+  // every path a page has been served at, so a renamed or moved page 301s
+  // from its old URL instead of 404ing and losing its ranking.
+  if (!hasMigration("068_nest_sites")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_sites (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        domain TEXT,
+        site_key TEXT UNIQUE,
+        domain_token TEXT NOT NULL,
+        domain_verified_at TEXT,
+        settings TEXT NOT NULL DEFAULT '{}',
+        indexnow_key TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS site_paths (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+    `);
+    recordMigration("068_nest_sites");
+  }
+
+  // 069: a docs site's public_url is honoured only once its host is proven
+  // with the same DNS TXT token as a custom domain (CU-wdqcq05jhm). Stores the
+  // host that was proven, so changing public_url to another host un-verifies it.
+  if (!hasMigration("069_site_public_url_host")) {
+    const cols = (db.prepare("PRAGMA table_info(nest_sites)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("public_url_host")) db.exec("ALTER TABLE nest_sites ADD COLUMN public_url_host TEXT");
+    recordMigration("069_site_public_url_host");
+  }
+
+  // 070: CONTEXT.md revisions (CU-wdqcq05mty). The nest's operating
   // instructions are one file the engine overwrites in place, so this table is
   // their only history: every write — the Instructions page, `ctx push`, a
   // confirmed held push, MCP — records the full text it wrote. `seq` numbers a
   // nest's revisions 1, 2, 3… and is what a save names as its base, so two
   // editors can't silently overwrite each other.
-  if (!hasMigration("068_instructions_revisions")) {
+  if (!hasMigration("070_instructions_revisions")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS instructions_revisions (
         id TEXT PRIMARY KEY,
@@ -2209,7 +2252,7 @@ export function runMigrations(db: Database.Database): void {
         UNIQUE(nest_id, seq)
       );
     `);
-    recordMigration("068_instructions_revisions");
+    recordMigration("070_instructions_revisions");
   }
 }
 

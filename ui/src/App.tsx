@@ -20,6 +20,7 @@ import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
+import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
@@ -662,6 +663,7 @@ export default function App() {
       else params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     } else if (view.page === "nest") {
       pathNestId = view.nestId;
       if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
@@ -672,6 +674,9 @@ export default function App() {
       // link keeps working and doesn't grow a redundant &tab=overview.
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
+      // ?review= (the change open in the review pane) only means something
+      // on the Review tab; NestView writes it, App drops it everywhere else.
+      if (view.tab !== "review") params.delete("review");
     } else if (
       // Nest views ride in the path (/nest/<id>/<segment>) — the registry
       // page owns its segment; trace is the one non-registry sub-page.
@@ -690,11 +695,13 @@ export default function App() {
       params.delete("thread");
       params.delete("tab");
       params.delete("view");
+      params.delete("review");
     } else {
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     }
     const qs = params.toString();
     const path =
@@ -1140,6 +1147,8 @@ export default function App() {
       )}
       {/* A refused write anywhere offers "Request access?" (CU-wdqcq041jn). */}
       <RequestAccessHost />
+      {/* A role change that raises someone's billed class asks first (CU-wdqcq04t06). */}
+      <BillingConfirmHost />
     </>
   );
 

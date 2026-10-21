@@ -8,8 +8,9 @@ import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { matchesFilters } from "../lib/node-filter";
-import { decideWikiLinkAction } from "../lib/wiki-preview";
+import { reviewIdFromSearch, withReviewParam } from "../lib/review-pane";
 import { checkFolderPath } from "../lib/folder-path";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
@@ -37,6 +38,7 @@ import { PushConfirmationModal } from "./PushConfirmationModal";
 import { untilTime } from "../lib/dates";
 import { ReaderView } from "./ReaderView";
 import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { PublicSiteDialog } from "./PublicSiteDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
@@ -92,13 +94,11 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardModal,
-  ReviewActions,
   ReasonDialog,
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { ActivityLogPanel } from "./ActivityLogPanel";
-import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
 
 
@@ -302,6 +302,7 @@ export function NestView({
   // reader-mode dialog, applied by ReaderView (and the shell, for readers).
   const [branding, setBranding] = useState<NestBranding | null>(null);
   const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
+  const [siteDialogOpen, setSiteDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -365,7 +366,21 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
-  const [reviewNode, setReviewNode] = useState<any | null>(null);
+  // The change open in the Review tab's pane. Mirrored into ?review= so a
+  // review can be linked and survives a refresh (CU-wdqcq05mhk).
+  const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : reviewIdFromSearch(window.location.search),
+  );
+  const setOpenReviewId = (nodeId: string | null) => {
+    setOpenReviewIdState(nodeId);
+    if (typeof window === "undefined") return;
+    const search = withReviewParam(window.location.search, nodeId);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + search + window.location.hash,
+    );
+  };
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   // Admin activity log for the whole nest (CU-wdqcq03aw2).
   const [showNestActivity, setShowNestActivity] = useState(false);
@@ -430,6 +445,7 @@ export function NestView({
   // clicks that jump to Documents — mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     setActiveTabState(tab);
+    if (tab !== "review" && openReviewId) setOpenReviewId(null);
     onTabChange?.(tab);
   };
   // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
@@ -443,6 +459,11 @@ export function NestView({
 
 
   const qc = useQueryClient();
+  // Whose nest this is, from the cached dashboard list (owner, roles,
+  // discovered) — the banner above the tabs names it when it isn't mine.
+  const listRow = useQuery(reads.nestList()).data?.nests?.find((n) => n.id === nestId);
+  const relation = listRow ? nestRelation(listRow) : "owned";
+  const relationText = listRow ? nestRelationText(listRow) : null;
 
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
@@ -914,33 +935,32 @@ export function NestView({
     }
   };
 
-  const handleApprove = async (note?: string) => {
-    if (!reviewNode) return;
+  // Decisions from the review pane. Errors are rethrown so the pane shows
+  // them inline beside the button that failed (a 403 from SoD, scope or
+  // licensing must not look like nothing happened).
+  const handleApprove = async (nodeId: string, note?: string) => {
     try {
-      await api.approveNode(nestId, reviewNode.id, note);
-      toast.success("Approved");
-      // Drop the row now; fetchData below reconciles in the background.
-      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
-      setReviewNode(null);
-      fetchData();
+      await api.approveNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] approveNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Approve failed");
+      console.error("[NestView] approveNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Approve failed");
     }
+    toast.success("Approved and published");
+    // Drop the row now; fetchData below reconciles in the background.
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
-  const handleReject = async (note: string) => {
-    if (!reviewNode) return;
+  const handleRequestChanges = async (nodeId: string, note: string) => {
     try {
-      await api.rejectNode(nestId, reviewNode.id, note);
-      toast.success("Rejected");
-      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
-      setReviewNode(null);
-      fetchData();
+      await api.rejectNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] rejectNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Reject failed");
+      console.error("[NestView] rejectNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Request changes failed");
     }
+    toast.success("Sent back to the author");
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
   // Cancel your own pending review — the document goes back to Draft rather
@@ -1719,6 +1739,29 @@ export function NestView({
         />
       )}
 
+      {relationText && (
+        <div
+          data-testid="nest-relation-banner"
+          className={`mb-4 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+            relation === "shared"
+              ? "border-blue-200 bg-blue-50 text-blue-800"
+              : "border-dashed bg-muted/40 text-muted-foreground"
+          }`}
+        >
+          {relation === "shared" ? (
+            <Users className="h-4 w-4 shrink-0" />
+          ) : listRow?.visibility === "public" ? (
+            <Globe className="h-4 w-4 shrink-0" />
+          ) : (
+            <Building2 className="h-4 w-4 shrink-0" />
+          )}
+          <span className="truncate">
+            {relation === "shared"
+              ? relationText
+              : `Not shared with you — you can read it because it's ${relationText}`}
+          </span>
+        </div>
+      )}
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
@@ -1838,7 +1881,9 @@ export function NestView({
           carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
         {activeTab !== "overview" && (
           <div
-            className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
+            // While a review is open, small screens skip the stats so the
+            // review itself is the first thing on screen.
+            className={`${activeTab === "review" && openReviewId ? "hidden lg:grid" : "grid"} grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
               ? "md:grid-cols-4"
               : "md:grid-cols-1 max-w-sm"
               }`}
@@ -2032,7 +2077,13 @@ export function NestView({
               deletionRequests={deletionRequests}
               stats={stats}
               onOpenDocument={onOpenDocument}
-              onReview={setReviewNode}
+              onReview={(node) => {
+                // Review happens in the Review tab's pane, with the diff and
+                // the author's note — not a second, thinner surface here.
+                if (!showReviewTab) return onOpenDocument(node.id);
+                setActiveTab("review");
+                setOpenReviewId(node.id);
+              }}
               onRefresh={fetchData}
               onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
               importInputRef={importInputRef}
@@ -2055,17 +2106,13 @@ export function NestView({
                 loading={loading}
                 onRefresh={fetchData}
                 onOpenDocument={onOpenDocument}
-                onSelectRequest={(req) => {
-                  const node = nodes.find((n) => n.id === req.nodeId);
-                  if (node) {
-                    setReviewNode(node);
-                    return;
-                  }
-                  // Not in the loaded levels. Under lazy loading that usually
-                  // just means its folder was never expanded, so open the
-                  // document itself rather than calling it missing.
-                  onOpenDocument(req.nodeId);
-                }}
+                openReviewId={openReviewId}
+                onOpenReview={setOpenReviewId}
+                onApproveReview={handleApprove}
+                onRequestChanges={handleRequestChanges}
+                currentUser={currentEmail}
+                canEditDocs={canEditDocs}
+                primeTags={primeTags}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />
@@ -2477,6 +2524,32 @@ export function NestView({
             </Button>
           </div>
 
+          {/* Public site — the static, crawlable docs site a public reader-mode
+              nest publishes: domain, page URLs, search and AI settings. */}
+          {readerModeEnabled && (
+            <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">Public site</Label>
+                <p className="text-xs text-muted-foreground">
+                  A search-engine-ready docs site with its own domain, page
+                  URLs and AI settings. Live while the nest is public.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0 gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setSiteDialogOpen(true);
+                }}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Site settings
+              </Button>
+            </div>
+          )}
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2497,6 +2570,8 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PublicSiteDialog open={siteDialogOpen} onOpenChange={setSiteDialogOpen} nestId={nestId} />
 
       <ReaderBrandingDialog
         open={brandingDialogOpen}
@@ -2587,19 +2662,6 @@ export function NestView({
       )}
 
 
-      {reviewNode && (
-        <ReviewDocumentModal
-          node={reviewNode}
-          nestId={nestId}
-          onApprove={handleApprove}
-          onReject={handleReject}
-          onClose={() => setReviewNode(null)}
-          onOpenDocument={(nodeId) => {
-            setReviewNode(null);
-            onOpenDocument(nodeId);
-          }}
-        />
-      )}
 
 
       {removeStewardId && (
@@ -2687,122 +2749,5 @@ export function NestView({
       )}
 
     </div>
-  );
-}
-
-// ─── Sub-modals ─────────────────────────────────────────────────
-
-function ReviewDocumentModal({
-  node,
-  nestId,
-  onApprove,
-  onReject,
-  onClose,
-  onOpenDocument,
-}: {
-  node: any;
-  nestId: string;
-  onApprove: (note?: string) => Promise<void>;
-  onReject: (note: string) => Promise<void>;
-  onClose: () => void;
-  onOpenDocument: (nodeId: string) => void;
-}) {
-  const [linkError, setLinkError] = useState<string | null>(null);
-  const qc = useQueryClient();
-
-  // The row that opened this modal comes from the document list, which carries
-  // metadata only — a body per row costs a file read per row, and nothing in
-  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
-  // one document, on open. Falls back to a body the caller already had, so a
-  // row that does carry one renders without a round trip.
-  const { data: full, isLoading: bodyLoading } = useQuery({
-    ...reads.node(nestId, node.id),
-    enabled: !node.content,
-  });
-  const body = node.content || full?.node?.content || "";
-
-  // Resolve `[[Title]]` clicks to a node id and jump straight to that
-  // doc. Without this the wiki-link decoration renders but click does
-  // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
-  // is provided. `id` (the decoration's cached existence check) is never
-  // trusted for navigation — it can go stale between when the decoration
-  // checked and when it's clicked — so every click re-resolves against the
-  // live node list via the shared decideWikiLinkAction (same rule as the
-  // editor), which also picks up a target created after the reviewer opened
-  // the modal. Broken links are NOT routed to the create flow (canAuthor:
-  // false) — the caller is acting as a reviewer here (read-only role for
-  // this surface), so silently dropping them into an authoring page would
-  // mislead them; instead we surface an inline note.
-  const handleWikiLinkClick = async (
-    title: string,
-    _id: string | null,
-    displayText?: string | null,
-  ) => {
-    setLinkError(null);
-    try {
-      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
-      const action = decideWikiLinkAction(
-        nodes as Array<{ id: string; title: string }>,
-        title,
-        false,
-        displayText,
-      );
-      if (action.kind === "navigate") {
-        onOpenDocument(action.node.id);
-        return;
-      }
-      setLinkError(
-        `"${action.title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
-      );
-    } catch (e) {
-      console.error("[NestView] wiki-link lookup failed", nestId, title, e);
-      setLinkError("Couldn't look up that document — try again later.");
-    }
-  };
-
-  return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>{node.title}</DialogTitle>
-        </DialogHeader>
-        {linkError && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-            {linkError}
-          </div>
-        )}
-        <div className="flex-1 overflow-y-auto rounded-md">
-          {body ? (
-            <MarkdownEditor
-              // Remount when the reviewer switches between docs in the
-              // queue. Same modal instance otherwise → TipTap keeps its
-              // previous doc's editor state and the body briefly shows
-              // the wrong content on swap.
-              key={node.id}
-              content={body}
-              onChange={() => { }}
-              editable={false}
-              nestId={nestId}
-              onWikiLinkClick={handleWikiLinkClick}
-            />
-          ) : bodyLoading ? (
-            // Distinct from "(no content)": approving on the strength of an
-            // empty box that was merely still loading is the one mistake this
-            // modal must not invite.
-            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
-          ) : (
-            <p className="text-sm text-muted-foreground p-4">(no content)</p>
-          )}
-        </div>
-        <DialogFooter>
-          <ReviewActions
-            documentTitle={node.title}
-            version={node.version || 1}
-            onApprove={onApprove}
-            onReject={onReject}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

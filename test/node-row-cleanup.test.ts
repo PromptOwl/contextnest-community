@@ -98,6 +98,9 @@ describe("node row cleanup", () => {
       ["stewards.node_pattern", "document-scoped only"],
       ["grants.target", "document grants only; folder grants cover a prefix"],
       ["access_requests.target_id", "node-targeted requests only; folder/nest targets aren't node ids"],
+      // Public docs-site URLs: move repoints them; delete keeps each path as a
+      // detached 410 marker (node_id ''). Handled beside the loop.
+      ["site_paths.node_id", "kept as a 410 marker on delete"],
     ]);
     const NODE_ID_COLUMNS = new Set([
       "node_id",

@@ -263,6 +263,8 @@ export async function jsonRequest(
 ) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Suites raise roles freely; billing-confirm.test.ts covers the 409 without it.
+    "X-Confirm-Billing": "true",
   };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 

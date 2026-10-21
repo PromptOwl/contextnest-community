@@ -1,3 +1,5 @@
+import { invalidateSiteNests } from "../site/invalidate.js";
+import { claimSiteKeyIfLive } from "../site/settings.js";
 import { mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
@@ -10,7 +12,7 @@ import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import { assertCanGrant } from "../auth/seats.js";
+import { assertCanGrant, billingConfirmed } from "../auth/seats.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
@@ -169,6 +171,8 @@ export async function setReaderMode(
   if (sets.length === 0) return;
   params.push(nestId);
   await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
+  invalidateSiteNests();
+  await claimSiteKeyIfLive(nestId);
 }
 
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
@@ -482,6 +486,7 @@ export async function renameNest(
     );
     updates.push("name = ?", "slug = ?");
     params.push(trimmed, slug);
+    invalidateSiteNests();
   }
 
   if (patch.description !== undefined) {
@@ -510,7 +515,10 @@ export async function assertCanCreateNest(userId: string): Promise<void> {
     (await isServerAdminUserId(userId))
   ) {
     // A nest owner bills as a user (pricing §3.3). The anon commons doesn't.
-    if (userId !== ANON_USER_ID) await assertCanGrant([{ userId, next: "user" }]);
+    // Creating your own nest isn't a raise the Account Owner confirms: plan cap only.
+    if (userId !== ANON_USER_ID) {
+      await billingConfirmed.run(true, () => assertCanGrant([{ userId, next: "user" }]));
+    }
     return;
   }
   throw new ForbiddenError(
@@ -1000,6 +1008,10 @@ export async function deleteNest(nestId: string): Promise<void> {
   await db.transaction(async (tx) => {
     const id = nestId;
     await tx.run("DELETE FROM approved_versions WHERE nest_id = ?", [id]);
+    // A deleted nest releases its docs-site domain for whoever claims it next.
+    await tx.run("DELETE FROM site_paths WHERE nest_id = ?", [id]);
+    await tx.run("DELETE FROM nest_sites WHERE nest_id = ?", [id]);
+    invalidateSiteNests();
     await tx.run("DELETE FROM node_versions WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM review_requests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM stewards WHERE nest_id = ?", [id]);

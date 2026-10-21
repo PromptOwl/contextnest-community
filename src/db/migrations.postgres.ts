@@ -93,7 +93,9 @@ export const HISTORICAL_MIGRATIONS = [
   "065_api_key_capability",
   "066_api_key_origin",
   "067_system_accounts",
-  "068_instructions_revisions",
+  "068_nest_sites",
+  "069_site_public_url_host",
+  "070_instructions_revisions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1194,7 +1196,36 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
-  // Migration 068 parity: CONTEXT.md revisions (see migrations.ts).
+  // Migration 068 parity: public docs sites (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_sites (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      domain TEXT,
+      site_key TEXT UNIQUE,
+      domain_token TEXT NOT NULL,
+      domain_verified_at TEXT,
+      settings TEXT NOT NULL DEFAULT '{}',
+      indexnow_key TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE TABLE IF NOT EXISTS site_paths (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+  `);
+
+  // Migration 069 parity: the proven host of a site's public_url.
+  await db.exec("ALTER TABLE nest_sites ADD COLUMN IF NOT EXISTS public_url_host TEXT");
+
+  // Migration 070 parity: CONTEXT.md revisions (see migrations.ts).
   await db.exec(`
     CREATE TABLE IF NOT EXISTS instructions_revisions (
       id TEXT PRIMARY KEY,

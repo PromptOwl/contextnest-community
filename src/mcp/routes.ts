@@ -20,6 +20,7 @@ import {
   clientToolField,
   connectionClient,
 } from "../shared/client-metadata.js";
+import { confirmBillingToolField } from "../auth/seats.js";
 import { config } from "../config.js";
 import { z } from "zod";
 
@@ -105,7 +106,7 @@ function createMcpServerForNest(
     // rather than in each tool's inputSchema, so no tool can be added without
     // it and the divergence guard sees no new inline schema. Validated against
     // the engine's own schema inside handleToolCall.
-    Object.assign(shape, clientToolField);
+    Object.assign(shape, clientToolField, confirmBillingToolField);
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);

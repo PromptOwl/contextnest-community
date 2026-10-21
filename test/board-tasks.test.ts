@@ -3,6 +3,8 @@ import {
   UNASSIGNED,
   assigneesOnBoard,
   dueState,
+  formatDue,
+  isPickedDue,
   matchesAssigneeFilter,
   matchesBlockedFilter,
   matchesTitleFilter,
@@ -96,6 +98,16 @@ describe("due, priority, sub-items, timestamps", () => {
     expect(dueState("2026-10-06", "2026-10-06")).toBe("today");
     expect(dueState("2026-10-08", "2026-10-06")).toBe("soon");
     expect(dueState("2026-10-20", "2026-10-06")).toBe("later");
+  });
+  it("a half-typed picker year isn't saved", () => {
+    // What a date input fires while "2026" is typed into its year.
+    expect(["0002-09-02", "0020-09-02", "0202-09-02"].some(isPickedDue)).toBe(false);
+    expect(isPickedDue("2026-09-02")).toBe(true);
+    expect(isPickedDue("")).toBe(false);
+  });
+  it("formatDue keeps a two-digit year instead of mapping it to 19xx", () => {
+    expect(formatDue("0020-09-02", "2026-10-06")).not.toMatch(/1920/);
+    expect(formatDue("2027-01-05", "2026-10-06")).toMatch(/2027/);
   });
   it("priorityRank puts urgent first and none last", () => {
     expect(["low", undefined, "urgent", "high"].sort((a, b) => priorityRank(a) - priorityRank(b)))

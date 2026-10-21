@@ -79,6 +79,19 @@ async function request<T = any>(
   }
 
   if (!res.ok) {
+    // A role change that raises someone's billed class: one listener
+    // (BillingConfirmHost) asks, and a yes resends with the confirm header.
+    if (res.status === 409 && data.code === "billing_confirm" && !headers["X-Confirm-Billing"] && typeof window !== "undefined") {
+      const ok = await new Promise<boolean>((resolve) => {
+        const ev = new CustomEvent<BillingConfirmRequest>(BILLING_CONFIRM_EVENT, {
+          detail: { changes: data.changes ?? [], resolve },
+          cancelable: true,
+        });
+        if (window.dispatchEvent(ev)) resolve(false); // no host mounted
+      });
+      if (ok) return request<T>(path, { ...options, headers: { ...headers, "X-Confirm-Billing": "true" } });
+      data.error = "Cancelled. Nothing was saved and no one's billing changed.";
+    }
     // 401 = the server says we're not logged in. Drop any legacy
     // localStorage entry and signal the auth context to reset UI state
     // (re-render to logged-out without a manual page refresh).
@@ -156,6 +169,19 @@ export function invalidateNestReads(nestId?: string): void {
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
+/** A role change the server says raises someone's billed class (409 billing_confirm). */
+export interface BillingChange {
+  userId: string | null;
+  email: string | null;
+  from: "viewer" | "subscriber" | "user";
+  to: "viewer" | "subscriber" | "user";
+}
+export interface BillingConfirmRequest {
+  changes: BillingChange[];
+  resolve: (confirmed: boolean) => void;
+}
+export const BILLING_CONFIRM_EVENT = "billing:confirm";
+
 export interface ApiError extends Error {
   status?: number;
   body?: { error?: string; fieldErrors?: Record<string, string>; [k: string]: unknown };
@@ -1469,6 +1495,59 @@ export async function setNestBranding(nestId: string, branding: NestBranding | n
   return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
     method: "PATCH",
     body: JSON.stringify(branding),
+  });
+}
+
+// Public docs site (CU-wdqcq05jhm) — owner / nest admin / server admin.
+export interface SiteSettings {
+  title?: string;
+  description?: string;
+  public_url?: string;
+  og_image_url?: string;
+  organization_name?: string;
+  organization_url?: string;
+  organization_logo_url?: string;
+  same_as?: string[];
+  twitter_site?: string;
+  google_site_verification?: string;
+  bing_site_verification?: string;
+  language?: string;
+  noindex?: boolean;
+  ai_training?: boolean;
+  ai_actions?: boolean;
+  indexnow?: boolean;
+  redirects?: Array<{ from: string; to: string }>;
+}
+export interface SiteInfo {
+  live: boolean;
+  reason: string | null;
+  url: string | null;
+  domain: string | null;
+  domain_verified: boolean;
+  domain_verified_at: string | null;
+  serving_domain: string | null;
+  dns: { txt: { name: string; value: string } | null; cname: string | null } | null;
+  public_url_verified: boolean;
+  public_url_dns: { name: string; value: string } | null;
+  settings: SiteSettings;
+  pages: Array<{ node_id: string; title: string; path: string; custom: boolean }>;
+}
+export async function getNestSite(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site`);
+}
+export async function updateNestSite(nestId: string, body: { domain?: string | null; settings?: SiteSettings }) {
+  return request<SiteInfo>(`/nests/${nestId}/site`, { method: "PATCH", body: JSON.stringify(body) });
+}
+export async function verifyNestSiteDomain(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-domain`, { method: "POST", body: "{}" });
+}
+export async function verifyNestSitePublicUrl(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-public-url`, { method: "POST", body: "{}" });
+}
+export async function setNestSitePageUrl(nestId: string, nodeId: string, path: string | null) {
+  return request<SiteInfo>(`/nests/${nestId}/site/pages`, {
+    method: "PUT",
+    body: JSON.stringify({ node_id: nodeId, path }),
   });
 }
 
