@@ -279,6 +279,12 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
+    /** Experimental features, one key each (default off; superadmin switches
+     *  under Settings → Features). Off → the routes 404 and the UI hides it. */
+    experimental?: {
+      /** Document pins: editorial + personal (CU-wdqcq02crw). */
+      doc_pins?: boolean;
+    };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
@@ -361,6 +367,8 @@ export interface AdminSettings {
   hootie_model: string;
   subagent_runs_enabled: boolean;
   metacognition_enabled: boolean;
+  /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
+  experimental_doc_pins: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -1259,6 +1267,46 @@ export async function restoreNest(nestId: string) {
 export async function setNestPinned(nestId: string, pinned: boolean) {
   return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
     method: pinned ? "POST" : "DELETE",
+  });
+}
+
+// ─── Document pins (experimental, CU-wdqcq02crw) ──────────────────────────
+export type DocPinScope = "nest" | "user";
+export interface DocPin {
+  node_id: string;
+  scope: DocPinScope;
+  title: string;
+  type: string;
+  status: string;
+  position: number;
+  pinned_by: string | null;
+  pinned_at: string;
+}
+export interface DocPins {
+  /** Pinned for everyone, in the steward's order. */
+  editorial: DocPin[];
+  /** The caller's own bookmarks. */
+  personal: DocPin[];
+  /** The caller may pin for everyone and reorder. */
+  can_pin_editorial: boolean;
+}
+export async function getDocPins(nestId: string) {
+  return request<DocPins>(`/nests/${nestId}/pins`);
+}
+export async function pinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  return request<{ pin: DocPin; created: boolean }>(`/nests/${nestId}/pins`, {
+    method: "POST",
+    body: JSON.stringify({ node_id: nodeId, scope }),
+  });
+}
+export async function unpinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  const q = new URLSearchParams({ node_id: nodeId, scope });
+  return request<{ unpinned: boolean }>(`/nests/${nestId}/pins?${q}`, { method: "DELETE" });
+}
+export async function reorderDocPins(nestId: string, nodeIds: string[]) {
+  return request<DocPins>(`/nests/${nestId}/pins/order`, {
+    method: "PUT",
+    body: JSON.stringify({ node_ids: nodeIds }),
   });
 }
 

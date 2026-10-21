@@ -47,6 +47,7 @@ import { folderGrantTarget } from "../../lib/folder-target";
 import { checkFolderPath } from "../../lib/folder-path";
 import type { NestCaps } from "../../lib/nest-caps";
 import { NodeTypeIcon } from "./NodeTypeIcon";
+import { DocPinControl } from "./DocPins";
 import { typePill, byPathSegments, folderOfNode, STATUS_LABELS, DATE_LABELS, TYPE_LABELS } from "./node-display";
 
 import { Badge } from "@/components/ui/badge";
@@ -1503,6 +1504,7 @@ export function DocumentsTab({
                               <FolderInput className="h-3.5 w-3.5" />
                             </Button>
                           )}
+                          <DocPinControl nestId={nestId} nodeId={node.id} />
                           <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                             <History className="h-3.5 w-3.5" />
                           </Button>

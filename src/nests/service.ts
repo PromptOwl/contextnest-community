@@ -1035,6 +1035,10 @@ export async function deleteNest(nestId: string): Promise<void> {
     } catch {
       // Table not present on legacy DBs — nothing to clean.
     }
+    // Document pins (migration 071) — FK-cascaded too, explicit for the same
+    // reason as the rows above. No try/catch: the migration always creates the
+    // table, and on Postgres a failed statement aborts the transaction anyway.
+    await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

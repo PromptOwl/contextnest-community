@@ -3052,6 +3052,10 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
+  // delete takes them with it (no pin on a document that is gone, or on the
+  // next one to take its id); a move carries them along.
+  ["node_pins", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
@@ -3102,6 +3106,12 @@ async function rewriteNodeKeyedRows(
   oldId: string,
   newId: string,
 ): Promise<void> {
+  // Pins are the one node-keyed table with a uniqueness rule on the id
+  // (migration 071's partial unique indexes). The destination is not a live
+  // document, so any pin row already on it is stale (its document vanished
+  // outside the app) — clear it, or the repoint trips the index and the move
+  // fails.
+  await tx.run("DELETE FROM node_pins WHERE nest_id = ? AND node_id = ?", [nestId, newId]);
   for (const [table, column] of NODE_KEYED_TABLES) {
     await tx.run(
       `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
