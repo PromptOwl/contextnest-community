@@ -13,7 +13,8 @@ import * as api from "../../lib/api";
 import { keys, reads } from "../../lib/queries";
 import { BULK_REVIEW_LIMIT } from "../../lib/constants";
 import { FEED_PAGE, useFeedComments } from "./feed-query";
-import { ReviewQueue, ReasonDialog, type ReviewRequest } from "../governance";
+import { ReviewQueue, ReviewPane, ReasonDialog, type ReviewRequest } from "../governance";
+import { displayedChangeOrder, nextReviewNodeId } from "../../lib/review-pane";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,8 +37,19 @@ interface Props {
   loading: boolean;
   onRefresh: () => void;
   onOpenDocument: (nodeId: string, opts?: { thread?: string }) => void;
-  /** Open the review modal for a request (NestView resolves the node). */
-  onSelectRequest: (req: ReviewRequest) => void;
+  /** The change open in the review pane (`?review=`), or null. */
+  openReviewId: string | null;
+  /** Open a change in the review pane, or close it with null. */
+  onOpenReview: (nodeId: string | null) => void;
+  /** Approve / send back one change; throws so the pane can show why. */
+  onApproveReview: (nodeId: string, note?: string) => Promise<void>;
+  onRequestChanges: (nodeId: string, note: string) => Promise<void>;
+  /** Lower-cased email of the caller. */
+  currentUser?: string;
+  /** The caller can edit documents here — gates the pane's Edit draft. */
+  canEditDocs: boolean;
+  /** Prime documents can't take approve-with-edits. */
+  primeTags: string[];
   onResolveDeletion: (request: api.DeletionRequest, action: "delete" | "decline") => void;
   /** Your own pending submission back to Draft. */
   onWithdrawSubmission: (nodeId: string) => void;
@@ -54,7 +66,13 @@ export function ReviewTab({
   loading,
   onRefresh,
   onOpenDocument,
-  onSelectRequest,
+  openReviewId,
+  onOpenReview,
+  onApproveReview,
+  onRequestChanges,
+  currentUser,
+  canEditDocs,
+  primeTags,
   onResolveDeletion,
   onWithdrawSubmission,
 }: Props) {
@@ -116,6 +134,30 @@ export function ReviewTab({
     onRefresh();
   };
 
+  // The change open in the pane. Looked up in the whole pending set, not just
+  // the reviewable subset, so a shared link to a change you can't act on
+  // still opens — read-only, with the reason.
+  const openFound = openReviewId
+    ? reviewQueue.find((r) => r.nodeId === openReviewId) ??
+      myPendingSubmissions.find((r) => r.nodeId === openReviewId) ??
+      null
+    : null;
+  // Anything outside the reviewable subset is read-only here, whatever an
+  // older server's canReview says — the server refuses the decision anyway.
+  const openRequest: ReviewRequest | null = openFound && {
+    ...openFound,
+    canReview: reviewableQueue.some((r) => r.nodeId === openFound.nodeId)
+      ? openFound.canReview
+      : false,
+  };
+  // A decision moves straight on to the next change in the queue.
+  const decideAndAdvance = async (nodeId: string, run: () => Promise<void>) => {
+    const shown = displayedChangeOrder(reviewableQueue, feedFilter !== "changes");
+    const next = nextReviewNodeId(shown, nodeId);
+    await run();
+    onOpenReview(next === nodeId ? null : next);
+  };
+
   // Feed filter chips — All shows changes + comments interleaved; Changes is
   // the legacy queue; Comments is discussion only; Agent activity is what
   // agents changed, with undo (CU-wdqcq0314v — the server lists only
@@ -156,7 +198,7 @@ export function ReviewTab({
     );
   }
 
-  return (
+  const queueColumn = (
     <>
       {chips}
       {/* The caller's own submissions, kept out of the actionable queue
@@ -178,10 +220,10 @@ export function ReviewTab({
             {myPendingSubmissions.map((r) => (
               <div
                 key={r.id}
-                className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
+                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50 ${openReviewId === r.nodeId ? "border-primary bg-muted/60" : ""}`}
               >
                 <button
-                  onClick={() => onOpenDocument(r.nodeId)}
+                  onClick={() => onOpenReview(r.nodeId)}
                   className="flex-1 min-w-0 text-left truncate"
                 >
                   {r.title || r.nodeId}
@@ -364,7 +406,8 @@ export function ReviewTab({
         }
         loading={loading}
         onRefresh={onRefresh}
-        onSelect={onSelectRequest}
+        onSelect={(req) => onOpenReview(req.nodeId)}
+        activeNodeId={openReviewId}
       />
       {/* Comment activity is paged (50/page) — fetch the next page when
           more exists than what's loaded. Changes need no pager: they're
@@ -425,5 +468,56 @@ export function ReviewTab({
         />
       )}
     </>
+  );
+
+  if (!openRequest) {
+    // A ?review= link to a change that is no longer pending (decided since
+    // the link was shared) says so instead of silently showing the queue.
+    const stale = openReviewId && !loading;
+    return (
+      <div className="space-y-4">
+        {stale && (
+          <div
+            className="flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm"
+            data-testid="review-pane-stale"
+          >
+            <span className="flex-1">
+              That change isn&rsquo;t waiting for review any more — it was already approved,
+              sent back or withdrawn.
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => onOpenReview(null)}>
+              Dismiss
+            </Button>
+          </div>
+        )}
+        {queueColumn}
+      </div>
+    );
+  }
+
+  // Queue on the left, the document under review on the right. Below lg the
+  // pane stacks above the queue so the open review is what you see first.
+  return (
+    <div className="grid gap-6 lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+      <div className="order-2 min-w-0 space-y-4 lg:order-1">{queueColumn}</div>
+      <div className="order-1 min-w-0 lg:order-2">
+        <ReviewPane
+          nestId={nestId}
+          request={openRequest}
+          currentUser={currentUser}
+          canEditDocs={canEditDocs}
+          primeTags={primeTags}
+          onApprove={(note) =>
+            decideAndAdvance(openRequest.nodeId, () => onApproveReview(openRequest.nodeId, note))
+          }
+          onRequestChanges={(note) =>
+            decideAndAdvance(openRequest.nodeId, () => onRequestChanges(openRequest.nodeId, note))
+          }
+          onEditDraft={() => onOpenDocument(openRequest.nodeId)}
+          onOpenDocument={(id) => onOpenDocument(id)}
+          onClose={() => onOpenReview(null)}
+        />
+      </div>
+    </div>
   );
 }
