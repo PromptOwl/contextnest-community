@@ -1599,6 +1599,12 @@ Comment items on **resolved** threads are left out (and out of `counts.comments`
 
 `counts` always carries both per-type totals regardless of `filter`; the UI tab badge binds to `counts.changes` (actionable items), not the feed length. The UI deep-links a comment item to its document with the thread focused via `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
 
+### Assigned rows (`GET /me/work` → `assigned`)
+
+Open board tasks and cards whose `assignee` is the caller, across every nest they can see. Each row carries `nest_id`, `nest_name`, `node_id`, `title`, `type`, `due`, `priority`, `assigned_at`, and `open_blockers` when non-zero. Completed cards (`completed_at` set) drop out, and so does anything the caller can't read. The assignee match ignores case, so `Ann@Acme.com` written by a file sync or import still lists for `ann@acme.com`. Rows are sorted soonest-due first (no due date last), then most recently assigned, and capped at 100.
+
+`assigned` is not paged with the reviews: `limit` / `offset` and `pagination` cover the review queue only, and the full `assigned` list comes back on every call. The My Work badge counts `pagination.total` plus `assigned.length`, so tasks assigned to you count as waiting on you.
+
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions, `comment_reply` thread replies, `comment` notes to a document's watchers and reviewers); nest-level rows have `node_id: null`.

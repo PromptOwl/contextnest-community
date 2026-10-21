@@ -179,6 +179,7 @@ describe("POST /nodes/bulk-update", () => {
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "tomorrow" } })).status).toBe(400);
     // A day that doesn't exist, which Date.parse would roll into March.
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "2026-02-31" } })).status).toBe(400);
+    expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "0020-09-02" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { assignee: "stranger@else.com" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { column: "done" } })).status).toBe(400);
   });

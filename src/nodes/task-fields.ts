@@ -47,6 +47,17 @@ export interface TaskFields {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
 
+/** A real YYYY-MM-DD day from 1900 on. Round-trips so 2026-02-31 fails; the
+ *  year floor stops a half-typed picker year (0020) from being saved. */
+export function isDueDate(d: string): boolean {
+  return (
+    DATE_RE.test(d) &&
+    Number(d.slice(0, 4)) >= 1900 &&
+    !Number.isNaN(Date.parse(d)) &&
+    new Date(d).toISOString().slice(0, 10) === d
+  );
+}
+
 export function hasTaskFieldsPatch(p: TaskFieldsPatch): boolean {
   return (
     p.assignee !== undefined ||
@@ -139,7 +150,7 @@ export async function applyTaskFields(
 
   if (patch.due !== undefined) {
     const next = patch.due === null || patch.due === "" ? null : String(patch.due);
-    if (next !== null && (!DATE_RE.test(next) || Number.isNaN(Date.parse(next)))) {
+    if (next !== null && !isDueDate(next)) {
       throw new ValidationError(`due must be a date like 2026-10-31, got "${patch.due}"`);
     }
     set("due", next);

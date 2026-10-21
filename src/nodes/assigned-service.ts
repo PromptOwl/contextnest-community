@@ -52,7 +52,8 @@ export async function listAssignedTo(
       continue;
     }
     const f = taskFieldsOf(fm?.metadata);
-    if (f.assignee !== me || f.completed_at) continue;
+    // The API lowercases on write; a file sync or import may not.
+    if (f.assignee?.toLowerCase() !== me || f.completed_at) continue;
     candidates.push({
       nest_id: r.nest_id,
       nest_name: nestName.get(r.nest_id) ?? r.nest_id,
