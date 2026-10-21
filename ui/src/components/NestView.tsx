@@ -8,6 +8,7 @@ import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { matchesFilters } from "../lib/node-filter";
 import { decideWikiLinkAction } from "../lib/wiki-preview";
 import { checkFolderPath } from "../lib/folder-path";
@@ -442,6 +443,11 @@ export function NestView({
 
 
   const qc = useQueryClient();
+  // Whose nest this is, from the cached dashboard list (owner, roles,
+  // discovered) — the banner above the tabs names it when it isn't mine.
+  const listRow = useQuery(reads.nestList()).data?.nests?.find((n) => n.id === nestId);
+  const relation = listRow ? nestRelation(listRow) : "owned";
+  const relationText = listRow ? nestRelationText(listRow) : null;
 
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
@@ -1717,6 +1723,29 @@ export function NestView({
         />
       )}
 
+      {relationText && (
+        <div
+          data-testid="nest-relation-banner"
+          className={`mb-4 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+            relation === "shared"
+              ? "border-blue-200 bg-blue-50 text-blue-800"
+              : "border-dashed bg-muted/40 text-muted-foreground"
+          }`}
+        >
+          {relation === "shared" ? (
+            <Users className="h-4 w-4 shrink-0" />
+          ) : listRow?.visibility === "public" ? (
+            <Globe className="h-4 w-4 shrink-0" />
+          ) : (
+            <Building2 className="h-4 w-4 shrink-0" />
+          )}
+          <span className="truncate">
+            {relation === "shared"
+              ? relationText
+              : `Not shared with you — you can read it because it's ${relationText}`}
+          </span>
+        </div>
+      )}
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
