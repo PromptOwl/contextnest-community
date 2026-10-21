@@ -72,7 +72,7 @@ if (
 if (!isTestRun) {
   console.log(
     `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}` +
-    (canonicalEnvLoaded ? ` + ${canonicalEnvLoaded}` : ""),
+      (canonicalEnvLoaded ? ` + ${canonicalEnvLoaded}` : ""),
   );
 }
 
@@ -767,7 +767,7 @@ export const config = {
     return process.env.EXPERIMENTAL_DOC_STREAM === "true";
   },
 
-  /**   
+  /**
    * Experimental: document pins (CU-wdqcq02crw). Editorial pins (a steward pins
    * documents to the front of a nest for everyone, in an order they choose) and
    * personal pins (my own bookmark row). Off by default; a superadmin flips it

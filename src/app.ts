@@ -924,9 +924,10 @@ export function createApp(): Hono<AuthEnv> {
         ...(info.persisted
           ? {}
           : {
-            warning: `License validated, but it could not be saved to the database (${info.persistError || "unknown error"
+              warning: `License validated, but it could not be saved to the database (${
+                info.persistError || "unknown error"
               }). It will be LOST on the next restart. Check the database connection, or provide PROMPTOWL_KEY via the container environment.`,
-          }),
+            }),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to install key";
@@ -1696,9 +1697,9 @@ export function createApp(): Hono<AuthEnv> {
     const effAllowedDomains =
       "oidc_allowed_domains" in body
         ? String(body.oidc_allowed_domains ?? "")
-          .split(",")
-          .map((d) => d.trim())
-          .filter(Boolean)
+            .split(",")
+            .map((d) => d.trim())
+            .filter(Boolean)
         : config.OIDC_ALLOWED_DOMAINS;
     const effAutoProvision =
       "oidc_auto_provision" in body
@@ -3477,13 +3478,13 @@ export function createApp(): Hono<AuthEnv> {
       // admin-tier routes (visibility, roles) aren't something to request.
       const hint =
         required === "write" &&
-          c.req.method !== "GET" &&
-          effectiveLevel >= permissionLevel("read")
+        c.req.method !== "GET" &&
+        effectiveLevel >= permissionLevel("read")
           ? await accessRequestHint({
-            nestId,
-            userId,
-            target: writeTargetForPath(nestId, parts, c.req.method),
-          })
+              nestId,
+              userId,
+              target: writeTargetForPath(nestId, parts, c.req.method),
+            })
           : null;
       return deny(
         403,

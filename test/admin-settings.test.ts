@@ -336,7 +336,7 @@ describe("/admin/settings — validation", () => {
     const health = await jsonRequest(app, "GET", "/health");
     expect(health.data.workflow_plane_enabled).toBe(true);
     expect(health.data.metacognition_enabled).toBe(true);
-    expect(health.data.experimental).toEqual({ doc_stream: true });
+    expect(health.data.experimental.doc_stream).toBe(true);
 
     // Turning the stream off leaves the other switches alone.
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { experimental_doc_stream_enabled: false }, admin.apiKey);

@@ -7,6 +7,7 @@
 export const NEST_TAB_LABELS: Record<string, string> = {
   overview: "Overview",
   documents: "Documents",
+  instructions: "Instructions",
   review: "Review queue",
   "external-edits": "External edits",
   stewards: "Stewards",

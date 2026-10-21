@@ -56,7 +56,7 @@ describe("doc stream switch (EXPERIMENTAL_DOC_STREAM)", () => {
     const stream = await jsonRequest(app, "GET", "/me/stream", undefined, member.apiKey);
     expect(stream.status).toBe(404);
     const health = await jsonRequest(app, "GET", "/health");
-    expect(health.data.experimental).toEqual({ doc_stream: false });
+    expect(health.data.experimental.doc_stream).toBe(false);
     const settings = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(settings.data.experimental_doc_stream_enabled).toBe(false);
   });
@@ -83,7 +83,7 @@ describe("doc stream switch (EXPERIMENTAL_DOC_STREAM)", () => {
       "SELECT value FROM server_settings WHERE key = ?", ["EXPERIMENTAL_DOC_STREAM"],
     )) as { value: string | null };
     expect(row.value).toBe("true");
-    expect((await jsonRequest(app, "GET", "/health")).data.experimental).toEqual({ doc_stream: true });
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(true);
     const stream = await jsonRequest(app, "GET", "/me/stream", undefined, member.apiKey);
     expect(stream.status).toBe(200);
     expect(stream.data.items).toEqual([]);

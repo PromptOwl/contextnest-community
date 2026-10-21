@@ -11,6 +11,11 @@ describe("NestView tab slugs", () => {
     expect(NEST_TAB_LABELS.stream).toBe("Stream");
   });
 
+  it("keeps ?tab=instructions (the nest Instructions tab)", () => {
+    expect(nestTabFromParam("instructions")).toBe("instructions");
+    expect(NEST_TAB_LABELS.instructions).toBe("Instructions");
+  });
+
   it("drops an unknown ?tab=", () => {
     expect(nestTabFromParam("nope")).toBeUndefined();
     expect(nestTabFromParam(null)).toBeUndefined();
