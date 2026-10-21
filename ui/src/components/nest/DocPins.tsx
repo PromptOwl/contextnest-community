@@ -11,12 +11,12 @@
  * switch hides every trace of the feature — the routes 404 at the same moment.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Pin, PinOff, GripVertical, X, Users, User } from "lucide-react";
 import { useAuth } from "../../auth/AuthContext";
 import * as api from "../../lib/api";
-import { reads } from "../../lib/queries";
+import { keys, reads } from "../../lib/queries";
 import { movePin, pinStateFor } from "../../lib/doc-pins";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,9 +42,10 @@ export function PinnedStrip({
 }) {
   const { docPinsEnabled } = useAuth();
   const { data } = useQuery({ ...reads.docPins(nestId), enabled: docPinsEnabled });
+  const qc = useQueryClient();
   const [dragging, setDragging] = useState<string | null>(null);
   // Optimistic order while a reorder is in flight, so the chip doesn't jump
-  // back for the moment before the refetch lands.
+  // back before the saved order is in the cache.
   const [pendingOrder, setPendingOrder] = useState<string[] | null>(null);
 
   if (!docPinsEnabled || !data) return null;
@@ -73,7 +74,8 @@ export function PinnedStrip({
     if (next === ids) return;
     setPendingOrder(next);
     try {
-      await api.reorderDocPins(nestId, next);
+      // Seed the cache with the saved order so clearing pendingOrder can't flash the old one.
+      qc.setQueryData(keys.docPins(nestId), await api.reorderDocPins(nestId, next));
     } catch (e) {
       toast.error(errorText(e, "Couldn't reorder the pins"));
     } finally {

@@ -3052,7 +3052,7 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
-  // Document pins (CU-wdqcq02crw, migration 069) — editorial and personal. A
+  // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
   ["node_pins", "node_id"],
@@ -3107,7 +3107,7 @@ async function rewriteNodeKeyedRows(
   newId: string,
 ): Promise<void> {
   // Pins are the one node-keyed table with a uniqueness rule on the id
-  // (migration 069's partial unique indexes). The destination is not a live
+  // (migration 071's partial unique indexes). The destination is not a live
   // document, so any pin row already on it is stale (its document vanished
   // outside the app) — clear it, or the repoint trips the index and the move
   // fails.

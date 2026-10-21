@@ -1,7 +1,7 @@
 /**
  * Document pins (CU-wdqcq02crw) — experimental, behind EXPERIMENTAL_DOC_PINS.
  *
- * Two kinds of pin on one table (node_pins, migration 069):
+ * Two kinds of pin on one table (node_pins, migration 071):
  *   - editorial (scope 'nest'): the nest's own front page. A steward pins for
  *     everyone, in an order they choose. Who may: the nest owner, a nest admin,
  *     the server admin, or a nest-wide reviewer steward — the same curator set

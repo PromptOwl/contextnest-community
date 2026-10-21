@@ -829,8 +829,8 @@ const PG_URL = process.env.TEST_DATABASE_URL;
     }
   });
 
-  it("records migration 069 and enforces the scope/user CHECK + per-scope uniqueness", async () => {
-    const rec = await adapter.get("SELECT id FROM schema_migrations WHERE id = '069_node_pins'", []);
+  it("records migration 071 and enforces the scope/user CHECK + per-scope uniqueness", async () => {
+    const rec = await adapter.get("SELECT id FROM schema_migrations WHERE id = '071_node_pins'", []);
     expect(rec).toBeTruthy();
     await adapter.run("INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES ('p1', 'n1', 'nodes/a', 'nest', NULL, 0)", []);
     await adapter.run("INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES ('p2', 'n1', 'nodes/a', 'user', 'u1', 0)", []);

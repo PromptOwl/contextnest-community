@@ -1443,7 +1443,7 @@ authRoutes.delete("/users/:userId", async (c) => {
     } catch {
       // Table not present on a DB predating the pins migration.
     }
-    // Their personal document pins (migration 069) go too — cascaded, explicit
+    // Their personal document pins (migration 071) go too — cascaded, explicit
     // like nest_pins. Editorial pins they made belong to the nest and stay
     // (pinned_by is attribution only, not a foreign key). No try/catch: the
     // migration creates the table at startup, and on Postgres a failed

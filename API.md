@@ -387,7 +387,7 @@ Read-only API keys may `GET` but not write (`403`); named system keys (`cnst_sys
 
 The document id travels in the body/query rather than the path because node ids contain slashes: a `/nodes/:nodeId/pin` suffix can't be told apart from a document whose slug is `pin`.
 
-Pins live in `node_pins` (migration 069). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) or being removed as a collaborator drops that person's personal pins there, unless they still reach the nest another way (a team, a share grant); a deleted nest takes all of them. Not part of `/me/stream` yet.
+Pins live in `node_pins` (migration 071). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) or being removed as a collaborator drops that person's personal pins there, unless they still reach the nest another way (a team, a share grant); a deleted nest takes all of them. Not part of `/me/stream` yet.
 
 ### GET `/nests/:nestId/settings`
 ```json

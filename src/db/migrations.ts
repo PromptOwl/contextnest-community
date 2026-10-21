@@ -2256,7 +2256,7 @@ export function runMigrations(db: Database.Database): void {
   }
 
   // 071: document pins (CU-wdqcq02crw, experimental — EXPERIMENTAL_DOC_PINS).
-  //   (068 is reserved by an open PR.) Two kinds in one table:
+  //   Two kinds in one table:
   //   - scope 'nest': an editorial pin, the nest's own — user_id NULL, ordered
   //     by position. pinned_by is attribution only (an email, NOT a foreign
   //     key): the pin belongs to the nest, so removing the steward who made it
