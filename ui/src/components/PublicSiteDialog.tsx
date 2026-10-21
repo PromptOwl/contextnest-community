@@ -282,7 +282,7 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
             </Section>
 
             <Section title="Redirects">
-              <Field label="One per line: old path, then new path or https:// URL" hint="For pages that moved before this site existed, or addresses you want to keep alive.">
+              <Field label="One per line: old path, then new path or https:// URL" hint="For pages that moved before this site existed, or addresses you want to keep alive. An https:// URL must be on your verified domain or verified public URL.">
                 <Textarea value={draft.redirects} onChange={(e) => set("redirects", e.target.value)} rows={3} placeholder="/old/setup /guides/setup" className="font-mono text-xs" />
               </Field>
             </Section>
@@ -291,6 +291,24 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
               <Field label="Serve behind your own proxy" hint="If you proxy the site under your main domain (e.g. https://example.com/docs), enter that URL. Canonical URLs then point there.">
                 <Input value={draft.public_url} onChange={(e) => set("public_url", e.target.value)} placeholder="https://example.com/docs" className="h-9" />
               </Field>
+              {info.settings.public_url && info.public_url_dns && (
+                <div className="space-y-2 rounded-md bg-muted/50 p-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium break-all">{info.settings.public_url}</span>
+                    {info.public_url_verified ? <Badge variant="secondary" className="gap-1"><Check className="h-3 w-3" /> Verified</Badge> : <Badge variant="outline">Not verified yet</Badge>}
+                  </div>
+                  {!info.public_url_verified && (
+                    <>
+                      <p>The site uses this URL only after you prove you control its domain. Add this record at your DNS provider:</p>
+                      <DnsRow type="TXT" name={info.public_url_dns.name} value={info.public_url_dns.value} />
+                      <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("verify-url", () => api.verifyNestSitePublicUrl(nestId), "Public URL verified")}>
+                        {busy === "verify-url" && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Verify DNS
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
             </Section>
           </div>
         )}

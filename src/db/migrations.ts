@@ -2222,6 +2222,15 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("068_nest_sites");
   }
+
+  // 069: a docs site's public_url is honoured only once its host is proven
+  // with the same DNS TXT token as a custom domain (CU-wdqcq05jhm). Stores the
+  // host that was proven, so changing public_url to another host un-verifies it.
+  if (!hasMigration("069_site_public_url_host")) {
+    const cols = (db.prepare("PRAGMA table_info(nest_sites)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("public_url_host")) db.exec("ALTER TABLE nest_sites ADD COLUMN public_url_host TEXT");
+    recordMigration("069_site_public_url_host");
+  }
 }
 
 /**

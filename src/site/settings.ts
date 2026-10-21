@@ -14,7 +14,7 @@ import { resolveTxt } from "node:dns/promises";
 import { z } from "zod";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { ValidationError, ConflictError } from "../shared/errors.js";
+import { ValidationError, ConflictError, NotFoundError } from "../shared/errors.js";
 
 export const SiteSettingsSchema = z.strictObject({
   /** The site's name in titles and the header. Default: branding site_title, then the nest name. */
@@ -65,6 +65,8 @@ export interface SiteRow {
   domainVerifiedAt: string | null;
   settings: SiteSettings;
   indexnowKey: string;
+  /** The public_url host proven by DNS TXT; public_url counts only while it matches. */
+  publicUrlHost: string | null;
 }
 
 interface DbRow {
@@ -75,16 +77,33 @@ interface DbRow {
   domain_verified_at: string | null;
   settings: string;
   indexnow_key: string;
+  public_url_host: string | null;
+}
+
+/**
+ * Settings that can't be read must not loosen the site's crawler policy: keep
+ * an owner's noindex and AI-training opt-out even when the rest is dropped.
+ */
+function readSettings(nestId: string, raw: string): SiteSettings {
+  let json: unknown;
+  try {
+    json = JSON.parse(raw || "{}");
+  } catch (err) {
+    console.warn(`[site] nest ${nestId}: settings are not valid JSON; using defaults`, err);
+    return {};
+  }
+  const parsed = SiteSettingsSchema.safeParse(json);
+  if (parsed.success) return parsed.data;
+  console.warn(`[site] nest ${nestId}: stored settings no longer match the schema; keeping only the crawler policy`, parsed.error.issues[0]);
+  const j = (json ?? {}) as Record<string, unknown>;
+  return {
+    ...(j.noindex === true ? { noindex: true } : {}),
+    ...(j.ai_training === false ? { ai_training: false } : {}),
+  };
 }
 
 function toRow(r: DbRow): SiteRow {
-  let settings: SiteSettings = {};
-  try {
-    const parsed = SiteSettingsSchema.safeParse(JSON.parse(r.settings || "{}"));
-    if (parsed.success) settings = parsed.data;
-  } catch {
-    /* unreadable settings read as defaults */
-  }
+  const settings = readSettings(r.nest_id, r.settings);
   return {
     nestId: r.nest_id,
     siteKey: r.site_key,
@@ -93,6 +112,7 @@ function toRow(r: DbRow): SiteRow {
     domainVerifiedAt: r.domain_verified_at,
     settings,
     indexnowKey: r.indexnow_key,
+    publicUrlHost: r.public_url_host ?? null,
   };
 }
 
@@ -215,7 +235,16 @@ export async function updateSite(
       if (!isSitePath(r.to) && !isHttpsUrl(r.to)) {
         throw new ValidationError(`Redirect "to" must be a path on this site or an https:// URL: ${r.to}`);
       }
+      // An absolute target must stay on a host this nest proved it controls,
+      // or the site becomes an open redirect on this server's origin.
+      if (!isSitePath(r.to) && !trustedHosts(nestId, row, parsed.data).has(new URL(r.to).host.toLowerCase())) {
+        throw new ValidationError(
+          `Redirect "to" may only leave the site for its verified domain or verified public URL: ${r.to}`,
+        );
+      }
     }
+    const loop = redirectLoops(parsed.data.redirects ?? []);
+    if (loop.size) throw new ValidationError(`These redirects form a loop: /${[...loop].join(", /")}`);
     await db.run("UPDATE nest_sites SET settings = ?, updated_at = ? WHERE nest_id = ?", [
       JSON.stringify(parsed.data),
       new Date().toISOString(),
@@ -243,6 +272,59 @@ export function verificationRecord(row: SiteRow): { name: string; value: string 
   return { name: `_contextnest.${row.domain}`, value: `contextnest-site=${row.domainToken}` };
 }
 
+/**
+ * Hosts this nest proved it controls: its serving domain, and its public_url
+ * host once that host passed the TXT check (verifyPublicUrl).
+ */
+export function trustedHosts(nestId: string, row: SiteRow, settings: SiteSettings = row.settings): Set<string> {
+  const hosts = new Set<string>();
+  const domain = domainForNest(nestId, row);
+  if (domain) hosts.add(domain);
+  const pub = publicUrlHost(settings);
+  if (pub && (pub === row.publicUrlHost || pub === domain)) hosts.add(pub);
+  return hosts;
+}
+
+function publicUrlHost(settings: SiteSettings): string | null {
+  if (!settings.public_url) return null;
+  try {
+    return new URL(settings.public_url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** The public_url to use, or null while its host is not proven. */
+export function verifiedPublicUrl(nestId: string, row: SiteRow): string | null {
+  const host = publicUrlHost(row.settings);
+  return host && trustedHosts(nestId, row).has(host) ? row.settings.public_url! : null;
+}
+
+/** "/Old/Path/" → "old/path": the key a redirect's from (or site-path to) is looked up by. */
+export function redirectKey(path: string): string {
+  return path.replace(/[?#].*$/, "").replace(/^\/+|\/+$/g, "").toLowerCase();
+}
+
+/** The `from` keys of manual redirects that never reach a page (a → b → a). */
+export function redirectLoops(redirects: Array<{ from: string; to: string }>): Set<string> {
+  const next = new Map<string, string>();
+  for (const r of redirects) if (isSitePath(r.to)) next.set(redirectKey(r.from), redirectKey(r.to));
+  const looping = new Set<string>();
+  for (const start of next.keys()) {
+    const seen = new Set<string>();
+    let at: string | undefined = start;
+    while (at !== undefined && next.has(at)) {
+      if (seen.has(at)) {
+        for (const k of seen) looping.add(k);
+        break;
+      }
+      seen.add(at);
+      at = next.get(at);
+    }
+  }
+  return looping;
+}
+
 export type TxtResolver = (name: string) => Promise<string[][]>;
 let txtResolver: TxtResolver = resolveTxt;
 /** Tests swap DNS out. */
@@ -250,21 +332,50 @@ export function setTxtResolverForTests(r: TxtResolver | null): void {
   txtResolver = r ?? resolveTxt;
 }
 
+/**
+ * Throw unless `name` carries the TXT `value`. "No such record" reads as not
+ * added yet; any other DNS failure is logged and reported as one, so the owner
+ * isn't told to add a record that may already be there.
+ */
+async function requireTxt(name: string, value: string): Promise<void> {
+  let found: string[];
+  try {
+    found = (await txtResolver(name)).map((parts) => parts.join(""));
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code !== "ENOTFOUND" && code !== "ENODATA") {
+      console.warn(`[site] TXT lookup for ${name} failed`, err);
+      throw new ValidationError(`The DNS lookup for ${name} failed (${code ?? "error"}). Try again in a minute.`);
+    }
+    found = [];
+  }
+  if (!found.includes(value)) {
+    throw new ValidationError(
+      `TXT record not found yet. Add ${name} with the value ${value} (DNS changes can take a few minutes).`,
+    );
+  }
+}
+
+/** Prove control of the public_url's host with the nest's TXT token. */
+export async function verifyPublicUrl(nestId: string): Promise<SiteRow> {
+  const row = await getSiteRow(nestId);
+  const host = publicUrlHost(row.settings);
+  if (!host) throw new ValidationError("Set a public URL first");
+  const hostname = host.replace(/:\d+$/, "");
+  await requireTxt(`_contextnest.${hostname}`, `contextnest-site=${row.domainToken}`);
+  await getDb().run("UPDATE nest_sites SET public_url_host = ?, updated_at = ? WHERE nest_id = ?", [
+    host,
+    new Date().toISOString(),
+    nestId,
+  ]);
+  return getSiteRow(nestId);
+}
+
 export async function verifyDomain(nestId: string): Promise<SiteRow> {
   const row = await getSiteRow(nestId);
   const record = verificationRecord(row);
   if (!record) throw new ValidationError("Set a domain first");
-  let found: string[] = [];
-  try {
-    found = (await txtResolver(record.name)).map((parts) => parts.join(""));
-  } catch {
-    found = [];
-  }
-  if (!found.includes(record.value)) {
-    throw new ValidationError(
-      `TXT record not found yet. Add ${record.name} with the value ${record.value} (DNS changes can take a few minutes).`,
-    );
-  }
+  await requireTxt(record.name, record.value);
   const taken = (await getDb().get(
     "SELECT nest_id FROM nest_sites WHERE domain = ? AND domain_verified_at IS NOT NULL AND nest_id != ?",
     [row.domain, nestId],
@@ -351,7 +462,7 @@ export async function nestIdForDomain(host: string | undefined): Promise<string 
   // or whose TXT record was removed, must stop being served (and stop being
   // vouched for to the TLS edge). Re-check in the background once a day.
   if (row && Date.now() - Date.parse(row.domain_verified_at) > REVERIFY_AFTER_MS) {
-    void recheckDomain(row.nest_id).catch(() => {});
+    void recheckDomain(row.nest_id).catch((err) => console.warn(`[site] re-checking ${h} failed`, err));
   }
   if (domainCache.size > 1000) domainCache.clear();
   domainCache.set(h, { nestId: row?.nest_id ?? null, at: Date.now() });
@@ -401,17 +512,31 @@ export async function setCustomPath(nestId: string, nodeId: string, path: string
   }
   const p = normalizePath(path);
   if (!p) throw new ValidationError("Use the Home document setting to put a page at the site root");
+  // Only a published page can own a URL; a typo'd id would reserve the path for nothing.
+  const page = await db.get("SELECT 1 AS ok FROM approved_versions WHERE nest_id = ? AND node_id = ?", [nestId, nodeId]);
+  if (!page) throw new NotFoundError(`No published page ${nodeId} in this nest`);
   const holder = (await db.get("SELECT node_id, kind FROM site_paths WHERE nest_id = ? AND path = ?", [nestId, p])) as
     | { node_id: string; kind: string }
     | undefined;
   if (holder && holder.node_id !== nodeId && holder.kind === "custom") {
     throw new ConflictError(`/${p} is already another page's URL`);
   }
-  await db.run("UPDATE site_paths SET kind = 'history' WHERE nest_id = ? AND node_id = ? AND kind = 'custom'", [nestId, nodeId]);
-  if (holder) {
-    await db.run("UPDATE site_paths SET node_id = ?, kind = 'custom' WHERE nest_id = ? AND path = ?", [nodeId, nestId, p]);
-  } else {
-    await db.run("INSERT INTO site_paths (nest_id, path, node_id, kind) VALUES (?, ?, ?, 'custom')", [nestId, p, nodeId]);
+  try {
+    // One transaction: a save that loses a race keeps the page's current URL.
+    await db.transaction(async (tx) => {
+      await tx.run("UPDATE site_paths SET kind = 'history' WHERE nest_id = ? AND node_id = ? AND kind = 'custom'", [nestId, nodeId]);
+      if (holder) {
+        await tx.run("UPDATE site_paths SET node_id = ?, kind = 'custom' WHERE nest_id = ? AND path = ?", [nodeId, nestId, p]);
+      } else {
+        await tx.run("INSERT INTO site_paths (nest_id, path, node_id, kind) VALUES (?, ?, ?, 'custom')", [nestId, p, nodeId]);
+      }
+    });
+  } catch (err) {
+    // Two saves of the same new path at once: the primary key lets one through.
+    if (/unique|constraint/i.test(String((err as Error)?.message ?? err))) {
+      throw new ConflictError(`/${p} is already another page's URL`);
+    }
+    throw err;
   }
 }
 

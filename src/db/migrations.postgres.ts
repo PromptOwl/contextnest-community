@@ -94,6 +94,7 @@ export const HISTORICAL_MIGRATIONS = [
   "066_api_key_origin",
   "067_system_accounts",
   "068_nest_sites",
+  "069_site_public_url_host",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1219,6 +1220,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       -- One nest per live domain, enforced by the database, not a check-then-write.
       CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
   `);
+
+  // Migration 069 parity: the proven host of a site's public_url.
+  await db.exec("ALTER TABLE nest_sites ADD COLUMN IF NOT EXISTS public_url_host TEXT");
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

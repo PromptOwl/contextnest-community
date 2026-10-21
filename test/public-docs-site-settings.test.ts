@@ -18,6 +18,10 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
   let nestId: string;
   let otherId: string;
   let txt: Record<string, string[][]> = {};
+  const fakeDns = async (name: string) => {
+    if (!txt[name]) throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
+    return txt[name];
+  };
 
   const get = (path: string, headers: Record<string, string> = HTML) => app.request(`http://localhost${path}`, { headers });
   const text = async (path: string, headers: Record<string, string> = HTML) => (await get(path, headers)).text();
@@ -60,10 +64,7 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     await jsonRequest(app, "PATCH", `/nests/${otherId}/reader-mode`, { enabled: true }, other.apiKey);
 
     const settings = await import("../src/site/settings.js");
-    settings.setTxtResolverForTests(async (name: string) => {
-      if (!txt[name]) throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
-      return txt[name];
-    });
+    settings.setTxtResolverForTests(fakeDns);
   }, 120000);
 
   afterAll(() => env.cleanup());
@@ -295,6 +296,65 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     }
   });
 
+  it("allows an https:// redirect only to a host the nest proved", async () => {
+    const evil = await site("PATCH", "", { settings: { redirects: [{ from: "/x", to: "https://evil.example/phish" }] } });
+    expect(evil.status).toBe(400);
+    const own = await site("PATCH", "", { settings: { redirects: [{ from: "/x", to: "https://docs.acme.dev/getting-started" }] } });
+    expect(own.status, JSON.stringify(own.data)).toBe(200);
+  });
+
+  it("refuses redirects that loop", async () => {
+    const pair = [{ from: "/a", to: "/b" }, { from: "/b", to: "/a/" }];
+    expect((await site("PATCH", "", { settings: { redirects: pair } })).status).toBe(400);
+    expect((await site("PATCH", "", { settings: { redirects: [{ from: "/self", to: "/Self" }] } })).status).toBe(400);
+  });
+
+  it("gives a URL only to a published page of the nest", async () => {
+    expect((await site("PUT", "/pages", { node_id: "nodes/no/such/page", path: "somewhere" })).status).toBe(404);
+  });
+
+  it("reports a DNS failure as a failure, not as a missing record", async () => {
+    const settings = await import("../src/site/settings.js");
+    const id = (await jsonRequest(app, "POST", "/nests", { name: "Dns Fail" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${id}/site`, { domain: "fail.acme.dev" }, owner.apiKey);
+    settings.setTxtResolverForTests(async () => {
+      throw Object.assign(new Error("queryTxt ESERVFAIL"), { code: "ESERVFAIL" });
+    });
+    try {
+      const r = await jsonRequest(app, "POST", `/nests/${id}/site/verify-domain`, {}, owner.apiKey);
+      expect(r.status).toBe(400);
+      expect(JSON.stringify(r.data)).toMatch(/lookup .* failed/);
+    } finally {
+      settings.setTxtResolverForTests(fakeDns);
+    }
+  });
+
+  it("shares one build between requests that miss the cache together", async () => {
+    const { buildCount } = await import("../src/site/build.js");
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("UPDATE nest_sites SET settings = ? WHERE nest_id = ?", [JSON.stringify({ title: "Burst" }), nestId]);
+    const before = buildCount();
+    await Promise.all(Array.from({ length: 6 }, () => get("/d/acme-docs/")));
+    expect(buildCount()).toBe(before + 1);
+  });
+
+  it("keeps noindex and the AI-training opt-out when stored settings can't be read", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const host = { ...HTML, Host: "docs.acme.dev" };
+    // A setting a later version retired fails the strict schema.
+    const store = (v: object) => getDb().run("UPDATE nest_sites SET settings = ? WHERE nest_id = ?", [JSON.stringify(v), nestId]);
+    try {
+      await store({ noindex: true, retired_setting: 1 });
+      const page = await app.request("https://docs.acme.dev/getting-started", { headers: host });
+      expect(page.status).toBe(200);
+      expect(page.headers.get("x-robots-tag")).toBe("noindex");
+      await store({ ai_training: false, retired_setting: 1 });
+      expect(await (await app.request("https://docs.acme.dev/robots.txt", { headers: host })).text()).toContain("ai-train=no");
+    } finally {
+      await store({});
+    }
+  });
+
   it("serves any number of Host headers from one build", async () => {
     const { buildCount } = await import("../src/site/build.js");
     await get("/d/acme-docs/getting-started").catch(() => {});
@@ -349,11 +409,18 @@ describe("docs site behind the owner's reverse proxy", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
   let nestId: string;
+  let owner: { apiKey: string };
+  const txt: Record<string, string[][]> = {};
 
   beforeAll(async () => {
     env = setupTestEnv();
     app = await createTestApp("key");
-    const owner = await registerUser(app, "owner@test.com", "Owner");
+    owner = await registerUser(app, "owner@test.com", "Owner");
+    const settings = await import("../src/site/settings.js");
+    settings.setTxtResolverForTests(async (name: string) => {
+      if (!txt[name]) throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
+      return txt[name];
+    });
     nestId = (await jsonRequest(app, "POST", "/nests", { name: "Proxied" }, owner.apiKey)).data.nest.id;
     await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Setup", content: "# Setup\n\nsteps", folder: "guides" }, owner.apiKey);
     await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
@@ -363,6 +430,24 @@ describe("docs site behind the owner's reverse proxy", () => {
   }, 90000);
 
   afterAll(() => env.cleanup());
+
+  it("stays at /d/<key> until the public URL's host is verified", async () => {
+    // Unproven, the public URL would make this server an open redirect.
+    const early = await app.request("http://localhost/d/proxied/setup", { headers: HTML });
+    expect(early.status).toBe(200);
+    expect(await early.text()).toContain('<link rel="canonical" href="http://localhost/d/proxied/setup">');
+    expect((await app.request(`http://localhost/nest/${nestId}`, { headers: HTML })).headers.get("location")).toBe("http://localhost/d/proxied/");
+
+    const info = await jsonRequest(app, "GET", `/nests/${nestId}/site`, undefined, owner.apiKey);
+    expect(info.data.public_url_verified).toBe(false);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/site/verify-public-url`, {}, owner.apiKey)).status).toBe(400);
+    txt[info.data.public_url_dns.name] = [[info.data.public_url_dns.value]];
+    expect(info.data.public_url_dns.name).toBe("_contextnest.example.com");
+    const ok = await jsonRequest(app, "POST", `/nests/${nestId}/site/verify-public-url`, {}, owner.apiKey);
+    expect(ok.status, JSON.stringify(ok.data)).toBe(200);
+    expect(ok.data.public_url_verified).toBe(true);
+    expect(ok.data.url).toBe("https://example.com/docs/");
+  });
 
   it("serves proxied requests with the public URL's paths and canonicals", async () => {
     // Every page sits under one top folder ("guides/"), so URLs start inside it.

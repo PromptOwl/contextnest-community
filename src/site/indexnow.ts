@@ -42,10 +42,12 @@ export async function pingIndexNow(before: Site, after: Site): Promise<void> {
   const urlList = changedUrls(before, after).slice(0, 10_000);
   if (!urlList.length) return;
   const host = new URL(after.base).host;
-  await fetch(ENDPOINT, {
+  const res = await fetch(ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ host, key: after.indexnowKey, keyLocation: url(after, `${after.indexnowKey}.txt`), urlList }),
     signal: AbortSignal.timeout(5000),
   });
+  // 200/202 accepted; 4xx means a bad key, key file or URL list — worth seeing.
+  if (!res.ok) throw new Error(`IndexNow answered ${res.status} for ${host}`);
 }

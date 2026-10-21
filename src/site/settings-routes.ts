@@ -6,6 +6,7 @@
  *   GET    /site                    → settings, domain + DNS records, site URL, pages
  *   PATCH  /site { domain?, settings? }
  *   POST   /site/verify-domain      → check the TXT record, mark the domain live
+ *   POST   /site/verify-public-url  → check the TXT record for public_url's host
  *   PUT    /site/pages { node_id, path | null } → a page's custom URL
  */
 import { Hono } from "hono";
@@ -22,6 +23,8 @@ import {
   updateSite,
   verificationRecord,
   verifyDomain,
+  verifyPublicUrl,
+  verifiedPublicUrl,
   type SiteRow,
 } from "./settings.js";
 import { siteForNest } from "./build.js";
@@ -52,6 +55,14 @@ async function describe(nestId: string, row: SiteRow, reqUrl: string) {
           cname: config.SITE_DNS_TARGET || null,
         }
       : null,
+    // public_url is used (and /d/<key> 301s to it) only once its host is proven.
+    public_url_verified: !!verifiedPublicUrl(nestId, row),
+    public_url_dns: row.settings.public_url
+      ? {
+          name: `_contextnest.${new URL(row.settings.public_url).hostname}`,
+          value: `contextnest-site=${row.domainToken}`,
+        }
+      : null,
     settings: row.settings,
     pages: site
       ? site.site.pages.map((p) => ({ node_id: p.nodeId, title: p.title, path: p.path, custom: custom.has(p.nodeId) }))
@@ -78,6 +89,12 @@ siteSettingsRoutes.patch("/site", async (c) => {
 siteSettingsRoutes.post("/site/verify-domain", async (c) => {
   const nestId = c.req.param("nestId")!;
   const row = await verifyDomain(nestId);
+  return c.json(await describe(nestId, row, c.req.url));
+});
+
+siteSettingsRoutes.post("/site/verify-public-url", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const row = await verifyPublicUrl(nestId);
   return c.json(await describe(nestId, row, c.req.url));
 });
 

@@ -44,8 +44,12 @@ import {
   isSitePath,
   nestIdForSiteKey,
   recordPaths,
+  redirectKey,
+  redirectLoops,
   sitePaths,
   siteRowsFor,
+  trustedHosts,
+  verifiedPublicUrl,
   type SiteRow,
   type SiteSettings,
 } from "./settings.js";
@@ -206,13 +210,16 @@ export interface Placement {
 
 /**
  * Where a nest's site lives: its verified domain, else the public URL the
- * owner set for a reverse-proxied path, else /d/<key> on this server.
+ * owner set for a reverse-proxied path (once its host is verified — /d/<key>
+ * 301s there, so an unproven one would make this server an open redirect),
+ * else /d/<key> on this server.
  */
 export async function placementFor(nest: SiteNest, row: SiteRow, serverOrigin: string): Promise<Placement> {
   const domain = domainForNest(nest.id, row);
   if (domain) return { base: `https://${domain}`, prefix: "", canonicalElsewhere: true, domain };
-  if (row.settings.public_url) {
-    const u = new URL(row.settings.public_url);
+  const publicUrl = verifiedPublicUrl(nest.id, row);
+  if (publicUrl) {
+    const u = new URL(publicUrl);
     const prefix = u.pathname.replace(/\/+$/, "");
     return { base: `${u.origin}${prefix}`, prefix, canonicalElsewhere: true, domain: null };
   }
@@ -325,7 +332,8 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
     let raw: string;
     try {
       raw = (await reconstructApproved(versions, nestId, row.node_id, row.approved_version)).raw;
-    } catch {
+    } catch (err) {
+      console.warn(`[site] nest ${nestId}: skipped ${row.node_id} v${row.approved_version}, its approved version can't be rebuilt`, err);
       continue;
     }
     let fm: Record<string, any>;
@@ -334,7 +342,8 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
       const doc = parseDocument(`${row.node_id}.md`, raw, row.node_id);
       fm = (doc.frontmatter ?? {}) as Record<string, any>;
       body = doc.body ?? "";
-    } catch {
+    } catch (err) {
+      console.warn(`[site] nest ${nestId}: skipped ${row.node_id}, its approved version doesn't parse`, err);
       continue;
     }
     // HTML artifacts render under the artifact sandbox (/p), not as a docs page.
@@ -596,12 +605,25 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
     if (now) redirects.set(p.path, href(now.path));
     else gone.add(p.path);
   }
+  // Validated on save; re-checked here so a stored value can never become an
+  // open redirect ("//evil.example" reads as another host, and an absolute URL
+  // must be on a host this nest proved, which can lapse) or a 301 loop.
+  const hosts = trustedHosts(nest.id, row);
+  const loops = redirectLoops(settings.redirects ?? []);
   for (const r of settings.redirects ?? []) {
-    // Validated on save; re-checked here so a stored value can never become
-    // an open redirect ("//evil.example" reads as another host).
-    if (!isSitePath(r.from) || (!isSitePath(r.to) && !/^https:\/\/[^\\\s]+$/.test(r.to))) continue;
-    const from = r.from.replace(/^\/+|\/+$/g, "").toLowerCase();
-    if (current.has(from)) continue;
+    if (!isSitePath(r.from)) continue;
+    if (!isSitePath(r.to)) {
+      if (!/^https:\/\/[^\\\s]+$/.test(r.to)) continue;
+      let host: string;
+      try {
+        host = new URL(r.to).host.toLowerCase();
+      } catch {
+        continue;
+      }
+      if (!hosts.has(host)) continue;
+    }
+    const from = redirectKey(r.from);
+    if (current.has(from) || loops.has(from)) continue;
     redirects.set(from, r.to.startsWith("/") ? href(r.to.replace(/^\/+/, "")) : r.to);
     gone.delete(from);
   }
@@ -730,6 +752,27 @@ export async function getSite(nest: SiteNest, requestOrigin: string): Promise<Si
   const hit = cache.get(nest.id);
   if (hit && hit.key === key && hit.origin === origin) return viewFor(hit, requestOrigin);
 
+  // Requests that miss together share one build: a crawler burst after an
+  // edit must not start a full rebuild per request.
+  const flightKey = `${nest.id}|${key}|${origin}`;
+  let flight = inFlight.get(flightKey);
+  if (!flight) {
+    flight = build(nest, inputs, place, key, origin, hit).finally(() => inFlight.delete(flightKey));
+    inFlight.set(flightKey, flight);
+  }
+  return viewFor(await flight, requestOrigin);
+}
+
+const inFlight = new Map<string, Promise<Built>>();
+
+async function build(
+  nest: SiteNest,
+  inputs: Inputs,
+  place: Placement,
+  key: string,
+  origin: string,
+  hit: Built | undefined,
+): Promise<Built> {
   const sources = await approvedSources(nest.id, inputs.rows, inputs.live);
   const site = buildSite(nest, sources, inputs, place, origin);
   const files = new Map<string, SiteFile>();
@@ -762,8 +805,8 @@ export async function getSite(nest: SiteNest, requestOrigin: string): Promise<Si
   const known = new Set(inputs.paths.map((p) => p.path));
   void recordPaths(nest.id, site.pages, known).catch((err) => console.warn("[site] recording paths failed", err));
   // Tell IndexNow engines what changed since the last build in this process.
-  if (hit) void pingIndexNow(hit.site, site).catch(() => {});
-  return viewFor(built, requestOrigin);
+  if (hit) void pingIndexNow(hit.site, site).catch((err) => console.warn("[site] IndexNow ping failed", err));
+  return built;
 }
 
 let builds = 0;

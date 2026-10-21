@@ -1455,6 +1455,8 @@ export interface SiteInfo {
   domain_verified_at: string | null;
   serving_domain: string | null;
   dns: { txt: { name: string; value: string } | null; cname: string | null } | null;
+  public_url_verified: boolean;
+  public_url_dns: { name: string; value: string } | null;
   settings: SiteSettings;
   pages: Array<{ node_id: string; title: string; path: string; custom: boolean }>;
 }
@@ -1466,6 +1468,9 @@ export async function updateNestSite(nestId: string, body: { domain?: string | n
 }
 export async function verifyNestSiteDomain(nestId: string) {
   return request<SiteInfo>(`/nests/${nestId}/site/verify-domain`, { method: "POST", body: "{}" });
+}
+export async function verifyNestSitePublicUrl(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-public-url`, { method: "POST", body: "{}" });
 }
 export async function setNestSitePageUrl(nestId: string, nodeId: string, path: string | null) {
   return request<SiteInfo>(`/nests/${nestId}/site/pages`, {
