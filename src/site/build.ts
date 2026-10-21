@@ -19,10 +19,10 @@
  * mentions. The page shows backlinks and ranked related pages, and the
  * structured data names the same relationships.
  */
-import { createHash } from "node:crypto";
 import { buildWikiTitleIndex, parseDocument, resolveWikiTarget } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { engineCache } from "../nodes/engine.js";
+import { hashContent } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
 import { describe, renderMarkdown, slugifyHeading, type Heading } from "./markdown.js";
@@ -331,10 +331,9 @@ async function inputsFor(nest: SiteNest): Promise<Inputs> {
     "SELECT term, definition, linked_tag FROM definitions WHERE nest_id = ? ORDER BY LOWER(term)",
     [nest.id],
   )) as Inputs["definitions"];
-  const key = createHash("sha256")
-    .update(JSON.stringify([rows, [...live].sort(), nest, row, paths.filter((p) => p.kind === "custom"), definitions]))
-    .digest("hex")
-    .slice(0, 16);
+  const key = hashContent(
+    JSON.stringify([rows, [...live].sort(), nest, row, paths.filter((p) => p.kind === "custom"), definitions]),
+  ).slice(0, 16);
   return { rows, live, row, paths, definitions, key };
 }
 
@@ -710,7 +709,7 @@ export const TYPES = {
 };
 
 function etagOf(body: string): string {
-  return `"${createHash("sha256").update(body).digest("base64url").slice(0, 22)}"`;
+  return `"${hashContent(body).slice(0, 32)}"`;
 }
 
 function httpDate(iso: string | null): string | null {
@@ -753,7 +752,7 @@ function viewFor(built: Built, origin: string): SiteView {
     return { site: built.site, has: (p) => built.files.has(p), file: (p) => built.files.get(p), paths: () => [...built.files.keys()] };
   }
   const swap = (v: string) => v.split(from).join(origin);
-  const tag = createHash("sha256").update(origin).digest("base64url").slice(0, 6);
+  const tag = hashContent(origin).slice(0, 8);
   const site: Site = { ...built.site, base: swap(built.site.base), serverOrigin: origin };
   return {
     site,

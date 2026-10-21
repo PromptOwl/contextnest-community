@@ -12,7 +12,7 @@
  * <server-origin> is also where media and the MCP endpoint are linked.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { initDb } from "../src/db/client.js";
 import { buildSiteFiles } from "../src/site/build.js";
 
@@ -26,7 +26,9 @@ await initDb();
 const files = await buildSiteFiles(nestId, base);
 const root = resolve(outDir);
 for (const [path, body] of Object.entries(files)) {
-  const target = join(root, path);
+  const target = resolve(root, path);
+  // Built paths are validated site paths, but never write outside out-dir.
+  if (!target.startsWith(root + sep)) throw new Error(`Refusing to write outside ${root}: ${path}`);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, body);
 }

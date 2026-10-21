@@ -418,7 +418,32 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect((await site("POST", "/verify-domain", {})).status).toBe(200);
   });
 
+  it("stops serving on the domain at once when Reader Mode goes off, with the domain cache warm", async () => {
+    const onDomain = () => app.request("https://docs.acme.dev/", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    expect((await onDomain()).status).toBe(200); // host → nest is now cached for 30s
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/reader-mode`, { enabled: false }, owner.apiKey);
+    expect((await onDomain()).status).toBe(404);
+    expect((await app.request("http://localhost/site-domain-check?domain=docs.acme.dev")).status).toBe(404);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/reader-mode`, { enabled: true }, owner.apiKey);
+    expect((await onDomain()).status).toBe(200);
+  });
+
+  it("answers /site-domain-check only with the token when one is set", async () => {
+    const check = (q: string) => app.request(`http://localhost/site-domain-check?domain=docs.acme.dev${q}`);
+    process.env.SITE_DOMAIN_CHECK_TOKEN = "edge-secret-1";
+    try {
+      expect((await check("")).status).toBe(403);
+      expect((await check("&token=wrong")).status).toBe(403);
+      expect((await check("&token=edge-secret-1")).status).toBe(200);
+    } finally {
+      delete process.env.SITE_DOMAIN_CHECK_TOKEN;
+    }
+    expect((await check("")).status).toBe(200);
+  });
+
   it("stops serving when the nest goes private, without stale redirects", async () => {
+    const warm = await app.request("https://docs.acme.dev/", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    expect(warm.status).toBe(200);
     await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "private" }, owner.apiKey);
     // The URL stays this nest's: the other "Acme Docs" doesn't inherit it.
     expect((await get("/d/acme-docs/")).status).toBe(404);
@@ -480,6 +505,17 @@ describe("docs site behind the owner's reverse proxy", () => {
     const html = await res.text();
     expect(html).toContain('<link rel="canonical" href="https://example.com/docs/setup">');
     expect(html).toContain('href="/docs/"');
+  });
+
+  it("varies on X-Forwarded-Host where it picks the response, so a shared cache can't mix them", async () => {
+    const via = await app.request("http://localhost/d/proxied/setup", { headers: { ...HTML, "X-Forwarded-Host": "example.com" } });
+    const direct = await app.request("http://localhost/d/proxied/setup", { headers: HTML });
+    expect([via.status, direct.status]).toEqual([200, 301]);
+    for (const res of [via, direct]) expect(res.headers.get("vary")).toMatch(/X-Forwarded-Host/i);
+    expect(via.headers.get("vary")).toMatch(/Accept/);
+    // The header never changes the body's URLs: they name the public URL either way.
+    const spoofed = await app.request("http://localhost/d/proxied/setup", { headers: { ...HTML, "X-Forwarded-Host": "example.com", Host: "attacker.example" } });
+    expect(await spoofed.text()).toContain('<link rel="canonical" href="https://example.com/docs/setup">');
   });
 
   it("points a spoofed X-Forwarded-Host copy back at the public URL", async () => {

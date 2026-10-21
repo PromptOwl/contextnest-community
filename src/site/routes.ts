@@ -21,6 +21,7 @@
  * are 301s with a bounded Cache-Control, so a browser that cached one recovers
  * when the owner changes their mind instead of being stuck forever.
  */
+import { timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -45,6 +46,12 @@ function decode(s: string): string | null {
   } catch {
     return null;
   }
+}
+
+function sameSecret(given: string, expected: string): boolean {
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** A 301 the browser may cache only for `maxAge` seconds. */
@@ -141,10 +148,16 @@ siteRoutes.get("*", async (c, next) => {
   if (!site.prefix.startsWith("/d/")) {
     // The site lives on a domain or behind the owner's proxy. A request that
     // came through that proxy is served; anything else moves to the real URL.
+    // The header picks 200 or 301 here (never the body's URLs, which always
+    // name the public URL), so a shared cache must key on it.
     const fwd = (c.req.header("X-Forwarded-Host") || "").toLowerCase();
     const realHost = new URL(site.base).host.toLowerCase();
-    if (fwd !== realHost) return movedTo(c, `${site.base}/${rest}${new URL(c.req.url).search}`, 3600);
-    return serveFile(c, built, rest);
+    const res =
+      fwd !== realHost
+        ? movedTo(c, `${site.base}/${rest}${new URL(c.req.url).search}`, 3600)
+        : serveFile(c, built, rest);
+    res.headers.append("Vary", "X-Forwarded-Host");
+    return res;
   }
   // A key that is not the canonical one (the id when the slug works) → canonical.
   if (key !== found.key) return movedTo(c, `${site.prefix}/${rest}`, 86400);
@@ -165,6 +178,9 @@ export async function docsDomainMiddleware(c: Context, next: () => Promise<void>
   if (c.req.method !== "GET" && c.req.method !== "HEAD") {
     return c.body("Method not allowed", 405, { Allow: "GET, HEAD, OPTIONS" });
   }
+  // The host → nest map is cached for 30s, but whether that nest still has a
+  // site is not: siteNests() drops a nest the moment it goes private or Reader
+  // Mode goes off on this instance (and within its 5s TTL on the others).
   const nest = (await siteNests()).find((n) => n.id === nestId);
   if (!nest) return notFound(c);
   const built = await getSite(nest, serverOrigin(c));
@@ -196,6 +212,9 @@ export async function sitemapIndex(c: Context) {
  * ask`, and the like): 200 only for a domain verified for a live docs site.
  */
 export async function siteDomainCheck(c: Context) {
+  // Optional shared secret, so only the edge can ask which domains are served.
+  const token = config.SITE_DOMAIN_CHECK_TOKEN;
+  if (token && !sameSecret(c.req.query("token") ?? "", token)) return c.text("forbidden", 403);
   const domain = (c.req.query("domain") || "").toLowerCase();
   const nestId = domain ? await nestIdForDomain(domain) : null;
   if (!nestId || !(await siteNests()).some((n) => n.id === nestId)) return c.text("unknown", 404);

@@ -240,6 +240,14 @@ export const config = {
    * terminates TLS for custom domains. Your edge should issue certificates
    * only for domains GET /site-domain-check?domain= answers 200 for.
    */
+  /**
+   * Optional shared secret for GET /site-domain-check. Set, the endpoint
+   * answers only requests with `&token=<value>` (403 otherwise), so only your
+   * TLS edge can ask which domains this server serves.
+   */
+  get SITE_DOMAIN_CHECK_TOKEN(): string {
+    return (process.env.SITE_DOMAIN_CHECK_TOKEN || "").trim();
+  },
   get SITE_DNS_TARGET(): string {
     return (process.env.SITE_DNS_TARGET || "").trim();
   },
@@ -256,7 +264,10 @@ export const config = {
     if (docsSitesCache.raw === raw) return docsSitesCache.map;
     const map = new Map<string, string>();
     for (const pair of raw.split(",")) {
-      const [host, nestId] = pair.split("=").map((s) => s.trim());
+      const eq = pair.indexOf("=");
+      if (eq < 0) continue;
+      const host = pair.slice(0, eq).trim();
+      const nestId = pair.slice(eq + 1).trim();
       if (host && nestId) map.set(host.toLowerCase(), nestId);
     }
     docsSitesCache.raw = raw;
