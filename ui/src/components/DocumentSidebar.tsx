@@ -218,6 +218,7 @@ export function DocumentSidebar({
         {nestId !== null && rows.map((n) => {
           const open = openNests.has(n.id);
           const current = n.id === nestId;
+          const relation = nestRelation(n);
           return (
             <div key={n.id} className={cn("mb-1", current && "mb-3")}>
               <div
@@ -252,13 +253,13 @@ export function DocumentSidebar({
                   className={cn(
                     "flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground",
                     // Readable only through its visibility tier — not mine, not shared.
-                    nestRelation(n) === "discovered" && "italic opacity-70",
+                    relation === "discovered" && "italic opacity-70",
                   )}
                   title={[`Open ${n.name}`, nestRelationText(n)].filter(Boolean).join(" — ")}
-                  data-relation={nestRelation(n)}
+                  data-relation={relation}
                 >
                   <span className="truncate">{n.name}</span>
-                  {nestRelation(n) === "shared" && (
+                  {relation === "shared" && (
                     <Users className="h-3 w-3 shrink-0 text-blue-600" aria-label="Shared with you" />
                   )}
                   <VisibilityGlyph visibility={n.visibility} />

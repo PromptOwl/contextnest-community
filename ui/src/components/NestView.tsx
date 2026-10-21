@@ -443,7 +443,7 @@ export function NestView({
   const qc = useQueryClient();
   // Whose nest this is, from the cached dashboard list (owner, roles,
   // discovered) — the banner above the tabs names it when it isn't mine.
-  const listRow = useQuery(reads.nestList()).data?.nests?.find((n: any) => n.id === nestId);
+  const listRow = useQuery(reads.nestList()).data?.nests?.find((n) => n.id === nestId);
   const relation = listRow ? nestRelation(listRow) : "owned";
   const relationText = listRow ? nestRelationText(listRow) : null;
 
