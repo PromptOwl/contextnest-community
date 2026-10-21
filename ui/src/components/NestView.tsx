@@ -37,6 +37,7 @@ import { PushConfirmationModal } from "./PushConfirmationModal";
 import { untilTime } from "../lib/dates";
 import { ReaderView } from "./ReaderView";
 import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { PublicSiteDialog } from "./PublicSiteDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
@@ -299,6 +300,7 @@ export function NestView({
   // reader-mode dialog, applied by ReaderView (and the shell, for readers).
   const [branding, setBranding] = useState<NestBranding | null>(null);
   const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
+  const [siteDialogOpen, setSiteDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -2461,6 +2463,32 @@ export function NestView({
             </Button>
           </div>
 
+          {/* Public site — the static, crawlable docs site a public reader-mode
+              nest publishes: domain, page URLs, search and AI settings. */}
+          {readerModeEnabled && (
+            <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">Public site</Label>
+                <p className="text-xs text-muted-foreground">
+                  A search-engine-ready docs site with its own domain, page
+                  URLs and AI settings. Live while the nest is public.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0 gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setSiteDialogOpen(true);
+                }}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Site settings
+              </Button>
+            </div>
+          )}
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2481,6 +2509,8 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PublicSiteDialog open={siteDialogOpen} onOpenChange={setSiteDialogOpen} nestId={nestId} />
 
       <ReaderBrandingDialog
         open={brandingDialogOpen}
