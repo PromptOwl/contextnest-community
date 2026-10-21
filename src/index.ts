@@ -2,6 +2,7 @@
 // First: snapshot the env Node's networking reads at start, before config.ts loads .env.
 import "./shared/boot-env.js";
 import { serve } from "@hono/node-server";
+import { lowercaseHostServer } from "./shared/http-server.js";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { initDb } from "./db/client.js";
@@ -253,7 +254,15 @@ ${config.AUTH_MODE === "key" ? `
     `);
   }
 
-  serve({ fetch: app.fetch, port: config.PORT, ...(config.HOST ? { hostname: config.HOST } : {}) });
+  // Parse DOCS_SITES now, so an entry for this server's own host warns at boot.
+  void config.DOCS_SITES;
+
+  serve({
+    fetch: app.fetch,
+    port: config.PORT,
+    ...(config.HOST ? { hostname: config.HOST } : {}),
+    createServer: lowercaseHostServer,
+  });
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();

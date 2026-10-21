@@ -5,6 +5,7 @@ export type { StewardRole, StewardSubmit } from "./StewardModal";
 export { ReviewQueue } from "./ReviewQueue";
 export type { ReviewRequest, ReviewRequestPriority, FeedComment } from "./ReviewQueue";
 export { ReviewActions } from "./ReviewActions";
+export { ReviewPane } from "./ReviewPane";
 export { SubmitForReviewModal } from "./SubmitForReviewModal";
 export { ReasonDialog } from "./ReasonDialog";
 export { VersionHistory } from "./VersionHistory";

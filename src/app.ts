@@ -16,9 +16,20 @@ import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
+import { instructionsRoutes } from "./nests/instructions-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
+import {
+  siteRoutes,
+  docsDomainMiddleware,
+  robotsTxt,
+  sitemapIndex,
+  legacySiteRedirect,
+  isCrawler,
+  siteDomainCheck,
+} from "./site/routes.js";
+import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
@@ -136,6 +147,7 @@ import {
   ValidationError,
   VaultBusyError,
   PlanLimitError,
+  BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -163,7 +175,7 @@ import {
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
-import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage } from "./auth/seats.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage, billingConfirmed } from "./auth/seats.js";
 import { hasEntitlement } from "./auth/entitlements.js";
 import {
   resolveModelCredential,
@@ -287,6 +299,7 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "visibility",
   "settings",
   "reader-mode",
+  "site",
   "grants",
   "systems",
   "headless",
@@ -569,6 +582,10 @@ export function createApp(): Hono<AuthEnv> {
       : cors({ origin: corsOrigins, credentials: true }),
   );
 
+  // Pricing spec v21: a role change that raises someone's billed class needs
+  // explicit confirmation; apps and scripts give it with this header.
+  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
+
   // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
   // this server. CORS does not cover this: it governs who may *read* our
   // responses, not who may *embed* us, so without this any site could iframe
@@ -651,6 +668,10 @@ export function createApp(): Hono<AuthEnv> {
   // ahead of every route (and every route's own auth) so a route added later
   // is closed to nest keys until it is allowlisted on purpose — see
   // auth/nest-scope-guard.ts for what a nest key may reach.
+  // A docs domain (verified custom domain or DOCS_SITES) is entirely its docs
+  // site — answered before any key guard or app route sees it (CU-wdqcq05jhm).
+  app.use("*", docsDomainMiddleware);
+
   app.use("*", nestScopedKeyGuard);
 
   // Health check (public)
@@ -2598,6 +2619,12 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
+  // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
+  app.route("/d", siteRoutes);
+  app.get("/robots.txt", robotsTxt);
+  app.get("/sitemap.xml", sitemapIndex);
+  app.get("/site-domain-check", siteDomainCheck);
   // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
   // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
   // token that works on one must work on the other.
@@ -3198,9 +3225,15 @@ export function createApp(): Hono<AuthEnv> {
       resource === "visibility" ||
       resource === "reader-mode" ||
       resource === "branding" ||
+      // site (CU-wdqcq05jhm): the public docs site's domain, URLs and SEO —
+      // what the nest says about itself on the open web.
+      resource === "site" ||
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
-      resource === "headless"
+      resource === "headless" ||
+      // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
+      // first, so changing it is owner/admin. Reading stays at read tier.
+      (resource === "instructions" && c.req.method !== "GET")
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -3526,6 +3559,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
+  nestsApp.route("/:nestId", instructionsRoutes);
+  nestsApp.route("/:nestId", siteSettingsRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document
@@ -3615,8 +3650,16 @@ export function createApp(): Hono<AuthEnv> {
   app.get(
     "*",
     async (c, next) => {
-      if (isDocumentNavigation(c)) return next();
-      return c.json({ error: "Not found" }, 404);
+      const navigation = isDocumentNavigation(c);
+      // An anonymous visitor to a docs-site nest's app URL gets the page. So
+      // does a crawler, which often sends `Accept: */*` or no Accept at all:
+      // without this, links already out there lose their value to it.
+      if (navigation || isCrawler(c)) {
+        const moved = await legacySiteRedirect(c);
+        if (moved) return moved;
+      }
+      if (!navigation) return c.json({ error: "Not found" }, 404);
+      return next();
     },
     serveIndexShell,
   );
@@ -3649,6 +3692,9 @@ export function createApp(): Hono<AuthEnv> {
         { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
         402,
       );
+    }
+    if (err instanceof BillingConfirmError) {
+      return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

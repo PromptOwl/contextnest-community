@@ -2884,6 +2884,10 @@ export async function updateNode(
         if (isAuthorEditingOwnReview) {
           await repointPendingReview({ nestId, nodeId, newVersion });
         }
+        // The working file keeps the last published frontmatter status; the
+        // version row just written is what GET reports, so say "draft" here too
+        // (the reply used to claim "published" for an edit awaiting review).
+        node = { ...node, frontmatter: { ...node.frontmatter, status: "draft" } };
         responseVersion = newVersion;
       } else {
         // Publish through the engine FIRST; only mirror into the DB once it
@@ -3086,6 +3090,13 @@ async function purgeNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [nestId, nodeId],
   );
+  // Public docs-site URLs (CU-wdqcq05jhm) outlive the document on purpose: its
+  // old addresses answer 410 Gone, which tells search engines to drop them.
+  // The row is detached from the id, so a later document there inherits none.
+  await tx.run(
+    `UPDATE site_paths SET node_id = '', kind = 'history' WHERE nest_id = ? AND node_id = ?`,
+    [nestId, nodeId],
+  );
 }
 
 /** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
@@ -3122,6 +3133,9 @@ async function rewriteNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [newId, nestId, oldId],
   );
+  // The page's public URLs move with it: its custom URL stays its own, and
+  // every address it was served at 301s to wherever it lands now.
+  await tx.run(`UPDATE site_paths SET node_id = ? WHERE nest_id = ? AND node_id = ?`, [newId, nestId, oldId]);
 }
 
 export interface MoveNodeResult {

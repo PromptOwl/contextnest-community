@@ -109,6 +109,16 @@ Apps and scripts receive `402` with `{ "code": "plan_limit", "limit": "users" | 
 
 ---
 
+## Confirming a price increase
+
+A change that moves someone to a higher-priced role asks first, even when the plan has room (and on unlimited plans). Moving a **Viewer** to **Editor**, or anyone to **User**, opens a confirmation that names each person with their current and new role. Nothing is saved until you choose **Confirm and save**. Cancel leaves everything as it was.
+
+This covers every action listed under [Reaching a limit](#reaching-a-limit) except **creating your own nest**, which only checks the plan limit. Giving viewer access and lowering a role never ask. The plan limit is checked first, so a change the plan can't fit is refused without asking.
+
+Apps and scripts receive `409` with `{ "code": "billing_confirm", "changes": [{ "userId", "email", "from", "to" }] }`, where `from` / `to` are `viewer`, `subscriber` (Editor) or `user`. Send the same request again with the header `X-Confirm-Billing: true` to confirm. MCP agents get a `BILLING_CONFIRMATION_REQUIRED` tool error naming the people, and confirm by calling the tool again with `confirm_billing: true` once the user has agreed. The header and the flag are a safeguard against raising someone's price by accident, not proof that a person agreed: the server can't tell whether an app or agent asked before setting them.
+
+---
+
 ## AI models and credits
 
 Hootie (the in-nest assistant) and workflow agent runs need an AI model. The server picks the credential like this:

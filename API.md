@@ -596,6 +596,63 @@ Response (200) echoes the persisted row:
 ```
 The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
 
+### Public docs site — `GET /d/:key/*` (no auth)
+A nest that is **public with Reader Mode on** is also served as a static, crawlable docs site: every **approved** document pre-rendered to complete HTML (no JavaScript needed to read it), at a clean path URL. Drafts and unapproved edits never render — the same rule as the public reader. Any other nest answers `404` (indistinguishable from "no such site").
+
+`:key` is fixed the first time the site is built: the nest's slug, or its id when another site already holds that slug. It never moves — not on rename, and not to another nest when this one goes private. The nest id always works too and `301`s to the key.
+
+| URL | What |
+|---|---|
+| `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
+| `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
+| `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
+| `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |
+| `/d/:key/glossary` | The nest's definitions (`DefinedTermSet`); each page links a term's first mention here |
+| `/d/:key/sitemap.xml` | Sitemap with `lastmod` from each page's own update time |
+| `/d/:key/robots.txt` | Allows AI search and user agents (OAI-SearchBot, ChatGPT-User, Claude-SearchBot, Claude-User, PerplexityBot…) always; training crawlers (GPTBot, ClaudeBot, Google-Extended, CCBot…) per `ai_training`; `Content-Signal` line |
+| `/d/:key/llms.txt`, `/d/:key/llms-full.txt` | Agent index (with the nest's MCP endpoint) / every page inline |
+| `/d/:key/<indexnow-key>.txt` | IndexNow key file |
+| `/robots.txt` | Server-level robots (allows crawling, disallows the API paths), points at `/sitemap.xml` |
+| `/sitemap.xml` | Sitemap index of every docs site hosted under `/d/` |
+| `/site-domain-check?domain=` | `200` only for a verified domain of a live site, else `404` — the `ask` endpoint for an edge that issues TLS certificates on demand. With `SITE_DOMAIN_CHECK_TOKEN` set, it also needs `&token=<value>` (`403` otherwise) |
+
+**Pages.** Each page carries a unique `<title>`, a meta description (frontmatter `description`, else the first prose paragraph), absolute canonical, Open Graph/Twitter tags (share image from site settings, else the branding banner/logo), JSON-LD `@graph` with `TechArticle` (dateModified, keywords, `about` topics, `mentions` of linked pages, `isBasedOn` from `derived_from`, `relatedLink`, publisher/author `Organization`, Markdown `encoding`) and `BreadcrumbList` (`WebSite` + `Organization` on the home page), prev/next, breadcrumb, an "On this page" outline, and — from the links between pages — **Builds on**, **Related pages** (ranked by shared tags weighted by rarity, links either way and co-citation) and **Referenced by**. Every way a body names another document — `[[path|label]]`, `[label](contextnest://…)`, `[label](nodes/x)`, `[label](x.md)` — becomes a plain link to that page's URL; a link to a page that isn't on the site renders as text. Raw HTML in a body is escaped; the page's own inline style and script are pinned by CSP hashes (no `'unsafe-inline'`). Optional "Copy page" / "Open in ChatGPT" / "Open in Claude" actions. Branding (logo, favicon, colors, footer, hide powered-by) applies.
+
+**HTTP.** `ETag` and `Last-Modified` (`304` on `If-None-Match` / `If-Modified-Since`), `Cache-Control: public, max-age=300, stale-while-revalidate=86400`, `Link` headers for the Markdown alternate and `llms.txt` (`rel="describedby"`). The site is rebuilt only when the nest's approved content, site settings, custom URLs or glossary change. Unknown paths get a real `404` marked `noindex`; a path a page used to have `301`s to where it is now (every served path is remembered); a path whose page was deleted answers `410 Gone`. A trailing slash, `.html` suffix or upper-case path `301`s to the one canonical URL. Redirects that depend on owner-changeable state carry a bounded `Cache-Control`.
+
+**Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
+
+**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+
+**IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
+
+**Static export.** `npm run site:export -- <nestId> <server-origin> <out-dir>` writes the same site as files (`<path>.html` per page for clean URLs on Pages/Netlify/Vercel/GitHub Pages, `.md` twins, `sitemap.xml`, `robots.txt`, `llms.txt`, `404.html`, and a `_redirects` file with every old URL).
+
+### `/nests/:nestId/site` — public docs site settings (nest owner / nest admin / server admin)
+```
+GET    /nests/:nestId/site                     → the site's state
+PATCH  /nests/:nestId/site  { domain?, settings? }
+POST   /nests/:nestId/site/verify-domain       → checks the DNS TXT record
+POST   /nests/:nestId/site/verify-public-url   → checks the DNS TXT record for public_url's host
+PUT    /nests/:nestId/site/pages { node_id, path | null }   → a page's custom URL
+```
+Response:
+```json
+{
+  "live": true, "reason": null, "url": "https://docs.acme.dev/",
+  "domain": "docs.acme.dev", "domain_verified": true, "domain_verified_at": "…", "serving_domain": "docs.acme.dev",
+  "dns": { "txt": { "name": "_contextnest.docs.acme.dev", "value": "contextnest-site=<token>" }, "cname": "<SITE_DNS_TARGET or null>" },
+  "public_url_verified": false,
+  "public_url_dns": { "name": "_contextnest.example.com", "value": "contextnest-site=<token>" },
+  "settings": { "title": "Acme Docs", "ai_training": false },
+  "pages": [{ "node_id": "nodes/docs/guides/setup", "title": "Setup", "path": "getting-started", "custom": true }]
+}
+```
+- `domain` — a host name (`https://`, paths and case are stripped; IPs and this server's own host are refused). Changing it un-verifies; `null` removes it. The domain is served only after `verify-domain` finds the TXT record (`400` with the record to add otherwise) and no other nest's site serves it (`409`). Point the domain at the server (`SITE_DNS_TARGET`) and give it TLS at your edge.
+- `settings` — replaces the stored settings: `title`, `description`, `public_url`, `og_image_url`, `organization_name`, `organization_url`, `organization_logo_url`, `same_as[]`, `twitter_site`, `google_site_verification`, `bing_site_verification`, `language`, `noindex`, `ai_training` (default true), `ai_actions` (default true), `indexnow` (default true), `redirects[{from, to}]` (`from` a path; `to` a path or an `https://` URL on the site's verified domain or verified `public_url` host). Unknown keys, an `https://` target on any other host, and redirects that loop → `400`.
+- `public_url` — used for canonicals, and `/d/<key>` 301s to it, only after `verify-public-url` finds `_contextnest.<host>` with the same TXT value as a custom domain (`400` with the record to add otherwise). Changing it to another host un-verifies it. Until then the site stays at `/d/<key>`. Your proxy must overwrite `X-Forwarded-Host` with the `public_url` host; see CONFIGURATION.md → Public docs site behind the owner's proxy.
+- `pages` — `path` is lower-cased, `a-z 0-9 - _ . ~` segments; reserved names (`sitemap`, `robots`, `llms`, `tags/…`, `glossary`, `*.md|txt|xml`) → `400`; another page's custom URL → `409`; a `node_id` that is not a published page of the nest → `404`. `null` returns the page to its folder-derived URL. The previous URL keeps working as a `301`.
+
 ### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
 Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
 ```json
@@ -871,7 +928,7 @@ Scope is deliberately narrow by default, because a single server may hold severa
 
 A named machine identity ("GitHub sync", "Nightly indexer") with `capability` `read` (viewer) or `write` (editor) on one or more nests. It is built on the same **service identity** a headless access key gets (no password, never a browser session, no OIDC / SSO / PromptOwl-ticket sign-in, `/auth/login` refuses it like a wrong password, `/auth/admin/reset-password` answers 400, not a seat, not in `/auth/teammates`, people search, `/stats` or telemetry) — but it is **not** a headless reader: instead of the reader allowlist it gets an ordinary collaborator row on each granted nest, so **governance is unchanged**: stewardship, submit-review and approval apply exactly as for a human editor, and a system can't approve its own submission. **Writes are attributed to the system.** Its identity (`email`, e.g. `github-sync-1a2b3c4d@system.contextnest.invalid`, an unroutable reserved domain) is the author in version history and provenance, never the person who created it. It belongs to its nests, not its creator: removing the creator from the nest or the server revokes nothing.
 
-A system key works only inside its granted nests (others 403/404). It can list them (`GET /nests`) and use the server-level `/mcp` (but not `nest_create`). Anything else is **403** `{ "code": "system_key" }`: every `/auth/*` route (it can't mint, list or rotate keys or change a password), `/systems`, `/admin/*`, `/me/*`, `/search`, `/index`, `POST /nests` and edits/deletes of a nest itself. Inside a nest it never reaches `collaborators`, `teams`, `visibility`, `settings`, `reader-mode`, `grants`, `systems`, `headless`, `publications`, `branding`, `metacognition`, `schedules`, `hooks`, `env`, `connectors`, `trace`, `stewards`, `archive`, `restore`, `push-allowlist` or `pending-pushes`.
+A system key works only inside its granted nests (others 403/404). It can list them (`GET /nests`) and use the server-level `/mcp` (but not `nest_create`). Anything else is **403** `{ "code": "system_key" }`: every `/auth/*` route (it can't mint, list or rotate keys or change a password), `/systems`, `/admin/*`, `/me/*`, `/search`, `/index`, `POST /nests` and edits/deletes of a nest itself. Inside a nest it never reaches `collaborators`, `teams`, `visibility`, `settings`, `reader-mode`, `site`, `grants`, `systems`, `headless`, `publications`, `branding`, `metacognition`, `schedules`, `hooks`, `env`, `connectors`, `trace`, `stewards`, `archive`, `restore`, `push-allowlist` or `pending-pushes`.
 
 Who may manage a system (always a person on a full credential — a read-only key, a headless access key or a system key gets 403):
 - **see / list**: an admin of at least one nest it works in. A listing names only the nests you administer, and counts the rest (`other_nest_count`).
@@ -974,7 +1031,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 `{ request }` — the caller's latest request for one target, any status (with `can_ask_again_at`), or `null`.
 
 ### POST `/nests/:nestId/access-requests/:id/approve` · `/deny`
-Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
+Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) or that raises the requester's billed class without `X-Confirm-Billing: true` (`409 billing_confirm`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
 
 Requests also appear in `GET /me/work` as `type: "access"` items (`request_id`, `target_type`, `level`, `reason` = the note): in `items` for whoever can decide them, in `waiting` for the requester. Agent equivalents: `context_request_access`, `context_access_requests`, `context_resolve_access_request`; a refused `context_create` / `context_update` / `context_delete` / `context_move` names `context_request_access` and carries the same `can_request_access` / `target` / `level` fields in its structured result.
 
@@ -1626,6 +1683,12 @@ Comment items on **resolved** threads are left out (and out of `counts.comments`
 ```
 
 `counts` always carries both per-type totals regardless of `filter`; the UI tab badge binds to `counts.changes` (actionable items), not the feed length. The UI deep-links a comment item to its document with the thread focused via `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
+### Assigned rows (`GET /me/work` → `assigned`)
+
+Open board tasks and cards whose `assignee` is the caller, across every nest they can see. Each row carries `nest_id`, `nest_name`, `node_id`, `title`, `type`, `due`, `priority`, `assigned_at`, and `open_blockers` when non-zero. Completed cards (`completed_at` set) drop out, and so does anything the caller can't read. The assignee match ignores case, so `Ann@Acme.com` written by a file sync or import still lists for `ann@acme.com`. Rows are sorted soonest-due first (no due date last), then most recently assigned, and capped at 100.
+
+`assigned` is not paged with the reviews: `limit` / `offset` and `pagination` cover the review queue only, and the full `assigned` list comes back on every call. The My Work badge counts `pagination.total` plus `assigned.length`, so tasks assigned to you count as waiting on you.
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
@@ -2706,8 +2769,11 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 | 404 | Nest / node / steward not found, or caller has no permission |
 | 402 | Plan limit: a role grant would pass the plan's cap. `{ "error", "code": "plan_limit", "limit": "users" \| "subscribers" \| "account_owners", "max" }`. Only raises are checked; demotions and viewers always go through. `error` tells a server admin to upgrade and anyone else to ask their admin |
 | 409 | Conflict (e.g., key already exists, version conflict) |
+| 409 | Billing confirmation: a role change raises someone's billed class (viewer → editor → user) and wasn't confirmed. `{ "error", "code": "billing_confirm", "changes": [{ "userId", "email", "from", "to" }] }`, classes `viewer` / `subscriber` (Editor) / `user`. Resend with `X-Confirm-Billing: true` |
 | 429 | Rate limit |
 | 503 | License missing |
+
+**Billing confirmation.** Every role-raising route (collaborators, stewards, grants, teams and team sharing, access-request approval, superadmins) answers `409 billing_confirm` for a raise sent without `X-Confirm-Billing: true`. The `402` plan-limit check runs first. Demotions, viewer access and creating your own nest never need it. On MCP, every tool takes an optional `confirm_billing` boolean: an unconfirmed raise returns a `BILLING_CONFIRMATION_REQUIRED` tool error with the same `changes`, and the agent calls again with `confirm_billing: true` once the user agrees. See `LICENSING.md`.
 
 ---
 

@@ -13,7 +13,7 @@
  * its version row, its vault lock, its id-occupancy check and its governance
  * rows. Nothing here hand-assembles a document.
  */
-import { engineCache } from "./engine.js";
+import { writeInstructions } from "../nests/instructions-service.js";
 import { createNode, derivedNodeId } from "./service.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { config } from "../config.js";
@@ -124,12 +124,13 @@ export async function applyPublish(
   const failed: Array<{ title: string; error: string }> = [];
 
   if (body.context_md) {
-    // No engine op exists for context.md, so this stays a direct write; the
-    // index regen keeps graph-mode reads (seeded from context.yaml) aware of
-    // it. Document creation below regenerates per doc via the engine.
-    const { storage } = await engineCache.get(nestId);
-    await storage.writeContextMd(body.context_md);
-    await storage.regenerateIndex();
+    // Through the instructions service, so a push lands in the Instructions
+    // history like any other edit, attributed to the submitter.
+    await writeInstructions(nestId, body.context_md, {
+      authorEmail,
+      note: "ctx push",
+      source: "push",
+    });
   }
 
   for (const doc of body.documents || []) {

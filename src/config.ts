@@ -80,6 +80,17 @@ function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
 }
 
+const docsSitesCache: { raw: string | null; map: Map<string, string> } = { raw: null, map: new Map() };
+
+/** PUBLIC_BASE_URL's host name, lower-cased, or "" when unset or invalid. */
+function ownHost(): string {
+  try {
+    return new URL(process.env.PUBLIC_BASE_URL || "").hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -231,6 +242,54 @@ export const config = {
    */
   get PUBLIC_BASE_URL(): string {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+  },
+  /**
+   * The DNS name customers point their docs domain at (a CNAME target), shown
+   * in the nest's site settings — e.g. the load balancer or edge proxy that
+   * terminates TLS for custom domains. Your edge should issue certificates
+   * only for domains GET /site-domain-check?domain= answers 200 for.
+   */
+  /**
+   * Optional shared secret for GET /site-domain-check. Set, the endpoint
+   * answers only requests with `&token=<value>` (403 otherwise), so only your
+   * TLS edge can ask which domains this server serves.
+   */
+  get SITE_DOMAIN_CHECK_TOKEN(): string {
+    return (process.env.SITE_DOMAIN_CHECK_TOKEN || "").trim();
+  },
+  get SITE_DNS_TARGET(): string {
+    return (process.env.SITE_DNS_TARGET || "").trim();
+  },
+  /**
+   * Custom domains for public docs sites (CU-wdqcq05jhm), as
+   * `host=nestId[,host=nestId…]` — e.g. `docs.contextnest.ai=ad8fe978-…`.
+   * Point the domain's DNS at this server and the nest's docs site is served
+   * at that domain's root (the nest must still be public with Reader Mode on).
+   * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
+   */
+  get DOCS_SITES(): Map<string, string> {
+    // Parsed once per distinct value: this is read on every request.
+    const raw = `${process.env.DOCS_SITES || ""}\n${process.env.PUBLIC_BASE_URL || ""}`;
+    if (docsSitesCache.raw === raw) return docsSitesCache.map;
+    const map = new Map<string, string>();
+    for (const pair of (process.env.DOCS_SITES || "").split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq < 0) continue;
+      const host = pair.slice(0, eq).trim();
+      const nestId = pair.slice(eq + 1).trim();
+      if (!host || !nestId) continue;
+      // A docs host is the read-only site, ahead of auth and every API route,
+      // so listing this server's own host would lock out the app and the API.
+      const h = host.toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "");
+      if (h === ownHost()) {
+        console.warn(`[config] DOCS_SITES: ignoring ${host}, it is this server's own host (PUBLIC_BASE_URL).`);
+        continue;
+      }
+      map.set(h, nestId);
+    }
+    docsSitesCache.raw = raw;
+    docsSitesCache.map = map;
+    return map;
   },
   /**
    * Dedicated secret this deployment uses to SIGN the short-lived MCP tickets

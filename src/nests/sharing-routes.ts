@@ -1,3 +1,5 @@
+import { invalidateSiteNests } from "../site/invalidate.js";
+import { claimSiteKeyIfLive } from "../site/settings.js";
 import { Hono } from "hono";
 import { dropPersonalPinsIfGone } from "../nodes/doc-pins.js";
 import { isSystemUser } from "../auth/systems.js";
@@ -250,6 +252,8 @@ sharingRoutes.patch("/visibility", async (c) => {
       : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
     [body.visibility, nestId],
   );
+  invalidateSiteNests();
+  if (result.changes > 0) await claimSiteKeyIfLive(nestId);
   if (result.changes === 0 && body.visibility !== "private" && (await isNestHeadless(nestId))) {
     return c.json(
       { error: "This nest is published API-only (headless), so it stays private." },

@@ -2189,7 +2189,73 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("067_system_accounts");
   }
 
-  // 069: document pins (CU-wdqcq02crw, experimental — EXPERIMENTAL_DOC_PINS).
+  // Public docs sites (CU-wdqcq05jhm). nest_sites holds a nest's site
+  // settings — its custom domain (claimed with a DNS TXT token, served only
+  // once verified) and its SEO settings as JSON. site_paths maps public paths
+  // to documents: 'custom' is a URL the owner chose for a page; 'history' is
+  // every path a page has been served at, so a renamed or moved page 301s
+  // from its old URL instead of 404ing and losing its ranking.
+  if (!hasMigration("068_nest_sites")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_sites (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        domain TEXT,
+        site_key TEXT UNIQUE,
+        domain_token TEXT NOT NULL,
+        domain_verified_at TEXT,
+        settings TEXT NOT NULL DEFAULT '{}',
+        indexnow_key TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS site_paths (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+    `);
+    recordMigration("068_nest_sites");
+  }
+
+  // 069: a docs site's public_url is honoured only once its host is proven
+  // with the same DNS TXT token as a custom domain (CU-wdqcq05jhm). Stores the
+  // host that was proven, so changing public_url to another host un-verifies it.
+  if (!hasMigration("069_site_public_url_host")) {
+    const cols = (db.prepare("PRAGMA table_info(nest_sites)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("public_url_host")) db.exec("ALTER TABLE nest_sites ADD COLUMN public_url_host TEXT");
+    recordMigration("069_site_public_url_host");
+  }
+
+  // 070: CONTEXT.md revisions (CU-wdqcq05mty). The nest's operating
+  // instructions are one file the engine overwrites in place, so this table is
+  // their only history: every write — the Instructions page, `ctx push`, a
+  // confirmed held push, MCP — records the full text it wrote. `seq` numbers a
+  // nest's revisions 1, 2, 3… and is what a save names as its base, so two
+  // editors can't silently overwrite each other.
+  if (!hasMigration("070_instructions_revisions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS instructions_revisions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        author_email TEXT,
+        note TEXT,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(nest_id, seq)
+      );
+    `);
+    recordMigration("070_instructions_revisions");
+  }
+
+  // 071: document pins (CU-wdqcq02crw, experimental — EXPERIMENTAL_DOC_PINS).
   //   (068 is reserved by an open PR.) Two kinds in one table:
   //   - scope 'nest': an editorial pin, the nest's own — user_id NULL, ordered
   //     by position. pinned_by is attribution only (an email, NOT a foreign
@@ -2203,7 +2269,7 @@ export function runMigrations(db: Database.Database): void {
   //   a foreign key (documents live on disk; node_index is a rebuildable mirror
   //   whose full rescan would cascade every pin away): NODE_KEYED_TABLES purges
   //   the rows on delete and repoints them on move.
-  if (!hasMigration("069_node_pins")) {
+  if (!hasMigration("071_node_pins")) {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS node_pins (
@@ -2224,7 +2290,7 @@ export function runMigrations(db: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
       `);
     })();
-    recordMigration("069_node_pins");
+    recordMigration("071_node_pins");
   }
 }
 
