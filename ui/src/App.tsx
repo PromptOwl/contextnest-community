@@ -20,6 +20,7 @@ import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
+import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
@@ -1138,6 +1139,8 @@ export default function App() {
       )}
       {/* A refused write anywhere offers "Request access?" (CU-wdqcq041jn). */}
       <RequestAccessHost />
+      {/* A role change that raises someone's billed class asks first (CU-wdqcq04t06). */}
+      <BillingConfirmHost />
     </>
   );
 

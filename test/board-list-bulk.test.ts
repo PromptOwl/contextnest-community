@@ -368,6 +368,7 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
     // Rita reads the nest and holds a write share on one document only.
     const g = await mcp(owner.apiKey, "context_grant", {
       email: rita.email, target_type: "document", target: "nodes/echo", role: "write",
+      confirm_billing: true,
     });
     expect(g.content[0].text).toMatch(/Shared document/);
     const res = await mcp(rita.apiKey, "context_bulk_update", { ids: ["nodes/alpha", "nodes/echo"], patch: { priority: "medium" } });

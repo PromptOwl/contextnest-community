@@ -946,7 +946,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 `{ request }` — the caller's latest request for one target, any status (with `can_ask_again_at`), or `null`.
 
 ### POST `/nests/:nestId/access-requests/:id/approve` · `/deny`
-Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
+Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) or that raises the requester's billed class without `X-Confirm-Billing: true` (`409 billing_confirm`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
 
 Requests also appear in `GET /me/work` as `type: "access"` items (`request_id`, `target_type`, `level`, `reason` = the note): in `items` for whoever can decide them, in `waiting` for the requester. Agent equivalents: `context_request_access`, `context_access_requests`, `context_resolve_access_request`; a refused `context_create` / `context_update` / `context_delete` / `context_move` names `context_request_access` and carries the same `can_request_access` / `target` / `level` fields in its structured result.
 
@@ -2682,8 +2682,11 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 | 404 | Nest / node / steward not found, or caller has no permission |
 | 402 | Plan limit: a role grant would pass the plan's cap. `{ "error", "code": "plan_limit", "limit": "users" \| "subscribers" \| "account_owners", "max" }`. Only raises are checked; demotions and viewers always go through. `error` tells a server admin to upgrade and anyone else to ask their admin |
 | 409 | Conflict (e.g., key already exists, version conflict) |
+| 409 | Billing confirmation: a role change raises someone's billed class (viewer → editor → user) and wasn't confirmed. `{ "error", "code": "billing_confirm", "changes": [{ "userId", "email", "from", "to" }] }`, classes `viewer` / `subscriber` (Editor) / `user`. Resend with `X-Confirm-Billing: true` |
 | 429 | Rate limit |
 | 503 | License missing |
+
+**Billing confirmation.** Every role-raising route (collaborators, stewards, grants, teams and team sharing, access-request approval, superadmins) answers `409 billing_confirm` for a raise sent without `X-Confirm-Billing: true`. The `402` plan-limit check runs first. Demotions, viewer access and creating your own nest never need it. On MCP, every tool takes an optional `confirm_billing` boolean: an unconfirmed raise returns a `BILLING_CONFIRMATION_REQUIRED` tool error with the same `changes`, and the agent calls again with `confirm_billing: true` once the user agrees. See `LICENSING.md`.
 
 ---
 

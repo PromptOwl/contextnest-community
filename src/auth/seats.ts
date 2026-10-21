@@ -2,8 +2,21 @@ import { getDb } from "../db/client.js";
 import { getCurrentLicense, getEntitlement } from "./license.js";
 import { getAccessConfig, isSuperAdmin } from "../governance/access-service.js";
 import { teamRoleToPermission } from "../governance/roles.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { PlanLimitError } from "../shared/errors.js";
+import { BillingConfirmError, PlanLimitError } from "../shared/errors.js";
+
+/** Per request: whether the caller confirmed a billed-class raise (X-Confirm-Billing). */
+export const billingConfirmed = new AsyncLocalStorage<boolean>();
+
+/** The MCP counterpart of X-Confirm-Billing, offered on every tool. */
+export const confirmBillingToolField = {
+  confirm_billing: z
+    .boolean()
+    .optional()
+    .describe("Set true only after the user agreed to a change that raises what someone is billed."),
+};
 
 /**
  * Billing per person (pricing spec §3.3): each person bills once, at their
@@ -116,19 +129,18 @@ export async function countBilled(): Promise<{ users: number; subscribers: numbe
 }
 
 /**
- * Refuse a role change that would take the server past its plan (402). Only a
- * raise is checked, so an over-limit server can still demote people and add
- * viewers; nothing already granted is ever taken away. `userId` null = a
- * person who has no account yet (e.g. a steward invited by email).
+ * Refuse a role change that would take the server past its plan (402), then
+ * one that raises someone's billed class without confirmation (409, pricing
+ * spec v21). Only a raise is checked, so demotions and viewers always pass.
+ * `userId` null = a person with no account yet (e.g. a steward invited by email).
  * ponytail: best-effort — count and write aren't atomic, so two grants at the
  * last seat can both pass; serialise check+write if the cap must be exact.
  */
 export async function assertCanGrant(
-  changes: Array<{ userId: string | null | undefined; next: BillingClass }>,
+  changes: Array<{ userId: string | null | undefined; next: BillingClass; email?: string }>,
 ): Promise<void> {
   const ent = getEntitlement();
-  if (ent.maxUsers == null && ent.maxSubscribers == null) return;
-  let raises = changes.filter((c) => c.next !== "viewer");
+  let raises = changes.filter((c) => c.next !== "viewer" && c.userId !== ANON_USER_ID);
   // Service identities (access keys, agent personas) are never billed, so they never take a seat.
   const ids = raises.map((c) => c.userId).filter((id): id is string => !!id);
   if (ids.length) {
@@ -145,13 +157,15 @@ export async function assertCanGrant(
   const before = tally(classes);
   const after = { ...before };
   const seen = new Set<string>();
-  for (const { userId, next } of raises) {
+  const raised: Array<{ userId: string | null; email?: string; from: BillingClass; to: BillingClass }> = [];
+  for (const { userId, next, email } of raises) {
     if (userId) {
       if (seen.has(userId)) continue;
       seen.add(userId);
     }
     const cur = (userId && classes.get(userId)) || "viewer";
     if (RANK[next] <= RANK[cur]) continue;
+    raised.push({ userId: userId ?? null, email, from: cur, to: next });
     if (cur === "subscriber") after.subscribers--;
     if (next === "user") after.users++;
     else after.subscribers++;
@@ -171,6 +185,21 @@ export async function assertCanGrant(
       planLimitMessage("subscribers", ent.maxSubscribers, true),
     );
   }
+
+  // No store = an internal call (seed, job), not a request: nothing to confirm.
+  if (!raised.length || billingConfirmed.getStore() !== false) return;
+  const raisedIds = raised.map((r) => r.userId).filter((id): id is string => !!id);
+  const emails = new Map<string, string>();
+  if (raisedIds.length) {
+    const rows = (await getDb().all(
+      `SELECT id, email FROM users WHERE id IN (${raisedIds.map(() => "?").join(",")})`,
+      raisedIds,
+    )) as Array<{ id: string; email: string }>;
+    for (const r of rows) emails.set(r.id, r.email);
+  }
+  throw new BillingConfirmError(
+    raised.map((r) => ({ ...r, email: (r.userId && emails.get(r.userId)) || r.email || null })),
+  );
 }
 
 /**
