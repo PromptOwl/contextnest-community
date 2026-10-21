@@ -244,12 +244,6 @@ export const config = {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
-   * The DNS name customers point their docs domain at (a CNAME target), shown
-   * in the nest's site settings — e.g. the load balancer or edge proxy that
-   * terminates TLS for custom domains. Your edge should issue certificates
-   * only for domains GET /site-domain-check?domain= answers 200 for.
-   */
-  /**
    * Optional shared secret for GET /site-domain-check. Set, the endpoint
    * answers only requests with `&token=<value>` (403 otherwise), so only your
    * TLS edge can ask which domains this server serves.
@@ -257,6 +251,12 @@ export const config = {
   get SITE_DOMAIN_CHECK_TOKEN(): string {
     return (process.env.SITE_DOMAIN_CHECK_TOKEN || "").trim();
   },
+  /**
+   * The DNS name customers point their docs domain at (a CNAME target), shown
+   * in the nest's site settings — e.g. the load balancer or edge proxy that
+   * terminates TLS for custom domains. Your edge should issue certificates
+   * only for domains GET /site-domain-check?domain= answers 200 for.
+   */
   get SITE_DNS_TARGET(): string {
     return (process.env.SITE_DNS_TARGET || "").trim();
   },
@@ -286,6 +286,9 @@ export const config = {
         continue;
       }
       map.set(h, nestId);
+    }
+    if (map.size && !ownHost()) {
+      console.warn("[config] DOCS_SITES is set but PUBLIC_BASE_URL is not, so an entry for this server's own host can't be caught; listing it would lock out the app and API.");
     }
     docsSitesCache.raw = raw;
     docsSitesCache.map = map;

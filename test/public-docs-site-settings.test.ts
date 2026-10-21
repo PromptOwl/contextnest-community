@@ -238,10 +238,12 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
   });
 
   it("follows manual redirects and answers 410 for a removed page", async () => {
-    await site("PATCH", "", { settings: { redirects: [{ from: "/old-guide", to: "/getting-started" }] } });
+    await site("PATCH", "", { settings: { redirects: [{ from: "/old-guide", to: "/getting-started" }, { from: "/old-anchor", to: "/getting-started#install" }] } });
     const r = await get("/d/acme-docs/old-guide");
     expect(r.status).toBe(301);
     expect(r.headers.get("location")).toBe("/d/acme-docs/getting-started");
+    // A .md request follows to the target's twin, before its fragment.
+    expect((await get("/d/acme-docs/old-anchor.md")).headers.get("location")).toBe("/d/acme-docs/getting-started.md#install");
     expect(await text("/d/acme-docs/reference/commands")).toContain("Every command");
     await jsonRequest(app, "DELETE", `/nests/${nestId}/nodes/nodes/docs/reference/commands`, undefined, owner.apiKey);
     const gone = await get("/d/acme-docs/reference/commands");
@@ -281,6 +283,8 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     const page = await app.request("https://docs.acme.dev/getting-started", { headers: { ...HTML, Host: "Docs.Acme.dev:443" } });
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('<link rel="canonical" href="https://docs.acme.dev/getting-started">');
+    // A fully-qualified Host (trailing dot) is the same domain.
+    expect((await app.request("https://docs.acme.dev/getting-started", { headers: { ...HTML, Host: "docs.acme.dev." } })).status).toBe(200);
     expect((await app.request("http://localhost/site-domain-check?domain=docs.acme.dev")).status).toBe(200);
     // An edge may pass the SNI name with a port, a trailing dot or in capitals.
     for (const d of ["docs.acme.dev:443", "docs.acme.dev.", "DOCS.Acme.dev"]) {

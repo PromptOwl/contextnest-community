@@ -86,7 +86,8 @@ function serveFile(c: Context, built: SiteView, rest: string) {
   if (!file) {
     const key = lower.replace(/\.md$/, "");
     const to = site.redirects.get(key);
-    if (to) return movedTo(c, lower.endsWith(".md") && to.startsWith("/") ? `${to}.md` : to, 86400);
+    // The .md twin of a redirect goes before any query or fragment on its target.
+    if (to) return movedTo(c, lower.endsWith(".md") && to.startsWith("/") ? to.replace(/(?=[?#]|$)/, ".md") : to, 86400);
     const gone = site.gone.has(key);
     const page = built.file(gone ? "410" : "404")!;
     return c.body(page.body, gone ? 410 : 404, {
@@ -185,7 +186,7 @@ export async function docsDomainMiddleware(c: Context, next: () => Promise<void>
   if (!nest) return notFound(c);
   const built = await getSite(nest, serverOrigin(c));
   // Serve only while this domain IS the site's home.
-  if (built.site.prefix !== "" || new URL(built.site.base).host.toLowerCase() !== host.toLowerCase().replace(/:\d+$/, "")) {
+  if (built.site.prefix !== "" || new URL(built.site.base).host.toLowerCase() !== host.toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "")) {
     return notFound(c);
   }
   const rest = decode(new URL(c.req.url).pathname.slice(1));
