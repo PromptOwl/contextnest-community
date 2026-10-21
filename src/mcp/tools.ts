@@ -1761,7 +1761,11 @@ export async function handleToolCall(
   } catch (err) {
     if (err instanceof BillingConfirmError) {
       status = 409;
-      const who = err.changes.map((c) => `${c.email ?? "a new person"} (${c.from} → ${c.to})`).join(", ");
+      // Same words as Settings → License and the UI dialog.
+      const label: Record<string, string> = { viewer: "viewer", subscriber: "editor", user: "user" };
+      const who = err.changes
+        .map((c) => `${c.email ?? "a new person"} (${label[c.from]} → ${label[c.to]})`)
+        .join(", ");
       return toolError(
         `This raises what ${who} is billed. Ask the user to confirm, then call this tool again with confirm_billing: true.`,
         "BILLING_CONFIRMATION_REQUIRED",
