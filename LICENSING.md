@@ -151,7 +151,7 @@ Does the license include "byok" (Enterprise)?
 
 ### Choosing the model
 
-**Settings → Hootie → Model** lists the models available, grouped by provider and searchable; a provider you have your own key for is marked "your key". Pick by plain name, for example `claude-sonnet-5`. On PromptOwl credits, the server adds PromptOwl's internal prefix when it calls. With nothing picked, Hootie uses the gateway's default model.
+**Settings → Hootie → Model** lists the models available, grouped by provider and searchable; a provider you have your own key for is marked "your key". Pick by plain name, for example `claude-sonnet-5`. On PromptOwl credits, the server adds PromptOwl's internal prefix when it calls. With nothing picked, Hootie uses `claude-sonnet-5`, an efficient model, so credits go further; pick another model to change it.
 
 ---
 

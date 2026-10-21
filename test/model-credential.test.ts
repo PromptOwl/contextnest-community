@@ -109,14 +109,14 @@ describe("the run bundle and Hootie use the same credential", () => {
 });
 
 describe("which model Hootie asks for", () => {
-  it("the admin's pick, else the gateway's team default, else Anthropic's id", async () => {
+  it("the admin's pick, else the efficient default — never the gateway's default", async () => {
     const { hootieModel } = await import("../src/shared/model-credential.js");
     const own = { apiKey: "k", baseUrl: null, source: "own" as const, defaultModel: null };
-    const gw = { ...own, source: "promptowl" as const, defaultModel: "default-claude/claude-sonnet-5" };
+    const gw = { ...own, source: "promptowl" as const, defaultModel: "default-claude/claude-opus-5" };
     const before = process.env.HOOTIE_MODEL;
     try {
       delete process.env.HOOTIE_MODEL;
-      expect(hootieModel(gw)).toBe("claude-sonnet-5") // shown and stored without the prefix;
+      expect(hootieModel(gw)).toBe("claude-sonnet-5"); // credits stay on the efficient model
       expect(hootieModel(own)).toBe("claude-sonnet-5");
       expect(hootieModel(null)).toBe("claude-sonnet-5");
       process.env.HOOTIE_MODEL = "gpt-5.5";
