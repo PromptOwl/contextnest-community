@@ -116,6 +116,18 @@ describe("public docs site", () => {
     expect(map).not.toContain("secret-plans");
   });
 
+  it("keeps draft paths out of the Markdown twins and llms-full.txt, as in the HTML", async () => {
+    const twin = await (await get("/d/acme-docs/guides/setup.md", {})).text();
+    const full = await (await get("/d/acme-docs/llms-full.txt", {})).text();
+    for (const out of [twin, full]) {
+      expect(out).not.toContain("docs/guides/secret-plans");
+      expect(out).toContain("See also secret-plans and No Such Page.");
+      expect(out).toContain("[the advanced guide](http://localhost/d/acme-docs/guides/advanced)");
+      // Code stays as written.
+      expect(out).toContain("`[[docs/guides/advanced]]` stays code.");
+    }
+  });
+
   it("escapes raw HTML and leaves code alone", async () => {
     const html = await (await get("/d/acme-docs/guides/setup")).text();
     expect(html).not.toContain("<script>alert(1)</script>");

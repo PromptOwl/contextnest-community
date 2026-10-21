@@ -62,6 +62,43 @@ function documentTarget(href: string): string | null {
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** `target#fragment|label` inside `[[ ]]`, with the label the page shows. */
+function wikiParts(inner: string): { path: string; fragment: string | undefined; label: string } {
+  const [rawTarget, ...rest] = inner.split("|");
+  const [path, fragment] = rawTarget.split("#");
+  const label = rest.join("|").trim() || fragment?.trim() || path.trim().split("/").pop() || path.trim();
+  return { path: path.trim(), fragment, label };
+}
+
+/**
+ * The body as Markdown for the `.md` twin and llms-full.txt, with links
+ * handled as in the HTML: a document link points at its page URL, and one to
+ * anything not on the site (a draft, a typo) keeps only its label, so an
+ * unpublished path never leaks. Code spans and fences are left as written.
+ */
+export function rewriteDocumentLinks(body: string, resolve: (target: string) => string | null): string {
+  return body
+    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part
+            .replace(/\[\[([^\]\n]+)\]\]/g, (_, inner: string) => {
+              const { path, fragment, label } = wikiParts(inner);
+              const url = resolve(path);
+              return url ? `[${label}](${fragment ? `${url}#${slugifyHeading(fragment)}` : url})` : label;
+            })
+            .replace(/(!?)\[([^\]\n]*)\]\(([^)\s]+)(\s+"[^"\n]*")?\)/g, (m, bang: string, label: string, href: string) => {
+              const target = bang ? null : documentTarget(href);
+              if (target === null) return m;
+              const url = resolve(target);
+              const frag = href.includes("#") ? `#${href.split("#").pop()}` : "";
+              return url ? `[${label}](${url}${frag})` : label;
+            }),
+    )
+    .join("");
+}
+
 export function renderMarkdown(
   body: string,
   opts: RenderOptions,
@@ -78,10 +115,8 @@ export function renderMarkdown(
     const inner = src.slice(start + 2, end);
     if (!inner.trim() || inner.includes("\n")) return false;
     if (!silent) {
-      const [rawTarget, ...rest] = inner.split("|");
-      const [path, fragment] = rawTarget.split("#");
-      const label = rest.join("|").trim() || fragment?.trim() || path.trim().split("/").pop() || path.trim();
-      const hit = opts.resolve(path.trim());
+      const { path, fragment, label } = wikiParts(inner);
+      const hit = opts.resolve(path);
       if (hit) {
         linked.add(hit.nodeId);
         const open = state.push("link_open", "a", 1);

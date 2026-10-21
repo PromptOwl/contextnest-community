@@ -25,7 +25,7 @@ import { engineCache } from "../nodes/engine.js";
 import { hashContent } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
-import { describe, renderMarkdown, slugifyHeading, type Heading } from "./markdown.js";
+import { describe, renderMarkdown, rewriteDocumentLinks, slugifyHeading, type Heading } from "./markdown.js";
 import {
   renderGlossary,
   renderGone,
@@ -540,7 +540,10 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
       path,
       title: r.title,
       description: r.description,
-      markdown: s.body,
+      markdown: rewriteDocumentLinks(s.body, (target) => {
+        const hit = resolveTarget(target);
+        return hit ? `${place.base}/${pathOf.get(hit.nodeId)}` : null;
+      }),
       html: r.html,
       headings: r.headings,
       updated: s.updated,
