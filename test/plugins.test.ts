@@ -158,6 +158,22 @@ describe("FEATURE_PLUGINS on", () => {
     expect(Object.keys(await storedEnvValues(nestId))).not.toContain("PLUGIN__MEMO__TOKEN");
   });
 
+  it("the /env route lists plugin secrets masked but cannot overwrite or delete them", async () => {
+    process.env.FEATURE_WORKFLOW_PLANE = "true";
+    try {
+      const list = await jsonRequest(app, "GET", `/nests/${nestId}/env`, undefined, owner.apiKey);
+      expect(list.status).toBe(200);
+      expect(list.data.env.find((e: any) => e.key === "PLUGIN__MEMO__TOKEN")?.value_masked).toMatch(/^••••/);
+      expect(JSON.stringify(list.data)).not.toContain("sekrit");
+      const put = await jsonRequest(app, "PUT", `/nests/${nestId}/env`, { key: "PLUGIN__MEMO__TOKEN", value: "hijack" }, editor.apiKey);
+      expect(put.status).toBe(400);
+      const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/env/PLUGIN__MEMO__TOKEN`, undefined, owner.apiKey);
+      expect(del.status).toBe(400);
+    } finally {
+      delete process.env.FEATURE_WORKFLOW_PLANE;
+    }
+  });
+
   it("rejects settings the plugin refuses, settings it doesn't declare, and an unknown plugin", async () => {
     const bad = await jsonRequest(app, "PUT", `/nests/${nestId}/plugins/memo`, { settings: { prefix: "" } }, owner.apiKey);
     expect(bad.status).toBe(400);
