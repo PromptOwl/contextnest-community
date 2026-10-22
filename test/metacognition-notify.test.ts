@@ -328,6 +328,74 @@ describe("a run that notifies", () => {
     expect(mails[0].to).toBe("rita@acme.com");
   });
 
+  it("several reviewers get one send, Bcc'd so no one sees the others", async () => {
+    await resetAuthRateLimit();
+    await registerUser(app, "rex@acme.com", "Rex");
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "rex@acme.com", permission: "read" }, owner.apiKey);
+    const add = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "nest", users: [{ email: "rex@acme.com", role: "reviewer" }] },
+      owner.apiKey,
+    );
+    expect(add.status).toBe(201);
+    expect((await configure({ recipients: ["reviewers"], channels: ["email"] })).status).toBe(200);
+    await run([call(toolUse("notify", { to: "reviewers", subject: "Please look", message: "Waiting." })), say("ok")]);
+    const mails = agentMail();
+    expect(mails).toHaveLength(1);
+    expect([...mails[0].bcc].sort()).toEqual(["rex@acme.com", "rita@acme.com"]);
+    expect(mails[0].to).toBe("nest@test.local");
+  });
+
+  it("a notify while notify is off is refused and traced", async () => {
+    expect((await configure()).status).toBe(200);
+    const done = await run([call(toolUse("notify", { to: "owner", subject: "x", message: "y" })), say("ok")]);
+    expect(agentMail()).toHaveLength(0);
+    expect(notifySteps(done)[0]?.detail.refused).toBe("not_configured");
+  });
+
+  it("won't link a document outside its read scope", async () => {
+    expect((await configure({ recipients: ["owner"], channels: ["email"] })).status).toBe(200);
+    const done = await run([
+      call(toolUse("notify", { to: "owner", subject: "x", message: "y", node_id: "nodes/private/secret" })),
+      say("ok"),
+    ]);
+    expect(agentMail()).toHaveLength(0);
+    expect(done.steps.some((s: any) => s.detail?.kind === "access_needed" && s.detail?.tool === "notify")).toBe(true);
+    expect(done.run.trace.notifications).toBe(0);
+  });
+
+  it("an email that fails to send is not counted or reported as sent", async () => {
+    expect((await configure({ recipients: ["owner"], channels: ["email"] })).status).toBe(200);
+    sendMail.mockClear();
+    sendMail.mockRejectedValueOnce(new Error("smtp down"));
+    requests = [];
+    script = [call(toolUse("notify", { to: "owner", subject: "Will fail (agent)", message: "y" })), say("ok")];
+    dispatchSpy.mockClear();
+    const start = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/${AGENT}/run`, {}, owner.apiKey);
+    const done = await waitForRun(start.data.run_id);
+    expect(done.run.trace.notifications).toBe(0);
+    expect(notifySteps(done)[0]?.detail.refused).toBe("delivery_failed");
+    expect(JSON.stringify(requests.at(-1))).toMatch(/could not be delivered/i);
+    const rows = await outboundRows(done.run.id);
+    expect(rows.filter((r) => r.channel === "email" && r.status === "failed")).toHaveLength(1);
+  });
+
+  it("stops at its daily ceiling across runs (METACOGNITION_NOTIFY_PER_DAY)", async () => {
+    expect((await configure({ recipients: ["owner"], channels: ["email"], max_per_run: 5 })).status).toBe(200);
+    process.env.METACOGNITION_NOTIFY_PER_DAY = "1";
+    try {
+      // Earlier runs in this file already sent today, so even the first is over the ceiling.
+      const done = await run([call(toolUse("notify", { to: "owner", subject: "a", message: "b" })), say("ok")]);
+      expect(agentMail()).toHaveLength(0);
+      expect(notifySteps(done)[0]?.detail.refused).toBe("daily_cap");
+      expect(JSON.stringify(requests.at(-1))).toMatch(/in the last 24 hours/);
+    } finally {
+      delete process.env.METACOGNITION_NOTIFY_PER_DAY;
+    }
+  });
+
   it("stops at max_per_run: the third call of a 2-per-run agent is refused", async () => {
     expect((await configure({ recipients: ["owner"], channels: ["email"], max_per_run: 2 })).status).toBe(200);
     const n = (i: number) => toolUse("notify", { to: "owner", subject: `Note ${i}`, message: `Message ${i}` });
@@ -409,5 +477,31 @@ describe("a run that notifies", () => {
     expect(evs[0].message).toContain("Stale pricing");
     expect(done.run.trace.notifications).toBe(1);
     expect(notifySteps(done)[0].detail.channels).toEqual(["connectors"]);
+  });
+
+  it("doesn't post to a channel when the document isn't open to everyone on the nest", async () => {
+    // A guest who holds a share grant on one other document is on the roster
+    // but can't open the pricing page: the room may hold people like them.
+    await resetAuthRateLimit();
+    await registerUser(app, "guest@acme.com", "Guest");
+    const other = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Open Doc", content: "# Open", folder: "gtm" }, owner.apiKey);
+    const g = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: other.data.node.id, email: "guest@acme.com", role: "read" },
+      owner.apiKey,
+    );
+    expect(g.status).toBe(201);
+    expect((await configure({ recipients: ["owner"], channels: ["email", "connectors"] })).status).toBe(200);
+    const done = await run([
+      call(toolUse("notify", { to: "owner", subject: "Restricted", message: "About pricing.", node_id: "nodes/gtm/pricing" })),
+      say("ok"),
+    ]);
+    expect(dispatchSpy.mock.calls.filter((c) => (c[0] as any).kind === "agent_notify")).toHaveLength(0);
+    expect(agentMail()).toHaveLength(1);
+    const step = notifySteps(done)[0];
+    expect(step.detail.channels).toEqual(["email"]);
+    expect(step.detail.skipped_channels).toEqual(["connectors"]);
   });
 });

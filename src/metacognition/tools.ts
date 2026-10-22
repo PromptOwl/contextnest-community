@@ -57,7 +57,8 @@ import { recordOutbound } from "../notify/outbound-log.js";
 import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { buildDocContext, docLink, nestName } from "../governance/title-resolver.js";
-import { resolveNotifyRecipients } from "./notify.js";
+import { resolveNotifyRecipients, openToWholeNest } from "./notify.js";
+import { config } from "../config.js";
 
 type FeedFetch = (url: string, init: RequestInit) => Promise<Response>;
 const realFeedFetch: FeedFetch = guardedFetch({ maxBytes: 2_000_000, timeoutMs: 20_000 });
@@ -757,6 +758,17 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
       `Not sent: you have used this run's ${cfg.max_per_run} notifications. Put anything else in your summary.`,
     );
   }
+  // max_per_run bounds one run; runs can start many times a day (schedules,
+  // hooks, Run), and a poisoned feed is read on every one. This bounds the day.
+  const perDay = config.METACOGNITION_NOTIFY_PER_DAY;
+  if ((await notificationsSince(ctx, Date.now() - 86_400_000)) >= perDay) {
+    return notifyRefused(
+      ctx,
+      "daily_cap",
+      key,
+      `Not sent: you have sent ${perDay} notifications in the last 24 hours, the most allowed. Put it in your summary instead.`,
+    );
+  }
   const subjectIn = str(input.subject, 10_000);
   const messageIn = str(input.message, 50_000);
   if (!subjectIn || !messageIn) return { isError: true, content: "to, subject and message are required" };
@@ -783,9 +795,12 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
   const doc = nodeId ? await buildDocContext(ctx.nestId, nodeId, ctx.baseUrl) : null;
   const link = doc?.link || ownPrefix;
 
+  // Only channels that actually took it count; a failed email is not "sent".
   const channels: string[] = [];
+  const skipped: string[] = [];
+  let failed = false;
   if (cfg.channels.includes("email") && isEmailConfigured()) {
-    await sendEmailToRecipient(
+    const outcome = await sendEmailToRecipient(
       people.map((p) => p.email),
       {
         status: "agent_notify",
@@ -797,40 +812,68 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
       },
       { senderKind: "persona", senderId: persona.email, nestId: ctx.nestId, nodeId, runId: ctx.runId },
     );
-    channels.push("email");
+    if (outcome === "sent") channels.push("email");
+    else failed = true;
   }
   if (cfg.channels.includes("connectors") && (await hasAnyConnector(ctx.nestId, "agent_notify"))) {
-    // A channel is a room, not the recipient: name who it is for (no
-    // addresses for a role), and carry the same defanged text.
-    const forWhom = key === "owner" ? "the nest owner" : key === "reviewers" ? "the reviewers" : people[0].name || people[0].email;
-    await dispatchEvent({
-      kind: "agent_notify",
-      nestId: ctx.nestId,
-      subjectId: nodeId ?? undefined,
-      actor: persona.email,
-      runId: ctx.runId,
-      message: `${label}, for ${forWhom}: *${subject}* — ${message}${link ? ` ${link}` : ""}`,
-    });
-    channels.push("connectors");
+    // A channel is a room, not the recipient, and its audience is set per
+    // nest, not by who can open this document: a note about a document some
+    // members can't open (written from what the agent read in it) stays out
+    // of the room. The email above already went only to people who can.
+    if (nodeId && !(await openToWholeNest(ctx.nestId, nodeId))) {
+      skipped.push("connectors");
+    } else {
+      // Name who it is for (no addresses for a role), same defanged text.
+      const forWhom = key === "owner" ? "the nest owner" : key === "reviewers" ? "the reviewers" : people[0].name || people[0].email;
+      await dispatchEvent({
+        kind: "agent_notify",
+        nestId: ctx.nestId,
+        subjectId: nodeId ?? undefined,
+        actor: persona.email,
+        runId: ctx.runId,
+        message: `${label}, for ${forWhom}: *${subject}* — ${message}${link ? ` ${link}` : ""}`,
+      });
+      // Connector posts are fire-and-forget; their own log rows say whether they landed.
+      channels.push("connectors");
+    }
   }
   if (!channels.length) {
-    return notifyRefused(
-      ctx,
-      "no_channel",
-      key,
-      "Not sent: none of the ways your owner chose is set up on this server (no email transport, or no connector listening for agent notifications). This was recorded.",
-      nodeId ?? undefined,
-    );
+    const why = failed
+      ? "Not sent: the email could not be delivered (the server's mail transport failed). This was recorded; don't retry this run."
+      : skipped.length
+        ? "Not sent: the only way your owner chose is the nest's chat channel, and that document isn't open to everyone on the nest, so it can't be posted there. This was recorded."
+        : "Not sent: none of the ways your owner chose is set up on this server (no email transport, or no connector listening for agent notifications). This was recorded.";
+    return notifyRefused(ctx, failed ? "delivery_failed" : "no_channel", key, why, nodeId ?? undefined);
   }
   ctx.notifications.made++;
   await step(ctx, {
     action: "notify",
     ...(nodeId ? { node_id: nodeId } : {}),
-    detail: { tool: "notify", kind: "notification", to: key, recipients: people.length, channels, subject },
+    detail: {
+      tool: "notify",
+      kind: "notification",
+      to: key,
+      recipients: people.length,
+      channels,
+      ...(skipped.length ? { skipped_channels: skipped } : {}),
+      ...(failed ? { failed_channels: ["email"] } : {}),
+      subject,
+    },
   });
   return {
-    content: `Sent to ${key === "reviewers" ? `${people.length} reviewer${people.length === 1 ? "" : "s"}` : key} by ${channels.join(" and ")}.`,
+    content: `Sent to ${key === "reviewers" ? `${people.length} reviewer${people.length === 1 ? "" : "s"}` : key} by ${channels.join(" and ")}${failed ? " (the email failed)" : ""}.`,
   };
+}
+
+/** This agent's sent notifications since `sinceMs`, across its runs. */
+async function notificationsSince(ctx: ToolContext, sinceMs: number): Promise<number> {
+  const row = (await getDb().get(
+    `SELECT COUNT(*) AS n FROM run_steps s JOIN runs r ON r.id = s.run_id
+      WHERE r.nest_id = ? AND r.agent_node = ? AND r.started_at >= ?
+        AND s.action = 'notify' AND s.detail LIKE '%"kind":"notification"%'`,
+    [ctx.nestId, ctx.agent.node_id, new Date(sinceMs).toISOString()],
+  )) as { n: number | string } | undefined;
+  return Number(row?.n ?? 0);
 }
 
 /** Rough text out of a feed body: tags dropped, whitespace folded. */

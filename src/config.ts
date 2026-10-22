@@ -795,6 +795,10 @@ export const config = {
     return Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
   },
   /** How often a running metacognition agent checks for a person's cancel (ms). */
+  /** Notifications one metacognition agent may send in any 24 hours, across runs. */
+  get METACOGNITION_NOTIFY_PER_DAY(): number {
+    return Number(process.env.METACOGNITION_NOTIFY_PER_DAY) || 20;
+  },
   get METACOGNITION_CANCEL_POLL_MS(): number {
     return Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
   },
