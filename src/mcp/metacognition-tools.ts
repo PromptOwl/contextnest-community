@@ -21,6 +21,7 @@ import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { summarizeConfig } from "../metacognition/summary.js";
 import { listAgents } from "../metacognition/store.js";
+import { resolveExportBody } from "../nodes/readable-body.js";
 import {
   NOT_ENABLED,
   metacognitionEnabled,
@@ -88,6 +89,20 @@ const NAMES = new Set(METACOGNITION_TOOL_DEFINITIONS.map((t) => t.name));
 export const METACOGNITION_TOOL_NAMES: ReadonlySet<string> = NAMES;
 export const isMetacognitionTool = (name: string): boolean => NAMES.has(name);
 
+/**
+ * Can this JSON-RPC body (one message or a batch) use the metacognition tools?
+ * Only a tools/list or a call to one of them — the server-level endpoint uses
+ * this to skip working out whether to offer them on every other request.
+ */
+export function requestMayUseMetacognition(body: unknown): boolean {
+  const msgs = Array.isArray(body) ? body : [body];
+  return msgs.some((m) => {
+    if (!m || typeof m !== "object") return false;
+    const { method, params } = m as { method?: unknown; params?: { name?: unknown } };
+    return method === "tools/list" || (method === "tools/call" && isMetacognitionTool(String(params?.name ?? "")));
+  });
+}
+
 /** An operation's refusal → a tool error carrying its message unchanged.
  *  CONFLICT (409: already running, too many starts this hour) means "try
  *  again later", not "fix the input". */
@@ -120,26 +135,47 @@ export async function runMetacognitionTool(
     await assertCanManageMetacognition(ctx.nestId, ctx.userId);
     switch (toolName) {
       case "metacognition_list": {
+        // The run skips an agent whose document has no approved version, so
+        // say which do — a harness should warn before setting up one that
+        // would never run.
+        const agentDocs = (await ctx.storage.discoverDocuments()).filter(
+          (d) => (d.frontmatter.type || "document") === "agent",
+        );
+        const approved = new Map<string, boolean>();
+        for (const d of agentDocs) {
+          approved.set(d.id, (await resolveExportBody(ctx.nestId, d.id, d.body || "")) !== null);
+        }
         const agents = (await listAgents(ctx.nestId)).map((a) => ({
           ...agentView(a),
+          instructions_approved: approved.get(a.node_id) ?? false,
           summary: summarizeConfig(a.config, { enabled: a.enabled }),
         }));
         const configured = new Set(agents.map((a) => a.node_id));
-        const docs = await ctx.storage.discoverDocuments();
-        const unconfigured = docs
-          .filter((d) => (d.frontmatter.type || "document") === "agent" && !configured.has(d.id))
+        const unconfigured = agentDocs
+          .filter((d) => !configured.has(d.id))
           .map((d) => ({
             node_id: d.id,
             title: d.frontmatter.title,
-            summary: "Not a metacognition agent yet. Set it up with metacognition_configure (dry_run first).",
+            instructions_approved: approved.get(d.id) ?? false,
+            summary: approved.get(d.id)
+              ? "Not a metacognition agent yet. Set it up with metacognition_configure (dry_run first)."
+              : "Not a metacognition agent yet, and its instructions have no approved version: runs would be skipped until a reviewer approves the document.",
           }))
           .sort((a, b) => a.node_id.localeCompare(b.node_id));
+        const notApproved = " — instructions not approved yet, so runs are skipped";
         const lines = [
           agents.length ? "## Metacognition agents" : "No metacognition agents yet.",
-          ...agents.map((a) => `- ${a.persona.name} (${a.node_id})${a.enabled ? "" : " — switched off"}: ${a.summary}`),
+          ...agents.map(
+            (a) =>
+              `- ${a.persona.name} (${a.node_id})${a.enabled ? "" : " — switched off"}${a.instructions_approved ? "" : notApproved}: ${a.summary}`,
+          ),
         ];
         if (unconfigured.length) {
-          lines.push("", "## Agent documents not set up yet", ...unconfigured.map((d) => `- ${d.title} (${d.node_id})`));
+          lines.push(
+            "",
+            "## Agent documents not set up yet",
+            ...unconfigured.map((d) => `- ${d.title} (${d.node_id})${d.instructions_approved ? "" : notApproved}`),
+          );
         }
         return { text: lines.join("\n"), data: { agents, unconfigured } };
       }

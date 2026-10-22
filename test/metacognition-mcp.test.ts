@@ -33,6 +33,7 @@ type User = { apiKey: string; userId: string; email: string };
 let owner: User;
 let editor: User;
 let admin: User;
+let root: User;
 let nestId: string;
 let systemKey: string;
 let systemUserId: string;
@@ -78,11 +79,13 @@ beforeAll(async () => {
   process.env.FEATURE_METACOGNITION = "true";
   process.env.METACOGNITION_STARTS_PER_HOUR = "1000";
   env = setupTestEnv();
-  app = await createTestApp("key");
+  app = await createTestApp("key", { superAdmins: ["root@meta-mcp.test"] });
   owner = await registerUser(app, "owner@meta-mcp.test", "Owner");
   editor = await registerUser(app, "editor@meta-mcp.test", "Editor");
   await resetAuthRateLimit();
   admin = await registerUser(app, "admin@meta-mcp.test", "Admin");
+  await resetAuthRateLimit();
+  root = await registerUser(app, "root@meta-mcp.test", "Root");
   await resetAuthRateLimit();
 
   nestId = (await jsonRequest(app, "POST", "/nests", { name: "Meta MCP" }, owner.apiKey)).data.nest.id;
@@ -434,6 +437,89 @@ describe("metacognition is owner/admin only on REST too", () => {
     // Stopping spend stays at write: a writer may still delete it.
     const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/schedules/${id}`, undefined, editor.apiKey);
     expect(del.status).toBe(200);
+  });
+});
+
+describe("which requests on the server-level /mcp consider the metacognition tools", () => {
+  it("tools/list and metacognition calls do, batched or not; other calls and junk don't", async () => {
+    const { requestMayUseMetacognition } = await import("../src/mcp/metacognition-tools.js");
+    const call = (name: string) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name } });
+    expect(requestMayUseMetacognition({ jsonrpc: "2.0", id: 1, method: "tools/list" })).toBe(true);
+    expect(requestMayUseMetacognition(call("metacognition_run"))).toBe(true);
+    expect(requestMayUseMetacognition(call("context_get"))).toBe(false);
+    expect(requestMayUseMetacognition([call("context_get"), call("metacognition_list")])).toBe(true);
+    expect(requestMayUseMetacognition([call("context_get")])).toBe(false);
+    expect(requestMayUseMetacognition(null)).toBe(false);
+    expect(requestMayUseMetacognition("tools/list")).toBe(false);
+  });
+
+  it("a body with no content-length (chunked) is still read, but only up to its cap", async () => {
+    const send = (payload: string) => {
+      const bytes = new TextEncoder().encode(payload);
+      const body = new ReadableStream({
+        start(ctrl) {
+          ctrl.enqueue(bytes);
+          ctrl.close();
+        },
+      });
+      return app.request("/mcp", {
+        method: "POST",
+        headers: { ...MCP_HEADERS, Authorization: `Bearer ${owner.apiKey}` },
+        body,
+        duplex: "half",
+      } as any);
+    };
+    const names = async (res: Response) => {
+      const ct = res.headers.get("content-type") || "";
+      const j = ct.includes("application/json")
+        ? await res.json()
+        : JSON.parse((await res.text()).split("\n").find((l) => l.startsWith("data: "))!.slice(6));
+      return (j.result?.tools ?? []).map((t: any) => t.name) as string[];
+    };
+    const small = await names(await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })));
+    expect(small).toContain("metacognition_list");
+    // Past the cap the peek gives up (the request itself is still served).
+    const big = await names(
+      await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { pad: "x".repeat(70 * 1024) } } })),
+    );
+    expect(big).toContain("nest_index");
+    expect(big).not.toContain("metacognition_list");
+  });
+
+  it("a server admin who owns no nest is offered them, and may use them on any nest", async () => {
+    const names = (await listTools(root.apiKey, "/mcp")).map((t) => t.name);
+    expect(names).toContain("metacognition_list");
+    const r = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, root.apiKey);
+    expect(isError(r)).toBe(false);
+  });
+
+  it("a key scoped to a nest the caller only writes in isn't offered them, though they own another", async () => {
+    const own = (await jsonRequest(app, "POST", "/nests", { name: "Editor Scoped" }, editor.apiKey)).data.nest.id;
+    const minted = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nestId }, editor.apiKey);
+    expect(minted.status).toBe(201);
+    const names = (await listTools(minted.data.api_key, "/mcp")).map((t) => t.name);
+    expect(names).not.toContain("metacognition_list");
+    // Unscoped, the same person (owner of `own`) is offered them.
+    expect((await listTools(editor.apiKey, "/mcp")).map((t) => t.name)).toContain("metacognition_list");
+    await jsonRequest(app, "DELETE", `/nests/${own}`, undefined, editor.apiKey);
+  });
+});
+
+describe("approval state in metacognition_list", () => {
+  it("says whether each agent document has approved instructions, so a harness can warn before setting up one that would never run", async () => {
+    const gov = (await jsonRequest(app, "POST", "/nests", { name: "Governed Meta" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Ready", content: "Approved instructions.", type: "agent" }, owner.apiKey);
+    const steward = await jsonRequest(app, "POST", `/nests/${gov}/stewards`, { scope: "nest", users: [{ email: admin.email, role: "reviewer" }] }, owner.apiKey);
+    expect(steward.status).toBe(201);
+    // Created once the nest is governed: a draft until a reviewer approves it.
+    await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Pending", content: "Not yet reviewed.", type: "agent" }, owner.apiKey);
+    const r = await mcp(`/nests/${gov}/mcp`, "tools/call", { name: "metacognition_list", arguments: {} }, owner.apiKey);
+    expect(isError(r)).toBe(false);
+    const byId = Object.fromEntries(r.result.structuredContent.unconfigured.map((d: any) => [d.node_id, d]));
+    expect(byId["nodes/ready"].instructions_approved).toBe(true);
+    expect(byId["nodes/pending"].instructions_approved).toBe(false);
+    expect(byId["nodes/pending"].summary).toMatch(/no approved version/i);
+    expect(text(r)).toMatch(/Pending \(nodes\/pending\).*not approved/i);
   });
 });
 

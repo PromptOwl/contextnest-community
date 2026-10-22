@@ -74,7 +74,11 @@ import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../a
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
-import { METACOGNITION_TOOL_DEFINITIONS, isMetacognitionTool } from "./metacognition-tools.js";
+import {
+  METACOGNITION_TOOL_DEFINITIONS,
+  isMetacognitionTool,
+  requestMayUseMetacognition,
+} from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -709,18 +713,20 @@ async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise
   if (!metacognitionEnabled()) return false;
   // The server is rebuilt per request, so only pay for the lookup when this
   // request can use the answer: a tools/list, or a call to one of these tools
-  // (which re-checks owner/admin on the named nest anyway).
-  // Don't peek at a large body: tools/list and a metacognition call are a few
-  // KB at most, so a declared size past 64 KB is some other tool's write.
-  if (Number(c.req.header("content-length") ?? 0) > 64 * 1024) return false;
-  const body = await c.req.raw
-    .clone()
-    .json()
-    .catch(() => null);
-  const msgs = (Array.isArray(body) ? body : [body]) as Array<{ method?: string; params?: { name?: string } } | null>;
-  const wants = msgs.some(
-    (m) => m?.method === "tools/list" || (m?.method === "tools/call" && isMetacognitionTool(String(m.params?.name ?? ""))),
-  );
+  // (which re-checks owner/admin on the named nest anyway). The peek never
+  // reads past 64 KB: those requests are a few KB at most, so anything bigger
+  // (declared, or read so far on a chunked body) is some other write.
+  const CAP = 64 * 1024;
+  if (Number(c.req.header("content-length") ?? 0) > CAP) return false;
+  const text = await readCapped(c.req.raw.clone().body, CAP);
+  if (text === null) return false;
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const wants = requestMayUseMetacognition(body);
   if (!wants) return false;
   if (await isSystemUser(userId)) return false;
   const person = (await getDb().get("SELECT COALESCE(is_service, 0) AS s FROM users WHERE id = ?", [userId])) as
@@ -741,6 +747,29 @@ async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise
     if (perm === "owner" || perm === "admin") return true;
   }
   return false;
+}
+
+/** The stream's text, or null once it passes `cap` bytes (or can't be read). */
+async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number): Promise<string | null> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > cap) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 export const serverMcpRoutes = new Hono<AuthEnv>();
