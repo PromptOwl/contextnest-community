@@ -63,7 +63,7 @@ describe("IndexNow private-host check", () => {
 // CU-wdqcq05ran: the docs site and the SPA reader pick the same home node from
 // a reader_home_node value. One rule, mirrored in the UI; this keeps them equal.
 describe("reader home node resolution (site ↔ reader parity)", () => {
-  const ids = ["nodes/docs/overview", "nodes/docs/welcome", "nodes/guides/welcome", "nodes/welcome-guide", "nodes/Intro"];
+  const ids = ["nodes/docs/overview", "nodes/docs/welcome", "nodes/guides/welcome", "nodes/welcome-guide", "nodes/Intro", "guides/setup"];
   const cases: Array<[string | null, string | undefined]> = [
     ["nodes/docs/welcome", "nodes/docs/welcome"], // full id
     ["NODES/Docs/Welcome", "nodes/docs/welcome"], // full id, any case
@@ -72,6 +72,8 @@ describe("reader home node resolution (site ↔ reader parity)", () => {
     ["Welcome", "nodes/docs/welcome"],
     ["intro", "nodes/Intro"], // leaf compares case-insensitively both ways
     ["docs/welcome", "nodes/docs/welcome"], // id without the nodes/ prefix: same leaf
+    ["setup", "guides/setup"], // an id without the nodes/ prefix leafs the same on both sides
+    ["nodes/gone/intro", "nodes/Intro"], // a full id that matches nothing still falls back by leaf
     ["no-such-page", undefined],
     ["", undefined],
     [null, undefined],

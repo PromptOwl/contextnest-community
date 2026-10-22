@@ -141,15 +141,10 @@ function leafOf(id: string): string {
   return leaf.toLowerCase();
 }
 
-/**
- * Whether a node is the designated reader-mode home node. Ids are
- * `nodes/<slug>` but the config field is typed by hand, so match on the leaf
- * either way — otherwise "welcome" silently misses `nodes/welcome` and the
- * convention fallback quietly stands in for the designation. Shared by
- * ReaderView (resolving the home pane) and NestView (validating before save).
- */
-export function isHomeNode(node: any, homeNode: string): boolean {
-  return node?.id === homeNode || leafOf(node?.id || "") === leafOf(homeNode);
+/** Lowercased last id segment — same as `homeLeaf` in src/shared/reader-home.ts. */
+function homeLeaf(id: string): string {
+  const i = id.lastIndexOf("/");
+  return (i === -1 ? id : id.slice(i + 1)).toLowerCase();
 }
 
 /**
@@ -167,10 +162,10 @@ export function pickHomeNode<T extends { id?: string }>(nodes: readonly T[], hom
   const idOf = (n: T) => n?.id || "";
   const exact = nodes.find((n) => idOf(n).toLowerCase() === want);
   if (exact) return exact;
-  const leaf = leafOf(want);
+  const leaf = homeLeaf(want);
   let best: T | undefined;
   for (const n of nodes) {
-    if (!idOf(n) || leafOf(idOf(n)) !== leaf) continue;
+    if (!idOf(n) || homeLeaf(idOf(n)) !== leaf) continue;
     if (best === undefined || idOf(n) < idOf(best)) best = n;
   }
   return best;
