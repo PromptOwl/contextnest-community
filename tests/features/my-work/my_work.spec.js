@@ -33,6 +33,7 @@
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
 import { getEntities } from '../../src/lib/entity_registry.js';
+import MyWorkApi from '../../src/lib/my_work_api.js';
 import {
   reviewItem,
   reviewItems,
@@ -198,15 +199,30 @@ test.describe('My Work', () => {
       await api.submitForReview(nest.id, doc.id);
       cleanups.push(() => api.cancelReview(nest.id, doc.id));
 
-      expect((await api.myWork({ limit: 1 })).pagination.total).toBeGreaterThan(0);
+      // An open task assigned to the primary waits on them too, and the badge
+      // counts it (CU-wdqcq05jg8 / PR #436; API.md "Assigned rows"). Seeded
+      // here so the assigned half of the count is never just whatever other
+      // suites left on the shared account.
+      const task = await api.createTask(nest.id, {
+        title: commonFunction.generateEntityName('badge-task'),
+        assignee: primaryRole.email,
+      });
+      cleanups.push(() => api.deleteNode(nest.id, task.id));
+      const seeded = await api.waitForWork(
+        (work) => (work.assigned ?? []).some((a) => a.nest_id === nest.id && a.node_id === task.id),
+        { what: `the assigned row for ${task.title}` }
+      );
+      expect(seeded.pagination.total).toBeGreaterThan(0);
 
       /**
-       * Load `open` and check the badge shows the server's pending count.
-       * Other suites raise and settle work on this account in parallel, so the
-       * badge is held to the total read just before the page loaded or the
-       * one read now — never to a number taken earlier.
+       * Load `open` and check the badge shows what is waiting on the user:
+       * the server's review/request total plus the tasks assigned to them
+       * (`waitingOnMeCount`). Other suites raise and settle work on this
+       * account in parallel, so the badge is held to the count read just
+       * before the page loaded or the one read now — never to a number taken
+       * earlier.
        */
-      const pendingTotal = async () => (await api.myWork({ limit: 1 })).pagination.total;
+      const pendingTotal = async () => MyWorkApi.waitingOnMe(await api.myWork({ limit: 1 }));
       const expectBadgeMatchesServer = async (open) => {
         const before = await pendingTotal();
         await open();
@@ -216,17 +232,20 @@ test.describe('My Work', () => {
             const shown = (await myWork.railBadge.count()) ? Number(await myWork.railBadge.textContent()) : 0;
             const now = await pendingTotal();
             return shown === before || shown === now;
-          }, { message: 'the rail badge should show the server pending count', timeout: 30_000 })
+          }, { message: 'the rail badge should show reviews + requests + assigned tasks', timeout: 30_000 })
           .toBe(true);
       };
 
       await expectBadgeMatchesServer(() => primary_user.nestsPage.goto());
       await expect(myWork.railItem).toContainText('My Work');
 
-      // The badge follows the inbox: the submission withdrawn, and the count
-      // the page shows after a reload is the server's new one.
+      // The badge follows the inbox: the submission withdrawn and the task
+      // deleted, the count the page shows after a reload is the server's new one.
       await api.cancelReview(nest.id, doc.id);
-      expect((await api.myWork()).waiting.some((w) => w.node_id === doc.id)).toBe(false);
+      expect((await api.deleteNode(nest.id, task.id)).ok).toBe(true);
+      const after = await api.myWork();
+      expect(after.waiting.some((w) => w.node_id === doc.id)).toBe(false);
+      expect((after.assigned ?? []).some((a) => a.nest_id === nest.id && a.node_id === task.id)).toBe(false);
       await expectBadgeMatchesServer(() => page.reload());
 
       await myWork.openFromRail();
@@ -234,7 +253,7 @@ test.describe('My Work', () => {
       await expect(page).toHaveURL(/\/my-work$/);
       await expect(myWork.pageTitle).toContainText('My Work');
       await expect(myWork.pageTitle).toContainText(
-        'Reviews and requests waiting on you, and what you handed off.'
+        'Tasks, reviews and requests waiting on you, and what you handed off.'
       );
       await expect(myWork.railItem).toHaveAttribute('aria-current', 'page');
     });
