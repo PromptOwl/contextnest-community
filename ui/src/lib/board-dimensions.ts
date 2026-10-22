@@ -209,6 +209,64 @@ function namespaceOf(config: { tagNamespace?: string }): string {
 const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
 const withHash = (t: string) => (t.startsWith("#") ? t : `#${t}`);
 
+/**
+ * Pattern columns (CU-wdqcq05pad). On the tag board a column key with a "*"
+ * — "status*", "*-review" — is a pattern, not a tag: it stands for one column
+ * per matching tag on the board, sorted, at the pattern's place in the order,
+ * so a status that appears later gets its column with no setup. A tag that
+ * is also listed as its own column keeps that column instead. Matching is a
+ * case-insensitive whole-value glob, "*" being any run of characters; it is
+ * deliberately not a regex — the server evaluates saved boards too, and a
+ * user's regex there is a catastrophic-backtracking risk.
+ */
+export function isColumnPattern(key: string): boolean {
+  return key.includes("*");
+}
+
+/** Whole-value glob match. No regex: the greedy last-star backtrack is
+ *  O(value × pattern) at worst — never exponential — and saved column keys
+ *  are capped at 600 characters server-side (board-service strList). */
+export function globMatch(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  let pi = 0;
+  let vi = 0;
+  let star = -1;
+  let mark = 0;
+  while (vi < v.length) {
+    if (pi < p.length && p[pi] === "*") {
+      star = pi++;
+      mark = vi;
+    } else if (pi < p.length && p[pi] === v[vi]) {
+      pi++;
+      vi++;
+    } else if (star >= 0) {
+      pi = star + 1;
+      vi = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (pi < p.length && p[pi] === "*") pi++;
+  return pi === p.length;
+}
+
+/**
+ * A column order rebuilt from the visible columns (a reorder) with the saved
+ * patterns carried over. The board only ever sees a pattern's expansion, so
+ * the rebuilt order would otherwise lose the pattern and stop picking up new
+ * tags. A reorder pins the expanded tags it writes out; add and remove edit
+ * the saved order instead, so they pin nothing.
+ */
+export function withoutPattern(order: string[] | undefined, pattern: string): string[] {
+  // Its columns go with it — including ones a reorder pinned in place.
+  return (order ?? []).filter((k) => k !== pattern && !globMatch(pattern, k));
+}
+
+export function keepPatterns(order: string[], saved: string[] | undefined): string[] {
+  return [...new Set([...order, ...(saved ?? []).filter(isColumnPattern)])];
+}
+
 /** A saved column layout for one dimension. */
 export interface ColumnLayout {
   columnOrder?: string[];
@@ -360,10 +418,10 @@ function shownKeys(
   // added: a card whose tags match none of them simply doesn't appear, and
   // there is no Uncategorized catch-all.
   if (config.explicitColumns) {
-    const allowed = new Set(
-      (config.columnOrder ?? []).filter((k) => !hidden.has(k)),
-    );
-    return keys.filter((k) => allowed.has(k));
+    const order = (config.columnOrder ?? []).filter((k) => !hidden.has(k));
+    const allowed = new Set(order);
+    const patterns = order.filter(isColumnPattern);
+    return keys.filter((k) => allowed.has(k) || patterns.some((p) => globMatch(p, k)));
   }
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
@@ -425,12 +483,28 @@ export function buildColumns(
   // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
   // order — nothing auto-appears, nothing trails. An empty order = empty board.
   if (config.explicitColumns) {
+    const order = config.columnOrder ?? [];
+    const listed = new Set(order.filter((k) => !isColumnPattern(k)));
+    // Tag values on the board's cards, for patterns to expand against.
+    const tagged = new Set<string>();
+    if (order.some(isColumnPattern)) {
+      for (const n of nodes) for (const k of cardColumnKeys(n, config)) tagged.add(k);
+      tagged.delete(UNCATEGORIZED);
+    }
     const seen = new Set<string>();
     const keys: string[] = [];
-    for (const key of config.columnOrder ?? []) {
+    for (const key of order) {
       if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
       seen.add(key);
-      keys.push(key);
+      if (!isColumnPattern(key)) {
+        keys.push(key);
+        continue;
+      }
+      for (const t of [...tagged].sort()) {
+        if (seen.has(t) || listed.has(t) || hidden.has(t) || !globMatch(key, t)) continue;
+        seen.add(t);
+        keys.push(t);
+      }
     }
     return keys.map((key) => ({
       key,
@@ -494,6 +568,33 @@ export function groupByColumn(
     }
   }
   return { columns, byColumn };
+}
+
+/**
+ * What the tag board's add-column box offers as you type: the tags on the
+ * nest's cards — all of them, since on a curated board the cards not shown
+ * are the ones whose tags are worth adding — with how many cards carry each,
+ * most used first, minus the ones already a column (directly or through a
+ * pattern). `query` is a case-insensitive substring.
+ */
+export function tagSuggestions(
+  nodes: BoardNode[],
+  config: BoardConfig,
+  query: string,
+): Array<{ value: string; count: number }> {
+  if (config.dimension !== "tag") return [];
+  const shown = new Set(buildColumns(nodes, config).map((c) => c.key));
+  const counts = new Map<string, number>();
+  for (const n of nodes) {
+    for (const k of cardColumnKeys(n, config)) {
+      if (k !== UNCATEGORIZED) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+  }
+  const q = query.trim().replace(/^#/, "").toLowerCase();
+  return [...counts]
+    .filter(([v]) => !shown.has(v) && (!q || v.toLowerCase().includes(q)))
+    .sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0))
+    .map(([value, count]) => ({ value, count }));
 }
 
 export type MovePlan =

@@ -70,6 +70,38 @@ const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
 const namespaceOf = (c: { tagNamespace?: string }) =>
   (c.tagNamespace ?? "").trim().split(":")[0]!.trim();
 
+/** A tag-board column key with a "*" is a pattern: one column per matching
+ *  tag (board-dimensions.ts isColumnPattern, CU-wdqcq05pad). */
+const isPattern = (k: string) => k.includes("*");
+
+/** Whole-value, case-insensitive glob. No regex — the pattern is user-saved
+ *  board config evaluated here on the server: O(value × pattern) at worst,
+ *  never exponential, with keys capped at 600 characters (strList). */
+export function globMatch(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  let pi = 0;
+  let vi = 0;
+  let star = -1;
+  let mark = 0;
+  while (vi < v.length) {
+    if (pi < p.length && p[pi] === "*") {
+      star = pi++;
+      mark = vi;
+    } else if (pi < p.length && p[pi] === v[vi]) {
+      pi++;
+      vi++;
+    } else if (star >= 0) {
+      pi = star + 1;
+      vi = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (pi < p.length && p[pi] === "*") pi++;
+  return pi === p.length;
+}
+
 /** layouts[] key — "tag:<ns>" / "field:<key>", the dimension otherwise. */
 export function layoutKeyOf(c: BoardConfig): string {
   if (c.dimension === "field") return `field:${c.fieldKey ?? ""}`;
@@ -155,8 +187,10 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
 function shownKeys(n: NodeResponse, c: BoardConfig, cols: ReturnType<typeof resolvedColumns>): string[] {
   const keys = columnKeysOf(n, c).filter((k) => !cols.hidden.has(k));
   if (cols.explicit) {
-    const allowed = new Set((cols.order ?? []).filter((k) => !cols.hidden.has(k)));
-    return keys.filter((k) => allowed.has(k));
+    const order = (cols.order ?? []).filter((k) => !cols.hidden.has(k));
+    const allowed = new Set(order);
+    const patterns = order.filter(isPattern);
+    return keys.filter((k) => allowed.has(k) || patterns.some((p) => globMatch(p, k)));
   }
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
@@ -241,8 +275,19 @@ export function groupForBoard(
   }
   const present = new Set(byGroup.keys());
   const keys: string[] = [];
-  for (const k of cols.order ?? []) {
-    if (present.delete(k) && k !== UNCATEGORIZED) keys.push(k);
+  const order = cols.order ?? [];
+  const listed = new Set(order.filter((k) => !isPattern(k)));
+  for (const k of order) {
+    if (cols.explicit && isPattern(k)) {
+      // A pattern's matches sit at its place, sorted; a tag listed on its
+      // own keeps its own place.
+      for (const t of [...present].sort()) {
+        if (t !== UNCATEGORIZED && !listed.has(t) && globMatch(k, t)) {
+          present.delete(t);
+          keys.push(t);
+        }
+      }
+    } else if (present.delete(k) && k !== UNCATEGORIZED) keys.push(k);
   }
   const hadUncat = present.delete(UNCATEGORIZED);
   keys.push(...[...present].sort());

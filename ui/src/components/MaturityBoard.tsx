@@ -52,6 +52,10 @@ import {
   groupByColumn,
   layoutKey,
   migrateLayout,
+  isColumnPattern,
+  keepPatterns,
+  tagSuggestions,
+  withoutPattern,
   newCardPlacement,
   planMove,
   resolveConfig,
@@ -96,6 +100,7 @@ import {
   TypeIcon,
 } from "./board/CardParts";
 import { BoardListView } from "./board/BoardListView";
+import { TagColumnInput } from "./board/TagColumnInput";
 import {
   resolveViewMode,
   viewStorageKey,
@@ -1026,9 +1031,10 @@ export function MaturityBoard({
       if (from < 0 || to < 0) return;
       order.splice(from, 1);
       order.splice(to, 0, fromKey);
-      updateLayout({ columnOrder: order });
+      // A pattern isn't a column itself, so the visible order lacks it.
+      updateLayout({ columnOrder: keepPatterns(order, effectiveConfig.columnOrder) });
     },
-    [orderedKeys, updateLayout],
+    [orderedKeys, effectiveConfig.columnOrder, updateLayout],
   );
 
   const hideColumn = useCallback(
@@ -1039,8 +1045,10 @@ export function MaturityBoard({
         // until the next reorder silently drops it. Folder/status re-derive
         // their columns from the data, so their saved order is left intact
         // and a column that repopulates keeps the position it was given.
+        // A column a pattern brought in isn't in the saved order; hiding it
+        // is enough, and leaves the pattern's other columns unpinned.
         ...(effectiveConfig.explicitColumns
-          ? { columnOrder: orderedKeys.filter((k) => k !== key) }
+          ? { columnOrder: (effectiveConfig.columnOrder ?? []).filter((k) => k !== key) }
           : {}),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
@@ -1049,9 +1057,17 @@ export function MaturityBoard({
     [
       orderedKeys,
       effectiveConfig.explicitColumns,
+      effectiveConfig.columnOrder,
       effectiveConfig.hiddenColumns,
       updateLayout,
     ],
+  );
+
+  /** Drop a pattern (status*) and every column it brought in. */
+  const removePattern = useCallback(
+    (pattern: string) =>
+      updateLayout({ columnOrder: withoutPattern(effectiveConfig.columnOrder, pattern) }),
+    [effectiveConfig.columnOrder, updateLayout],
   );
 
   /**
@@ -1111,7 +1127,14 @@ export function MaturityBoard({
       updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
         // and un-hide it if it was removed earlier.
-        columnOrder: [...new Set([...orderedKeys, v])],
+        // On a curated board that's the saved order, so a pattern's columns
+        // stay unpinned; a fresh board's auto columns are written out first.
+        columnOrder: [
+          ...new Set([
+            ...(effectiveConfig.explicitColumns ? (effectiveConfig.columnOrder ?? []) : orderedKeys),
+            v,
+          ]),
+        ],
         hiddenColumns: (effectiveConfig.hiddenColumns ?? []).filter(
           (k) => k !== v,
         ),
@@ -1122,23 +1145,25 @@ export function MaturityBoard({
       nestId,
       orderedKeys,
       effectiveConfig.dimension,
+      effectiveConfig.columnOrder,
       effectiveConfig.hiddenColumns,
       updateLayout,
       members,
     ],
   );
 
-  // Distinct tag values present in the nest — suggestions for the add-column box.
-  const availableTagValues = useMemo(() => {
-    if (effectiveConfig.dimension !== "tag") return [];
-    const set = new Set<string>();
-    for (const n of nodes) {
-      for (const k of cardColumnKeys(n, effectiveConfig)) {
-        if (k !== UNCATEGORIZED) set.add(k);
-      }
-    }
-    return [...set].sort();
-  }, [nodes, effectiveConfig]);
+  // Tags not yet a column, with card counts — the add-column box's list.
+  const tagColumnSuggestions = useMemo(
+    () => tagSuggestions(nodes, effectiveConfig, ""),
+    [nodes, effectiveConfig],
+  );
+  const tagPatterns = useMemo(
+    () =>
+      effectiveConfig.dimension === "tag"
+        ? (effectiveConfig.columnOrder ?? []).filter(isColumnPattern)
+        : [],
+    [effectiveConfig.dimension, effectiveConfig.columnOrder],
+  );
 
   // ── Done columns, lanes, render helpers ──
   const doneTags = useMemo(
@@ -1647,10 +1672,36 @@ export function MaturityBoard({
           {/* Add a column: a tag value, or — for writers on the folder board —
               a folder. Without this a nest whose documents all sit in Root has
               a single column and nowhere to drag them. */}
-          {(config.dimension === "tag" ||
-            ((effectiveConfig.dimension === "folder" ||
-              effectiveConfig.dimension === "assignee") &&
-              canEditDocs)) && (
+          {config.dimension === "tag" && (
+            <>
+              {/* Pattern columns aren't columns themselves — each shows here,
+                  removable, while its matching tags show as columns. */}
+              {tagPatterns.map((p) => (
+                <span
+                  key={p}
+                  className="inline-flex h-8 items-center gap-1 rounded-md border px-2 font-mono text-xs"
+                  title={`Every tag matching “${p}” is a column, including new ones. × removes them all.`}
+                >
+                  {p}
+                  <button
+                    type="button"
+                    onClick={() => removePattern(p)}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove the ${p} columns`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+              <TagColumnInput
+                suggestions={tagColumnSuggestions}
+                onAdd={(v) => void addColumn(v)}
+              />
+            </>
+          )}
+          {(effectiveConfig.dimension === "folder" ||
+            effectiveConfig.dimension === "assignee") &&
+            canEditDocs && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -1662,25 +1713,11 @@ export function MaturityBoard({
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
                 placeholder={
-                  config.dimension === "tag"
-                    ? "add column…"
-                    : config.dimension === "assignee"
-                      ? "add person…"
-                      : "new folder…"
+                  config.dimension === "assignee" ? "add person…" : "new folder…"
                 }
-                list={
-                  config.dimension === "tag"
-                    ? "board-tag-values"
-                    : config.dimension === "assignee"
-                      ? "board-people"
-                      : undefined
-                }
+                list={config.dimension === "assignee" ? "board-people" : undefined}
                 className="h-8 w-32"
-                title={
-                  config.dimension === "tag"
-                    ? "Add a tag column — pick an existing tag or type a new value"
-                    : "Add a folder column — drag a card into it to file the document there (nest with parent/child)"
-                }
+                title="Add a folder column — drag a card into it to file the document there (nest with parent/child)"
               />
               {config.dimension === "assignee" && (
                 <datalist id="board-people">
@@ -1691,21 +1728,12 @@ export function MaturityBoard({
                   ))}
                 </datalist>
               )}
-              {config.dimension === "tag" && (
-                <datalist id="board-tag-values">
-                  {availableTagValues.map((v) => (
-                    <option key={v} value={v} />
-                  ))}
-                </datalist>
-              )}
               <Button
                 type="submit"
                 variant="outline"
                 size="sm"
                 disabled={!newColumn.trim()}
-                title={
-                  config.dimension === "tag" ? "Add column" : "Add folder column"
-                }
+                title="Add folder column"
               >
                 <Plus className="h-3.5 w-3.5" />
               </Button>
@@ -1870,7 +1898,9 @@ export function MaturityBoard({
             <li>
               <span className="font-medium text-foreground">+</span> to add a
               column, <span className="font-medium text-foreground">×</span> to
-              remove one.
+              remove one. A pattern like{" "}
+              <code className="font-medium text-foreground">status*</code> adds a
+              column for every matching tag, new ones included.
             </li>
           </>
         ) : config.dimension === "field" ? (
@@ -2155,7 +2185,7 @@ export function MaturityBoard({
         // would be a lie — the documents are there, the columns aren't yet.
         <div className="text-sm text-muted-foreground py-8">
           {effectiveConfig.dimension === "tag"
-            ? "No tag columns yet — add one above to start sorting documents into it."
+            ? "No tag columns yet — add one above to start sorting documents into it, or a pattern like status* for every matching tag."
             : "No documents to show."}
         </div>
       ) : viewMode === "list" ? (
