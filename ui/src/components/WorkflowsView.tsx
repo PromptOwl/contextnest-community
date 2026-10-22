@@ -149,6 +149,9 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
   const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
   const permission = (nestMeta as { permission?: string } | undefined)?.permission;
   const canConfigureAgents = permission === "owner" || permission === "admin";
+  // Metacognition is owner/admin only for every action (CU-wdqcq05rqq): a
+  // writer would get 403s, so the tab isn't shown to them at all.
+  const showAgents = metacognitionEnabled && canConfigureAgents;
 
   return (
     <div>
@@ -168,7 +171,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <TabsTrigger value="table">Table</TabsTrigger>
           <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
-          {metacognitionEnabled && (
+          {showAgents && (
             <TabsTrigger value="agents" data-testid="workflows-agents-tab">
               Agents
             </TabsTrigger>
@@ -183,7 +186,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         <TabsContent value="run" className="mt-4">
           <RunsPanel nestId={nestId} focusRunId={focusRun} />
         </TabsContent>
-        {metacognitionEnabled && (
+        {showAgents && (
           <TabsContent value="agents" className="mt-4">
             <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} onOpenRun={openRun} />
           </TabsContent>
