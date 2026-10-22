@@ -10,9 +10,9 @@ import { describe, it, expect } from "vitest";
 import {
   conventionKey,
   deriveNestCaps,
-  isHomeNode,
   isReaderHiddenView,
   isViewBlockedInReaderMode,
+  pickHomeNode,
   READER_HIDDEN_VIEWS,
 } from "./nest-caps";
 
@@ -179,20 +179,20 @@ describe("reader-mode home node matching", () => {
   const node = { id: "nodes/welcome", title: "Welcome" };
 
   it("matches the full node id", () => {
-    expect(isHomeNode(node, "nodes/welcome")).toBe(true);
+    expect(pickHomeNode([node], "nodes/welcome")).toBe(node);
   });
 
   it("matches the bare slug people actually type, case-insensitively", () => {
     // The config field is hand-typed; "welcome" must find nodes/welcome, or the
     // designation silently loses to the naming convention.
-    expect(isHomeNode(node, "welcome")).toBe(true);
-    expect(isHomeNode(node, "Welcome")).toBe(true);
-    expect(isHomeNode({ id: "nodes/guides/intro" }, "intro")).toBe(true);
+    expect(pickHomeNode([node], "welcome")).toBe(node);
+    expect(pickHomeNode([node], "Welcome")).toBe(node);
+    expect(pickHomeNode([{ id: "nodes/guides/intro" }], "intro")?.id).toBe("nodes/guides/intro");
   });
 
   it("rejects a node that is not the home node", () => {
-    expect(isHomeNode(node, "index")).toBe(false);
-    expect(isHomeNode({ id: "nodes/welcome-guide" }, "welcome")).toBe(false);
+    expect(pickHomeNode([node], "index")).toBeUndefined();
+    expect(pickHomeNode([{ id: "nodes/welcome-guide" }], "welcome")).toBeUndefined();
   });
 
   it("keys a node by id leaf and title for the convention fallback", () => {

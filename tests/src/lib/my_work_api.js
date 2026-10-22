@@ -30,6 +30,16 @@ class MyWorkApi extends DashboardApi {
   }
 
   /**
+   * What the My Work rail badge shows for a /me/work response: the reviews and
+   * requests the server totals plus the open tasks assigned to the caller
+   * (`waitingOnMeCount` in ui/src/lib/my-work-groups.ts, since CU-wdqcq05jg8).
+   * `assigned` is not paged, so a one-row read carries all of it.
+   */
+  static waitingOnMe(work) {
+    return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0);
+  }
+
+  /**
    * Poll /me/work until `predicate(work)` holds, and return that response.
    *
    * Needed because "can this caller approve in that nest?" is cached
@@ -112,6 +122,29 @@ class MyWorkApi extends DashboardApi {
       ...(folder ? { folder } : {}),
     });
     return data.node;
+  }
+
+  /**
+   * POST /nests/:id/nodes — create an open board task assigned to `assignee`.
+   * An open task assigned to the caller lists under My Work's `assigned` rows
+   * and counts toward the rail badge (API.md, "Assigned rows").
+   * @param {string} nestId
+   * @param {{title: string, assignee: string}} task
+   */
+  async createTask(nestId, { title, assignee }) {
+    const data = await this.expectOk('POST', `/nests/${nestId}/nodes`, {
+      title,
+      type: 'task',
+      tags: ['doing'],
+      assignee,
+      content: `# ${title}\n\nSeeded by the My Work suite.\n`,
+    });
+    return data.node;
+  }
+
+  /** DELETE /nests/:id/nodes/:nodeId — remove a seeded document or task. */
+  async deleteNode(nestId, nodeId) {
+    return this.request('DELETE', `/nests/${nestId}/nodes/${nodeId}`);
   }
 
   /** GET /nests/:id/nodes/:nodeId — `{ok, status, data}`; 404 once deleted. */

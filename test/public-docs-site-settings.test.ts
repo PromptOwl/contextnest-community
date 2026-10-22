@@ -93,8 +93,19 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(html).toContain("CollectionPage");
     expect(html).toContain("A folder of governed Markdown documents.");
     expect(html).toContain('href="/d/acme-docs/reference/commands"');
+    // CU-wdqcq05raw: a readable title (acronyms kept) and a description that
+    // names the topic and counts its pages.
+    expect(html).toContain("<title>CLI — Acme Docs</title>");
+    expect(html).toContain("<h1>CLI</h1>");
+    expect(html).toMatch(/<meta name="description" content="[^"]*3 pages[^"]*CLI[^"]*"/);
     expect((await get("/d/acme-docs/tags/api")).status).toBe(404);
     expect(await text("/d/acme-docs/sitemap.xml", {})).toContain("/d/acme-docs/tags/cli</loc>");
+  });
+
+  it("uses a description set through PATCH as the page's meta description (CU-wdqcq05raw)", async () => {
+    const r = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/docs/reference/api`, { description: "Every REST endpoint, with examples." }, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect(await text("/d/acme-docs/reference/api")).toContain('<meta name="description" content="Every REST endpoint, with examples.">');
   });
 
   it("publishes the glossary and links a term's first mention on each page", async () => {
@@ -461,8 +472,10 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
       expect(res.status, headers["User-Agent"]).toBe(301);
       expect(res.headers.get("location")).toMatch(new RegExp(`/d/${otherId}/$|/d/acme-docs/$`));
     }
-    // A non-crawler client without a page Accept keeps the JSON 404.
-    const api = await get(live, { "User-Agent": "curl/8.0", Accept: "*/*" });
+    // So does curl or a link checker (CU-wdqcq05raw): a 404 there made every
+    // inbound link look dead. Only a JSON-only API client keeps the JSON 404.
+    expect((await get(live, { "User-Agent": "curl/8.0", Accept: "*/*" })).status).toBe(301);
+    const api = await get(live, { "User-Agent": "curl/8.0", Accept: "application/json" });
     expect(api.status).toBe(404);
     expect(await api.json()).toEqual({ error: "Not found" });
     // A crawler on an unrelated unknown path still gets JSON 404, not the shell.

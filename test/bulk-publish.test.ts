@@ -36,7 +36,7 @@ describe("bulk publish — partial-batch reporting", () => {
     const admin = await registerUser(app, OWNER_EMAIL);
     const nestId = await makeNest(app, admin.apiKey);
 
-    // Middle row is over the 120-char title bound. Before per-row reporting it
+    // Middle row is over the 200-char title bound. Before per-row reporting it
     // threw, leaving "First" written and nothing in the response naming it.
     const res = await jsonRequest(
       app,
@@ -45,7 +45,7 @@ describe("bulk publish — partial-batch reporting", () => {
       {
         documents: [
           { title: "First", content: "# one" },
-          { title: "T".repeat(200), content: "# too long" },
+          { title: "T".repeat(201), content: "# too long" },
           { title: "Third", content: "# three" },
         ],
       },
@@ -56,8 +56,8 @@ describe("bulk publish — partial-batch reporting", () => {
     expect(res.data.published).toBe(2);
     expect(res.data.node_ids).toEqual(["nodes/first", "nodes/third"]);
     expect(res.data.failed).toHaveLength(1);
-    expect(res.data.failed[0].title).toBe("T".repeat(200));
-    expect(res.data.failed[0].error).toMatch(/120 characters/);
+    expect(res.data.failed[0].title).toBe("T".repeat(201));
+    expect(res.data.failed[0].error).toMatch(/200 characters/);
 
     // The row AFTER the failure is the one that used to be abandoned.
     const third = await jsonRequest(

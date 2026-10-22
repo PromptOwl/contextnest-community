@@ -15,6 +15,7 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  TITLE_MAX_LENGTH,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -167,8 +168,9 @@ type ImportOpResult = {
 /** Max characters in a human-readable title. The id/slug bound (100 per
  *  segment, below) doesn't cover this: a title of emoji or non-latin text
  *  slugifies to almost nothing, so an unbounded title still lands in
- *  frontmatter and stretches every header that renders it. */
-const MAX_TITLE_LENGTH = 120;
+ *  frontmatter and stretches every header that renders it. The engine owns the
+ *  number, so a title a local vault accepts is never refused on push. */
+const MAX_TITLE_LENGTH = TITLE_MAX_LENGTH;
 
 /** Shared choke point for REST + MCP: both create and rename route here. */
 function assertTitleLength(title: string): void {
@@ -1610,6 +1612,9 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   append?: string;
   tags?: string[];
   title?: string;
+  /** Frontmatter one-line summary (the docs site's meta description). An
+   *  empty string removes it. */
+  description?: string;
   status?: string;
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
@@ -2513,6 +2518,20 @@ async function stagePdfImport(
   }
 }
 
+/** Longest frontmatter description accepted — a summary, not a second body. */
+export const MAX_DESCRIPTION_LENGTH = 500;
+
+/** A trimmed, single-line description, or a ValidationError saying why not. */
+function normalizeDescription(value: unknown): string {
+  if (typeof value !== "string") throw new ValidationError("description must be a string");
+  const description = value.trim();
+  if (/[\r\n]/.test(description)) throw new ValidationError("description must be a single line");
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new ValidationError(`description must be at most ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
+  return description;
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -2648,6 +2667,17 @@ export async function updateNode(
           frontmatter: { ...node.frontmatter, title: patch.title },
         };
         opInput.title = patch.title;
+      }
+      if (patch.description !== undefined) {
+        const description = normalizeDescription(patch.description);
+        if (description !== (node.frontmatter.description ?? "")) {
+          const frontmatter: Record<string, unknown> = { ...node.frontmatter };
+          if (description) frontmatter.description = description;
+          else delete frontmatter.description;
+          node = { ...node, frontmatter: frontmatter as any };
+          // The engine stores it; an empty string removes the key.
+          opInput.description = description;
+        }
       }
       // Re-type BEFORE the schedule gate below, so "turn this document into
       // an agent and schedule it" is one call — the gate reads the type the
