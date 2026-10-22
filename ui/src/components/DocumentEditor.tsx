@@ -77,6 +77,7 @@ import {
   Check,
   Copy,
   Star,
+  Megaphone,
   Undo2,
   PanelLeft,
   Globe,
@@ -339,6 +340,13 @@ export function DocumentEditor({
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
   const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
+  // Document-scope always-include flag (CU-wdqcq05rn0): same shape as prime —
+  // null inherits from the nest's always-include tags. Owner/admin only.
+  const [alwaysInclude, setAlwaysInclude] = useState<boolean | null>(null);
+  const loadedAlwaysIncludeRef = useRef<boolean | null>(null);
+  const alwaysIncludeTags = ((nestSettings.data as any)?.always_include_tags ?? [
+    "always-include",
+  ]) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -1147,6 +1155,10 @@ export function DocumentEditor({
       const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
       setPrime(loadedPrime);
       loadedPrimeRef.current = loadedPrime;
+      const loadedAlwaysInclude =
+        typeof node?.always_include === "boolean" ? node.always_include : null;
+      setAlwaysInclude(loadedAlwaysInclude);
+      loadedAlwaysIncludeRef.current = loadedAlwaysInclude;
       setBaseVersion(node?.version);
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
@@ -1358,8 +1370,9 @@ export function DocumentEditor({
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
     if (prime !== loadedPrimeRef.current) return true;
+    if (alwaysInclude !== loadedAlwaysIncludeRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule, prime]);
+  }, [touched, title, content, tags, schedule, prime, alwaysInclude]);
 
   // Save is a no-op on a clean document (it would only bump the version), so
   // the button says so by being disabled — the enabled/disabled pair IS the
@@ -1545,12 +1558,17 @@ export function DocumentEditor({
         // Only sent when explicitly flagged — the server 403s a non-admin who
         // sends `prime` at all, so an inherited (null) flag stays off the wire.
         ...(prime === null ? {} : { prime }),
+        ...(alwaysInclude === null ? {} : { always_include: alwaysInclude }),
       });
       savedId = (res as any)?.node?.id;
       createdStatus = (res as any)?.node?.status;
     } else {
-      const primePatch =
-        prime === loadedPrimeRef.current ? {} : { prime };
+      const primePatch = {
+        ...(prime === loadedPrimeRef.current ? {} : { prime }),
+        ...(alwaysInclude === loadedAlwaysIncludeRef.current
+          ? {}
+          : { always_include: alwaysInclude }),
+      };
       const res = await api.updateNode(
         nestId,
         nodeId,
@@ -1561,6 +1579,7 @@ export function DocumentEditor({
         baseVersion,
       );
       loadedPrimeRef.current = prime;
+      loadedAlwaysIncludeRef.current = alwaysInclude;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -1834,7 +1853,13 @@ export function DocumentEditor({
   const primeByTag =
     primeTags.length > 0 &&
     tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
-  const effectivePrime = prime === null ? primeByTag : prime;
+  // Always-include mirrors the server the same way; an always-include
+  // document is prime whatever its own prime flag says.
+  const alwaysIncludeByTag =
+    alwaysIncludeTags.length > 0 &&
+    tags.some((t) => alwaysIncludeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectiveAlwaysInclude = alwaysInclude === null ? alwaysIncludeByTag : alwaysInclude;
+  const effectivePrime = effectiveAlwaysInclude || (prime === null ? primeByTag : prime);
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
@@ -3167,9 +3192,14 @@ export function DocumentEditor({
                           ? "Inherited from a prime tag on this document — it always needs steward approval."
                           : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
                       </p>
-                      {primeByTag && prime === false && (
+                      {primeByTag && prime === false && !effectiveAlwaysInclude && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its prime tag.
+                        </p>
+                      )}
+                      {effectiveAlwaysInclude && (
+                        <p className="text-xs text-muted-foreground">
+                          Prime because it is always-included — turn that off first.
                         </p>
                       )}
                       {/* The one case people get wrong: an owner with auto-publish on
@@ -3183,7 +3213,7 @@ export function DocumentEditor({
                     </div>
                     <Switch
                       checked={effectivePrime}
-                      disabled={fieldsDisabled}
+                      disabled={fieldsDisabled || effectiveAlwaysInclude}
                       onCheckedChange={(next) => {
                         // Turning the switch back to whatever the tags already imply
                         // clears the override rather than pinning a redundant flag.
@@ -3192,6 +3222,42 @@ export function DocumentEditor({
                       }}
                       aria-label="Prime document"
                       data-testid="document-editor-prime"
+                    />
+                  </div>
+                )}
+
+                {/* Always include — any nest, owner/admin only. It reaches every
+              agent and model, governed or not; in a governed nest it also
+              makes the document prime. */}
+                {canFlagPrime && pageActive && (
+                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                    <div className="space-y-0.5">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Megaphone className="h-4 w-4" />
+                        Always include
+                      </span>
+                      <p className="text-xs text-muted-foreground">
+                        {alwaysIncludeByTag && alwaysInclude === null
+                          ? "Inherited from an always-include tag on this document."
+                          : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs."}
+                        {stewardshipEnabled &&
+                          " It is also prime: every change to it needs steward approval."}
+                      </p>
+                      {alwaysIncludeByTag && alwaysInclude === false && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Exempted from its always-include tag.
+                        </p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={effectiveAlwaysInclude}
+                      disabled={fieldsDisabled}
+                      onCheckedChange={(next) => {
+                        setAlwaysInclude(next === alwaysIncludeByTag ? null : next);
+                        setTouched(true);
+                      }}
+                      aria-label="Always include"
+                      data-testid="document-editor-always-include"
                     />
                   </div>
                 )}

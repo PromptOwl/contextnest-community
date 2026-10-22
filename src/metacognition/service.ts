@@ -18,6 +18,7 @@
 import { v4 as uuid } from "uuid";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getDb } from "../db/client.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { config } from "../config.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -347,7 +348,14 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   try {
     await withdrawRejectedDrafts(runId, nestId, agent);
     const memory = await memoryOf(runId, nestId, agent);
-    const system = systemPrompt(agent, instructions);
+    // The nest's always-include documents, as the owner the persona acts
+    // for may read them (CU-wdqcq05rn0).
+    const { text: standing } = await standingBlockFor(
+      nestId,
+      { userId: owner.userId, userEmail: owner.email },
+      "read them with read_node",
+    );
+    const system = systemPrompt(agent, instructions, standing);
     const tools = toolsFor(agent);
     const ctx: ToolContext = {
       nestId,
@@ -511,7 +519,7 @@ function scopeLine(list: string[], none: string): string {
   return list.length ? list.map((f) => `nodes/${f}/`).join(", ") : none;
 }
 
-function systemPrompt(agent: MetacognitionAgent, instructions: string): string {
+function systemPrompt(agent: MetacognitionAgent, instructions: string, standing = ""): string {
   const c = agent.config;
   const proposeScope =
     c.scope.propose[0] === "*"
@@ -539,6 +547,10 @@ function systemPrompt(agent: MetacognitionAgent, instructions: string): string {
     "<instructions>",
     instructions.trim(),
     "</instructions>",
+    // Fenced like the rest of what the nest says, and labelled for what it
+    // is: approved documents every agent in this nest is held to — the
+    // nest's rules for your proposals, not a new task.
+    standing ? `\n${standing}` : "",
   ]
     .filter((l) => l !== "")
     .join("\n");

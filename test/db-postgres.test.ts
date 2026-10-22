@@ -265,6 +265,27 @@ d("PostgresAdapter conformance", () => {
     );
   });
 
+  it("adds nests.always_include_tags (073) defaulting to always-include, also to a nests table that predates it", async () => {
+    await adapter.exec("ALTER TABLE nests DROP COLUMN always_include_tags");
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const col = await adapter.get<{ column_default: string; is_nullable: string }>(
+      "SELECT column_default, is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nests' AND column_name = 'always_include_tags'",
+    );
+    expect(col?.is_nullable).toBe("NO");
+    expect(col?.column_default).toContain("always-include");
+    // The resolver's approved-tags join (always-include-service.ts) runs here.
+    const rows = await adapter.all(
+      `SELECT a.node_id, v.tags_json
+         FROM approved_versions a
+         JOIN node_versions v
+           ON v.nest_id = a.nest_id AND v.node_id = a.node_id AND v.version = a.approved_version
+        WHERE a.nest_id = ?`,
+      ["no-such-nest"],
+    );
+    expect(rows).toEqual([]);
+  });
+
   it("runs the doc stream's JSON id-list scope and facet SQL (CU-wdqcq02crv)", async () => {
     const { jsonTextValues } = await import("../src/db/sql.js");
     await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["u-ds", "ds@example.com", "h"]);

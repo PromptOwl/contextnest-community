@@ -403,6 +403,7 @@ Pins live in `node_pins` (migration 071). A deleted document takes its pins with
   "allow_self_approve": false,
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
+  "always_include_tags": ["always-include"],
   "done_tags": ["done"],
   "require_push_confirmation": false,
   "creator_is_reviewer": false,
@@ -421,6 +422,7 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `always_include_tags` — tags that mark a document **always-include** (default `["always-include"]`): its approved text is pushed to every agent and model that enters the nest — see [Always-include documents](#always-include-documents-standing-instructions). Same input and normalization as `prime_tags`; an empty list leaves only the per-document flag. Owner/admin, like every field here. Works with stewardship on or off.
 - `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
@@ -1169,6 +1171,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - Optional `model` (model id, opaque to the server; 1–128 characters of letters, digits and `. _ : / @ -`, `400` otherwise): the model a runner should use for this agent. Same rules as `schedule`: runnable types only (`400` otherwise), stored in frontmatter `metadata.model`, echoed on node responses, and returned as `agent.model` in the run bundle (`null` when unset, meaning the runner's default).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
+- Optional `always_include` (boolean) — the document-scope **always-include** flag (stored as `metadata.always_include`): `true` pushes this document's approved text to every agent entering the nest, `false` exempts it from an always-include tag. Owner/admin only (`403` otherwise); not a boolean → `400`. An always-include document is also prime. Echoed on node responses as `always_include` (absent when inherited from `always_include_tags`).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
 - Optional `fields` — custom field values, `{ "severity": "high", "estimate": 3 }`. Validated against the nest's definitions: an unknown key, a field that doesn't apply to this node type, a value of the wrong shape, or a computed field → `400` naming the field. Defaults fill fields left out; a required field still empty after that → `400`.
@@ -1240,6 +1243,7 @@ Requires nest write permission.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
+- `always_include` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope always-include flag, `null` clears it back to `always_include_tags`. An always-include document is prime, so an edit that makes it always-include is gated the same way — and until that version is approved, nothing new is injected.
 - `fields` — custom field values to set, merged into the stored ones (keys left out are untouched; `null` clears one; clearing a required field → `400`). Same validation as create. A value change seals a version like any edit; a `fields`-only PATCH that changes nothing seals none.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
@@ -2240,6 +2244,8 @@ Response: `text/event-stream`.
 | `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (by `[[Title]]`, in order), and what happened to any `@mentions`. |
 | `error` | `{ error }` — the model call failed; the stream ends. |
 
+**Standing instructions.** The nest's always-include documents the caller can read (approved versions) sit in the system prompt in a "Standing instructions for this nest" block, ahead of the retrieved documents, on every question — see [Always-include documents](#always-include-documents-standing-instructions).
+
 **Grounding.** The retrieved documents are placed in the system prompt verbatim with the instruction to answer from them alone. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
 
 **Mentions.** A message naming people (`@alice@acme.com`) posts the exchange — question and answer, under the asker's name — as a comment on the anchor document (the open one, else the first document the answer cites) and notifies them through the comment-mention path: inbox row, and email / Slack / Teams where configured. `mention` is `{ status: "posted", node_id, node_title, thread_id, notified }` or `{ status: "undeliverable", reason: "no_anchor" | "post_failed" }`. Nothing is posted when nobody is named.
@@ -2420,7 +2426,7 @@ Only the approved version is ever served — a document with no approved snapsho
 
 ### Runs — the operational trace (server never executes)
 
-- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs?, parent_run_id? }`. Returns `201` with the executable **bundle**: `{ run_id, parent_run_id, depth, agent{content,…}, edges[<reachable flow subgraph>], definitions[], trace_hint }`. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`). `parent_run_id` spawns a **sub-agent run** nested under a still-running parent (`FEATURE_SUBAGENT_RUNS`, off by default — any `parent_run_id` is `400` while off); it's bounded by `SUBAGENT_MAX_DEPTH` (depth → `403`) and `SUBAGENT_MAX_CHILDREN` (fan-out → `403`, enforced atomically with the insert), rejects re-entrancy of an agent already in the ancestor chain (`409`), and refuses a closed (`409`) or unknown/cross-nest (`404`) parent.
+- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs?, parent_run_id? }`. Returns `201` with the executable **bundle**: `{ run_id, parent_run_id, depth, agent{content,…}, edges[<reachable flow subgraph>], definitions[], standing_instructions{text, documents[], overflow[]}, trace_hint }`. `standing_instructions.text` is the nest's always-include block (what the caller may read, approved versions) for the runner to put in its model's system prompt; `documents` / `overflow` name what it holds (`{ id, title, version }`). `GET /runs/:id/bundle` and MCP `workflow_run` carry the same field. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`). `parent_run_id` spawns a **sub-agent run** nested under a still-running parent (`FEATURE_SUBAGENT_RUNS`, off by default — any `parent_run_id` is `400` while off); it's bounded by `SUBAGENT_MAX_DEPTH` (depth → `403`) and `SUBAGENT_MAX_CHILDREN` (fan-out → `403`, enforced atomically with the insert), rejects re-entrancy of an agent already in the ancestor chain (`409`), and refuses a closed (`409`) or unknown/cross-nest (`404`) parent.
 - `POST /runs/:id/steps` (write) — append one step. Body: `{ action: read|write|branch|notify|external, node_id?, edge_id?, detail? }`. `seq` is server-assigned (monotonic, atomic); any client `seq` is ignored. `409` if the run is already terminal, or once the run hits `RUN_MAX_STEPS`.
 - `PATCH /runs/:id` (write) — close/update. Body: `{ status: running|succeeded|failed|cancelled, trace? }`. Compare-and-swap on `status='running'`: a second close → `409` ("terminal is final").
 - `GET /runs/:id` (read) — full trace `{ run, steps[] }`. Freeform payloads (`run.inputs`, `run.trace`, `steps[].detail`) are redacted to `null` below write tier.
@@ -2482,6 +2488,30 @@ Not behind the workflow-plane flag: connectors fire on review events too.
 
 ### `/nests/:nestId/mcp/*`
 Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually; LLM clients connect here.
+
+#### Always-include documents (standing instructions)
+
+The server pushes a nest's rules to agents instead of waiting for them to call `context_init` (CU-wdqcq05rn0). A document is **always-include** when its approved version has `metadata.always_include: true`, or carries one of the nest's `always_include_tags` (default `always-include`) without `always_include: false`. Wherever an agent or model enters the server it gets those documents' **approved** text:
+
+| Entry point | What it gets |
+|---|---|
+| `initialize` on `/nests/:id/mcp` | `result.instructions` = CONTEXT.md (first 24,000 chars, cut at a line, pointing at `context_init` for the rest), then the standing-instructions block. A headless access key gets the block only (CONTEXT.md isn't a reviewed document and `context_init` is closed to it). |
+| `initialize` on `/mcp` | `result.instructions` = a pointer to each nest's `context_init`, then one block covering every nest the caller can read (in name order, one shared budget). Once the budget is full, later nests aren't checked, and the text says how many. |
+| `context_init` | CONTEXT.md, then the block. |
+| Hootie (`POST /nests/:id/chat`) | The block, ahead of the retrieved documents. |
+| Metacognition agents | The block, after the agent's own instructions, resolved as the agent's owner. |
+| Workflow runs | `standing_instructions` in the run bundle. |
+| `GET /nests/:id/instructions` | `always_included: { documents, overflow }` (ids, titles, versions — no text). |
+
+Rules for what goes in:
+- **Approved versions only.** Whether a document is always-include is read from its approved version too, so a draft that adds the tag (or the flag) injects nothing until a steward approves it. A document with no approved version is never included; neither is one whose approved version can't be rebuilt.
+- **Access-filtered.** Each caller gets only the documents they can read (`filterAccessible`): a document share narrows it to the shared documents; a public reader or headless key reads approved documents anyway. Nobody learns a document exists through this.
+- **Ordered by node id**, so the same nest yields the same text every time.
+- **Budget: 24,000 characters** of document text per entry point. Whole documents only: the first one that doesn't fit, and every one after it, is listed by title, id and version (up to 50 named, the rest counted) instead of being cut mid-text.
+- **Fenced.** Each document is wrapped as `<standing_document id="nodes/…" version="N">` inside `<standing_instructions>`; a document can't close either fence early (the closing tags are defused in its text).
+- **Always-include documents are prime** (see `STEWARDSHIP.md`), so in a governed nest the injected text can't change without a steward's approval.
+
+The server guarantees **delivery**, not obedience: an outside client (Claude Code, Cursor, …) receives the rules in `instructions`, which most clients place in the system prompt, but its model may still ignore them. For the models this server runs (Hootie, metacognition) and the run bundle, the server owns the prompt.
 
 **Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
 

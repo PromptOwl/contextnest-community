@@ -72,6 +72,13 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
 
   const { frontmatter, body } = splitFrontmatter(data.content);
   const revision = data.revision;
+  // Always-include documents (CU-wdqcq05rn0) travel with these instructions;
+  // counted from what this reader can read, including any past the budget.
+  const standing = data.always_included;
+  const alwaysIncluded = standing ? standing.documents.length + standing.overflow.length : 0;
+  const standingTitles = standing
+    ? [...standing.documents, ...standing.overflow].map((d) => d.title).join(", ")
+    : "";
 
   const startEdit = () => {
     setDraft(body);
@@ -138,6 +145,17 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
                 <code className="text-xs">context_init</code>). Every change is recorded.
               </span>
             </CardDescription>
+            {alwaysIncluded > 0 && (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="instructions-always-included"
+                title={standingTitles}
+              >
+                Plus {alwaysIncluded} always-included document
+                {alwaysIncluded === 1 ? "" : "s"}, sent with these instructions to
+                every agent (approved versions only).
+              </p>
+            )}
             {revision && (
               <p className="text-xs text-muted-foreground" data-testid="instructions-last-change">
                 Revision {revision.seq} · {who(revision)} · {relTime(revision.createdAt)} ·{" "}

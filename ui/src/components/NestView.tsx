@@ -278,6 +278,7 @@ export function NestView({
   const [reviewSlaHours, setReviewSlaHours] = useState<number | null>(null);
   const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const [alwaysIncludeTags, setAlwaysIncludeTags] = useState<string[]>(["always-include"]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
   // Held agent writes awaiting confirmation (reviewer view). Empty when the
@@ -632,6 +633,9 @@ export function NestView({
     setReviewSlaHours((settingsData as api.NestSettings).review_sla_hours ?? null);
     setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
+    setAlwaysIncludeTags(
+      (settingsData as Partial<api.NestSettings>).always_include_tags ?? ["always-include"],
+    );
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -2275,6 +2279,7 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          alwaysIncludeTags={alwaysIncludeTags}
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
@@ -2296,6 +2301,7 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setAlwaysIncludeTags(next.alwaysIncludeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
             setReviewSlaHours(next.reviewSlaHours);

@@ -2292,6 +2292,21 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("071_node_pins");
   }
+
+  // 073: nests.always_include_tags (CU-wdqcq05rn0). Tags whose documents'
+  //   APPROVED text is pushed to every agent and model that enters the nest
+  //   (MCP initialize, context_init, Hootie, metacognition, run bundles). Comma
+  //   list like prime_tags; defaults to "always-include". (072 is claimed by an
+  //   open branch.)
+  if (!hasMigration("073_nest_always_include_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("always_include_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN always_include_tags TEXT NOT NULL DEFAULT 'always-include'");
+    }
+    recordMigration("073_nest_always_include_tags");
+  }
 }
 
 /**

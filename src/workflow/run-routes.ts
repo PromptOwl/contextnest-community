@@ -19,6 +19,7 @@ import { engineCache } from "../nodes/engine.js";
 import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { standingBlockFor, standingRefs } from "../governance/always-include-service.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -135,7 +136,12 @@ async function referencedDefinitions(
  * run) and GET /runs/:id/bundle (which re-hands the bundle for a run created
  * server-side, e.g. by the interval scheduler).
  */
-async function buildRunBundle(nestId: string, agentNode: string) {
+async function buildRunBundle(
+  nestId: string,
+  agentNode: string,
+  /** Who receives the bundle — the standing instructions are what THEY may read. */
+  caller: { userId: string; userEmail: string },
+) {
   const { storage } = await engineCache.get(nestId);
   let doc;
   try {
@@ -181,6 +187,9 @@ async function buildRunBundle(nestId: string, agentNode: string) {
   // permission to obtain, and this is the ONLY surface that returns full
   // values (the /env routes mask them).
   const env = await envValues(nestId);
+  // The nest's always-include documents (CU-wdqcq05rn0): the runner puts
+  // `text` in its model's system prompt, as Hootie and metacognition do.
+  const standing = await standingBlockFor(nestId, caller);
 
   return {
     agent: {
@@ -200,6 +209,7 @@ async function buildRunBundle(nestId: string, agentNode: string) {
     tools,
     env,
     definitions,
+    standing_instructions: { text: standing.text, ...standingRefs(standing.set) },
   };
 }
 
@@ -344,12 +354,15 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     }
   }
 
-  const bundle = await buildRunBundle(nestId, agentNode);
   // Derived from auth, never client-supplied — this is the accountability
   // field ("who triggered this run"), so it must be trustworthy. A scheduler
   // or external runner authenticates with its own key; that identity is the
   // honest answer.
   const triggeredBy = await resolveCallerEmail(c.get("userId"));
+  const bundle = await buildRunBundle(nestId, agentNode, {
+    userId: c.get("userId"),
+    userEmail: triggeredBy,
+  });
 
   const id = `run_${uuid()}`;
   await getDb().run(
@@ -597,7 +610,10 @@ runDetailRoutes.get("/:id/bundle", requireWorkflowPlane, async (c) => {
   if (!res.changes) {
     throw new ConflictError("Run already claimed by another runner");
   }
-  const bundle = await buildRunBundle(run.nest_id, run.agent_node);
+  const bundle = await buildRunBundle(run.nest_id, run.agent_node, {
+    userId: c.get("userId"),
+    userEmail: claimer,
+  });
   return c.json({
     run_id: run.id,
     parent_run_id: run.parent_run_id,

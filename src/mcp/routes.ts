@@ -23,6 +23,7 @@ import {
 import { confirmBillingToolField } from "../auth/seats.js";
 import { config } from "../config.js";
 import { z } from "zod";
+import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
 
@@ -60,10 +61,13 @@ function createMcpServerForNest(
   /** A person holding a full credential who administers this nest — gates
    *  MCP_ADMIN_TOOLS (each call is re-checked in the service layer). */
   isNestAdmin = false,
+  /** Returned in the `initialize` result — CONTEXT.md plus the nest's
+   *  always-include documents (connect-instructions.ts). */
+  instructions?: string,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
   // Advertise the workflow-plane tools only when the flag is on — the same
@@ -146,6 +150,15 @@ mcpRoutes.all("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const caller = await getCaller(userId);
+  // The connect message carries the nest's rules (CU-wdqcq05rn0). Resolved
+  // only for the initialize request — every tool call rebuilds this server.
+  const instructions = (await isInitializeRequest(c.req.raw))
+    ? await nestConnectInstructions(
+        nestId,
+        { userId, userEmail: caller.email },
+        { headless: caller.headless },
+      )
+    : undefined;
   // Create a fresh server per request (stateless) with the current user's identity
   const server = createMcpServerForNest(
     nestId,
@@ -160,6 +173,7 @@ mcpRoutes.all("/", async (c) => {
     caller.person &&
       (c.get("keyCapability") ?? "write") === "write" &&
       (c.get("nestPermission") === "owner" || c.get("nestPermission") === "admin"),
+    instructions,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
