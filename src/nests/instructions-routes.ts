@@ -48,11 +48,13 @@ instructionsRoutes.get("/instructions", async (c) => {
   const userId = c.get("userId");
   // Which always-include documents travel with these instructions to every
   // agent (CU-wdqcq05rn0) — the ones THIS reader can read, without the text.
-  const { set } = await standingBlockFor(nestId, {
-    userId,
-    userEmail: await resolveCallerEmail(userId),
-  });
-  return c.json({ ...(await getInstructions(nestId)), always_included: standingRefs(set) });
+  // Resolved alongside the CONTEXT.md read, and cached per nest until an
+  // approval changes it; a failure shows as none rather than failing the page.
+  const [instructions, { set }] = await Promise.all([
+    getInstructions(nestId),
+    resolveCallerEmail(userId).then((userEmail) => standingBlockFor(nestId, { userId, userEmail })),
+  ]);
+  return c.json({ ...instructions, always_included: standingRefs(set) });
 });
 
 instructionsRoutes.put("/instructions", async (c) => {

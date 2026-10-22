@@ -2084,6 +2084,7 @@ export function NestView({
               stewardshipEnabled={stewardshipEnabled}
               allowSelfApprove={allowSelfApprove}
               primeTags={primeTags}
+              alwaysIncludeTags={alwaysIncludeTags}
               visibility={visibility}
               hasRoleOnNode={hasRoleOnNode}
               canReviewNode={canReviewNode}
@@ -2128,6 +2129,7 @@ export function NestView({
                 currentUser={currentEmail}
                 canEditDocs={canEditDocs}
                 primeTags={primeTags}
+                alwaysIncludeTags={alwaysIncludeTags}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />

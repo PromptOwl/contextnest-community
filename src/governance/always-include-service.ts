@@ -19,9 +19,10 @@
  *   - Only the documents the caller can read (`filterAccessible`). A scoped
  *     reader gets their subset; nobody learns a document exists through this.
  *   - Ordered by node id, so the same nest yields the same text every time.
- *   - Within a size budget. Whole documents only: the first one that doesn't
- *     fit, and every one after it, is listed by title and id instead of being
- *     cut mid-text — the reader can fetch it, and nothing is silently dropped.
+ *   - Within a size budget. Whole documents only: one that doesn't fit what's
+ *     left is listed by title and id instead of being cut mid-text, and later,
+ *     smaller documents still go in — so one oversized document can't push out
+ *     every rule after it. Nothing is silently dropped.
  *
  * The rendered block is fenced like any other document text the server hands
  * a model, and labelled as approved documents rather than as the model's own
@@ -45,6 +46,29 @@ export const ALWAYS_INCLUDE_BUDGET_CHARS = 24_000;
 
 /** Overflow entries listed by name before the rest are counted. */
 const MAX_OVERFLOW_LISTED = 50;
+
+/** What a document costs on top of its text: the fence, id, version and title
+ *  line the block wraps it in. */
+const PER_DOCUMENT_OVERHEAD = 80;
+
+/**
+ * Resolved sets, per nest, keyed by a fingerprint of everything the result
+ * depends on: the nest's always-include tags and every approved (node, version)
+ * pin. The decision and the text both come from approved versions, so the
+ * fingerprint changes exactly when the answer can — an approval, a heal, a
+ * move, a delete, a tag-setting change — and a cache hit skips the rebuilds.
+ * Bounded; the oldest nest is evicted first.
+ */
+const resolvedCache = new Map<string, { fingerprint: string; docs: StandingDocument[] }>();
+const MAX_CACHED_NESTS = 200;
+
+function fingerprintOf(tags: string[], approved: Map<string, number>): string {
+  const pins = [...approved.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, v]) => `${id}@${v}`)
+    .join("\n");
+  return `${tags.join(",")}\n${pins}`;
+}
 
 export interface StandingDocument {
   id: string;
@@ -74,9 +98,31 @@ export interface StandingCaller {
  * `alwaysIncludeDocs`, which filters to what the caller may read.
  */
 async function approvedAlwaysInclude(nestId: string): Promise<StandingDocument[]> {
-  const approved = await getApprovedVersions(nestId);
+  const [approved, tags] = await Promise.all([
+    getApprovedVersions(nestId),
+    nestAlwaysIncludeTags(nestId),
+  ]);
   if (approved.size === 0) return [];
-  const tags = await nestAlwaysIncludeTags(nestId);
+  const fingerprint = fingerprintOf(tags, approved);
+  const hit = resolvedCache.get(nestId);
+  if (hit && hit.fingerprint === fingerprint) return hit.docs;
+  const { docs, complete } = await resolveApprovedAlwaysInclude(nestId, approved, tags);
+  // A rebuild that failed may succeed next time; only a clean result is kept.
+  if (complete) {
+    resolvedCache.delete(nestId);
+    resolvedCache.set(nestId, { fingerprint, docs });
+    if (resolvedCache.size > MAX_CACHED_NESTS) {
+      resolvedCache.delete(resolvedCache.keys().next().value!);
+    }
+  }
+  return docs;
+}
+
+async function resolveApprovedAlwaysInclude(
+  nestId: string,
+  approved: Map<string, number>,
+  tags: string[],
+): Promise<{ docs: StandingDocument[]; complete: boolean }> {
   const wanted = new Set(tags);
 
   // The approved versions' tags, from the version rows — no file reads.
@@ -119,10 +165,11 @@ async function approvedAlwaysInclude(nestId: string): Promise<StandingDocument[]
       );
     })
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { docs: [], complete: true };
 
   const { versions } = await engineCache.get(nestId);
   const out: StandingDocument[] = [];
+  let complete = true;
   for (const n of candidates) {
     let raw: string;
     let version: number;
@@ -132,6 +179,7 @@ async function approvedAlwaysInclude(nestId: string): Promise<StandingDocument[]
       // Fail closed: an approved text we can't rebuild is never replaced by
       // the working copy (which may be a draft).
       console.warn(`[always-include] ${nestId}/${n.id}: approved version unavailable`, err);
+      complete = false;
       continue;
     }
     const { body, frontmatter } = parseVersionRaw(n.id, raw);
@@ -145,46 +193,57 @@ async function approvedAlwaysInclude(nestId: string): Promise<StandingDocument[]
       content: body.trim(),
     });
   }
-  return out;
+  return { docs: out, complete };
 }
 
 /**
  * The nest's always-include documents this caller may read, within the
- * budget. `budget` lets a caller resolving several nests share one budget.
+ * budget.
  */
 export async function alwaysIncludeDocs(
   nestId: string,
   caller: StandingCaller,
   budget: Budget = newBudget(),
 ): Promise<StandingInstructions> {
-  const all = await approvedAlwaysInclude(nestId);
-  if (all.length === 0) return { documents: [], overflow: [] };
-  const readable = await filterAccessible(nestId, caller.userId, caller.userEmail, all);
-  return fitBudget(readable, budget);
+  return fitBudget(await readableAlwaysInclude(nestId, caller), budget);
 }
 
-/** What's left of a size budget. Once one document overflows, it stays full:
- *  every later document is listed, so the order owners see is the order
- *  documents fall out of the budget. */
+/** The nest's always-include documents this caller may read, in order, before
+ *  any budget. */
+export async function readableAlwaysInclude(
+  nestId: string,
+  caller: StandingCaller,
+): Promise<StandingDocument[]> {
+  const all = await approvedAlwaysInclude(nestId);
+  if (all.length === 0) return [];
+  return filterAccessible(nestId, caller.userId, caller.userEmail, all);
+}
+
+/** What's left of a size budget, shared by every nest one block covers. */
 export interface Budget {
   remaining: number;
-  full: boolean;
 }
 
 export function newBudget(chars = ALWAYS_INCLUDE_BUDGET_CHARS): Budget {
-  return { remaining: chars, full: false };
+  return { remaining: chars };
 }
 
-/** Whole documents into the budget, in order; the rest become overflow. */
+/** What a document takes out of the budget: its text plus its wrapping. */
+export function documentCost(d: StandingDocument): number {
+  return d.content.length + d.title.length + PER_DOCUMENT_OVERHEAD;
+}
+
+/** Whole documents into the budget, in order. One that doesn't fit what's
+ *  left becomes overflow; later documents that do fit still go in. */
 export function fitBudget(docs: StandingDocument[], budget: Budget): StandingInstructions {
   const documents: StandingDocument[] = [];
   const overflow: StandingRef[] = [];
   for (const d of docs) {
-    if (!budget.full && d.content.length <= budget.remaining) {
-      budget.remaining -= d.content.length;
+    const cost = documentCost(d);
+    if (cost <= budget.remaining) {
+      budget.remaining -= cost;
       documents.push(d);
     } else {
-      budget.full = true;
       overflow.push({ id: d.id, title: d.title, version: d.version });
     }
   }
@@ -203,10 +262,12 @@ export function standingRefs(set: StandingInstructions): {
   };
 }
 
-/** A document can't close its own fence (or the block's) and have what
- *  follows read as outside the fence. */
+/** A document can't open or close a fence of its own — closing its fence
+ *  early, or forging another `<standing_document id=… version=…>`, would make
+ *  its text read as something it isn't. Both tag forms are broken with a
+ *  space, which a reader sees and a parser of the real tags doesn't match. */
 function defuse(text: string): string {
-  return text.replace(/<\/(standing_document|standing_instructions)/gi, "</ $1");
+  return text.replace(/<(\/?)(standing_document|standing_instructions)/gi, "<$1 $2");
 }
 
 /** One-line title, safe inside the fence. */

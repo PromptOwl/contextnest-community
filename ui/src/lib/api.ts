@@ -1236,15 +1236,32 @@ export async function removeFromAllowlist(
 /**
  * Does this document need steward approval regardless of who edits it?
  * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
- * the badge is advisory, the server gate is authoritative.
+ * the badge is advisory, the server gate is authoritative. An always-include
+ * document is prime whatever its own prime flag says.
  */
 export function isPrimeNode(
-  node: { tags?: string[]; prime?: boolean },
+  node: { tags?: string[]; prime?: boolean; always_include?: boolean },
   primeTags: string[],
+  alwaysIncludeTags: string[] = [],
 ): boolean {
+  if (isAlwaysIncludeNode(node, alwaysIncludeTags)) return true;
   if (typeof node.prime === "boolean") return node.prime;
   if (!primeTags.length) return false;
   const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
+  );
+}
+
+/** Same resolution as the server's `isAlwaysIncludeDocument`: the document
+ *  flag, else the nest's always-include tags. */
+export function isAlwaysIncludeNode(
+  node: { tags?: string[]; always_include?: boolean },
+  alwaysIncludeTags: string[],
+): boolean {
+  if (typeof node.always_include === "boolean") return node.always_include;
+  if (!alwaysIncludeTags.length) return false;
+  const wanted = new Set(alwaysIncludeTags);
   return (node.tags || []).some((t) =>
     wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );

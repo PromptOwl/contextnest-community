@@ -15,9 +15,12 @@
 import { getInstructions } from "../nests/instructions-service.js";
 import {
   alwaysIncludeDocs,
+  fitBudget,
   newBudget,
+  readableAlwaysInclude,
   renderStandingInstructions,
   type StandingCaller,
+  type StandingDocument,
   type StandingSection,
 } from "../governance/always-include-service.js";
 
@@ -25,10 +28,19 @@ import {
  *  much of it, cut at a line, with a pointer to `context_init` for the rest. */
 export const CONNECT_CONTEXT_MD_CHARS = 24_000;
 
+/** An `initialize` request is a few hundred bytes; a body past this is a tool
+ *  call (a bulk update, a long document) and isn't parsed a second time. */
+const MAX_INITIALIZE_BYTES = 16 * 1024;
+
+/** How many nests the server-wide connect message resolves at once. */
+const NEST_CONCURRENCY = 8;
+
 /** Is this JSON-RPC request (or batch) an `initialize`? Reads a clone, so the
  *  transport still gets the body. Anything unparseable is "no". */
 export async function isInitializeRequest(req: Request): Promise<boolean> {
   if (req.method !== "POST") return false;
+  const length = Number(req.headers.get("content-length"));
+  if (Number.isFinite(length) && length > MAX_INITIALIZE_BYTES) return false;
   try {
     const body = (await req.clone().json()) as unknown;
     const msgs = Array.isArray(body) ? body : [body];
@@ -80,9 +92,9 @@ export async function nestConnectInstructions(
 /**
  * Server-wide endpoint: every readable nest's always-include documents under
  * ONE budget, nests in name order, plus a pointer to the per-nest endpoint's
- * `context_init` (which this endpoint doesn't have). Once the budget is full
- * the remaining nests aren't resolved at all — the count says so — which keeps
- * a connect cheap for someone who can read hundreds of nests.
+ * `context_init` (which this endpoint doesn't have). Nests resolve a few at a
+ * time (each is cached until its approvals change); the budget is then spent
+ * in order. A nest that can't be resolved is named, not silently skipped.
  */
 export async function serverConnectInstructions(
   nests: Array<{ id: string; name: string }>,
@@ -92,20 +104,27 @@ export async function serverConnectInstructions(
   const ordered = [...nests].sort(
     (a, b) => a.name.localeCompare(b.name, "en") || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
+  // Resolved without a budget (filtered to the caller), then fitted in order.
+  const resolved: Array<StandingDocument[] | null> = new Array(ordered.length).fill(null);
+  for (let i = 0; i < ordered.length; i += NEST_CONCURRENCY) {
+    await Promise.all(
+      ordered.slice(i, i + NEST_CONCURRENCY).map(async (n, j) => {
+        try {
+          resolved[i + j] = await readableAlwaysInclude(n.id, caller);
+        } catch (err) {
+          console.error(`[mcp] ${n.id}: standing instructions unavailable`, err);
+        }
+      }),
+    );
+  }
   const budget = newBudget();
   const sections: StandingSection[] = [];
-  let unchecked = 0;
-  for (const n of ordered) {
-    if (budget.full) {
-      unchecked++;
-      continue;
-    }
-    try {
-      sections.push({ nest: n, set: await alwaysIncludeDocs(n.id, caller, budget) });
-    } catch (err) {
-      console.error(`[mcp] ${n.id}: standing instructions unavailable`, err);
-    }
-  }
+  const failed: string[] = [];
+  ordered.forEach((n, i) => {
+    const docs = resolved[i];
+    if (docs === null) failed.push(n.name);
+    else sections.push({ nest: n, set: fitBudget(docs, budget) });
+  });
   const lines = [
     "Each nest has operating instructions (CONTEXT.md). Before working in a nest, read them: " +
       `connect to ${baseUrl}/nests/<nest-id>/mcp and call context_init (nest_index lists the ids).`,
@@ -115,10 +134,10 @@ export async function serverConnectInstructions(
     fetchHint: "read them with context_get and the nest argument",
   });
   if (block) lines.push("", block);
-  if (unchecked) {
+  if (failed.length) {
     lines.push(
       "",
-      `The size budget filled before ${unchecked} more nest${unchecked === 1 ? "" : "s"} could be checked for standing instructions — connect to a nest's own endpoint to receive its full set.`,
+      `Standing instructions could not be loaded for: ${failed.map((f) => `"${f.replace(/\s+/g, " ")}"`).join(", ")} — connect to that nest's own endpoint, or call context_init there.`,
     );
   }
   return lines.join("\n");

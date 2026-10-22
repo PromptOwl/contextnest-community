@@ -2496,7 +2496,7 @@ The server pushes a nest's rules to agents instead of waiting for them to call `
 | Entry point | What it gets |
 |---|---|
 | `initialize` on `/nests/:id/mcp` | `result.instructions` = CONTEXT.md (first 24,000 chars, cut at a line, pointing at `context_init` for the rest), then the standing-instructions block. A headless access key gets the block only (CONTEXT.md isn't a reviewed document and `context_init` is closed to it). |
-| `initialize` on `/mcp` | `result.instructions` = a pointer to each nest's `context_init`, then one block covering every nest the caller can read (in name order, one shared budget). Once the budget is full, later nests aren't checked, and the text says how many. |
+| `initialize` on `/mcp` | `result.instructions` = a pointer to each nest's `context_init`, then one block covering every nest the caller can read (in name order, one shared budget). A nest whose documents can't be loaded is named, not silently left out. |
 | `context_init` | CONTEXT.md, then the block. |
 | Hootie (`POST /nests/:id/chat`) | The block, ahead of the retrieved documents. |
 | Metacognition agents | The block, after the agent's own instructions, resolved as the agent's owner. |
@@ -2507,8 +2507,9 @@ Rules for what goes in:
 - **Approved versions only.** Whether a document is always-include is read from its approved version too, so a draft that adds the tag (or the flag) injects nothing until a steward approves it. A document with no approved version is never included; neither is one whose approved version can't be rebuilt.
 - **Access-filtered.** Each caller gets only the documents they can read (`filterAccessible`): a document share narrows it to the shared documents; a public reader or headless key reads approved documents anyway. Nobody learns a document exists through this.
 - **Ordered by node id**, so the same nest yields the same text every time.
-- **Budget: 24,000 characters** of document text per entry point. Whole documents only: the first one that doesn't fit, and every one after it, is listed by title, id and version (up to 50 named, the rest counted) instead of being cut mid-text.
-- **Fenced.** Each document is wrapped as `<standing_document id="nodes/…" version="N">` inside `<standing_instructions>`; a document can't close either fence early (the closing tags are defused in its text).
+- **Budget: 24,000 characters** per entry point, counting each document's text, title and wrapping. Whole documents only: a document that doesn't fit what's left is listed by title, id and version (up to 50 named, the rest counted) instead of being cut mid-text, and later documents that do fit still go in.
+- **Cached per nest** until the result can change: the cache key is the nest's always-include tags plus every approved (document, version) pin, so an approval, a move, a delete or a tag-setting change resolves afresh. A rebuild that failed is not cached.
+- **Fenced.** Each document is wrapped as `<standing_document id="nodes/…" version="N">` inside `<standing_instructions>`; a document can't open or close either fence (both tag forms are defused in its text, `<standing_…` → `< standing_…`).
 - **Always-include documents are prime** (see `STEWARDSHIP.md`), so in a governed nest the injected text can't change without a steward's approval.
 
 The server guarantees **delivery**, not obedience: an outside client (Claude Code, Cursor, …) receives the rules in `instructions`, which most clients place in the system prompt, but its model may still ignore them. For the models this server runs (Hootie, metacognition) and the run bundle, the server owns the prompt.

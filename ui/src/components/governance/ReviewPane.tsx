@@ -52,6 +52,8 @@ interface ReviewPaneProps {
    *  refuses prime documents — offer it only when it can work. */
   canEditDocs: boolean;
   primeTags: string[];
+  /** Always-include documents are prime too. */
+  alwaysIncludeTags?: string[];
   onApprove: (note?: string) => Promise<void>;
   onRequestChanges: (note: string) => Promise<void>;
   /** Open the document in the editor (Edit, Save & approve). */
@@ -77,6 +79,7 @@ export function ReviewPane({
   currentUser,
   canEditDocs,
   primeTags,
+  alwaysIncludeTags = [],
   onApprove,
   onRequestChanges,
   onEditDraft,
@@ -137,7 +140,7 @@ export function ReviewPane({
     !!stewardData &&
     !isReviewerOnly(stewardData.stewards ?? [], currentUser) &&
     !!node &&
-    !api.isPrimeNode(node, primeTags);
+    !api.isPrimeNode(node, primeTags, alwaysIncludeTags);
 
   const decide = async (kind: "approve" | "changes") => {
     if (kind === "changes") {
