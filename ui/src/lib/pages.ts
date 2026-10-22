@@ -38,6 +38,8 @@ export interface PageCaps {
   /** A signed-in server superadmin. Never true in open mode, where everyone
    *  is "admin" — superadmin-only pages (the message log) stay hidden there. */
   isSuperadmin?: boolean;
+  /** The experimental cross-nest document stream is on (/health). */
+  docStreamEnabled?: boolean;
 }
 
 export interface PageMeta {

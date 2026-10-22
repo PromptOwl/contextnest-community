@@ -20,6 +20,7 @@ import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
+import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
@@ -28,6 +29,7 @@ import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
+import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
@@ -205,29 +207,6 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-/** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
- *  gated inside NestView, which falls back to overview when one isn't shown. */
-/** Breadcrumb labels for those tabs. */
-const NEST_TAB_LABELS: Record<string, string> = {
-  overview: "Overview",
-  documents: "Documents",
-  review: "Review queue",
-  "external-edits": "External edits",
-  stewards: "Stewards",
-  collaborators: "Collaborators",
-  fields: "Fields",
-};
-
-const NEST_TABS = [
-  "overview",
-  "documents",
-  "review",
-  "external-edits",
-  "stewards",
-  "collaborators",
-  "fields",
-];
-
 type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
@@ -262,12 +241,13 @@ export default function App() {
     workflowPlaneEnabled,
     subagentRunsEnabled,
     mcpOauthEnabled,
+    docStreamEnabled,
     loading,
     error,
     logout,
   } = useAuth();
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -616,9 +596,7 @@ export default function App() {
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
-          tab: NEST_TABS.includes(params.get("tab") ?? "")
-            ? params.get("tab")!
-            : undefined,
+          tab: nestTabFromParam(params.get("tab")),
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
@@ -660,6 +638,7 @@ export default function App() {
       else params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     } else if (view.page === "nest") {
       pathNestId = view.nestId;
       if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
@@ -670,6 +649,9 @@ export default function App() {
       // link keeps working and doesn't grow a redundant &tab=overview.
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
+      // ?review= (the change open in the review pane) only means something
+      // on the Review tab; NestView writes it, App drops it everywhere else.
+      if (view.tab !== "review") params.delete("review");
     } else if (
       // Nest views ride in the path (/nest/<id>/<segment>) — the registry
       // page owns its segment; trace is the one non-registry sub-page.
@@ -688,11 +670,13 @@ export default function App() {
       params.delete("thread");
       params.delete("tab");
       params.delete("view");
+      params.delete("review");
     } else {
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     }
     const qs = params.toString();
     const path =
@@ -857,7 +841,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -865,7 +849,7 @@ export default function App() {
     () => ({
       openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
-      openReview: (nestId, nestName, nodeId) =>
+      openReview: (nestId, nestName, nodeId, opts) =>
         setView({
           page: "document",
           nestId,
@@ -873,6 +857,7 @@ export default function App() {
           nodeId,
           isOwner: true,
           isAnonOwned: true,
+          initialThreadId: opts?.thread,
           returnTo: viewRef.current,
         }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
@@ -1138,6 +1123,8 @@ export default function App() {
       )}
       {/* A refused write anywhere offers "Request access?" (CU-wdqcq041jn). */}
       <RequestAccessHost />
+      {/* A role change that raises someone's billed class asks first (CU-wdqcq04t06). */}
+      <BillingConfirmHost />
     </>
   );
 

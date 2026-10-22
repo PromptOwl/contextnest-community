@@ -107,6 +107,7 @@ import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
+import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -233,6 +234,9 @@ interface DocumentEditorProps {
   /** Open the nest's settings dialog (the self-approve switch). */
   onOpenNestSettings?: () => void;
 }
+
+/** Mirrors the engine's TITLE_MAX_LENGTH, which the server enforces. */
+const TITLE_MAX = 200;
 
 /** Shown when nobody but the submitter could approve (CU-wdqcq02t1r). */
 const NO_APPROVER_COPY =
@@ -2530,6 +2534,8 @@ export function DocumentEditor({
               <span className="hidden sm:inline">Share</span>
             </Button>
           )}
+          {/* Experimental document pins — nothing while the switch is off. */}
+          {!isNew && <DocPinControl nestId={nestId} nodeId={nodeId} />}
           {/* Comments — toggles the rail. The count is open threads. Closing
               also leaves comment mode, or the rail would reopen itself. */}
           {!isNew && (
@@ -2896,11 +2902,10 @@ export function DocumentEditor({
                           }
                         }}
                         placeholder="Untitled"
-                        // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
-                        // stop here so the server's 400 is unreachable from the UI.
+                        // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
-                        maxLength={120}
+                        maxLength={TITLE_MAX}
                         disabled={fieldsDisabled}
                         required
                         aria-required="true"
@@ -2910,13 +2915,13 @@ export function DocumentEditor({
                         className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
                           }`}
                       />
-                      {((touched && !title.trim()) || title.length >= 90) && (
+                      {((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
                         <div className="mt-1 flex items-start justify-between gap-2 text-xs">
                           <span className="text-destructive">
                             {touched && !title.trim() ? "Title is required" : ""}
                           </span>
                           <span className="text-muted-foreground tabular-nums">
-                            {title.length >= 90 ? `${title.length}/120` : ""}
+                            {title.length >= TITLE_MAX - 30 ? `${title.length}/${TITLE_MAX}` : ""}
                           </span>
                         </div>
                       )}

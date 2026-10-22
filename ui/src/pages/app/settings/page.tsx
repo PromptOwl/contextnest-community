@@ -113,6 +113,8 @@ const TABS: {
       "workflow_plane_enabled",
       "subagent_runs_enabled",
       "metacognition_enabled",
+      "experimental_doc_stream_enabled",
+      "experimental_doc_pins",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1177,6 +1179,60 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     checked={draft.metacognition_enabled}
                     disabled={!draft.workflow_plane_enabled}
                     onCheckedChange={(v) => set({ metacognition_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Experimental: cross-nest document stream — its own switch */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Document stream (experimental)</CardTitle>
+                <CardDescription>
+                  A Stream page (and a Stream tab on each nest) showing every
+                  document version across the nests a person can read, newest
+                  first, filterable by nest, topic, type and author, with the
+                  document's comments inline. Off by default. Experimental: it
+                  may change or disappear in a later release.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.experimental_doc_stream_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.experimental_doc_stream_enabled}
+                    onCheckedChange={(v) => set({ experimental_doc_stream_enabled: v })}
+                    aria-label="Document stream (experimental)"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Experimental: document pins (CU-wdqcq02crw) — its own switch */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Document pins (experimental)
+                </CardTitle>
+                <CardDescription>
+                  Pin documents to the front of a nest. Stewards pin for
+                  everyone, in the order they choose; anyone who can read a
+                  document can pin it for themselves. Pins show as a strip
+                  above the nest's document list. Experimental — this may
+                  change or disappear.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.experimental_doc_pins ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={!!draft.experimental_doc_pins}
+                    onCheckedChange={(v) => set({ experimental_doc_pins: v })}
+                    data-testid="settings-experimental-doc-pins"
                   />
                 </div>
               </CardContent>

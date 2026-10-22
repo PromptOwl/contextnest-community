@@ -1,4 +1,4 @@
-import type { WorkItem } from "./api";
+import type { AssignedItem, WorkItem, WorkPagination } from "./api";
 
 /**
  * Split the inbox: reviews (the only rows a batch decision applies to) and
@@ -22,4 +22,20 @@ export function workItemKey(w: WorkItem): string {
   return w.type === "access" && w.request_id
     ? `access:${w.request_id}`
     : `${w.nest_id}:${w.node_id}`;
+}
+
+/**
+ * The My Work badge: everything waiting on you — the reviews and requests the
+ * server totals, plus the open tasks assigned to you. Assigned tasks aren't in
+ * pagination.total because they don't page with the reviews.
+ */
+export function waitingOnMeCount(
+  work: { pagination?: WorkPagination; assigned?: AssignedItem[] } | undefined,
+): number {
+  return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0);
+}
+
+/** "All caught up" only when no review, request or assigned task waits on you. */
+export function nothingWaitingOnMe(work: { items: WorkItem[]; assigned?: AssignedItem[] }): boolean {
+  return work.items.length === 0 && (work.assigned?.length ?? 0) === 0;
 }

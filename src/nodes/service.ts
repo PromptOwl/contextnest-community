@@ -16,6 +16,7 @@ import {
   readPdfBinary,
   pdfSidecarPath,
   viewMetaSchema,
+  TITLE_MAX_LENGTH,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -169,8 +170,9 @@ type ImportOpResult = {
 /** Max characters in a human-readable title. The id/slug bound (100 per
  *  segment, below) doesn't cover this: a title of emoji or non-latin text
  *  slugifies to almost nothing, so an unbounded title still lands in
- *  frontmatter and stretches every header that renders it. */
-const MAX_TITLE_LENGTH = 120;
+ *  frontmatter and stretches every header that renders it. The engine owns the
+ *  number, so a title a local vault accepts is never refused on push. */
+const MAX_TITLE_LENGTH = TITLE_MAX_LENGTH;
 
 /** Shared choke point for REST + MCP: both create and rename route here. */
 function assertTitleLength(title: string): void {
@@ -398,6 +400,20 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
   }
   console.error(`${context}:`, err);
   return new AppError(500, message);
+}
+
+/** Reconstructed markdown split into its frontmatter and body. Unparseable →
+ *  the raw text as body and no frontmatter (fail closed on metadata). */
+export function parseVersionRaw(
+  nodeId: string,
+  raw: string,
+): { body: string; frontmatter: Record<string, unknown> } {
+  try {
+    const doc = parseDocument(`${nodeId}.md`, raw, nodeId);
+    return { body: doc.body ?? "", frontmatter: (doc.frontmatter ?? {}) as unknown as Record<string, unknown> };
+  } catch {
+    return { body: raw, frontmatter: {} };
+  }
 }
 
 /** Strip YAML frontmatter from reconstructed markdown; mirrors node.body shape. */
@@ -2977,6 +2993,10 @@ export async function updateNode(
         if (isAuthorEditingOwnReview) {
           await repointPendingReview({ nestId, nodeId, newVersion });
         }
+        // The working file keeps the last published frontmatter status; the
+        // version row just written is what GET reports, so say "draft" here too
+        // (the reply used to claim "published" for an edit awaiting review).
+        node = { ...node, frontmatter: { ...node.frontmatter, status: "draft" } };
         responseVersion = newVersion;
       } else {
         // Publish through the engine FIRST; only mirror into the DB once it
@@ -3141,6 +3161,10 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
+  // delete takes them with it (no pin on a document that is gone, or on the
+  // next one to take its id); a move carries them along.
+  ["node_pins", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
@@ -3175,6 +3199,13 @@ async function purgeNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [nestId, nodeId],
   );
+  // Public docs-site URLs (CU-wdqcq05jhm) outlive the document on purpose: its
+  // old addresses answer 410 Gone, which tells search engines to drop them.
+  // The row is detached from the id, so a later document there inherits none.
+  await tx.run(
+    `UPDATE site_paths SET node_id = '', kind = 'history' WHERE nest_id = ? AND node_id = ?`,
+    [nestId, nodeId],
+  );
 }
 
 /** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
@@ -3184,6 +3215,12 @@ async function rewriteNodeKeyedRows(
   oldId: string,
   newId: string,
 ): Promise<void> {
+  // Pins are the one node-keyed table with a uniqueness rule on the id
+  // (migration 071's partial unique indexes). The destination is not a live
+  // document, so any pin row already on it is stale (its document vanished
+  // outside the app) — clear it, or the repoint trips the index and the move
+  // fails.
+  await tx.run("DELETE FROM node_pins WHERE nest_id = ? AND node_id = ?", [nestId, newId]);
   for (const [table, column] of NODE_KEYED_TABLES) {
     await tx.run(
       `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
@@ -3205,6 +3242,9 @@ async function rewriteNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [newId, nestId, oldId],
   );
+  // The page's public URLs move with it: its custom URL stays its own, and
+  // every address it was served at 301s to wherever it lands now.
+  await tx.run(`UPDATE site_paths SET node_id = ? WHERE nest_id = ? AND node_id = ?`, [newId, nestId, oldId]);
 }
 
 export interface MoveNodeResult {

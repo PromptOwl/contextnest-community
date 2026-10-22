@@ -10,13 +10,26 @@ import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
+import { pinRoutes } from "./nests/pin-routes.js";
+import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
+import { instructionsRoutes } from "./nests/instructions-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
+import {
+  siteRoutes,
+  docsDomainMiddleware,
+  robotsTxt,
+  sitemapIndex,
+  legacySiteRedirect,
+  isCrawler,
+  siteDomainCheck,
+} from "./site/routes.js";
+import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
@@ -26,6 +39,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
+import { getDocStream } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -79,7 +93,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -135,6 +149,7 @@ import {
   ValidationError,
   VaultBusyError,
   PlanLimitError,
+  BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -162,7 +177,7 @@ import {
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
-import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage } from "./auth/seats.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage, billingConfirmed } from "./auth/seats.js";
 import { hasEntitlement } from "./auth/entitlements.js";
 import {
   resolveModelCredential,
@@ -286,6 +301,7 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "visibility",
   "settings",
   "reader-mode",
+  "site",
   "grants",
   "systems",
   "headless",
@@ -302,6 +318,9 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "restore",
   "push-allowlist",
   "pending-pushes",
+  // Document pins (CU-wdqcq02crw) are curation and personal bookmarks — a
+  // person's acts, not content a sync carries.
+  "pins",
 ]);
 
 // Unauth GETs in key mode: allow read-only access to a specific nest
@@ -565,6 +584,10 @@ export function createApp(): Hono<AuthEnv> {
       : cors({ origin: corsOrigins, credentials: true }),
   );
 
+  // Pricing spec v21: a role change that raises someone's billed class needs
+  // explicit confirmation; apps and scripts give it with this header.
+  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
+
   // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
   // this server. CORS does not cover this: it governs who may *read* our
   // responses, not who may *embed* us, so without this any site could iframe
@@ -647,6 +670,10 @@ export function createApp(): Hono<AuthEnv> {
   // ahead of every route (and every route's own auth) so a route added later
   // is closed to nest keys until it is allowlisted on purpose — see
   // auth/nest-scope-guard.ts for what a nest key may reach.
+  // A docs domain (verified custom domain or DOCS_SITES) is entirely its docs
+  // site — answered before any key guard or app route sees it (CU-wdqcq05jhm).
+  app.use("*", docsDomainMiddleware);
+
   app.use("*", nestScopedKeyGuard);
 
   // Health check (public)
@@ -716,6 +743,13 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Experimental features, one key each (default OFF; superadmin switches
+      // under Settings → Features). Off → the feature's routes 404 and the UI
+      // renders none of it. Add new experimental switches as keys here.
+      experimental: {
+        doc_pins: config.EXPERIMENTAL_DOC_PINS,
+        doc_stream: config.EXPERIMENTAL_DOC_STREAM,
+      },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -934,7 +968,7 @@ export function createApp(): Hono<AuthEnv> {
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
-    // The model in use: the admin's pick, else the gateway's default (see hootieModel).
+    // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
@@ -956,6 +990,8 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
+    experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1385,6 +1421,25 @@ export function createApp(): Hono<AuthEnv> {
       } else {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
+    }
+    // Experimental: the cross-nest document stream. Its own switch, no
+    // dependencies. Off writes a tombstone (null): the switch is off now and
+    // stays off across a restart with the same deploy env, even if that env
+    // says true (db/settings.ts precedence) — same as FEATURE_METACOGNITION.
+    if ("experimental_doc_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_STREAM",
+        value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
+    }
+
+    // Experimental: document pins (CU-wdqcq02crw). Default OFF — enabling
+    // writes "true", disabling clears the row (falls back to the default).
+    if ("experimental_doc_pins" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_PINS",
+        value: body.experimental_doc_pins ? "true" : null,
+      });
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
     // a UI-set value gates identically to an env-set one. null clears → default.
@@ -2414,6 +2469,95 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
+  // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // One item per node version across every nest the caller can read, newest
+  // first, access-filtered per nest (see governance/stream-service.ts). Behind
+  // its own switch: off → 404. Version history is a licensed governance view,
+  // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
+  const streamUnreadableWarned = new Set<string>();
+  app.get("/me/stream", async (c) => {
+    if (!config.EXPERIMENTAL_DOC_STREAM) {
+      return c.json(
+        {
+          error:
+            "The document stream is an experimental feature that is not enabled on this server. A superadmin can turn it on in Settings (EXPERIMENTAL_DOC_STREAM).",
+        },
+        404,
+      );
+    }
+    const userId = c.get("userId");
+    if (!getCurrentLicense()?.valid) {
+      const denial = await readOnlyDenial(userId);
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
+    const list = (name: string) =>
+      [
+        ...new Set(
+          (c.req.queries(name) ?? [])
+            .flatMap((v) => v.split(","))
+            .map((v) => v.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 50);
+    let since: string | undefined;
+    const sinceRaw = c.req.query("since");
+    if (sinceRaw) {
+      // Timestamps are UTC throughout: the stream's own `at` values
+      // ("YYYY-MM-DD HH:MM:SS") round-trip, and an ISO date-time with no zone
+      // is read as UTC too, never as the server's local time.
+      const noZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(sinceRaw);
+      const t = Date.parse(noZone ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
+      if (Number.isNaN(t)) return c.json({ error: "since must be a date, e.g. 2026-10-01T00:00:00Z" }, 400);
+      // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
+      since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
+    }
+    const me = await resolveCallerEmail(userId);
+    const nests = new Map<string, string>();
+    for (const n of await listVisibleNests(userId, { readable: true }))
+      nests.set(n.id, n.name ?? n.id);
+    const page = await getDocStream({
+      userId,
+      userEmail: me,
+      nests,
+      filters: {
+        nest: list("nest"),
+        tag: list("tag"),
+        type: list("type"),
+        author: list("author"),
+        since,
+      },
+      // The service clamps (limit 1–100, default 50; offset 0–10000).
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
+      readVersion: async (nestId, nodeId, version) => {
+        const { storage, versions } = await engineCache.get(nestId);
+        try {
+          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
+        } catch {
+          // The unreviewed draft on top is never in the chain — its bytes are
+          // the live file (same fallback as GET …/versions/:version).
+          const node = await storage.readDocument(nodeId);
+          if ((node.frontmatter.version ?? 1) === version) {
+            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
+          }
+          // Neither the chain nor the live file has this version: a broken
+          // chain. The card shows no summary; say so once per document.
+          const key = `${nestId}:${nodeId}`;
+          if (!streamUnreadableWarned.has(key)) {
+            // Bounded: a long-lived server forgets old ones rather than grow.
+            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
+            streamUnreadableWarned.add(key);
+            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
+          }
+          return null;
+        }
+      },
+    });
+    return c.json(page);
+  });
+
   // Watcher notifications — read + mark-read (auth via the /me/* middleware).
   app.get("/me/notifications", async (c) => {
     const me = await resolveCallerEmail(c.get("userId"));
@@ -2444,6 +2588,10 @@ export function createApp(): Hono<AuthEnv> {
       `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
       [new Date().toISOString(), me, nestId],
     );
+    // Leaving takes the leaver's personal document pins here with them
+    // (CU-wdqcq02crw) — unless they still reach the nest another way (a team,
+    // a share grant). One rule with collaborator removal.
+    if (info.changes > 0) await dropPersonalPinsIfGone(nestId, c.get("userId"));
     return c.json({ left: info.changes > 0 });
   });
 
@@ -2575,6 +2723,12 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
+  // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
+  app.route("/d", siteRoutes);
+  app.get("/robots.txt", robotsTxt);
+  app.get("/sitemap.xml", sitemapIndex);
+  app.get("/site-domain-check", siteDomainCheck);
   // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
   // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
   // token that works on one must work on the other.
@@ -2676,6 +2830,15 @@ export function createApp(): Hono<AuthEnv> {
       if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
     }
     if (parts.length < 2) return next();
+
+    // Experimental document pins (CU-wdqcq02crw): while the switch is off the
+    // routes do not exist — 404 before the license gate, the permission merge
+    // or the nest lookup, so "off" answers the same whoever asks. Exact
+    // resource segment; documents live under /nodes, never here.
+    const isDocPinsPath = parts[1] === "pins";
+    if (isDocPinsPath && !config.EXPERIMENTAL_DOC_PINS) {
+      return c.json({ error: "Not found" }, 404);
+    }
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
@@ -2815,7 +2978,10 @@ export function createApp(): Hono<AuthEnv> {
         isActivityPath ||
         isFeedPath ||
         isDeletionQueuePath ||
-        isAgentActivityPath;
+        isAgentActivityPath ||
+        // Document pins (CU-wdqcq02crw) are a curation surface, licensed like
+        // the governance views even on GET. Exact segment (parts[1]).
+        parts[1] === "pins";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -2982,6 +3148,13 @@ export function createApp(): Hono<AuthEnv> {
         // write most often stops. Filing and reading back their OWN request is
         // all this opens; the service 404s a target they can't see, and
         // deciding stays owner/admin-only in the handler.
+        grantNestVisible = access.hasGrant;
+      } else if (parts[1] === "pins") {
+        // Document pins (CU-wdqcq02crw), for someone who reaches this nest only
+        // through a document or folder grant: the list is narrowed to the
+        // documents they can read (filterAccessible), a personal pin needs read
+        // access to its document, and editorial writes are refused in the
+        // handler — so this opens nothing past their grants.
         grantNestVisible = access.hasGrant;
       } else if (isPinAction) {
         // Pinning, for someone who reaches this nest only through a document or
@@ -3156,9 +3329,15 @@ export function createApp(): Hono<AuthEnv> {
       resource === "visibility" ||
       resource === "reader-mode" ||
       resource === "branding" ||
+      // site (CU-wdqcq05jhm): the public docs site's domain, URLs and SEO —
+      // what the nest says about itself on the open web.
+      resource === "site" ||
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
-      resource === "headless"
+      resource === "headless" ||
+      // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
+      // first, so changing it is owner/admin. Reading stays at read tier.
+      (resource === "instructions" && c.req.method !== "GET")
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -3198,6 +3377,10 @@ export function createApp(): Hono<AuthEnv> {
       !isFieldDefinitionAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
+      // Document pins: personal pins need only read access; editorial writes
+      // are gated in the handler (assertCanCurate) — a nest-wide reviewer
+      // steward may hold only read collaborator access.
+      !isDocPinsPath &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isStructureCheck &&
@@ -3485,6 +3668,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
+  nestsApp.route("/:nestId", instructionsRoutes);
+  nestsApp.route("/:nestId", siteSettingsRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document
@@ -3493,6 +3678,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
+  nestsApp.route("/:nestId/pins", pinRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
@@ -3573,8 +3759,16 @@ export function createApp(): Hono<AuthEnv> {
   app.get(
     "*",
     async (c, next) => {
-      if (isDocumentNavigation(c)) return next();
-      return c.json({ error: "Not found" }, 404);
+      const navigation = isDocumentNavigation(c);
+      // An anonymous visitor to a docs-site nest's app URL gets the page. So
+      // does a crawler, which often sends `Accept: */*` or no Accept at all:
+      // without this, links already out there lose their value to it.
+      if (navigation || isCrawler(c)) {
+        const moved = await legacySiteRedirect(c);
+        if (moved) return moved;
+      }
+      if (!navigation) return c.json({ error: "Not found" }, 404);
+      return next();
     },
     serveIndexShell,
   );
@@ -3607,6 +3801,9 @@ export function createApp(): Hono<AuthEnv> {
         { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
         402,
       );
+    }
+    if (err instanceof BillingConfirmError) {
+      return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

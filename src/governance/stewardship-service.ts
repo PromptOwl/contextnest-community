@@ -155,7 +155,7 @@ export async function updateSteward(id: string, update: StewardUpdate): Promise<
     const u = (await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [
       current.user_email,
     ])) as { id: string } | undefined;
-    await assertCanGrant([{ userId: u?.id, next: stewardClass(role) }]);
+    await assertCanGrant([{ userId: u?.id, next: stewardClass(role), email: current.user_email }]);
   }
 
   await db.run(
@@ -358,7 +358,7 @@ export async function createStewardRecord(params: {
       "SELECT id FROM users WHERE email = ?",
       [email],
     ) as { id: string } | undefined;
-    await assertCanGrant([{ userId: userRow?.id, next: stewardClass(user.role ?? "reviewer") }]);
+    await assertCanGrant([{ userId: userRow?.id, next: stewardClass(user.role ?? "reviewer"), email }]);
 
     // Mint an invited placeholder for an unregistered email — mirrors the
     // collaborator/grant/MCP provisioning paths. This gives the steward a real
