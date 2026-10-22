@@ -690,6 +690,30 @@ export const config = {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
   /**
+   * Nest Plugins (CU-wdqcq05raz) — connect outside sources (GitHub, Gong,
+   * Slack, email…) to nests through plugins written against the Apache-2.0
+   * Nest Plugin SDK, run by the engine's plugin host. Gated separately from the
+   * workflow plane. Off by default: every /nests/:id/plugins route 404s and the
+   * plugin MCP tools are not advertised. Superadmin-editable at runtime via
+   * /admin/settings (plugins_enabled).
+   */
+  get FEATURE_PLUGINS(): boolean {
+    return process.env.FEATURE_PLUGINS === "true";
+  },
+  /**
+   * Comma-separated plugin specifiers to load: npm package names resolvable
+   * from the server's node_modules, or absolute paths to an ESM module. An
+   * explicit allowlist, never a directory scan — plugins run in-process, so
+   * what runs is the operator's call. Editable via /admin/settings
+   * (plugins_packages); a change reloads the set on next use.
+   */
+  get PLUGINS(): string[] {
+    return (process.env.PLUGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  },
+  /**
    * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
    * missing/unset/anything-but-"false" = enabled, so existing deployments see
    * zero behavior change. Only CREATION of the type is refused when disabled;

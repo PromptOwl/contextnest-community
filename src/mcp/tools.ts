@@ -116,6 +116,7 @@ import {
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { isPluginTool, runPluginTool } from "./plugin-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import * as systems from "../auth/systems.js";
@@ -452,6 +453,8 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_runs_list",
   "workflow_edges_list",
   "workflow_edge_types_list",
+  // Nest Plugins (FEATURE_PLUGINS) — the read tool; run/configure are writes.
+  "context_plugins",
 ]);
 
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
@@ -463,6 +466,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   "context_systems",
   "context_instructions_update",
+  // Nest Plugins: configuring provisions a system identity and stores secrets.
+  "context_plugin_configure",
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -4242,6 +4247,10 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Nest Plugin tools (FEATURE_PLUGINS): same service layer as REST.
+      if (isPluginTool(toolName) && config.FEATURE_PLUGINS) {
+        return runPluginTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

@@ -459,6 +459,27 @@ The validation API the Structure page and the create forms use. Read tier; owner
 
 A draft that doesn't compile answers `200` with `{ "error", "fieldErrors" }` and empty results: live typing is not a failed request. A malformed body, or more than 50 tests or folders, is a `400`.
 
+## Nest Plugins (`FEATURE_PLUGINS`)
+
+Connectors that pull outside sources into a nest, run by the engine's plugin host. All routes 404 when `FEATURE_PLUGINS` is off. MCP parity: `context_plugins` (read), `context_plugin_run` (write), `context_plugin_configure` (owner/admin).
+
+Plugin writes go through the nest's normal write path, authored by the plugin's own **system identity** (`Plugin: <name>`, a write-tier system on that nest, provisioned on enable and listed under `/nests/:nestId/systems`). That means enforced structure rules apply, a governed nest sends each write to review, and a node a person edited is never overwritten: it is reported as a conflict instead. Settings the plugin marks `x-secret` are stored encrypted in the nest env store as `PLUGIN__<PLUGIN>__<KEY>`. They are never returned (only `"••••"` when set), they can't be written through `/env`, and they are left out of the workflow runner's env bundle.
+
+### GET `/nests/:nestId/plugins` (read)
+Every plugin this server loaded, with this nest's config: `{ plugins: [{ name, version, displayName, capabilities, settingsSchema, secretKeys, configured, enabled, mode, folder, settings, cursor, system, last_run_at, last_status, runs }], load_errors }`. A failed run's error text is shown only at write tier.
+
+### PUT `/nests/:nestId/plugins/:name` (owner/admin) `{ enabled?, mode?: "raw"|"summary", folder?, settings? }`
+Create or merge. A secret value of `null` clears it, and `""` or `"••••"` leaves it unchanged. Unknown settings → 400, and the plugin's `validateSettings` can refuse → 400. Enabling provisions the system identity if the plugin has no live one.
+
+### DELETE `/nests/:nestId/plugins/:name` (owner/admin)
+Forget config, secrets and the system identity. Nodes stay.
+
+### POST `/nests/:nestId/plugins/:name/run` (write)
+Run `pull()` now → `{ run: { status: "clean"|"conflicts"|"failed", created, updated, unchanged, conflicts, failed, results, triggered_by } }`. The cursor advances only on a clean run. 409 when the plugin is disabled, already running, or its system identity was revoked (re-enable to re-provision).
+
+### GET `/nests/:nestId/plugins/:name/runs?limit=` (read) · GET `/nests/:nestId/plugins/:name/health` (read)
+The run ledger, and the plugin's healthcheck against the stored settings.
+
 ## Push Confirmation Gate
 
 When a nest has `require_push_confirmation` on, a document written by an agent or script — through the MCP `context_create` tool, `POST /nests/:id/nodes` with an API key, or a bulk `POST /nests/:id/publish` — is **held** as a pending record instead of applying. It lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).

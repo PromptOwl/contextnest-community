@@ -14,6 +14,7 @@ import {
 } from "./tools.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { PLUGIN_TOOL_DEFINITIONS } from "./plugin-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
@@ -70,9 +71,12 @@ function createMcpServerForNest(
   // gate the REST requireWorkflowPlane middleware applies. config is read per
   // request (the server is rebuilt per call), so toggling the flag at runtime
   // takes effect immediately.
-  const allDefs = config.FEATURE_WORKFLOW_PLANE
-    ? [...TOOL_DEFINITIONS, ...WORKFLOW_TOOL_DEFINITIONS]
-    : TOOL_DEFINITIONS;
+  // Nest Plugin tools follow FEATURE_PLUGINS the same way (REST 404s when off).
+  const allDefs = [
+    ...TOOL_DEFINITIONS,
+    ...(config.FEATURE_WORKFLOW_PLANE ? WORKFLOW_TOOL_DEFINITIONS : []),
+    ...(config.FEATURE_PLUGINS ? PLUGIN_TOOL_DEFINITIONS : []),
+  ];
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
   const toolDefs = headless

@@ -471,6 +471,8 @@ export interface NodeResponse extends TaskFields {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Nest Plugin provenance (`metadata.provenance`) when a plugin wrote it. */
+  provenance?: Record<string, unknown>;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
@@ -659,6 +661,8 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     model:
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    // Nest Plugin provenance — "ingested by <plugin> from <url>".
+    ...((fm.metadata as any)?.provenance ? { provenance: (fm.metadata as any).provenance } : {}),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
@@ -1605,6 +1609,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** Nest Plugin provenance, stored as `metadata.provenance`. System writers
+   *  only (src/plugins/writer.ts) — no REST or MCP body maps onto it. */
+  provenance?: Record<string, unknown>;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1632,6 +1639,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   /** Custom field values to set, field key → value; `null` clears one. Merged
    *  into the stored map — keys left out are untouched. */
   fields?: FieldsPatch;
+  /** See CreateNodeInput.provenance — replaces the stored block. */
+  provenance?: Record<string, unknown>;
 }
 
 /**
@@ -1965,6 +1974,7 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.provenance ? { provenance: input.provenance } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
@@ -2716,6 +2726,11 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.provenance) {
+        const metadata = { ...(node.frontmatter.metadata as any), provenance: patch.provenance };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = { ...(opInput.metadata as object), provenance: patch.provenance };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
