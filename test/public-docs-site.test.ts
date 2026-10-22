@@ -223,6 +223,9 @@ describe("public docs site", () => {
     const bare = await get(`/nest/${nestId}`, {});
     expect(bare.status).toBe(301);
     expect(bare.headers.get("location")).toBe(want);
+    // The answer depends on Accept and User-Agent too, so caches must key on them.
+    expect(bare.headers.get("vary")).toMatch(/Accept/);
+    expect(bare.headers.get("vary")).toMatch(/User-Agent/);
     const mozilla = await get(`/nest/${nestId}`, { "User-Agent": "Mozilla/5.0" });
     expect(mozilla.status).toBe(301);
     const any = await get(`/nest/${nestId}`, { Accept: "*/*" });

@@ -264,6 +264,7 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   const built = await getSite(nest, serverOrigin(c));
   const doc = url.searchParams.get("doc");
   const path = doc ? (built.site.pages.find((p) => p.nodeId === doc)?.path ?? "") : "";
-  // Varies on the session: a signed-in visitor of the same URL gets the app.
-  return movedTo(c, `${built.site.base}/${path}`, 3600, "Cookie, Authorization");
+  // Varies on the session and on who is asking: a signed-in visitor, or a
+  // JSON-only API client, of the same URL gets the app instead.
+  return movedTo(c, `${built.site.base}/${path}`, 3600, "Cookie, Authorization, Accept, User-Agent");
 }

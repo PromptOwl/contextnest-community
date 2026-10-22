@@ -442,11 +442,11 @@ export function renderTagPage(site: Site, hub: TagHub): string {
   // Name the topic and count its pages; lead with the glossary definition
   // when there is one, else name the first pages so no two hubs read alike.
   const names = hub.pages.slice(0, 3).map((p) => p.title);
-  const description = clip(
-    hub.definition
-      ? `${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}. ${count} in ${site.name} cover ${title}.`
-      : `${count} in ${site.name} about ${title}${names.length ? `, including ${names.join(", ")}` : ""}.`,
-  );
+  // The count sentence is never clipped away: a long definition is cut first.
+  const tail = `${count} in ${site.name} about ${title}`;
+  const description = hub.definition
+    ? `${clip(`${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}.`, Math.max(60, 154 - tail.length))} ${tail}.`
+    : clip(`${tail}${names.length ? `, including ${names.join(", ")}` : ""}.`);
   const canonical = url(site, hub.path);
   return shell(site, {
     title: `${title} — ${site.name}`,
