@@ -9,7 +9,7 @@ import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { revokeAllHeadlessKeys } from "../auth/headless.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, parseOrgDomains } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import { assertCanGrant, billingConfirmed } from "../auth/seats.js";
@@ -283,6 +283,120 @@ export async function setCreatorIsReviewer(
     enabled ? 1 : 0,
     nestId,
   ]);
+}
+
+/**
+ * Org contributions (CU-wdqcq05rz6): whether anyone in the organization may
+ * suggest documents and edits on this org nest as drafts for review, and —
+ * on a shared deployment, where it is the org boundary — which email domains
+ * count as the organization. Who actually qualifies is decided in
+ * resolveNestAccess (src/shared/access.ts); this is only the stored setting.
+ */
+export type OrgContributions = "off" | "drafts";
+
+export async function nestOrgContributions(
+  nestId: string,
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] }> {
+  const row = (await getDb().get(
+    "SELECT org_contributions, org_domains FROM nests WHERE id = ?",
+    [nestId],
+  )) as { org_contributions: string | null; org_domains: string | null } | undefined;
+  return {
+    org_contributions: row?.org_contributions === "drafts" ? "drafts" : "off",
+    org_domains: parseOrgDomains(row?.org_domains),
+  };
+}
+
+/** A bare registrable-looking host: labels of [a-z0-9-] (no edge hyphens),
+ *  at least one dot, an alphabetic TLD. No wildcards, schemes, ports, paths
+ *  or local parts — a domain list is matched by exact equality. */
+const DOMAIN_RE = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+/** Trim, lowercase, drop one leading '@', dedupe. Throws on anything else. */
+export function normalizeOrgDomains(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+  }
+  if (input.length > 50) throw new ValidationError("org_domains takes at most 50 domains");
+  const out: string[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "string") {
+      throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+    }
+    const d = raw.trim().toLowerCase().replace(/^@/, "");
+    if (!DOMAIN_RE.test(d)) {
+      throw new ValidationError(
+        `"${raw}" isn't an email domain. Use the bare domain after the @, like acme.com — no wildcards, no https://.`,
+      );
+    }
+    if (!out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Validate an org-contributions change against the state it would leave, so
+ * a refused body writes nothing. Returns the new state, or null when the body
+ * doesn't touch these fields.
+ *
+ * - Turning it ON needs visibility 'org': on a private nest there is no
+ *   "anyone in the org" to admit, and on a public one the readers are the
+ *   whole internet. (A nest that later leaves 'org' keeps the stored value,
+ *   but resolveNestAccess admits nobody until it is 'org' again.)
+ * - On a shared deployment it needs a non-empty domain list, including when
+ *   a later change would empty the list under a setting that is on —
+ *   "everyone on the server" there is every customer.
+ */
+export async function validateOrgContributionsPatch(
+  nestId: string,
+  body: { org_contributions?: unknown; org_domains?: unknown },
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] } | null> {
+  if (body.org_contributions === undefined && body.org_domains === undefined) return null;
+  if (
+    body.org_contributions !== undefined &&
+    body.org_contributions !== "off" &&
+    body.org_contributions !== "drafts"
+  ) {
+    throw new ValidationError('org_contributions must be "off" or "drafts"');
+  }
+  const current = await nestOrgContributions(nestId);
+  const next = {
+    org_contributions: (body.org_contributions ?? current.org_contributions) as OrgContributions,
+    org_domains:
+      body.org_domains === undefined ? current.org_domains : normalizeOrgDomains(body.org_domains),
+  };
+  if (next.org_contributions === "drafts") {
+    if (body.org_contributions === "drafts") {
+      const row = (await getDb().get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as
+        | { visibility: string }
+        | undefined;
+      if (row?.visibility !== "org") {
+        throw new ValidationError(
+          "Org contributions only apply to a nest shared with the organization (visibility 'org'). Change its visibility first.",
+        );
+      }
+    }
+    if (config.SHARED_DEPLOYMENT && next.org_domains.length === 0) {
+      throw new ValidationError(
+        "This server hosts several organizations, so org contributions need your organization's email domains (org_domains) — otherwise every account on the server could contribute.",
+      );
+    }
+  }
+  return next;
+}
+
+export async function setOrgContributions(
+  nestId: string,
+  next: { org_contributions: OrgContributions; org_domains: string[] },
+): Promise<void> {
+  await getDb().run(
+    "UPDATE nests SET org_contributions = ?, org_domains = ? WHERE id = ?",
+    [
+      next.org_contributions,
+      next.org_domains.length ? JSON.stringify(next.org_domains) : null,
+      nestId,
+    ],
+  );
 }
 
 /** Longest review SLA a nest may set: a year. Past that it isn't an SLA. */

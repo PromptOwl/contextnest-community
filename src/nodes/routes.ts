@@ -24,6 +24,14 @@ import {
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import {
   holdWriteIfGated,
   heldWriteResponse,
@@ -262,6 +270,39 @@ nodeRoutes.post("/", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const authorEmail = await getUserEmail(c);
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier by the access gate
+  // for exactly this route. Their document is a draft sent to review, never
+  // published, whatever the nest's self-publish postures.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorCreate(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const { node, review } = await contributeDocument(
+      nestId,
+      {
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        folder: body.folder,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json(
+      {
+        node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+        review,
+        org_contribution: true,
+      },
+      201,
+    );
+  }
 
   // Agent-write gate. Only an API-key caller is held: a person creating a
   // document in the web UI authenticates with a session cookie and is exactly
@@ -722,6 +763,45 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     throw new ValidationError("type must be a string");
   }
 
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier for this route
+  // only. The edit is proposed as a draft for review; the published text
+  // stays exactly as it is until a reviewer approves. Ahead of the
+  // X-Base-Version check on purpose: that 409 names who last changed the
+  // document and echoes the working version, which for a contributor could
+  // be someone else's unapproved draft. proposeEdit's own checks decide.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorPatch(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const authorEmail = await getUserEmail(c);
+    const { node, version, review } = await proposeEdit(
+      nestId,
+      nodeId,
+      c.get("userId"),
+      {
+        content: body.content,
+        append: body.append,
+        title: body.title,
+        description: body.description,
+        tags: body.tags,
+        changeNote: body.changeNote,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json({
+      node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+      version,
+      review,
+      org_contribution: true,
+    });
+  }
+
   // Conflict detection via X-Base-Version header — REST-only contract.
   const baseVersionHeader = c.req.header("X-Base-Version");
   if (baseVersionHeader) {
@@ -743,6 +823,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   }
 
   const authorEmail = await getUserEmail(c);
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,

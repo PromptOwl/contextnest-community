@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -133,6 +134,7 @@ function createMcpServerForNest(
         apiKeyLabel,
         client,
         capability,
+        contributorCredential: credentialMayContribute(c),
       });
       return toCallToolResult(out);
     });

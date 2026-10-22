@@ -28,6 +28,8 @@ import {
 } from "../nests/push-confirmation-service.js";
 import type { PushManifestEntry } from "../nodes/publish-apply.js";
 import type { ReviewRequest } from "./types.js";
+import { isPublicReader } from "../shared/access.js";
+import { orgContributorRequesters } from "./org-contribution.js";
 
 export type FeedFilter = "all" | "changes" | "comments";
 
@@ -37,6 +39,9 @@ export interface ChangeFeedItem extends ReviewRequest {
   type: "change";
   /** Authoritative "can this caller approve/reject" (same check the queue stamps). */
   canReview: boolean;
+  /** The requester reaches this nest only as an org contributor
+   *  (CU-wdqcq05rz6) — not someone the reviewer added. */
+  requestedByOrgContributor: boolean;
   /** Merge key — mirrors requestedAt so all feed items sort on one field. */
   createdAt: string;
 }
@@ -129,24 +134,34 @@ export async function getNestFeed(params: {
   let changes: ChangeFeedItem[] = [];
   let changesTotal = 0;
   {
+    // A visibility-only reader (an org contributor among them) sees only
+    // their OWN requests: a request names an unapproved draft. Same rule as
+    // GET /review-queue (CU-wdqcq05rz6).
+    const ownOnly = await isPublicReader(params.nestId, params.userId);
+    const mine = ownOnly ? " AND requested_by = ?" : "";
+    const mineArgs = ownOnly ? [params.userEmail.toLowerCase()] : [];
     // Number(): Postgres returns COUNT(*) as a bigint, which `pg` hands back
     // as a string — the totals below are summed, and "12" + "3" is "123".
     changesTotal = Number(
       (
         (await db.get(
-          "SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'",
-          [params.nestId],
+          `SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'${mine}`,
+          [params.nestId, ...mineArgs],
         )) as { c: number | string }
       ).c,
     );
     if (filter !== "comments" && changesTotal > 0) {
       const rows = (await db.all(
         `SELECT * FROM review_requests
-          WHERE nest_id = ? AND status = 'pending'
+          WHERE nest_id = ? AND status = 'pending'${mine}
           ORDER BY requested_at DESC, id DESC
           LIMIT ?`,
-        [params.nestId, fetchWindow],
+        [params.nestId, ...mineArgs, fetchWindow],
       )) as any[];
+      const contributors = await orgContributorRequesters(
+        params.nestId,
+        rows.map((r) => String(r.requested_by)),
+      );
 
       // The authoritative approve-check for every node at once (mirrors the
       // queue route), not one per node.
@@ -177,6 +192,7 @@ export async function getNestFeed(params: {
         escalationLevel: Number(row.escalation_level ?? 0),
         escalatedAt: row.escalated_at || undefined,
         canReview: canReviewByNode.get(row.node_id) ?? false,
+        requestedByOrgContributor: contributors.has(String(row.requested_by).toLowerCase()),
         createdAt: row.requested_at,
       }));
     }

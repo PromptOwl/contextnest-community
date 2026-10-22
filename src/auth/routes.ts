@@ -57,6 +57,7 @@ import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { isEmailConfigured } from "../notify/email.js";
 import { createInvitedUser } from "./invited-user.js";
+import { markEmailVerified } from "./email-verified.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -268,6 +269,10 @@ async function provisionPromptowlUser(
       license_owner_email: lic.ownerEmail,
     };
   }
+
+  // PromptOwl vouches for the address: its own login refuses an account
+  // whose email isn't verified (CU-wdqcq05rz6, see markEmailVerified).
+  await markEmailVerified(user.id, "promptowl");
 
   const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);

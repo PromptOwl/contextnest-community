@@ -26,6 +26,7 @@ import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -492,6 +493,10 @@ oidcRoutes.get("/callback", async (c) => {
     } catch (err) {
       console.error("[oidc] department upsert failed (login continues):", err);
     }
+
+    // The IdP vouched for this address (email_verified is never false here —
+    // refused above). See markEmailVerified.
+    await markEmailVerified(user.id, "oidc");
 
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the

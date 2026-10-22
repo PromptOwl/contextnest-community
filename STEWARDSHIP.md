@@ -163,6 +163,17 @@ A nest's structure rules (folders, node types, name formats, templates; see `API
 - **Enforcing** them binds every writer the same way: owners, stewards, editors, agents and `ctx`. Rules have no per-role bypass. An approval publishes only what the rules allow, so a reviewer can't approve a change that breaks them.
 - **The compliance report** lists documents of every status, so it is for callers who read the whole nest. Readers limited by this page's read gate, or by public or org visibility, get the rules but not the report.
 
+## Org contributors — drafts without being added
+
+An `org` nest can let **anyone in the organization** suggest documents and edits without being added as a collaborator: nest **Settings → Sharing → Anyone in the organization can suggest drafts** (`org_contributions: "drafts"`, owner/admin). Every suggestion is a **draft that goes to review**. Governance doesn't loosen: nothing an org contributor writes is published until a reviewer approves it.
+
+- **Who.** A person who reads the nest through its `org` visibility (or holds only `read` on it) and is in the organization. On a self-hosted server that is any signed-in account. On a shared server (`SHARED_DEPLOYMENT=true`) it is only someone whose email domain exactly matches one of the nest's `org_domains`, and the setting can't be turned on without them. A domain counts only for an address an identity provider verified (SSO, IdP token exchange, PromptOwl sign-in), never for a password sign-up.
+- **Can.** Create a document and propose an edit to one they can read, always as a draft submitted for review. The nest's self-publish postures don't apply to them: creator-reviews (they are never made the document's reviewer), prime-only review, self-approve and board-task skipping. They can also see and revise their own drafts and comment where readers can.
+- **Can't.** Approve or reject, publish, delete, move, discard, change settings or visibility, see other people's drafts (including other people's rows in the review queue), or use admin and agent tools. Prime documents and folder-scoped reviewer rules apply to their drafts like anyone else's.
+- **Not a role.** It's not a permission level: the person's nest permission stays `read`, and the server admits them on exactly two routes, create and propose. Every other check that needs edit rights still refuses them. Only their own sign-in or personal key works. Nest-scoped keys, system keys, headless keys and service tickets get nothing new.
+- **Reviewing.** Their requests show in the review queue labelled **org contributor (not a collaborator)**. Someone has to be able to approve them: a reviewer steward, or the owner/an admin with self-approve on.
+- **Turning it off** (or moving the nest off `org`) stops new suggestions at once. Drafts already submitted stay in the queue for a reviewer to decide.
+
 ## Server super-admins
 
 Super-admins administer **every** nest on the server without being added per-nest. The effective set is the union of three sources:

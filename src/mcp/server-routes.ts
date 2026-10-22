@@ -24,6 +24,7 @@
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -408,6 +409,8 @@ async function handleServerToolCall(
   client?: ClientMetadata,
   headless = false,
   capability: "read" | "write" = "write",
+  /** A person's own full credential (CU-wdqcq05rz6) — see McpToolContext. */
+  contributorCredential = false,
 ): Promise<ToolResult> {
   // Headless access keys (CU-wdqcq0314u): nest_create and every other
   // server-only tool are refused here; per-nest tools are re-checked in
@@ -602,6 +605,7 @@ async function handleServerToolCall(
     apiKeyLabel,
     client,
     capability,
+    contributorCredential,
   });
 }
 
@@ -669,6 +673,7 @@ function createServerMcp(
         attributeRequest(c, undefined, connectionClient(server)),
         headless,
         capability,
+        credentialMayContribute(c),
       );
       return toCallToolResult(out);
     });

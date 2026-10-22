@@ -31,7 +31,17 @@ import {
   NotFoundError,
   ValidationError,
   ConflictError,
+  LockedError,
 } from "../shared/errors.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  isOrgContribution,
+  ownsWorkingDraft,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import { listBoards } from "../nests/board-service.js";
 import { listBoardItems } from "../nests/board-items.js";
 import { bulkUpdateNodes } from "../nodes/bulk-update.js";
@@ -407,6 +417,14 @@ export interface McpToolContext {
    *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
    *  when unset (cookie sessions, unscoped legacy keys, open mode). */
   capability?: "read" | "write";
+  /**
+   * The call arrived on a person's own full credential — a session, an
+   * unscoped personal key or an OAuth grant — which is the only kind an org
+   * contributor may contribute with (CU-wdqcq05rz6;
+   * governance/org-contribution.ts credentialMayContribute). Unset is false:
+   * any other caller of handleToolCall gets no contributor reach.
+   */
+  contributorCredential?: boolean;
 }
 
 /**
@@ -2056,6 +2074,119 @@ async function runSystemsTool(
 }
 
 /**
+ * Org contributors over MCP (CU-wdqcq05rz6) — the same service functions the
+ * REST create / PATCH call, so an agent acting for a contributor gets exactly
+ * what the web app gets: a draft sent to review, never a publish. Reached only
+ * after the ordinary write check refused AND isOrgContribution said yes for a
+ * person's own full credential (ctx.contributorCredential).
+ */
+const MCP_TRANSPORT_FIELDS = new Set(["client", "confirm_billing"]);
+
+function contributorFields(args: Record<string, any>, drop: string[] = []): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (MCP_TRANSPORT_FIELDS.has(k) || drop.includes(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function contributorError(err: unknown): ToolResult {
+  if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+  if (err instanceof ValidationError || err instanceof ConflictError || err instanceof LockedError) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
+  throw err;
+}
+
+async function contributeOverMcp(ctx: McpToolContext, args: Record<string, any>): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  try {
+    assertContributorCreate(contributorFields(args));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+  } catch (err) {
+    return contributorError(err);
+  }
+  const wanted = String(args.title ?? "").toLowerCase();
+  return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+    // Titles stay unique, as for every create. The message names no document:
+    // the twin may be someone else's draft, which a contributor can't see.
+    const existing = await storage.discoverDocuments();
+    if (existing.some((n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted)) {
+      return toolError(
+        `That title is already used in this nest. Suggest it under a different title, or propose an edit to the existing document with context_update.`,
+        "DOCUMENT_ALREADY_EXISTS",
+      );
+    }
+    let made: Awaited<ReturnType<typeof contributeDocument>>;
+    try {
+      made = await contributeDocument(
+        nestId,
+        { title: args.title, content: args.content, tags: args.tags, folder: args.folder, client: ctx.client },
+        userEmail,
+        { baseUrl: ctx.baseUrl },
+      );
+    } catch (err) {
+      return contributorError(err);
+    }
+    return {
+      text: `Suggested **${args.title}** (${made.node.id}) as an org contributor. It is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""} — not published until a reviewer approves it.`,
+      data: {
+        id: made.node.id,
+        version: made.version,
+        status: "draft",
+        checkpoint: null,
+        org_contribution: true,
+        review: made.review ? { id: made.review.id, status: made.review.status } : null,
+      },
+    };
+  });
+}
+
+async function proposeOverMcp(
+  ctx: McpToolContext,
+  nodeId: string,
+  args: Record<string, any>,
+): Promise<ToolResult> {
+  const { nestId, userId, userEmail } = ctx;
+  let made: Awaited<ReturnType<typeof proposeEdit>>;
+  try {
+    // id / title name the document here; they aren't edits.
+    assertContributorPatch(contributorFields(args, ["id", "title"]));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+    made = await proposeEdit(
+      nestId,
+      nodeId,
+      userId,
+      {
+        content: args.content,
+        append: args.append,
+        tags: args.tags,
+        description: args.description,
+        changeNote: args.changeNote,
+        client: ctx.client,
+      },
+      userEmail,
+      { baseUrl: ctx.baseUrl },
+    );
+  } catch (err) {
+    return contributorError(err);
+  }
+  return {
+    text: `Proposed an edit to **${made.node.frontmatter.title}** as an org contributor — v${made.version} is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""}. The published text is unchanged until a reviewer approves it.`,
+    data: {
+      id: made.node.id,
+      version: made.version,
+      status: "draft",
+      checkpoint: null,
+      org_contribution: true,
+      review: made.review ? { id: made.review.id, status: made.review.status } : null,
+    },
+  };
+}
+
+/**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
  * distinguish reads from writes); per-tool permission checks in the cases
@@ -2932,6 +3063,9 @@ async function runTool(
       // (the MCP transport is always POST), so this per-tool check is what
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return contributeOverMcp(ctx, args);
+        }
         return writeRefusal(
           ctx,
           "You don't have permission to create documents in this nest.",
@@ -3065,6 +3199,9 @@ async function runTool(
       // and this gate runs on the resolved node, not on how it was named.
       const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return proposeOverMcp(ctx, node.id, args);
+        }
         return writeRefusal(
           ctx,
           `You don't have permission to edit "${label}": ${editCheck.reason}`,
@@ -3920,7 +4057,12 @@ async function runTool(
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
-      if (!submitCheck.allowed) {
+      // An org contributor (CU-wdqcq05rz6) may send their OWN draft to review.
+      const ownContribution =
+        !submitCheck.allowed &&
+        (await isOrgContribution(ctx.nestId, userId, ctx.contributorCredential === true)) &&
+        (await ownsWorkingDraft(ctx.nestId, node.id, userEmail));
+      if (!submitCheck.allowed && !ownContribution) {
         return toolError(
           `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",

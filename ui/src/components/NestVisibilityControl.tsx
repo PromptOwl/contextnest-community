@@ -57,6 +57,7 @@ import {
   visibilityTierHint,
   visibilityConfirmCopy,
 } from "../lib/visibility-confirm";
+import { OrgContributionsSetting } from "./OrgContribution";
 
 interface Props {
   nestId: string;
@@ -106,6 +107,9 @@ export function NestVisibilityControl({
     | undefined;
   const serverDescription =
     ((meta.data as any)?.nest?.description as string | null | undefined) ?? "";
+  const canManageSettings = ["owner", "admin"].includes(
+    ((meta.data as any)?.permission as string | undefined) ?? "",
+  );
   useEffect(() => {
     if (serverVisibility) setVisibility(serverVisibility);
   }, [serverVisibility]);
@@ -318,6 +322,12 @@ export function NestVisibilityControl({
           </Select>
         </div>
       </div>
+
+      {/* CU-wdqcq05rz6: only meaningful on an org nest, and only an owner or
+          admin may change it (the server enforces both). */}
+      {isOrg && serverVisibility === "org" && canManageSettings && (
+        <OrgContributionsSetting nestId={nestId} onError={onError} />
+      )}
 
       {confirmDialog}
     </div>

@@ -329,9 +329,9 @@ Response (201 one-shot, 200 finalize):
 
 ### GET `/nests/:nestId`
 ```json
-{ "nest": { ... }, "permission": "owner" | "admin" | "write" | "read" }
+{ "nest": { ... }, "permission": "owner" | "admin" | "write" | "read", "org_contributor": false }
 ```
-404 if caller has no permission.
+404 if caller has no permission. `org_contributor: true` means this caller may suggest documents and edits here as drafts for review (see *Org contributors* below); their `permission` stays `read`. `nest.org_domains` is returned to owners and admins only.
 
 ### PATCH `/nests/:nestId` (owner/admin)
 Rename a nest and/or change its description.
@@ -407,7 +407,9 @@ Pins live in `node_pins` (migration 071). A deleted document takes its pins with
   "require_push_confirmation": false,
   "creator_is_reviewer": false,
   "review_sla_hours": null,
-  "access_log_enabled": true
+  "access_log_enabled": true,
+  "org_contributions": "off",
+  "org_domains": []
 }
 ```
 
@@ -427,7 +429,44 @@ Every field is optional; only the ones present are changed.
 - `review_sla_hours` — review SLA in whole hours (`1`–`8760`), or `null` (or `0`) for off, the default. When set, a review left pending that long escalates **one rung**: from the document's own reviewers to its **tag**-scope reviewers, then **nest**-scope reviewers, then the **nest owner** — each rung getting the same window before the next. Escalating notifies the new rung (a `review_escalated` inbox row linking the document, a Slack/Teams post — through the server-wide webhooks by default, in the same digest as review requests, and through any per-nest connector subscribed to `review_escalated` or `"*"` — and an email to each escalated reviewer when SMTP is configured); it never changes who may approve, and the submitter is never a recipient. Any other value → `400`, with nothing in the body applied. Inert while off and in ungoverned or archived nests. See `STEWARDSHIP.md → Review SLA escalation`.
 - `access_log_enabled` — record reads, retrievals and exports of this nest's documents in the activity log (see `GET /nests/:nestId/activity-log`). **On by default.** Any nest admin may turn it on; turning it **off** is owner / server-admin only — anyone else gets a per-field `403` (`"field": "access_log_enabled"`) and nothing in the same body is applied. Takes effect for the next read; rows already recorded stay until the retention window prunes them.
 
+- `org_contributions` — `"off"` (default) or `"drafts"`: anyone in the organization may suggest documents and edits on this nest without being added, always as drafts that go to review. See *Org contributors* below. Turning it on needs the nest's visibility to be `org` (`400` otherwise); if the nest later leaves `org` the stored value stays but admits nobody. On a shared deployment (`SHARED_DEPLOYMENT=true`) it also needs a non-empty `org_domains` — enabling without one, or emptying the list while it is on, is `400`. Any other value is `400`. Like every field here, a refused body writes nothing.
+- `org_domains` — the email domains that count as the organization, e.g. `["acme.com"]`. Required on a shared deployment, optional (a further restriction) on a self-hosted one. Each entry is trimmed, lowercased and stripped of a leading `@`; wildcards, schemes, ports and paths are `400`. Matched **exactly**: `acme.com` does not admit `eng.acme.com` or `evil-acme.com`. Only an email an identity provider vouched for counts (see below).
+
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
+
+### Org contributors
+
+On an `org` nest with `org_contributions: "drafts"`, a person **in the organization** who holds nothing above `read` may:
+
+- create a document — `POST /nests/:nestId/nodes` with `title`, `content`, and optionally `tags`, `folder`, `type: "document"`;
+- propose an edit to a document they can read — `PATCH /nests/:nestId/nodes/:nodeId` with `content`, `append`, `title`, `description`, `tags`, `changeNote`;
+- revise their own pending draft the same way, and send their own draft to review (`POST …/submit-review`);
+- see their own drafts — `GET /nests/:nestId/contributions/mine`.
+
+Both writes land as a **draft submitted for review** and answer with the review (`{ "node": …, "review": { "id": … }, "org_contribution": true }`). They never publish, whatever the nest's postures say: `creator_is_reviewer`, `prime_only_review`, self-approve and task-skip-review don't apply, and the contributor is never made a steward. The published text, and what every other reader sees, stays the same until a reviewer approves. Any other field (`prime`, `status`, `type` other than `document`, schedules, models, task or custom fields) is `403`. A proposal is refused before anything is written when someone else's change is under review on that document (`423`), when the working copy holds someone else's unreviewed draft (`409`), or when the contributor can't read the document (`404`).
+
+Who counts as in the organization:
+
+| Deployment | Who |
+|---|---|
+| Self-hosted, no `org_domains` | any signed-in person (the same boundary `org` visibility uses) |
+| Any deployment with `org_domains` | a person whose email domain **equals** one entry **and** whose address an identity provider verified (`users.email_verified_at`, set on an OIDC sign-in, an IdP token exchange or a PromptOwl sign-in) |
+| Shared deployment, no `org_domains` | nobody |
+
+A password sign-up never verifies an address, so on a domain-limited nest it never qualifies — otherwise anyone could register `x@acme.com` and claim the domain. An existing SSO user becomes verified at their next SSO sign-in.
+
+What it is **not**: a permission. The caller's nest permission stays `read`, and the request gate admits exactly the two routes above for them, so everything else that needs `write` or more still refuses them — approve, reject, delete, move, discard, bulk actions, settings, visibility, collaborators, teams, hooks, env, connectors and the rest. Only a person's own full credential contributes: a browser session, an unscoped personal API key, or an MCP OAuth grant. A nest-scoped key, a read-only key, a named system key, a headless key, a PromptOwl service ticket and the anonymous caller get nothing new. A nest that holds agent writes (`require_push_confirmation`) refuses contributions over a key or MCP with `403` (a held write would later replay on the confirmer's authority); people still contribute from the web app. Archived nests take no contributions.
+
+MCP `context_create`, `context_update` and `context_submit_review` behave the same way for an org contributor: a draft sent to review, with `org_contribution: true` and the `review` in the structured result.
+
+Someone still has to approve: on a nest with no reviewer steward, that is the owner or an admin with self-approve on, exactly as for any other draft.
+
+### GET `/nests/:nestId/contributions/mine`
+The caller's own unpublished documents in this nest — every document whose newest version is an unreviewed one they wrote — with the draft text:
+```json
+{ "contributions": [{ "node_id": "nodes/idea", "title": "Idea", "version": 1, "status": "pending_review", "created_at": "...", "review_id": "...", "content": "..." }] }
+```
+Read tier. Only the caller's own rows can appear (the author is part of the query). This is how an org contributor, who otherwise reads approved content only, finds their drafts again.
 
 ## Structure rules
 
@@ -1398,7 +1437,7 @@ Who besides the caller could approve the caller's submission of this document �
 ```json
 { "note": "ready for review", "priority": "low" | "normal" | "high" | "urgent" }
 ```
-Sets node status → `pending_review`. UI locks editing.
+Sets node status → `pending_review`. UI locks editing. A caller who reaches the nest only through its visibility (`org` or `public`, an org contributor included) may submit only their **own** draft; anything else is `404`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/approve`
 ```json
@@ -1444,7 +1483,7 @@ Pending external (on-disk) edits awaiting approval, newest first. The list is co
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 
-Returns ALL reviews for the nest (server does not gate by reviewer scope).
+Returns ALL reviews for the nest (server does not gate by reviewer scope) — except to a caller who reaches the nest only through its visibility (`org` or `public`, an org contributor included): they get their **own** requests only, since a request names an unapproved draft. Each row carries `requestedByOrgContributor: true` when the requester reaches the nest only as an org contributor — the UI labels it "org contributor (not a collaborator)".
 ```json
 {
   "requests": [{

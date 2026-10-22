@@ -48,6 +48,8 @@ import {
   titleScore,
 } from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
+import { credentialMayContribute } from "./governance/org-contribution.js";
+import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
@@ -3455,8 +3457,32 @@ export function createApp(): Hono<AuthEnv> {
         : 0;
     const effectiveLevel = Math.max(permissionLevel(permission), grantLevel);
 
+    // Org contributor (CU-wdqcq05rz6): a person in the organization who holds
+    // only READ here may still create a document (POST /nodes) or propose an
+    // edit (PATCH /nodes/:id) on an org nest that opted in — and nothing else.
+    // Their permission is NOT raised (nestPermission stays 'read', so every
+    // other gate refuses them as before); the two handlers see
+    // `orgContribution` and route the write through governance/org-contribution
+    // (always a draft, always to review). Exact routes only: the node update is
+    // the ONLY PATCH under /nodes (test/org-contributors.test.ts pins the route
+    // table), and POST with exactly two segments is the create.
+    const isContributionRoute =
+      parts[1] === "nodes" &&
+      ((c.req.method === "POST" && parts.length === 2) ||
+        (c.req.method === "PATCH" && parts.length >= 3));
+    const orgContribution =
+      isContributionRoute &&
+      required === "write" &&
+      !stewardEditorBypass &&
+      permission === "read" &&
+      effectiveLevel < permissionLevel("write") &&
+      access.orgContributor &&
+      credentialMayContribute(c);
+    c.set("orgContribution", orgContribution);
+
     if (
       !stewardEditorBypass &&
+      !orgContribution &&
       effectiveLevel < permissionLevel(required)
     ) {
       // The archive cap is what refused this, not the caller's standing —
@@ -3672,6 +3698,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
+  nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);

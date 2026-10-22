@@ -26,6 +26,7 @@ import type { Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
@@ -232,6 +233,9 @@ async function withDepartment(
   } catch (err) {
     console.error("[token-exchange] department upsert failed:", err);
   }
+  // Every successful resolution passes through here, after the IdP token's
+  // signature and email_verified were checked.
+  await markEmailVerified(user.id, "token-exchange");
   return user;
 }
 
