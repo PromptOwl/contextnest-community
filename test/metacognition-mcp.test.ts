@@ -449,6 +449,7 @@ describe("which requests on the server-level /mcp consider the metacognition too
     expect(requestMayUseMetacognition(call("context_get"))).toBe(false);
     expect(requestMayUseMetacognition([call("context_get"), call("metacognition_list")])).toBe(true);
     expect(requestMayUseMetacognition([call("context_get")])).toBe(false);
+    expect(requestMayUseMetacognition([{ jsonrpc: "2.0", id: 2, method: "tools/list" }])).toBe(true);
     expect(requestMayUseMetacognition(null)).toBe(false);
     expect(requestMayUseMetacognition("tools/list")).toBe(false);
   });
@@ -502,6 +503,20 @@ describe("which requests on the server-level /mcp consider the metacognition too
     // Unscoped, the same person (owner of `own`) is offered them.
     expect((await listTools(editor.apiKey, "/mcp")).map((t) => t.name)).toContain("metacognition_list");
     await jsonRequest(app, "DELETE", `/nests/${own}`, undefined, editor.apiKey);
+  });
+});
+
+describe("tool errors", () => {
+  it("map an operation's status to a code: 403, 404, 409, 400, and a server-side failure is INTERNAL", async () => {
+    const { metacognitionRefusal } = await import("../src/mcp/metacognition-tools.js");
+    const { AppError } = await import("../src/shared/errors.js");
+    const code = (status: number) => (metacognitionRefusal(new AppError(status, "x")) as any).data.code;
+    expect(code(403)).toBe("UNAUTHORIZED_ACTION");
+    expect(code(404)).toBe("DOCUMENT_NOT_FOUND");
+    expect(code(409)).toBe("CONFLICT");
+    expect(code(400)).toBe("VALIDATION_FAILED");
+    expect(code(500)).toBe("INTERNAL");
+    expect(code(503)).toBe("INTERNAL");
   });
 });
 

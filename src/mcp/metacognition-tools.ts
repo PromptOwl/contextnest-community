@@ -32,7 +32,7 @@ import {
   removeAgent,
   runAgent,
 } from "../metacognition/manage.js";
-import { METACOGNITION_INPUT_SCHEMAS } from "../metacognition/schemas.js";
+import { CONFIG_PROPERTIES, METACOGNITION_INPUT_SCHEMAS } from "../metacognition/schemas.js";
 import type { McpToolContext, ToolResult } from "./tools.js";
 
 const EXAMPLE_BODY = JSON.stringify({
@@ -95,6 +95,8 @@ export const isMetacognitionTool = (name: string): boolean => NAMES.has(name);
  * this to skip working out whether to offer them on every other request.
  */
 export function requestMayUseMetacognition(body: unknown): boolean {
+  // Fail closed: anything unrecognised (junk, an odd encoding) is "no", which
+  // only means the tools aren't offered on that request.
   const msgs = Array.isArray(body) ? body : [body];
   return msgs.some((m) => {
     if (!m || typeof m !== "object") return false;
@@ -105,11 +107,13 @@ export function requestMayUseMetacognition(body: unknown): boolean {
 
 /** An operation's refusal → a tool error carrying its message unchanged.
  *  CONFLICT (409: already running, too many starts this hour) means "try
- *  again later", not "fix the input". */
-function refusal(err: unknown): ToolResult {
+ *  again later", not "fix the input"; a 5xx is the server's fault, INTERNAL. */
+export function metacognitionRefusal(err: unknown): ToolResult {
   if (!(err instanceof AppError)) throw err;
   const code =
-    err.statusCode === 403
+    err.statusCode >= 500
+      ? "INTERNAL"
+      : err.statusCode === 403
       ? "UNAUTHORIZED_ACTION"
       : err.statusCode === 404
         ? err.message === NOT_ENABLED
@@ -131,7 +135,7 @@ export async function runMetacognitionTool(
   ctx: McpToolContext,
 ): Promise<ToolResult> {
   try {
-    if (!metacognitionEnabled()) return refusal(new NotFoundError(NOT_ENABLED));
+    if (!metacognitionEnabled()) return metacognitionRefusal(new NotFoundError(NOT_ENABLED));
     await assertCanManageMetacognition(ctx.nestId, ctx.userId);
     switch (toolName) {
       case "metacognition_list": {
@@ -141,10 +145,13 @@ export async function runMetacognitionTool(
         const agentDocs = (await ctx.storage.discoverDocuments()).filter(
           (d) => (d.frontmatter.type || "document") === "agent",
         );
-        const approved = new Map<string, boolean>();
-        for (const d of agentDocs) {
-          approved.set(d.id, (await resolveExportBody(ctx.nestId, d.id, d.body || "")) !== null);
-        }
+        const approved = new Map<string, boolean>(
+          await Promise.all(
+            agentDocs.map(
+              async (d) => [d.id, (await resolveExportBody(ctx.nestId, d.id, d.body || "")) !== null] as const,
+            ),
+          ),
+        );
         const agents = (await listAgents(ctx.nestId)).map((a) => ({
           ...agentView(a),
           instructions_approved: approved.get(a.node_id) ?? false,
@@ -180,7 +187,10 @@ export async function runMetacognitionTool(
         return { text: lines.join("\n"), data: { agents, unconfigured } };
       }
       case "metacognition_configure": {
-        const { agent: _agent, dry_run, nest: _nest, client: _client, confirm_billing: _cb, ...body } = args;
+        // The PUT body is exactly its own fields: nothing a wrapper adds to the
+        // call (nest, client, confirm_billing, …) reaches parseConfig.
+        const { dry_run } = args;
+        const body = Object.fromEntries(Object.keys(CONFIG_PROPERTIES).filter((k) => k in args).map((k) => [k, args[k]]));
         // Fail closed: a dry_run of "true" or 1 must never read as "save it".
         if (dry_run !== undefined && typeof dry_run !== "boolean") {
           throw new ValidationError("dry_run must be true or false");
@@ -233,6 +243,6 @@ export async function runMetacognitionTool(
         return { text: `Unknown metacognition tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown metacognition tool: ${toolName}` } };
     }
   } catch (err) {
-    return refusal(err);
+    return metacognitionRefusal(err);
   }
 }

@@ -115,6 +115,7 @@ import {
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
@@ -460,6 +461,14 @@ export const MCP_READ_TOOLS = new Set<string>([
  *  and holds a full credential (mcp/routes.ts), and re-checked on every call
  *  by the same service layer the REST routes use. Not in MCP_READ_TOOLS or
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
+/** The zod field for an `array` property in a tool's JSON schema, shared by
+ *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
+ *  (metacognition feeds, MCP servers): each item must be an object, its fields
+ *  are the handler's parser's to check. Everything else is a list of strings. */
+export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+  return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   "context_systems",

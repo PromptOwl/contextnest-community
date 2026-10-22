@@ -9,6 +9,7 @@ import {
   TOOL_DEFINITIONS,
   MCP_READ_TOOLS,
   MCP_ADMIN_TOOLS,
+  arrayToolField,
   handleToolCall,
   toCallToolResult,
 } from "./tools.js";
@@ -104,11 +105,7 @@ function createMcpServerForNest(
       let field: z.ZodTypeAny;
       if (def.type === "string") field = z.string();
       else if (def.type === "number") field = z.number();
-      else if (def.type === "array")
-        // A list of objects (metacognition feeds, MCP servers): each item must
-        // be an object; its fields are the handler's parser's to check.
-        // Everything else is a list of strings.
-        field = def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+      else if (def.type === "array") field = arrayToolField(def);
       else field = z.any();
 
       if (!required.includes(key)) field = field.optional();
