@@ -74,6 +74,8 @@ describe("reader home node resolution (site ↔ reader parity)", () => {
     ["docs/welcome", "nodes/docs/welcome"], // id without the nodes/ prefix: same leaf
     ["setup", "guides/setup"], // an id without the nodes/ prefix leafs the same on both sides
     ["nodes/gone/intro", "nodes/Intro"], // a full id that matches nothing still falls back by leaf
+    ["  welcome  ", "nodes/docs/welcome"], // padded input is trimmed on both sides
+    ["welcome/", undefined], // a trailing slash leaves an empty slug: no match on either side
     ["no-such-page", undefined],
     ["", undefined],
     [null, undefined],

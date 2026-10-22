@@ -124,6 +124,10 @@ describe("public docs site", () => {
     const html = await siteHome("Home Slug");
     expect(html).toMatch(/<title>Welcome[^<]*Home Slug<\/title>/);
     expect(html).toContain("designated home");
+    // And through the live /d/<key>/ route, not just the static export.
+    const res = await get("/d/home-slug/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/<title>Welcome[^<]*Home Slug<\/title>/);
   });
 
   it("matches a home_node full id case-insensitively", async () => {
