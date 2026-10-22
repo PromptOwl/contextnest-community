@@ -20,6 +20,9 @@
  *  - FEEDS and MCP results are untrusted data. They come back fenced as such,
  *    feeds only from the configured list (the model names a feed, never a
  *    URL), MCP only the configured servers' allow-listed tools.
+ *  - NOTIFY reaches only the people its owner listed (the model picks one of
+ *    those keys, never an address), each still a member when it sends, a few
+ *    per run, with the text defanged and links limited to this nest.
  *
  * A refusal is a tool result the model can read and work around, plus an
  * `access_needed` step on the run so a person can see what it wanted. The
@@ -46,11 +49,15 @@ import { hasUnsealedDraft, getCurrentVersion } from "../governance/version-servi
 import { AppError, ConflictError, LockedError, ValidationError } from "../shared/errors.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
 import { appendRunStep, linkRunArtifacts } from "../workflow/run-service.js";
-import { inFolders, mayProposeIn, urlAllowed, type McpServerConfig } from "./config.js";
+import { inFolders, mayProposeIn, urlAllowed, notifyOn, type McpServerConfig } from "./config.js";
 import type { MetacognitionAgent } from "./store.js";
 import { McpPool, MAX_RESULT_CHARS } from "./mcp-client.js";
 import { guardedFetch, readCapped, OutboundTooLargeError, OutboundBlockedError } from "./net.js";
 import { recordOutbound } from "../notify/outbound-log.js";
+import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
+import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
+import { buildDocContext, docLink, nestName } from "../governance/title-resolver.js";
+import { resolveNotifyRecipients } from "./notify.js";
 
 type FeedFetch = (url: string, init: RequestInit) => Promise<Response>;
 const realFeedFetch: FeedFetch = guardedFetch({ maxBytes: 2_000_000, timeoutMs: 20_000 });
@@ -75,6 +82,7 @@ export interface ToolContext {
   proposals: { made: number };
   comments: { made: number };
   accessRequests: { made: number };
+  notifications: { made: number };
   mcp: McpPool;
   signal: AbortSignal;
 }
@@ -86,6 +94,9 @@ export const MAX_ACCESS_REQUESTS_PER_RUN = 3;
  *  document (or the same new title) again inside this window. */
 export const REJECTED_HOLD_MS = 7 * 24 * 3600_000;
 const MAX_FEED_BYTES = 200_000;
+/** A notification's subject and message, after defanging. */
+const MAX_NOTIFY_SUBJECT = 150;
+const MAX_NOTIFY_MESSAGE = 2000;
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -217,13 +228,44 @@ export const TOOLS: Anthropic.Tool[] = [
   },
 ];
 
-/** The tools this agent is offered: feed/MCP tools only when it has any. */
+/**
+ * `notify`, built per agent: `to` is an enum of the owner's configured keys,
+ * so the model can only choose among them. The send path checks the key
+ * against the config again — the enum is guidance, not the guard.
+ */
+function notifyTool(recipients: string[]): Anthropic.Tool {
+  return {
+    name: "notify",
+    description:
+      "Tell a person something they need to know or act on — e.g. that you filed proposals, or found a problem you can't fix. You can only reach the people your owner chose (`to`). It is sent by email and/or the nest's chat channel, labelled as coming from you, an agent. Keep it short; a link to `node_id` is added for you. Don't paste outside links: only this nest's documents can be linked.",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: {
+          type: "string",
+          enum: recipients,
+          description: '"owner" = the nest owner, "reviewers" = its reviewers, otherwise that person.',
+        },
+        subject: { type: "string", description: `One line (max ${MAX_NOTIFY_SUBJECT} characters).` },
+        message: { type: "string", description: `Plain text (max ${MAX_NOTIFY_MESSAGE} characters).` },
+        node_id: { type: "string", description: "Optional: the document it is about (e.g. nodes/gtm/pricing)." },
+      },
+      required: ["to", "subject", "message"],
+      additionalProperties: false,
+    },
+  };
+}
+
+/** The tools this agent is offered: feed/MCP tools only when it has any,
+ *  notify only when its owner chose who it may notify. */
 export function toolsFor(agent: MetacognitionAgent): Anthropic.Tool[] {
-  return TOOLS.filter((t) => {
+  const tools = TOOLS.filter((t) => {
     if (t.name === "fetch_feed") return agent.config.feeds.length > 0;
     if (t.name.startsWith("mcp_")) return agent.config.mcp_servers.length > 0;
     return true;
   });
+  if (notifyOn(agent.config)) tools.push(notifyTool(agent.config.notify.recipients));
+  return tools;
 }
 
 type Step = { action: "read" | "write" | "branch" | "notify" | "external"; node_id?: string; detail: Record<string, unknown> };
@@ -261,6 +303,38 @@ export function defang(text: string): string {
 /** An attribute value that can't break out of its quotes or the tag. */
 export function attr(v: string): string {
   return v.replace(/[^\w./:@ -]/g, "_").slice(0, 200);
+}
+
+/**
+ * Text the model wrote for a person's inbox or a team channel. It may carry
+ * what a feed or an MCP result planted, so: no markup (HTML, Slack's
+ * `<!channel>` / `<url|label>`), no mass mentions, and no link a reader could
+ * click except to this nest's own documents (`ownPrefix`, the nest's deep
+ * link; "" = none). Anything else URL- or domain-shaped is broken the usual
+ * way (`hxxps[:]//evil[.]com`) so it reads, but doesn't open.
+ */
+export function defangNotice(text: string, ownPrefix: string): string {
+  const own = (u: string) =>
+    !!ownPrefix && u.startsWith(ownPrefix) && (u.length === ownPrefix.length || u[ownPrefix.length] === "&");
+  const broken = (s: string) =>
+    s
+      .replace(/^(h)tt(ps?)/i, "$1xx$2")
+      .replace(/:\/\//, "[:]//")
+      .replace(/\./g, "[.]");
+  return defang(text)
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/\[([^\]\n]{0,300})\]\(([^)\s]{1,2000})\)/g, "$1 ($2)")
+    .replace(/<[a-z!/?@#][^>\n]{0,1000}>/gi, "")
+    .replace(
+      /\b[a-z][a-z0-9+.-]{1,20}:\/\/[^\s<>"'`]+|\b(?:javascript|data|vbscript|file|mailto):|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b/gi,
+      (m) => (own(m) ? m : /:$/.test(m) ? `${m.slice(0, -1)}[:]` : broken(m)),
+    )
+    .replace(/@(channel|here|everyone)\b/gi, "@ $1")
+    .trim();
+}
+
+function capText(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
 function untrusted(kind: string, source: string, text: string): string {
@@ -355,6 +429,8 @@ export async function runTool(ctx: ToolContext, name: string, input: Record<stri
       return mcpListTools(ctx, input);
     case "mcp_call":
       return mcpCall(ctx, input);
+    case "notify":
+      return notify(ctx, input);
     default:
       return { isError: true, content: `There is no tool named ${name}.` };
   }
@@ -637,6 +713,123 @@ async function requestAccess(ctx: ToolContext, input: Record<string, unknown>): 
     content: res.created
       ? `Asked. An admin will decide (request ${res.request.id}). Carry on with what you can reach.`
       : `You already asked for this (request ${res.request.id}, ${res.request.status}). Carry on with what you can reach.`,
+  };
+}
+
+/** A notify that sent nothing: the model is told why, and the run records it. */
+async function notifyRefused(
+  ctx: ToolContext,
+  refused: string,
+  to: unknown,
+  content: string,
+  nodeId?: string,
+): Promise<ToolOutcome> {
+  await step(ctx, {
+    action: "notify",
+    ...(nodeId ? { node_id: nodeId } : {}),
+    detail: { tool: "notify", refused, to: attr(typeof to === "string" ? to : String(to ?? "")).slice(0, 100) },
+  });
+  return { isError: true, content };
+}
+
+async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  const cfg = ctx.agent.config.notify;
+  // Not offered without a config, but a model can name any tool.
+  if (!notifyOn(ctx.agent.config)) {
+    return notifyRefused(ctx, "not_configured", input.to, "There is no tool named notify.");
+  }
+  // The recipient is one of the owner's keys or nobody: an address the model
+  // came up with — perhaps read in a feed — reaches no one.
+  const key = typeof input.to === "string" ? input.to.trim().toLowerCase() : "";
+  if (!cfg.recipients.includes(key)) {
+    return notifyRefused(
+      ctx,
+      "not_a_recipient",
+      input.to,
+      `Not sent: "${attr(String(input.to ?? ""))}" is not one of the people you may notify (${cfg.recipients.join(", ")}). This was recorded.`,
+    );
+  }
+  if (ctx.notifications.made >= cfg.max_per_run) {
+    return notifyRefused(
+      ctx,
+      "cap",
+      key,
+      `Not sent: you have used this run's ${cfg.max_per_run} notifications. Put anything else in your summary.`,
+    );
+  }
+  const subjectIn = str(input.subject, 10_000);
+  const messageIn = str(input.message, 50_000);
+  if (!subjectIn || !messageIn) return { isError: true, content: "to, subject and message are required" };
+  let nodeId: string | null = null;
+  if (input.node_id !== undefined && input.node_id !== null && input.node_id !== "") {
+    nodeId = nodeIdOf(input.node_id);
+    if (!nodeId) return { isError: true, content: "node_id must be a document id like nodes/folder/name" };
+    const denied = await mayRead(ctx, nodeId);
+    if (denied) return accessNeeded(ctx, "notify", nodeId, "read", denied);
+  }
+
+  // Re-checked now, not trusted from when the config was saved.
+  const { people, reason } = await resolveNotifyRecipients(ctx.nestId, key, nodeId);
+  if (!people.length) {
+    return notifyRefused(ctx, "not_reachable", key, `Not sent: ${reason}. This was recorded.`, nodeId ?? undefined);
+  }
+
+  const name = (await nestName(ctx.nestId)).replace(/[\r\n]+/g, " ").trim();
+  const persona = ctx.agent.persona;
+  const label = `${persona.avatar ? `${persona.avatar} ` : ""}${persona.name} (agent) in ${name}`;
+  const ownPrefix = docLink(ctx.nestId, undefined, ctx.baseUrl);
+  const subject = capText(defangNotice(subjectIn.replace(/[\r\n]+/g, " "), ownPrefix), MAX_NOTIFY_SUBJECT) || "(no subject)";
+  const message = capText(defangNotice(messageIn, ownPrefix), MAX_NOTIFY_MESSAGE) || "(no message)";
+  const doc = nodeId ? await buildDocContext(ctx.nestId, nodeId, ctx.baseUrl) : null;
+  const link = doc?.link || ownPrefix;
+
+  const channels: string[] = [];
+  if (cfg.channels.includes("email") && isEmailConfigured()) {
+    await sendEmailToRecipient(
+      people.map((p) => p.email),
+      {
+        status: "agent_notify",
+        docTitle: subject,
+        path: doc?.path ?? name,
+        link,
+        actor: label,
+        note: message,
+      },
+      { senderKind: "persona", senderId: persona.email, nestId: ctx.nestId, nodeId, runId: ctx.runId },
+    );
+    channels.push("email");
+  }
+  if (cfg.channels.includes("connectors") && (await hasAnyConnector(ctx.nestId, "agent_notify"))) {
+    // A channel is a room, not the recipient: name who it is for (no
+    // addresses for a role), and carry the same defanged text.
+    const forWhom = key === "owner" ? "the nest owner" : key === "reviewers" ? "the reviewers" : people[0].name || people[0].email;
+    await dispatchEvent({
+      kind: "agent_notify",
+      nestId: ctx.nestId,
+      subjectId: nodeId ?? undefined,
+      actor: persona.email,
+      runId: ctx.runId,
+      message: `${label}, for ${forWhom}: *${subject}* — ${message}${link ? ` ${link}` : ""}`,
+    });
+    channels.push("connectors");
+  }
+  if (!channels.length) {
+    return notifyRefused(
+      ctx,
+      "no_channel",
+      key,
+      "Not sent: none of the ways your owner chose is set up on this server (no email transport, or no connector listening for agent notifications). This was recorded.",
+      nodeId ?? undefined,
+    );
+  }
+  ctx.notifications.made++;
+  await step(ctx, {
+    action: "notify",
+    ...(nodeId ? { node_id: nodeId } : {}),
+    detail: { tool: "notify", kind: "notification", to: key, recipients: people.length, channels, subject },
+  });
+  return {
+    content: `Sent to ${key === "reviewers" ? `${people.length} reviewer${people.length === 1 ? "" : "s"}` : key} by ${channels.join(" and ")}.`,
   };
 }
 

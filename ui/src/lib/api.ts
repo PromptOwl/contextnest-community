@@ -4335,6 +4335,15 @@ export interface MetacognitionAgentConfig {
   feeds: Array<{ name: string; url: string }>;
   mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
   model: string | null;
+  /** Who it may notify (CU-wdqcq05rkq). Empty recipients = off. */
+  notify?: MetacognitionNotifyConfig;
+}
+
+/** "owner" = the nest owner, "reviewers" = its reviewers, else a member's email. */
+export interface MetacognitionNotifyConfig {
+  recipients: string[];
+  channels: Array<"email" | "connectors">;
+  max_per_run: number;
 }
 
 export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
@@ -4358,6 +4367,7 @@ export interface MetacognitionTrace {
   };
   est_cost_usd?: number | null;
   proposals?: number;
+  notifications?: number;
   stopped_by?: string;
   summary?: string;
   skipped?: string;
@@ -4400,6 +4410,7 @@ export interface AgentRunSummary {
   approved: number;
   rejected: number;
   comments: number;
+  notifications?: number;
   error: string | null;
 }
 
@@ -4419,6 +4430,7 @@ export interface AgentStats {
     approval_rate: number | null;
   };
   comments: number;
+  notifications?: number;
   access_requests: number;
   blocked_by_scope: number;
   last_run_at: string | null;

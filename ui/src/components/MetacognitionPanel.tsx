@@ -23,6 +23,7 @@ import {
 } from "../lib/api";
 import { formatServerDate } from "../lib/dates";
 import { AgentActivity } from "./AgentActivity";
+import { MetacognitionNotifySection, EMPTY_NOTIFY, toNotifyConfig, toNotifyDraft, type NotifyDraft } from "./MetacognitionNotifySection";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Input } from "./ui/input";
@@ -45,6 +46,7 @@ interface Draft {
   feeds: string;
   mcp: string;
   model: string;
+  notify: NotifyDraft;
 }
 
 const EMPTY: Draft = {
@@ -62,6 +64,7 @@ const EMPTY: Draft = {
   feeds: "",
   mcp: "",
   model: "",
+  notify: EMPTY_NOTIFY,
 };
 
 const list = (s: string) =>
@@ -89,6 +92,7 @@ function toDraft(a: MetacognitionAgent): Draft {
       .map((m) => [m.name, m.url, m.allowed_tools.join(","), m.auth_env ?? ""].join(" ").trim())
       .join("\n"),
     model: a.model ?? "",
+    notify: toNotifyDraft(a.notify),
   };
 }
 
@@ -115,6 +119,7 @@ function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
       return { name, url, allowed_tools: list(tools ?? ""), ...(auth_env ? { auth_env } : {}) };
     }),
     model: d.model.trim() || null,
+    notify: toNotifyConfig(d.notify),
   };
 }
 
@@ -139,7 +144,9 @@ export function RunCost({ trace }: { trace: MetacognitionTrace | null | undefine
   const total = u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0;
   return (
     <span className="text-muted-foreground" data-testid="metacognition-run-cost">
-      {trace.proposals ?? 0} proposal{trace.proposals === 1 ? "" : "s"} · {tokens(total)} tokens
+      {trace.proposals ?? 0} proposal{trace.proposals === 1 ? "" : "s"} ·{" "}
+      {trace.notifications ? `${trace.notifications} notification${trace.notifications === 1 ? "" : "s"} · ` : ""}
+      {tokens(total)} tokens
       {typeof trace.est_cost_usd === "number" ? ` · ~$${trace.est_cost_usd.toFixed(3)}` : ""} ·{" "}
       {trace.billing === "own_key" ? "your key (not billed by PromptOwl)" : "PromptOwl credits"}
       {trace.stopped_by && trace.stopped_by !== "end_turn" ? ` · stopped: ${trace.stopped_by.replace(/_/g, " ")}` : ""}
@@ -478,6 +485,7 @@ export function MetacognitionPanel({
               and the agent can only act on it by proposing.
             </p>
           </div>
+          <MetacognitionNotifySection nestId={nestId} value={draft.notify} onChange={(notify) => setDraft({ ...draft, notify })} />
           <div className="space-y-1 sm:w-1/2">
             <Label>Model (optional; default is the nest's Hootie model)</Label>
             <Input value={draft.model} onChange={text("model")} placeholder="claude-sonnet-5" />
