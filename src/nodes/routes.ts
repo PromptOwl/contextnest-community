@@ -705,6 +705,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     tags?: string[];
     status?: string;
     title?: string;
+    description?: string;
     changeNote?: string;
     schedule?: string;
     model?: string;
@@ -750,6 +751,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       append: body.append,
       tags: body.tags,
       title: body.title,
+      description: body.description,
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,

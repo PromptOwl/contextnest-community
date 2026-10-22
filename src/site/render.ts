@@ -398,13 +398,60 @@ function renderToc(site: Site): string {
   });
 }
 
+/**
+ * Words a tag hub keeps upper-case: "mcp" reads "MCP", never "Mcp". Only
+ * letters that are never an ordinary English word — "rest", "id" and "soc"
+ * are left out, so a "rest" tag reads "Rest", not "REST".
+ */
+const ACRONYMS = new Set([
+  "ai", "api", "cli", "sdk", "sso", "mcp", "llm", "rag", "ui", "ux", "url", "http", "https",
+  "json", "yaml", "sql", "seo", "pdf", "csv", "html", "css", "jwt", "oidc", "saml", "rbac", "gdpr",
+  "hipaa", "gtm", "crm", "erp", "kpi", "okr", "faq", "dns", "aws", "gcp",
+]);
+
+/** A tag as a heading: "api-design" → "API Design", "getting_started" → "Getting Started". */
+export function tagTitle(tag: string): string {
+  const title = tag
+    .replace(/^#/, "")
+    .split(/[-_\s/]+/)
+    .filter(Boolean)
+    .map((w) => {
+      const lower = w.toLowerCase();
+      if (ACRONYMS.has(lower)) return lower.toUpperCase();
+      // A plural acronym: "apis" → "APIs", "llms" → "LLMs".
+      if (lower.endsWith("s") && ACRONYMS.has(lower.slice(0, -1))) return `${lower.slice(0, -1).toUpperCase()}s`;
+      return w[0].toUpperCase() + w.slice(1);
+    })
+    .join(" ");
+  // A tag of separators only still needs a heading.
+  return title || tag;
+}
+
+/** ~155 characters, cut on a word. */
+function clip(text: string, max = 155): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > 80 ? lastSpace : max).replace(/[,;:.\s]+$/, "")}…`;
+}
+
 export function renderTagPage(site: Site, hub: TagHub): string {
-  const description = hub.definition
-    ? hub.definition.slice(0, 155)
-    : `${hub.pages.length} pages in ${site.name} about ${hub.tag}.`;
+  const title = tagTitle(hub.tag);
+  const n = hub.pages.length;
+  const count = `${n} ${n === 1 ? "page" : "pages"}`;
+  // Name the topic and count its pages; lead with the glossary definition
+  // when there is one, else name the first pages so no two hubs read alike.
+  const names = hub.pages.slice(0, 3).map((p) => p.title);
+  // The count sentence is never clipped away: a long definition is cut first.
+  const tail = `${count} in ${site.name} about ${title}`;
+  const description = clip(
+    hub.definition
+      ? `${clip(`${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}.`, Math.max(60, 154 - tail.length))} ${tail}.`
+      : `${tail}${names.length ? `, including ${names.join(", ")}` : ""}.`,
+  );
   const canonical = url(site, hub.path);
   return shell(site, {
-    title: `${hub.tag} — ${site.name}`,
+    title: `${title} — ${site.name}`,
     description,
     canonical,
     current: hub.path,
@@ -414,14 +461,14 @@ export function renderTagPage(site: Site, hub: TagHub): string {
       "@graph": [
         {
           "@type": "CollectionPage",
-          name: hub.tag,
+          name: title,
           url: canonical,
-          about: { "@type": "DefinedTerm", name: hub.tag, ...(hub.definition ? { description: hub.definition } : {}) },
+          about: { "@type": "DefinedTerm", name: title, ...(hub.definition ? { description: hub.definition } : {}) },
           hasPart: hub.pages.map((p) => ({ "@type": "TechArticle", name: p.title, url: url(site, p.path) })),
         },
       ],
     })}</script>`,
-    main: `<article><nav class="crumbs" aria-label="Breadcrumb"><a href="${esc(href(site, ""))}">${esc(site.name)}</a> / Topics</nav><h1>${esc(hub.tag)}</h1>${hub.definition ? `<p>${esc(hub.definition)}</p>` : ""}<ul>${hub.pages
+    main: `<article><nav class="crumbs" aria-label="Breadcrumb"><a href="${esc(href(site, ""))}">${esc(site.name)}</a> / Topics</nav><h1>${esc(title)}</h1>${hub.definition ? `<p>${esc(hub.definition)}</p>` : ""}<ul>${hub.pages
       .map((p) => `<li><a href="${esc(href(site, p.path))}">${esc(p.title)}</a> — ${esc(p.description)}</li>`)
       .join("")}</ul></article>`,
   });

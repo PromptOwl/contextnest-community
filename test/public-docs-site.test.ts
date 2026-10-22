@@ -51,6 +51,12 @@ describe("public docs site", () => {
       "docs/guides",
     );
     await add("Advanced", "# Advanced\n\nApproved advanced text.", "docs/guides");
+    // CU-wdqcq05raw: comments, filenames and aliased wikilinks in a table.
+    await add(
+      "Matrix",
+      "# Matrix\n\n<!-- editor note: do not ship -->\n\nEdit CONTEXT.md first.\n\n| Guide | Use |\n| --- | --- |\n| [[docs/guides/advanced|Deep dive]] | later |",
+      "docs/guides",
+    );
 
     // Governed from here on: new docs and edits wait for review.
     await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
@@ -177,6 +183,17 @@ describe("public docs site", () => {
     }
   });
 
+  it("renders table wikilinks, plain filenames and no HTML comments, in every output (CU-wdqcq05raw)", async () => {
+    const html = await (await get("/d/acme-docs/guides/matrix")).text();
+    expect(html).toContain('<td><a href="/d/acme-docs/guides/advanced">Deep dive</a></td>');
+    expect(html).not.toContain("http://CONTEXT.md");
+    expect(html).toContain("Edit CONTEXT.md first.");
+    const twin = await (await get("/d/acme-docs/guides/matrix.md", {})).text();
+    const full = await (await get("/d/acme-docs/llms-full.txt", {})).text();
+    for (const out of [html, twin, full]) expect(out).not.toContain("editor note");
+    expect(twin).toContain("| [Deep dive](http://localhost/d/acme-docs/guides/advanced) | later |");
+  });
+
   it("escapes raw HTML and leaves code alone", async () => {
     const html = await (await get("/d/acme-docs/guides/setup")).text();
     expect(html).not.toContain("<script>alert(1)</script>");
@@ -247,6 +264,37 @@ describe("public docs site", () => {
     const b = await get(`/?nest=${nestId}&doc=nodes/docs/guides/setup`);
     expect(b.status).toBe(301);
     expect(b.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
+  });
+
+  it("301s the SPA URL for any anonymous GET or HEAD, whatever it Accepts (CU-wdqcq05raw)", async () => {
+    const want = "http://localhost/d/acme-docs/";
+    // Plain curl, a link checker or an AI fetcher: no Accept, generic UA.
+    const bare = await get(`/nest/${nestId}`, {});
+    expect(bare.status).toBe(301);
+    expect(bare.headers.get("location")).toBe(want);
+    // The answer depends on Accept and User-Agent too, so caches must key on them.
+    expect(bare.headers.get("vary")).toMatch(/Accept/);
+    // Only a crawler's JSON-only 301 depends on the UA as well.
+    expect(bare.headers.get("vary")).not.toMatch(/User-Agent/);
+    const bot = await get(`/nest/${nestId}`, { "User-Agent": "GPTBot/1.2", Accept: "application/json" });
+    expect(bot.status).toBe(301);
+    expect(bot.headers.get("vary")).toMatch(/User-Agent/);
+    const mozilla = await get(`/nest/${nestId}`, { "User-Agent": "Mozilla/5.0" });
+    expect(mozilla.status).toBe(301);
+    const any = await get(`/nest/${nestId}`, { Accept: "*/*" });
+    expect(any.status).toBe(301);
+    const head = await app.request(`http://localhost/nest/${nestId}`, { method: "HEAD" });
+    expect(head.status).toBe(301);
+    expect(head.headers.get("location")).toBe(want);
+    const doc = await get(`/?nest=${nestId}&doc=nodes/docs/guides/setup`, {});
+    expect(doc.status).toBe(301);
+    expect(doc.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
+    // API clients keep their answer: a bearer token, or JSON-only Accept.
+    expect((await get(`/nest/${nestId}`, authed(owner.apiKey))).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json" })).status).not.toBe(301);
+    // axios' default: JSON first, with */* as a fallback — still an API client.
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json, text/plain, */*" })).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}?app=1`, {})).status).not.toBe(301);
   });
 
   it("picks up a newly approved version without a restart", async () => {

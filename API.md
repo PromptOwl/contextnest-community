@@ -629,7 +629,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 **Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
 
-**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+**Redirects from the app.** In key mode, any anonymous `GET` or `HEAD` of `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization, Accept`, plus `User-Agent` when a crawler asked only for JSON) to the page, whatever its `Accept` or `User-Agent` — a browser, a crawler, a link checker and plain `curl` all see the same live link. A `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`), API clients whose `Accept` names JSON but not `text/html` (e.g. `application/json`, or axios' `application/json, text/plain, */*`) from a non-crawler User-Agent, and `?app=1` still get the app's answer.
 
 **IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
 
@@ -1226,6 +1226,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 {
   "title": "...",
   "content": "...",
+  "description": "One-line summary.",
   "tags": ["..."],
   "changeNote": "fixed typo",
   "schedule": "0 7 * * *",
@@ -1234,6 +1235,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
+- `description` — the frontmatter one-line summary, which the public docs site uses as the page's meta description. Trimmed; one line, at most 500 characters (`400` otherwise). `""` removes it. MCP `context_update` takes the same field.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
