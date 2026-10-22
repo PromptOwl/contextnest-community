@@ -40,4 +40,13 @@ describe("device-auth gate (disabled)", () => {
     );
     expect(res.status).toBe(403);
   });
+
+  it("blocks POST /auth/device/poll with 403", async () => {
+    const res = await app.request("/auth/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "abc", client_secret: "def" }),
+    });
+    expect(res.status).toBe(403);
+  });
 });
