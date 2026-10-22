@@ -11,6 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { toast } from "sonner";
 import { reads } from "../../lib/queries";
+import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
 import { documentFacets } from "../../lib/document-facets";
@@ -380,6 +381,10 @@ export function DocumentsTab({
       return false;
     });
   };
+  // Who gets a select box: anyone who could act on the row (edit/move/tag, or
+  // delete as admin or author). Row, select-all and folder boxes share it.
+  const canSelect = (node: any) =>
+    !isReadOnly && (canEditNode(node) || canManage || isMine(node));
 
 
   // Node ids the caller can review right now (authoritative, from the queue
@@ -631,6 +636,14 @@ export function DocumentsTab({
         a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
       );
   })();
+
+  // Loaded, filtered docs the caller may select — what "Select all" covers.
+  const selectableVisible = sorted.filter(canSelect);
+  const selectableIn = (folder: string) =>
+    selectableVisible.filter((n) => {
+      const f = folderOfNode(n.id);
+      return f === folder || f.startsWith(`${folder}/`);
+    });
 
   // Every folder in the nest, so the tree can show one whose documents have
   // never been fetched. Memoised — FolderTree keys a useMemo on this.
@@ -1100,6 +1113,16 @@ export function DocumentsTab({
                   ))}
                 </div>
               )}
+              {!initialLoad && selectableVisible.length > 0 && (
+                <label className="mb-2 flex w-fit items-center gap-2 px-2 text-xs text-muted-foreground cursor-pointer">
+                  <Checkbox
+                    checked={selectionState(selected, selectableVisible)}
+                    onCheckedChange={() => setSelected((prev) => toggleMany(prev, selectableVisible))}
+                    data-testid="select-all-docs"
+                  />
+                  Select all ({selectableVisible.length})
+                </label>
+              )}
               {initialLoad || loadingFolders.has(baseFolder) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1299,7 +1322,7 @@ export function DocumentsTab({
                     </div>
                   );
                   const selectBox =
-                    !isReadOnly && (canEditNode(node) || canDelete) ? (
+                    canSelect(node) ? (
                       <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
                         <Checkbox
                           checked={selected.has(node.id)}
@@ -1606,6 +1629,7 @@ export function DocumentsTab({
                         // genuinely empty folder stays a static row, no chevron.
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
+                        const folderDocs = selectableIn(node.path);
                         // Same split as a document: admins/owners delete the
                         // folder (and everything under it), editors raise a
                         // request. Hidden while one is already pending, and
@@ -1710,6 +1734,18 @@ export function DocumentsTab({
                               // Spacer so names still line up under sibling
                               // collapsible folders.
                               <span className="h-3.5 w-3.5 shrink-0" />
+                            )}
+                            {/* Expanded only: a collapsed folder's docs aren't
+                                loaded, so its box would select nothing. */}
+                            {!collapsed && folderDocs.length > 0 && (
+                              <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                                <Checkbox
+                                  checked={selectionState(selected, folderDocs)}
+                                  onCheckedChange={() => setSelected((prev) => toggleMany(prev, folderDocs))}
+                                  aria-label={`Select documents in ${prettyFolderPath(node.path)}`}
+                                  data-testid={`select-folder-${node.path}`}
+                                />
+                              </div>
                             )}
                             <FolderOpen className="h-4 w-4 text-blue-500" />
                             <span className="text-sm font-medium">
