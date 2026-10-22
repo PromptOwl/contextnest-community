@@ -59,3 +59,41 @@ describe("IndexNow private-host check", () => {
     (host) => expect(PRIVATE_HOST.test(host)).toBe(false),
   );
 });
+
+// CU-wdqcq05ran: the docs site and the SPA reader pick the same home node from
+// a reader_home_node value. One rule, mirrored in the UI; this keeps them equal.
+describe("reader home node resolution (site ↔ reader parity)", () => {
+  const ids = ["nodes/docs/overview", "nodes/docs/welcome", "nodes/guides/welcome", "nodes/welcome-guide", "nodes/Intro", "guides/setup"];
+  const cases: Array<[string | null, string | undefined]> = [
+    ["nodes/docs/welcome", "nodes/docs/welcome"], // full id
+    ["NODES/Docs/Welcome", "nodes/docs/welcome"], // full id, any case
+    ["nodes/guides/welcome", "nodes/guides/welcome"], // exact id beats a leaf twin listed first
+    ["welcome", "nodes/docs/welcome"], // bare slug, two pages share it: lowest id wins
+    ["Welcome", "nodes/docs/welcome"],
+    ["intro", "nodes/Intro"], // leaf compares case-insensitively both ways
+    ["docs/welcome", "nodes/docs/welcome"], // id without the nodes/ prefix: same leaf
+    ["setup", "guides/setup"], // an id without the nodes/ prefix leafs the same on both sides
+    ["nodes/gone/intro", "nodes/Intro"], // a full id that matches nothing still falls back by leaf
+    ["  welcome  ", "nodes/docs/welcome"], // padded input is trimmed on both sides
+    ["welcome/", undefined], // a trailing slash leaves an empty slug: no match on either side
+    ["no-such-page", undefined],
+    ["", undefined],
+    [null, undefined],
+  ];
+
+  it.each(cases)("server: %j → %j", async (home, want) => {
+    const { pickHomeNode } = await import("../src/shared/reader-home.js");
+    expect(pickHomeNode(ids, home, (id) => id)).toBe(want);
+  });
+
+  it.each(cases)("reader UI: %j → %j", async (home, want) => {
+    const { pickHomeNode } = await import("../ui/src/lib/nest-caps");
+    const nodes = ids.map((id) => ({ id }));
+    expect(pickHomeNode(nodes, home)?.id).toBe(want);
+  });
+
+  it("is independent of list order", async () => {
+    const { pickHomeNode } = await import("../src/shared/reader-home.js");
+    expect(pickHomeNode([...ids].reverse(), "welcome", (id) => id)).toBe("nodes/docs/welcome");
+  });
+});
