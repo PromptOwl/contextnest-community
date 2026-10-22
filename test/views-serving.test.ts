@@ -262,7 +262,11 @@ describe("AC-1: the view page", () => {
     const csp = res.headers.get("content-security-policy")!;
     expect(csp).toContain("script-src 'none'");
     expect(csp).toContain("default-src 'none'");
-    expect(csp).toContain("frame-src 'self'");
+    // Exactly 'self': this is what keeps a frame (which may navigate itself)
+    // from loading anywhere else inside the page. Loosening it must fail here.
+    const frameSrc = csp.split(";").map((d) => d.trim()).filter((d) => d.startsWith("frame-src"));
+    expect(frameSrc).toEqual(["frame-src 'self'"]);
+    expect(csp).not.toMatch(/(^|;)\s*child-src\b/);
     expect(csp).not.toMatch(/(^|;)\s*sandbox\b/);
     expect(res.headers.get("cache-control")).toBe("private, no-store");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");

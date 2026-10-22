@@ -153,6 +153,9 @@ describe("injectNestData placement (AC-18)", () => {
     ["a <textarea>", "<!doctype html><body><textarea><script>no</script></textarea><script>app()</script></body>", "<script>app()"],
     ["an attribute value", '<!doctype html><head><meta name="x" content="<script>"></head><body></body>', "</head>"],
     ["a single-quoted attribute with >", "<!doctype html><head><meta content='a > <script>'><script>app()</script></head>", "<script>app()"],
+    ["a CDATA-looking run", "<!doctype html><head><![CDATA[ x ]]><script>app()</script></head>", "<script>app()"],
+    ["a processing-instruction-looking run", "<!doctype html><head><?xml x?><script>app()</script></head>", "<script>app()"],
+    ["an attribute with mixed quotes", `<!doctype html><head><meta a='"' b="'<script>'"><script>app()</script></head>`, "<script>app()"],
   ] as const) {
     it(`skips a <script / </head> inside ${name}`, () => {
       const out = injectNestData(html, "{}");
