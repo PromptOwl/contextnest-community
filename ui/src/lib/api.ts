@@ -224,9 +224,11 @@ export async function startDeviceAuth() {
 }
 
 export async function pollDeviceAuth(code: string, clientSecret: string) {
-  return request<{ status: string; token?: string }>(
-    `/auth/device/poll?code=${encodeURIComponent(code)}&client_secret=${encodeURIComponent(clientSecret)}`,
-  );
+  // Secret in the body, not the URL, so access logs never record it.
+  return request<{ status: string; token?: string }>("/auth/device/poll", {
+    method: "POST",
+    body: JSON.stringify({ code, client_secret: clientSecret }),
+  });
 }
 
 export type ClaimBlocked =
