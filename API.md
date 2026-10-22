@@ -333,6 +333,13 @@ Response (201 one-shot, 200 finalize):
 ```
 404 if caller has no permission.
 
+### PATCH `/nests/:nestId` (owner/admin)
+Rename a nest and/or change its description.
+```json
+{ "name": "New Name", "description": "What this nest holds" }
+```
+Both fields optional; only the ones present change. `description: null` or `""` clears it. A new `name` re-derives the nest's slug, so it must contain a letter or number and not collide with another nest of the same owner (`400`). Shared collaborators with write access get `403` — renaming changes user-visible URLs. Returns `{ "nest": { ... } }`.
+
 ### DELETE `/nests/:nestId`
 Owner only. Permanent — documents, versions and governance state all go.
 

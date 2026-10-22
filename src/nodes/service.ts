@@ -15,6 +15,7 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  TITLE_MAX_LENGTH,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -167,8 +168,9 @@ type ImportOpResult = {
 /** Max characters in a human-readable title. The id/slug bound (100 per
  *  segment, below) doesn't cover this: a title of emoji or non-latin text
  *  slugifies to almost nothing, so an unbounded title still lands in
- *  frontmatter and stretches every header that renders it. */
-const MAX_TITLE_LENGTH = 120;
+ *  frontmatter and stretches every header that renders it. The engine owns the
+ *  number, so a title a local vault accepts is never refused on push. */
+const MAX_TITLE_LENGTH = TITLE_MAX_LENGTH;
 
 /** Shared choke point for REST + MCP: both create and rename route here. */
 function assertTitleLength(title: string): void {

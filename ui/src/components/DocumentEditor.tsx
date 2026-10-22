@@ -2873,11 +2873,11 @@ export function DocumentEditor({
                           }
                         }}
                         placeholder="Untitled"
-                        // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
-                        // stop here so the server's 400 is unreachable from the UI.
+                        // Mirrors the engine's TITLE_MAX_LENGTH (src/nodes/service.ts) — a
+                        // hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
-                        maxLength={120}
+                        maxLength={200}
                         disabled={fieldsDisabled}
                         required
                         aria-required="true"
