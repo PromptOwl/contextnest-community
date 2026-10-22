@@ -13,6 +13,7 @@ import {
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { isDerivedAnnotationsNode } from "./service.js";
+import { taskFieldsOf } from "./task-fields.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
@@ -214,6 +215,16 @@ export async function buildNestGraph(
       seen.add(key);
       allLinks.push({ source: d.id, target: targetId });
     }
+  }
+  // A Board sub-item's `parent` is a link to that parent (CU-wdqcq05rau); only
+  // drawn when the caller can see both ends.
+  for (const d of accessible) {
+    const parent = taskFieldsOf(d.frontmatter?.metadata).parent;
+    if (!parent || !idSet.has(parent) || parent === d.id) continue;
+    const key = `${d.id}->${parent}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    allLinks.push({ source: d.id, target: parent });
   }
 
   // Tag counts + tag→doc-ids index (the latter powers exact bottleneck share).
