@@ -799,6 +799,7 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
   const channels: string[] = [];
   const skipped: string[] = [];
   let failed = false;
+  let roomWhy: "restricted" | "too_many" | null = null;
   if (cfg.channels.includes("email") && isEmailConfigured()) {
     const outcome = await sendEmailToRecipient(
       people.map((p) => p.email),
@@ -820,8 +821,10 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
     // nest, not by who can open this document: a note about a document some
     // members can't open (written from what the agent read in it) stays out
     // of the room. The email above already went only to people who can.
-    if (nodeId && !(await openToWholeNest(ctx.nestId, nodeId))) {
+    const open = nodeId ? await openToWholeNest(ctx.nestId, nodeId) : "open";
+    if (open !== "open") {
       skipped.push("connectors");
+      roomWhy = open;
     } else {
       // Name who it is for (no addresses for a role), same defanged text.
       const forWhom = key === "owner" ? "the nest owner" : key === "reviewers" ? "the reviewers" : people[0].name || people[0].email;
@@ -831,7 +834,8 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
         subjectId: nodeId ?? undefined,
         actor: persona.email,
         runId: ctx.runId,
-        message: `${label}, for ${forWhom}: *${subject}* — ${message}${link ? ` ${link}` : ""}`,
+        // Chat markup out of the subject: it is wrapped in *bold* here.
+        message: `${label}, for ${forWhom}: *${subject.replace(/[*_~`]/g, "")}* — ${message}${link ? ` ${link}` : ""}`,
       });
       // Connector posts are fire-and-forget; their own log rows say whether they landed.
       channels.push("connectors");
@@ -840,7 +844,9 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
   if (!channels.length) {
     const why = failed
       ? "Not sent: the email could not be delivered (the server's mail transport failed). This was recorded; don't retry this run."
-      : skipped.length
+      : roomWhy === "too_many"
+        ? "Not sent: the only way your owner chose is the nest's chat channel, and this nest has too many people to confirm they can all open that document, so a note about it isn't posted there. Notify without node_id, or put it in your summary. This was recorded."
+        : roomWhy
         ? "Not sent: the only way your owner chose is the nest's chat channel, and that document isn't open to everyone on the nest, so it can't be posted there. This was recorded."
         : "Not sent: none of the ways your owner chose is set up on this server (no email transport, or no connector listening for agent notifications). This was recorded.";
     return notifyRefused(ctx, failed ? "delivery_failed" : "no_channel", key, why, nodeId ?? undefined);
@@ -865,11 +871,19 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
   };
 }
 
-/** This agent's sent notifications since `sinceMs`, across its runs. */
+/**
+ * This agent's sent notifications since `sinceMs`, across its runs, by when
+ * each was sent (a long run that started earlier still counts). Check-then-
+ * send is safe here because sends are serial per agent: one run per agent at
+ * a time (startMetacognitionRun), and the loop runs a turn's tool calls one
+ * after another. The LIKE matches the step `notify()` writes below —
+ * appendRunStep stores JSON.stringify(detail), so `"kind":"notification"` has
+ * no spaces; metacognition-notify.test.ts pins it.
+ */
 async function notificationsSince(ctx: ToolContext, sinceMs: number): Promise<number> {
   const row = (await getDb().get(
     `SELECT COUNT(*) AS n FROM run_steps s JOIN runs r ON r.id = s.run_id
-      WHERE r.nest_id = ? AND r.agent_node = ? AND r.started_at >= ?
+      WHERE r.nest_id = ? AND r.agent_node = ? AND s.at >= ?
         AND s.action = 'notify' AND s.detail LIKE '%"kind":"notification"%'`,
     [ctx.nestId, ctx.agent.node_id, new Date(sinceMs).toISOString()],
   )) as { n: number | string } | undefined;

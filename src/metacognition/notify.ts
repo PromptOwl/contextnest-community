@@ -117,19 +117,20 @@ export async function resolveNotifyRecipients(
   return allowed.length ? { people: allowed } : { people: [], reason: `nobody in "${key}" can open ${nodeId}` };
 }
 
-/** Past this many people the check is skipped and the answer is no: a room
- *  post about a document isn't worth an unbounded access sweep. */
+/** Past this many people the sweep isn't run and the answer is "too_many"
+ *  (fail closed): a room post about a document isn't worth an unbounded
+ *  access check per notification. */
 const OPEN_CHECK_MAX = 200;
 
 /**
  * Can everyone on the nest open this document? The bar for posting about it
  * to the nest's chat channel, whose audience isn't tied to the document's.
  */
-export async function openToWholeNest(nestId: string, nodeId: string): Promise<boolean> {
+export async function openToWholeNest(nestId: string, nodeId: string): Promise<"open" | "restricted" | "too_many"> {
   const members = [...(await notifyMembers(nestId)).values()];
-  if (members.length > OPEN_CHECK_MAX) return false;
+  if (members.length > OPEN_CHECK_MAX) return "too_many";
   for (const p of members) {
-    if (!(await canOpenNode(nestId, nodeId, p.userId, p.email))) return false;
+    if (!(await canOpenNode(nestId, nodeId, p.userId, p.email))) return "restricted";
   }
-  return true;
+  return "open";
 }

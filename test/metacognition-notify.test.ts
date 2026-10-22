@@ -143,6 +143,18 @@ describe("defangNotice", () => {
     expect(out).toContain("evil[.]example");
   });
 
+  it("with no base URL nothing is a link; scripts, data URIs and Slack controls are neutralised", () => {
+    const out = defangNotice("go https://nest.example.com/?nest=n1 <@U123> <#C1> javascript:alert(1) data:text/html,x", "");
+    expect(out).not.toContain("https://");
+    expect(out).not.toMatch(/<@U123>|<#C1>/);
+    expect(out).not.toMatch(/javascript:|data:/i);
+  });
+
+  it("an own link followed by punctuation stays a link", () => {
+    const link = "https://nest.example.com/?nest=n1&doc=nodes%2Fa";
+    expect(defangNotice(`(see ${link}).`, own)).toContain(link);
+  });
+
   it("keeps a link to this nest's own documents", () => {
     const link = "https://nest.example.com/?nest=n1&doc=nodes%2Fgtm%2Fpricing";
     expect(defangNotice(`Look: ${link}`, own)).toContain(link);
@@ -396,6 +408,36 @@ describe("a run that notifies", () => {
     }
   });
 
+  it("the daily ceiling counts when a notification was sent, not when its run started", async () => {
+    expect((await configure({ recipients: ["owner"], channels: ["email"], max_per_run: 5 })).status).toBe(200);
+    const { getDb } = await import("../src/db/client.js");
+    const db = getDb();
+    const since = new Date(Date.now() - 86_400_000).toISOString();
+    const row = (await db.get(
+      `SELECT COUNT(*) AS n FROM run_steps s JOIN runs r ON r.id = s.run_id
+        WHERE r.nest_id = ? AND r.agent_node = ? AND s.at >= ? AND s.action = 'notify' AND s.detail LIKE '%"kind":"notification"%'`,
+      [nestId, AGENT, since],
+    )) as { n: number };
+    // A long run that started two days ago and notified a minute ago.
+    const old = `run_old_${Date.now()}`;
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    await db.run(
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, started_at, depth) VALUES (?, ?, ?, 'test', 'succeeded', ?, 0)`,
+      [old, nestId, AGENT, twoDaysAgo],
+    );
+    await db.run(
+      `INSERT INTO run_steps (run_id, seq, action, detail, at) VALUES (?, 1, 'notify', ?, ?)`,
+      [old, JSON.stringify({ tool: "notify", kind: "notification", to: "owner" }), new Date(Date.now() - 60_000).toISOString()],
+    );
+    process.env.METACOGNITION_NOTIFY_PER_DAY = String(Number(row.n) + 1);
+    try {
+      const done = await run([call(toolUse("notify", { to: "owner", subject: "a", message: "b" })), say("ok")]);
+      expect(notifySteps(done)[0]?.detail.refused).toBe("daily_cap");
+    } finally {
+      delete process.env.METACOGNITION_NOTIFY_PER_DAY;
+    }
+  });
+
   it("stops at max_per_run: the third call of a 2-per-run agent is refused", async () => {
     expect((await configure({ recipients: ["owner"], channels: ["email"], max_per_run: 2 })).status).toBe(200);
     const n = (i: number) => toolUse("notify", { to: "owner", subject: `Note ${i}`, message: `Message ${i}` });
@@ -475,6 +517,15 @@ describe("a run that notifies", () => {
     expect(evs[0]).toMatchObject({ nestId, subjectId: "nodes/gtm/pricing", runId: done.run.id });
     expect(evs[0].message).toContain("Archivist (agent)");
     expect(evs[0].message).toContain("Stale pricing");
+    expect(done.run.trace.notifications).toBe(1);
+  });
+
+  it("strips chat markup from the subject it posts to a channel", async () => {
+    expect((await configure({ recipients: ["owner"], channels: ["connectors"] })).status).toBe(200);
+    const done = await run([call(toolUse("notify", { to: "owner", subject: "*bold* _it_ ~x~ `code`", message: "m" })), say("ok")]);
+    const ev = dispatchSpy.mock.calls.map((c) => c[0] as any).find((e) => e.kind === "agent_notify");
+    expect(ev).toBeTruthy();
+    expect(ev.message).toContain("*bold it x code*");
     expect(done.run.trace.notifications).toBe(1);
     expect(notifySteps(done)[0].detail.channels).toEqual(["connectors"]);
   });
