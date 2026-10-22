@@ -14,6 +14,8 @@ import {
 } from "./tools.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
+import { metacognitionEnabled } from "../metacognition/manage.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
@@ -70,8 +72,14 @@ function createMcpServerForNest(
   // gate the REST requireWorkflowPlane middleware applies. config is read per
   // request (the server is rebuilt per call), so toggling the flag at runtime
   // takes effect immediately.
+  // Metacognition tools need FEATURE_METACOGNITION as well (the REST
+  // requireMetacognition gate), and are admin tools on top.
   const allDefs = config.FEATURE_WORKFLOW_PLANE
-    ? [...TOOL_DEFINITIONS, ...WORKFLOW_TOOL_DEFINITIONS]
+    ? [
+        ...TOOL_DEFINITIONS,
+        ...WORKFLOW_TOOL_DEFINITIONS,
+        ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
+      ]
     : TOOL_DEFINITIONS;
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
@@ -96,7 +104,10 @@ function createMcpServerForNest(
       let field: z.ZodTypeAny;
       if (def.type === "string") field = z.string();
       else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
+      else if (def.type === "array")
+        // A list of objects (metacognition feeds, MCP servers) is checked by
+        // the handler's own parser; everything else is a list of strings.
+        field = def.items?.type === "object" ? z.array(z.any()) : z.array(z.string());
       else field = z.any();
 
       if (!required.includes(key)) field = field.optional();

@@ -116,6 +116,7 @@ import {
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import * as systems from "../auth/systems.js";
@@ -463,6 +464,12 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   "context_systems",
   "context_instructions_update",
+  // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
+  // action; only advertised while both feature flags are on (mcp/routes.ts).
+  "metacognition_list",
+  "metacognition_configure",
+  "metacognition_run",
+  "metacognition_remove",
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -4249,6 +4256,11 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Metacognition tools: same deal, behind both flags; each call re-checks
+      // owner/admin and refuses system keys in metacognition/manage.ts.
+      if (isMetacognitionTool(toolName)) {
+        return runMetacognitionTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

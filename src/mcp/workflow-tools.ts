@@ -25,8 +25,13 @@ import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { ForbiddenError, ValidationError, NotFoundError } from "../shared/errors.js";
 import type { McpToolContext } from "./tools.js";
-import { getAgent } from "../metacognition/store.js";
-import { agentStats } from "../metacognition/stats.js";
+import {
+  NOT_ENABLED,
+  metacognitionEnabled,
+  assertCanManageMetacognition,
+  getAgentView,
+  agentStatsFor,
+} from "../metacognition/manage.js";
 import {
   triggerRun,
   appendRunStep,
@@ -117,7 +122,8 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "List runs in this nest, most recent first. Filter by agent node id and/or status (running|succeeded|failed|cancelled). " +
       "With agent_stats: true and agent set to a metacognition agent, returns that agent's track record instead — run outcomes " +
       "(succeeded/failed/timeout/skipped), tokens and estimated cost, how its proposals were judged (approval rate), comments, " +
-      "the last error, and its `limit` most recent runs — over the last `days` (default 30). Needs write access, like the agent's page.",
+      "the last error, and its `limit` most recent runs — over the last `days` (default 30). Owner/admin only, like the agent's page. " +
+      "To list, set up, run or remove metacognition agents, use metacognition_list, metacognition_configure, metacognition_run and metacognition_remove.",
     inputSchema: {
       type: "object",
       properties: {
@@ -216,26 +222,25 @@ async function nestPermission(ctx: McpToolContext): Promise<NestPermission> {
 /**
  * workflow_runs_list { agent_stats: true } — the MCP twin of
  * GET /nests/:id/metacognition/:node/stats, behind the same gate: the
- * metacognition flags (404 otherwise), write tier, and the node must be a
- * configured metacognition agent.
+ * metacognition flags (404 otherwise), owner/admin and no system key, and the
+ * node must be a configured metacognition agent.
  */
-async function agentStatsForMcp(nestId: string, perm: NestPermission, args: Record<string, any>) {
-  if (!config.FEATURE_WORKFLOW_PLANE || !config.FEATURE_METACOGNITION) {
-    throw new NotFoundError("Metacognition agents are not enabled on this server.");
-  }
-  requireTier(perm, "write");
+async function agentStatsForMcp(ctx: McpToolContext, perm: NestPermission, args: Record<string, any>) {
+  if (!metacognitionEnabled()) throw new NotFoundError(NOT_ENABLED);
+  await assertCanManageMetacognition(ctx.nestId, ctx.userId, perm);
   if (typeof args.agent !== "string" || !args.agent.trim()) {
     throw new ValidationError("agent_stats needs agent: the metacognition agent's node id");
   }
-  const nodeId = assertSafeNodeId(args.agent.trim());
-  if (!(await getAgent(nestId, nodeId))) throw new NotFoundError(`${nodeId} is not a metacognition agent`);
+  const nodeId = args.agent.trim();
   const whole = (k: string) => {
     const v = args[k];
     if (v === undefined || v === null) return undefined;
     if (!Number.isInteger(v) || v < 1) throw new ValidationError(`${k} must be a positive whole number`);
     return v as number;
   };
-  return { stats: await agentStats(nestId, nodeId, { days: whole("days"), limit: whole("limit") }) };
+  // Existence first, as before: an unknown agent is "not found" before a bad window.
+  await getAgentView(ctx.nestId, nodeId);
+  return { stats: await agentStatsFor(ctx.nestId, nodeId, { days: whole("days"), limit: whole("limit") }) };
 }
 
 function requireTier(perm: NestPermission, tier: "read" | "write"): void {
@@ -314,7 +319,7 @@ export async function runWorkflowTool(
       return json(await getRunTrace(run, { canSeeDetail }));
     }
     case "workflow_runs_list": {
-      if (args.agent_stats === true) return json(await agentStatsForMcp(ctx.nestId, perm, args));
+      if (args.agent_stats === true) return json(await agentStatsForMcp(ctx, perm, args));
       requireTier(perm, "read");
       const canSeeDetail = permissionLevel(perm) >= permissionLevel("write");
       return json(

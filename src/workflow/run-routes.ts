@@ -28,6 +28,7 @@ import { envValues } from "./env-routes.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
+import { requireMetacognitionAdmin } from "../metacognition/manage.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -302,6 +303,8 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
   if (config.FEATURE_METACOGNITION) {
     const meta = await getAgent(nestId, agentNode);
     if (meta?.enabled) {
+      // Metacognition is owner/admin only, however the run is started.
+      requireMetacognitionAdmin(c.get("nestPermission"));
       if (body.parent_run_id !== undefined && body.parent_run_id !== null) {
         throw new ValidationError("A metacognition agent can't run as a sub-agent");
       }

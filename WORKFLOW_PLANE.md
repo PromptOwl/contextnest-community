@@ -35,7 +35,7 @@ A read-only **Runs** tab (nest header, shown when the flag is on) lists a nest's
 
 ## The one exception: metacognition agents
 
-With `FEATURE_METACOGNITION=true`, an owner or admin can make an agent document a **metacognition agent** (`PUT /nests/:id/metacognition/:node`). Those the server runs itself — everything else here is still executed by external runners. The boundary moves only as far as it has to:
+With `FEATURE_METACOGNITION=true`, an owner or admin can make an agent document a **metacognition agent** (`PUT /nests/:id/metacognition/:node`, or the `metacognition_configure` MCP tool). Everything about one — listing, running, stats, its schedules and hooks — is owner/admin only. Those the server runs itself — everything else here is still executed by external runners. The boundary moves only as far as it has to:
 
 - **Claimed at creation.** A metacognition run is inserted with `claimed_by = "server:metacognition"`, whichever way it starts (manual trigger, `POST /run/:agent`, a schedule, an inbound hook), so a poll-mode runner never sees it, and `/runnables` leaves these agents out. Only the server appends its steps; a person can still cancel it.
 - **Proposals only.** The loop's tools read (in the agent's own nest, within its configured folders or grants given to the persona, capped by its pinned owner's access; approved text only) and propose: an edit or a new document lands as a draft submitted for review, authored by the agent's persona (a service identity), never published. Comments are comments. Nothing approves, publishes, deletes or changes permissions.
