@@ -164,7 +164,9 @@ describe("injectNestData placement (AC-18)", () => {
   }
 
   it("stays linear on hostile markup (no catastrophic backtracking)", () => {
-    for (const html of ["<a".repeat(50_000), '<a "'.repeat(50_000), "<!--" + "<a b=c ".repeat(50_000), "<a " + "b".repeat(200_000)]) {
+    for (const html of ["<a".repeat(50_000), '<a "'.repeat(50_000), "<!--" + "<a b=c ".repeat(50_000), "<a " + "b".repeat(200_000),
+      // Unterminated quotes, a few hundred KB (review finding).
+      '<a "' + "x".repeat(400_000), ("<a '" + "x".repeat(400)).repeat(1_000), ('<a "' + "<b ".repeat(100)).repeat(1_000)]) {
       const t0 = Date.now();
       expect(count(injectNestData(html, "{}"))).toBe(1);
       expect(Date.now() - t0).toBeLessThan(1000);
