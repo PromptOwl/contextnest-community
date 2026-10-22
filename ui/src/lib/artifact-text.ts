@@ -15,6 +15,12 @@ const BLOCK_TAGS = new Set([
   "UL", "OL", "BR", "HR",
 ]);
 
+/** HTML if it opens on a tag, after any leading whitespace — a pushed body
+ *  keeps the blank line under its frontmatter. Else markdown or plain text. */
+export function isHtmlBody(body: string): boolean {
+  return /^\s*</.test(body);
+}
+
 /**
  * Reduce artifact HTML to readable plain text with block-level newlines.
  * Scripts/styles are dropped. Deterministic so a quote captured in the

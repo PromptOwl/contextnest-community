@@ -266,9 +266,10 @@ nestRoutes.get("/", async (c) => {
     deduped.push(n);
   }
   // Rows the caller reaches through visibility ALONE — no ownership, no
-  // collaborator/steward/team row. The dashboard's default "My nests" scope
-  // leaves these out, so it needs the fact stated rather than inferred from
-  // an empty roles list (a public nest you're also an editor of is yours).
+  // collaborator/steward/team row. The dashboard's "My nests" scope leaves
+  // these out and labels them on All, so it needs the fact stated rather
+  // than inferred from an empty roles list (a public nest you're also an
+  // editor of is yours).
   const memberIds = new Set([...owned, ...shared].map((n) => n.id));
   const out = (await Promise.all(deduped.map(annotate))).map((row) => ({
     ...row,

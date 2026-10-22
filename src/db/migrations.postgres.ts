@@ -93,6 +93,10 @@ export const HISTORICAL_MIGRATIONS = [
   "065_api_key_capability",
   "066_api_key_origin",
   "067_system_accounts",
+  "068_nest_sites",
+  "069_site_public_url_host",
+  "070_instructions_revisions",
+  "071_node_pins",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1180,7 +1184,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_task_activity_node
       ON task_activity(nest_id, node_id, created_at);
   `);
-  
+
   // Migration 067 parity: named systems (see migrations.ts).
   await db.exec(`
     CREATE TABLE IF NOT EXISTS system_accounts (
@@ -1191,6 +1195,72 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_by_email TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW}
     );
+  `);
+
+  // Migration 068 parity: public docs sites (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_sites (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      domain TEXT,
+      site_key TEXT UNIQUE,
+      domain_token TEXT NOT NULL,
+      domain_verified_at TEXT,
+      settings TEXT NOT NULL DEFAULT '{}',
+      indexnow_key TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE TABLE IF NOT EXISTS site_paths (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+  `);
+
+  // Migration 069 parity: the proven host of a site's public_url.
+  await db.exec("ALTER TABLE nest_sites ADD COLUMN IF NOT EXISTS public_url_host TEXT");
+
+  // Migration 070 parity: CONTEXT.md revisions (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS instructions_revisions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      author_email TEXT,
+      note TEXT,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      UNIQUE(nest_id, seq)
+    );
+  `);
+
+  // Migration 071 parity: document pins (see migrations.ts). Editorial
+  // (scope 'nest', user_id NULL, ordered) and personal (scope 'user') pins;
+  // per-scope uniqueness as two partial unique indexes.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS node_pins (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('nest', 'user')),
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL DEFAULT 0,
+      pinned_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      CHECK ((scope = 'nest' AND user_id IS NULL) OR (scope = 'user' AND user_id IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+      ON node_pins(nest_id, node_id) WHERE scope = 'nest';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+      ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
+    CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

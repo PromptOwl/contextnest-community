@@ -137,7 +137,9 @@ class MyDraftsPage {
     logger.info(`Searching drafts for "${text}"`);
     const landed = this.waitForList({ q: text.trim() });
     await this.search.fill('');
-    await this.search.pressSequentially(text, { delay: 40 });
+    // Typed in one burst: on a loaded shared server the browser can stall
+    // between spaced-out keys long enough for the debounce to fire mid-word.
+    await this.search.pressSequentially(text, { delay: 0 });
     const body = await (await landed).json();
     await this.loader.waitFor({ state: 'hidden' });
     return body;

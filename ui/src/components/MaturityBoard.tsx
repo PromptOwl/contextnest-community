@@ -52,6 +52,10 @@ import {
   groupByColumn,
   layoutKey,
   migrateLayout,
+  isColumnPattern,
+  keepPatterns,
+  tagSuggestions,
+  withoutPattern,
   newCardPlacement,
   planMove,
   resolveConfig,
@@ -72,6 +76,7 @@ import {
   localToday,
   matchesAssigneeFilter,
   matchesBlockedFilter,
+  matchesTitleFilter,
   moveNeedsReview,
   openBlockers,
   subItemsByParent,
@@ -95,6 +100,7 @@ import {
   TypeIcon,
 } from "./board/CardParts";
 import { BoardListView } from "./board/BoardListView";
+import { TagColumnInput } from "./board/TagColumnInput";
 import {
   resolveViewMode,
   viewStorageKey,
@@ -542,6 +548,8 @@ export function MaturityBoard({
   const boardPeople = useMemo(() => assigneesOnBoard(nodes), [nodes]);
   // "Hide blocked" — a glance, like the assignee filter, not a saved setting.
   const [hideBlocked, setHideBlocked] = useState(false);
+  // The filter box: filters titles as you type; Enter turns it into a tag chip.
+  const [filterDraft, setFilterDraft] = useState("");
   const blockedCount = useMemo(
     () => nodes.filter((n) => openBlockers(n) > 0).length,
     [nodes],
@@ -557,6 +565,7 @@ export function MaturityBoard({
           (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
           matchesBlockedFilter(n, hideBlocked) &&
+          matchesTitleFilter(n, filterDraft) &&
           // Linear's "completed issues: past week/month" display option.
           !(
             config.hideDoneAfterDays !== undefined &&
@@ -570,7 +579,7 @@ export function MaturityBoard({
           ) &&
           matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
   // Folders with nothing in them — the sidebar's census read (shared cache), so
@@ -943,8 +952,7 @@ export function MaturityBoard({
   const draggable = canEditDocs;
 
   // ── Board tabs: create / rename / duplicate / share / delete ──
-  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
-  const [filterDraft, setFilterDraft] = useState("");
+  const [renaming, setRenaming] = useState<{ id: string; value: string; fresh?: boolean } | null>(null);
   const selectBoard = useCallback((id: string) => setActiveId(id), []);
   const upsertBoard = useCallback(
     (saved: api.SavedBoard) =>
@@ -966,7 +974,8 @@ export function MaturityBoard({
         });
         upsertBoard(board);
         setActiveId(board.id);
-        setRenaming({ id: board.id, value: board.name });
+        // A duplicate keeps its "… copy" name; a brand-new board needs one.
+        setRenaming({ id: board.id, value: board.name, fresh: !from });
       } catch (e: any) {
         toast.error(e?.message || "Couldn't create the board");
       }
@@ -1022,9 +1031,10 @@ export function MaturityBoard({
       if (from < 0 || to < 0) return;
       order.splice(from, 1);
       order.splice(to, 0, fromKey);
-      updateLayout({ columnOrder: order });
+      // A pattern isn't a column itself, so the visible order lacks it.
+      updateLayout({ columnOrder: keepPatterns(order, effectiveConfig.columnOrder) });
     },
-    [orderedKeys, updateLayout],
+    [orderedKeys, effectiveConfig.columnOrder, updateLayout],
   );
 
   const hideColumn = useCallback(
@@ -1035,8 +1045,10 @@ export function MaturityBoard({
         // until the next reorder silently drops it. Folder/status re-derive
         // their columns from the data, so their saved order is left intact
         // and a column that repopulates keeps the position it was given.
+        // A column a pattern brought in isn't in the saved order; hiding it
+        // is enough, and leaves the pattern's other columns unpinned.
         ...(effectiveConfig.explicitColumns
-          ? { columnOrder: orderedKeys.filter((k) => k !== key) }
+          ? { columnOrder: (effectiveConfig.columnOrder ?? []).filter((k) => k !== key) }
           : {}),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
@@ -1045,9 +1057,17 @@ export function MaturityBoard({
     [
       orderedKeys,
       effectiveConfig.explicitColumns,
+      effectiveConfig.columnOrder,
       effectiveConfig.hiddenColumns,
       updateLayout,
     ],
+  );
+
+  /** Drop a pattern (status*) and every column it brought in. */
+  const removePattern = useCallback(
+    (pattern: string) =>
+      updateLayout({ columnOrder: withoutPattern(effectiveConfig.columnOrder, pattern) }),
+    [effectiveConfig.columnOrder, updateLayout],
   );
 
   /**
@@ -1107,7 +1127,14 @@ export function MaturityBoard({
       updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
         // and un-hide it if it was removed earlier.
-        columnOrder: [...new Set([...orderedKeys, v])],
+        // On a curated board that's the saved order, so a pattern's columns
+        // stay unpinned; a fresh board's auto columns are written out first.
+        columnOrder: [
+          ...new Set([
+            ...(effectiveConfig.explicitColumns ? (effectiveConfig.columnOrder ?? []) : orderedKeys),
+            v,
+          ]),
+        ],
         hiddenColumns: (effectiveConfig.hiddenColumns ?? []).filter(
           (k) => k !== v,
         ),
@@ -1118,23 +1145,25 @@ export function MaturityBoard({
       nestId,
       orderedKeys,
       effectiveConfig.dimension,
+      effectiveConfig.columnOrder,
       effectiveConfig.hiddenColumns,
       updateLayout,
       members,
     ],
   );
 
-  // Distinct tag values present in the nest — suggestions for the add-column box.
-  const availableTagValues = useMemo(() => {
-    if (effectiveConfig.dimension !== "tag") return [];
-    const set = new Set<string>();
-    for (const n of nodes) {
-      for (const k of cardColumnKeys(n, effectiveConfig)) {
-        if (k !== UNCATEGORIZED) set.add(k);
-      }
-    }
-    return [...set].sort();
-  }, [nodes, effectiveConfig]);
+  // Tags not yet a column, with card counts — the add-column box's list.
+  const tagColumnSuggestions = useMemo(
+    () => tagSuggestions(nodes, effectiveConfig, ""),
+    [nodes, effectiveConfig],
+  );
+  const tagPatterns = useMemo(
+    () =>
+      effectiveConfig.dimension === "tag"
+        ? (effectiveConfig.columnOrder ?? []).filter(isColumnPattern)
+        : [],
+    [effectiveConfig.dimension, effectiveConfig.columnOrder],
+  );
 
   // ── Done columns, lanes, render helpers ──
   const doneTags = useMemo(
@@ -1643,10 +1672,36 @@ export function MaturityBoard({
           {/* Add a column: a tag value, or — for writers on the folder board —
               a folder. Without this a nest whose documents all sit in Root has
               a single column and nowhere to drag them. */}
-          {(config.dimension === "tag" ||
-            ((effectiveConfig.dimension === "folder" ||
-              effectiveConfig.dimension === "assignee") &&
-              canEditDocs)) && (
+          {config.dimension === "tag" && (
+            <>
+              {/* Pattern columns aren't columns themselves — each shows here,
+                  removable, while its matching tags show as columns. */}
+              {tagPatterns.map((p) => (
+                <span
+                  key={p}
+                  className="inline-flex h-8 items-center gap-1 rounded-md border px-2 font-mono text-xs"
+                  title={`Every tag matching “${p}” is a column, including new ones. × removes them all.`}
+                >
+                  {p}
+                  <button
+                    type="button"
+                    onClick={() => removePattern(p)}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove the ${p} columns`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+              <TagColumnInput
+                suggestions={tagColumnSuggestions}
+                onAdd={(v) => void addColumn(v)}
+              />
+            </>
+          )}
+          {(effectiveConfig.dimension === "folder" ||
+            effectiveConfig.dimension === "assignee") &&
+            canEditDocs && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -1658,25 +1713,11 @@ export function MaturityBoard({
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
                 placeholder={
-                  config.dimension === "tag"
-                    ? "add column…"
-                    : config.dimension === "assignee"
-                      ? "add person…"
-                      : "new folder…"
+                  config.dimension === "assignee" ? "add person…" : "new folder…"
                 }
-                list={
-                  config.dimension === "tag"
-                    ? "board-tag-values"
-                    : config.dimension === "assignee"
-                      ? "board-people"
-                      : undefined
-                }
+                list={config.dimension === "assignee" ? "board-people" : undefined}
                 className="h-8 w-32"
-                title={
-                  config.dimension === "tag"
-                    ? "Add a tag column — pick an existing tag or type a new value"
-                    : "Add a folder column — drag a card into it to file the document there (nest with parent/child)"
-                }
+                title="Add a folder column — drag a card into it to file the document there (nest with parent/child)"
               />
               {config.dimension === "assignee" && (
                 <datalist id="board-people">
@@ -1687,21 +1728,12 @@ export function MaturityBoard({
                   ))}
                 </datalist>
               )}
-              {config.dimension === "tag" && (
-                <datalist id="board-tag-values">
-                  {availableTagValues.map((v) => (
-                    <option key={v} value={v} />
-                  ))}
-                </datalist>
-              )}
               <Button
                 type="submit"
                 variant="outline"
                 size="sm"
                 disabled={!newColumn.trim()}
-                title={
-                  config.dimension === "tag" ? "Add column" : "Add folder column"
-                }
+                title="Add folder column"
               >
                 <Plus className="h-3.5 w-3.5" />
               </Button>
@@ -1728,15 +1760,20 @@ export function MaturityBoard({
                   key={b.id}
                   autoFocus
                   value={renaming.value}
-                  onChange={(e) => setRenaming({ id: b.id, value: e.target.value })}
+                  onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                    if (e.key === "Escape") setRenaming(null);
+                    if (e.key === "Escape") {
+                      setRenaming(null);
+                      if (renaming.fresh) void removeBoard(b);
+                    }
                   }}
                   onBlur={() => {
                     const v = renaming.value.trim();
                     setRenaming(null);
-                    if (v && v !== b.name) void saveBoardMeta(b.id, { name: v });
+                    // A new board left unnamed is an accidental click — discard it.
+                    if (renaming.fresh && (!v || v === b.name)) void removeBoard(b);
+                    else if (v && v !== b.name) void saveBoardMeta(b.id, { name: v });
                   }}
                   className="h-8 w-44 mb-1"
                 />
@@ -1861,7 +1898,9 @@ export function MaturityBoard({
             <li>
               <span className="font-medium text-foreground">+</span> to add a
               column, <span className="font-medium text-foreground">×</span> to
-              remove one.
+              remove one. A pattern like{" "}
+              <code className="font-medium text-foreground">status*</code> adds a
+              column for every matching tag, new ones included.
             </li>
           </>
         ) : config.dimension === "field" ? (
@@ -2006,8 +2045,9 @@ export function MaturityBoard({
               }
               setFilterDraft("");
             }}
-            placeholder="filter by tag…"
-            className="h-7 w-32 text-xs"
+            placeholder="filter by title or #tag…"
+            title="Type to filter by title. Enter adds the text as a tag filter."
+            className="h-7 w-40 text-xs"
           />
         </div>
         {/* Custom-field filters (select / person / checkbox), saved per board. */}
@@ -2145,7 +2185,7 @@ export function MaturityBoard({
         // would be a lie — the documents are there, the columns aren't yet.
         <div className="text-sm text-muted-foreground py-8">
           {effectiveConfig.dimension === "tag"
-            ? "No tag columns yet — add one above to start sorting documents into it."
+            ? "No tag columns yet — add one above to start sorting documents into it, or a pattern like status* for every matching tag."
             : "No documents to show."}
         </div>
       ) : viewMode === "list" ? (

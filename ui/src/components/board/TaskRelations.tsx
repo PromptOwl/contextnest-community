@@ -188,7 +188,13 @@ export function TaskRelations({
         nestId={nestId}
         excludeNodeId={nodeId}
         title={picking ? `${GROUPS.find((g) => g.kind === picking)!.pick.replace("…", "")}` : ""}
-        description="Pick a document in this nest. Done blockers don't count — a task stays blocked only while something it waits on is still open."
+        description={
+          picking === "relates_to"
+            ? "Pick a document in this nest to link as related."
+            : picking === "duplicates"
+              ? "Pick the document in this nest that this one duplicates."
+              : "Pick a document in this nest. Done blockers don't count — a task stays blocked only while something it waits on is still open."
+        }
         onSelect={(n) => {
           const kind = picking;
           setPicking(null);

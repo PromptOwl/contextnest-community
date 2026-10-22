@@ -39,6 +39,7 @@ import {
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -639,8 +640,8 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
-    // Same §9.4 field the per-nest surface advertises.
-    Object.assign(shape, clientToolField);
+    // Same §9.4 and billing-confirm fields the per-nest surface advertises.
+    Object.assign(shape, clientToolField, confirmBillingToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
@@ -851,13 +852,13 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
-  - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - read: \`context_init\` (operating instructions — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
   - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
-  - admin: \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
+  - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`

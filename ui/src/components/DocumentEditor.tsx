@@ -107,6 +107,7 @@ import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
+import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -2504,6 +2505,8 @@ export function DocumentEditor({
               <span className="hidden sm:inline">Share</span>
             </Button>
           )}
+          {/* Experimental document pins — nothing while the switch is off. */}
+          {!isNew && <DocPinControl nestId={nestId} nodeId={nodeId} />}
           {/* Comments — toggles the rail. The count is open threads. Closing
               also leaves comment mode, or the rail would reopen itself. */}
           {!isNew && (

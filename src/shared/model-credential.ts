@@ -128,12 +128,11 @@ export function bareModelName(id: string): string {
 
 /**
  * The model Hootie asks for, as people see and store it (no instance prefix):
- * the admin's pick (Settings → Hootie), else the gateway's default, else
- * Anthropic's id. resolveGatewayModel adds the prefix at call time.
+ * the admin's pick (Settings → Hootie), else the efficient default — never the
+ * gateway's default (pricing spec: it decides how far credits go).
  */
-export function hootieModel(credential: ModelCredential | null): string {
-  if (process.env.HOOTIE_MODEL) return process.env.HOOTIE_MODEL;
-  return credential?.defaultModel ? bareModelName(credential.defaultModel) : DIRECT_DEFAULT_MODEL;
+export function hootieModel(_credential?: ModelCredential | null): string {
+  return process.env.HOOTIE_MODEL || DIRECT_DEFAULT_MODEL;
 }
 
 /** Model ids a credential's endpoint lists (`/v1/models`), cached 5 min per key. */
