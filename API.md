@@ -253,8 +253,8 @@ SSO via PromptOwl. Used by web UI; not typically called from Postman. Subject to
 ### GET `/auth/admin-status`
 Returns whether the caller is the license admin + license metadata.
 
-### POST `/auth/device` / GET `/auth/device/poll`
-Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
+### POST `/auth/device` / POST `/auth/device/poll`
+Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`. `POST /auth/device` returns `deviceCode` and `clientSecret`. Poll with `POST /auth/device/poll` and body `{ "code": "<deviceCode>", "client_secret": "<clientSecret>" }`; the response is `{ "status": "pending" | "approved" | ..., "token"? }`. Missing or non-string fields → `400`. **Deprecated:** `GET /auth/device/poll?code=...&client_secret=...` still works for older CLIs, but it puts the secret in the URL where access logs can record it.
 
 ### GET `/auth/sso`
 One-click SSO auto-login from an **official community site** (**not for self-hosted deployments** — see below). A trusted site redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server tries the ticket's signature against every configured official community site's secret (`GET/POST/PATCH/DELETE /admin/community-sites`, plus the legacy `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair for backward compatibility), checks `aud` against this deployment's own `PUBLIC_BASE_URL` (not the matched site's `url`, which is a display/uniqueness field only), enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When no official community site is configured** (i.e. every self-hosted server, by default) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without a matching secret no ticket can be verified, so the feature stays exclusive to configured official sites regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
@@ -588,7 +588,7 @@ Configure **Public Docs Reader Mode** — a clean, read-only public docs view of
 - `enabled` (optional boolean) — toggle reader mode. When on, read-only callers (public/anonymous readers) get a stripped three-pane docs reader instead of the tabbed authoring UI; owners/editors/reviewers/admins keep the full UI.
 - `home_node` (optional string | null) — the designated landing/hub node id. `null` (or a blank string) clears it, so the landing node resolves by convention (first node whose id/title is `welcome | index | readme | home | overview`, case-insensitive; else the synthesized Contents table). A non-string, non-null value is rejected `400`.
 - At least one of `enabled` / `home_node` must be present (`400` otherwise).
-- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader matches on either the full node id (`nodes/welcome`) or its bare slug (`welcome`), case-insensitively; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
+- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader and the public docs site (`/d/:key/`) match it the same way: on the full node id (`nodes/welcome`) or its bare slug — the last id segment, so `welcome` also finds `nodes/docs/welcome` — case-insensitively. A full-id match wins; a full id that matches no node (say the page was deleted) still falls back to any node with the same last segment; when several nodes share the slug, the lowest node id wins; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
 
 Rejections are the standard error shape:
 ```json
@@ -610,7 +610,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 | URL | What |
 |---|---|
-| `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
+| `/d/:key/` | Home: `reader_home_node` (full id or bare slug, matched as the reader does), else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
 | `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
 | `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
 | `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |

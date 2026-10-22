@@ -25,6 +25,7 @@ import { engineCache } from "../nodes/engine.js";
 import { hashContent } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
+import { pickHomeNode } from "../shared/reader-home.js";
 import { describe, renderMarkdown, rewriteDocumentLinks, slugifyHeading, type Heading } from "./markdown.js";
 import {
   renderGlossary,
@@ -435,7 +436,8 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
     sources.map((s) => [s.nodeId, (s.rel.startsWith(strip) ? s.rel.slice(strip.length) : s.rel).toLowerCase()]),
   );
   const home =
-    sources.find((s) => s.nodeId === nest.home) ??
+    // Same rule as the SPA reader: full id or bare slug, case-insensitively.
+    pickHomeNode(sources, nest.home, (s) => s.nodeId) ??
     sources.find((s) => !pathOf.get(s.nodeId)!.includes("/") && LEAD.test(leafOf(pathOf.get(s.nodeId)!)));
   const custom = new Map(paths.filter((p) => p.kind === "custom").map((p) => [p.nodeId, p.path]));
   for (const s of sources) {
