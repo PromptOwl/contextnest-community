@@ -23,7 +23,10 @@ export async function markEmailVerified(userId: string, source: string): Promise
       [new Date().toISOString(), userId],
     );
   } catch (err) {
-    console.error(`[auth] recording a verified email failed (${source}; sign-in continues):`, err);
+    console.error(
+      `[auth] recording a verified email failed (user ${userId}, ${source}; sign-in continues):`,
+      err,
+    );
   }
 }
 

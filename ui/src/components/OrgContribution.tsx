@@ -134,7 +134,7 @@ export function OrgContributionsSetting({
         <p className="text-[11px] text-muted-foreground">
           Matched exactly: acme.com doesn't include eng.acme.com or evil-acme.com. A domain only counts
           for an address an identity provider verified (single sign-on or PromptOwl), not a password
-          sign-up.
+          sign-up. People who already use single sign-on qualify after their next sign-in.
         </p>
       </div>
     </div>
