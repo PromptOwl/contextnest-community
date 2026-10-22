@@ -252,7 +252,8 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   // which gets the page whatever it asks for. No Accept or `*/*` alone (curl,
   // link checkers, AI fetchers) is redirected.
   const accept = (c.req.header("Accept") ?? "").toLowerCase();
-  if (/json/.test(accept) && !/text\/html/.test(accept) && !isCrawler(c)) return null;
+  const jsonOnly = /json/.test(accept) && !/text\/html/.test(accept);
+  if (jsonOnly && !isCrawler(c)) return null;
   const nestId = /^\/nest\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? (url.pathname === "/" ? url.searchParams.get("nest") : null);
   if (!nestId) return null;
   const nest: SiteNest | undefined = (await siteNests()).find((n) => n.id === nestId);
@@ -264,7 +265,9 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   const built = await getSite(nest, serverOrigin(c));
   const doc = url.searchParams.get("doc");
   const path = doc ? (built.site.pages.find((p) => p.nodeId === doc)?.path ?? "") : "";
-  // Varies on the session and on who is asking: a signed-in visitor, or a
-  // JSON-only API client, of the same URL gets the app instead.
-  return movedTo(c, `${built.site.base}/${path}`, 3600, "Cookie, Authorization, Accept, User-Agent");
+  // Varies on the session and on Accept: a signed-in visitor, or a JSON-only
+  // API client, of the same URL gets the app instead. Only a JSON-only 301
+  // (a crawler) also depends on the User-Agent; keying every other 301 on it
+  // would leave shared caches one entry per UA string.
+  return movedTo(c, `${built.site.base}/${path}`, 3600, `Cookie, Authorization, Accept${jsonOnly ? ", User-Agent" : ""}`);
 }

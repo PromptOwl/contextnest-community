@@ -225,7 +225,11 @@ describe("public docs site", () => {
     expect(bare.headers.get("location")).toBe(want);
     // The answer depends on Accept and User-Agent too, so caches must key on them.
     expect(bare.headers.get("vary")).toMatch(/Accept/);
-    expect(bare.headers.get("vary")).toMatch(/User-Agent/);
+    // Only a crawler's JSON-only 301 depends on the UA as well.
+    expect(bare.headers.get("vary")).not.toMatch(/User-Agent/);
+    const bot = await get(`/nest/${nestId}`, { "User-Agent": "GPTBot/1.2", Accept: "application/json" });
+    expect(bot.status).toBe(301);
+    expect(bot.headers.get("vary")).toMatch(/User-Agent/);
     const mozilla = await get(`/nest/${nestId}`, { "User-Agent": "Mozilla/5.0" });
     expect(mozilla.status).toBe(301);
     const any = await get(`/nest/${nestId}`, { Accept: "*/*" });

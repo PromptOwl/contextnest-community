@@ -444,9 +444,11 @@ export function renderTagPage(site: Site, hub: TagHub): string {
   const names = hub.pages.slice(0, 3).map((p) => p.title);
   // The count sentence is never clipped away: a long definition is cut first.
   const tail = `${count} in ${site.name} about ${title}`;
-  const description = hub.definition
-    ? `${clip(`${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}.`, Math.max(60, 154 - tail.length))} ${tail}.`
-    : clip(`${tail}${names.length ? `, including ${names.join(", ")}` : ""}.`);
+  const description = clip(
+    hub.definition
+      ? `${clip(`${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}.`, Math.max(60, 154 - tail.length))} ${tail}.`
+      : `${tail}${names.length ? `, including ${names.join(", ")}` : ""}.`,
+  );
   const canonical = url(site, hub.path);
   return shell(site, {
     title: `${title} — ${site.name}`,
