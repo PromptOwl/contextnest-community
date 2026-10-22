@@ -173,6 +173,8 @@ export function DocumentsTab({
   // Per-node comment counts drive the activity and "most comments" sorts —
   // a Documents-tab need, so it is read here, not on the nest page.
   const commentCounts = useQuery(reads.commentCounts(nestId)).data?.counts ?? {};
+  // Roster for author chips' display names; signed-out readers keep the email.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled: !!currentEmail });
   const fetchData = onRefresh;
 
 
@@ -1457,6 +1459,7 @@ export function DocumentsTab({
                               <AuthorshipChips
                                 author={node.author}
                                 collaborators={node.collaborators}
+                                people={roster?.people}
                               />
                             </>
                           )}
