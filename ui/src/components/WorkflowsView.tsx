@@ -85,6 +85,7 @@ import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
 import { NestPageHeader } from "./NestPageHeader";
 import { MetacognitionPanel, RunCost } from "./MetacognitionPanel";
+import { canManageMetacognition } from "../lib/metacognition-form";
 
 interface Props {
   nestId: string;
@@ -145,10 +146,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
     setTab("run");
   };
   const { metacognitionEnabled } = useAuth();
-  // Configuring an agent takes owner/admin on the nest (the server enforces it).
+  // Metacognition agents are owner/admin only, for every action: a writer
+  // doesn't see the Agents tab at all.
   const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
   const permission = (nestMeta as { permission?: string } | undefined)?.permission;
-  const canConfigureAgents = permission === "owner" || permission === "admin";
+  const showAgents = canManageMetacognition(metacognitionEnabled, permission);
 
   return (
     <div>
@@ -168,7 +170,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <TabsTrigger value="table">Table</TabsTrigger>
           <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
-          {metacognitionEnabled && (
+          {showAgents && (
             <TabsTrigger value="agents" data-testid="workflows-agents-tab">
               Agents
             </TabsTrigger>
@@ -183,9 +185,9 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         <TabsContent value="run" className="mt-4">
           <RunsPanel nestId={nestId} focusRunId={focusRun} />
         </TabsContent>
-        {metacognitionEnabled && (
+        {showAgents && (
           <TabsContent value="agents" className="mt-4">
-            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} onOpenRun={openRun} />
+            <MetacognitionPanel nestId={nestId} onOpenRun={openRun} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="mt-4 space-y-6">

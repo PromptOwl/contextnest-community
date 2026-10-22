@@ -4381,6 +4381,28 @@ export async function saveMetacognitionAgent(
   return r.agent;
 }
 
+/** GET /nests/:id/metacognition/:node/suggest — a starting config read off
+ *  the agent document (never saved), each field with a plain-words `why`. */
+export interface MetacognitionSuggestion {
+  config: MetacognitionAgentConfig;
+  why: Record<string, string>;
+  /** MCP links in the instructions; a person names their tools before saving. */
+  mcp_candidates: Array<{ name: string; url: string }>;
+  /** "none" when the document has no approved instructions yet. */
+  instructions: "approved" | "none";
+}
+
+export async function suggestMetacognitionConfig(nestId: string, nodeId: string) {
+  const r = await request<{ suggestion: MetacognitionSuggestion }>(`/nests/${nestId}/metacognition/${nodeId}/suggest`);
+  return r.suggestion;
+}
+
+/** GET /nests/:id/folders — every folder path in the nest (no documents). */
+export async function listNestFolderPaths(nestId: string) {
+  const r = await request<{ folders: Array<{ path: string; count: number; total: number }> }>(`/nests/${nestId}/folders`);
+  return r.folders.map((f) => f.path);
+}
+
 export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
 }

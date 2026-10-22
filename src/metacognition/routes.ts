@@ -17,6 +17,9 @@ import { assertSafeNodeId } from "../shared/node-id.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { engineCache } from "../nodes/engine.js";
 import { parseConfig } from "./config.js";
+import { suggestConfig } from "./suggest.js";
+import { listNestFolders } from "../nodes/service.js";
+import { resolveExportBody } from "../nodes/readable-body.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { startMetacognitionRun } from "./service.js";
 import { agentStats } from "./stats.js";
@@ -115,6 +118,43 @@ metacognitionRoutes.get("/:nodeId{.+}/stats", requireMetacognition, async (c) =>
   return c.json({ stats: await agentStats(nestId, nodeId, { days: num("days"), limit: num("limit") }) });
 });
 
+/** The agent document behind a config; 400 when there is none, or it isn't an agent. */
+async function readAgentDoc(nestId: string, nodeId: string) {
+  const { storage } = await engineCache.get(nestId);
+  let doc;
+  try {
+    doc = await storage.readDocument(nodeId);
+  } catch (err) {
+    if (err instanceof DocumentNotFoundError) throw new ValidationError(`No document ${nodeId}`);
+    throw err;
+  }
+  if ((doc.frontmatter.type || "document") !== "agent") {
+    throw new ValidationError(`${nodeId} is a "${doc.frontmatter.type || "document"}" — only an agent document can be a metacognition agent.`);
+  }
+  return doc;
+}
+
+// A starting config read off the agent document, for the setup form to
+// prefill (CU-wdqcq05rkp). Same gates as PUT, since what it returns is what a
+// PUT would grant; it saves nothing. It reads the approved instructions — the
+// text a run reads — so an unreviewed draft can't widen the suggested scope.
+// Registered before GET /:nodeId so the catch-all doesn't swallow "/suggest".
+metacognitionRoutes.get("/:nodeId{.+}/suggest", requireMetacognition, async (c) => {
+  requireTier(c, "admin");
+  const nestId = c.req.param("nestId")!;
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
+  const doc = await readAgentDoc(nestId, nodeId);
+  const instructions = await resolveExportBody(nestId, nodeId, doc.body || "");
+  const folders = (await listNestFolders(nestId)).map((f) => f.path);
+  const suggestion = suggestConfig({
+    title: String(doc.frontmatter.title || nodeId.replace(/^nodes\//, "")),
+    frontmatter: { ...doc.frontmatter } as Record<string, unknown>,
+    instructions,
+    folders,
+  });
+  return c.json({ suggestion: { ...suggestion, instructions: instructions === null ? "none" : "approved" } });
+});
+
 metacognitionRoutes.get("/:nodeId{.+}", requireMetacognition, async (c) => {
   requireTier(c, "write");
   const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
@@ -127,17 +167,7 @@ metacognitionRoutes.put("/:nodeId{.+}", requireMetacognition, async (c) => {
   requireTier(c, "admin");
   const nestId = c.req.param("nestId")!;
   const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
-  const { storage } = await engineCache.get(nestId);
-  let doc;
-  try {
-    doc = await storage.readDocument(nodeId);
-  } catch (err) {
-    if (err instanceof DocumentNotFoundError) throw new ValidationError(`No document ${nodeId}`);
-    throw err;
-  }
-  if ((doc.frontmatter.type || "document") !== "agent") {
-    throw new ValidationError(`${nodeId} is a "${doc.frontmatter.type || "document"}" — only an agent document can be a metacognition agent.`);
-  }
+  await readAgentDoc(nestId, nodeId);
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     throw new ValidationError("enabled must be true or false");

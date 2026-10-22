@@ -1,5 +1,6 @@
 /**
- * Metacognition agents — CN-META-001 … CN-META-003 (CU-wdqcq041jm)
+ * Metacognition agents — CN-META-001 … CN-META-003 (CU-wdqcq041jm; the
+ * plain-language setup form, CU-wdqcq05rkp)
  *
  * Page under test: Workflows → Agents (ui/src/components/MetacognitionPanel.tsx)
  * and the run it starts.
@@ -100,9 +101,17 @@ test.describe('Metacognition agents', () => {
     await page.goto(`/nest/${seeded.nestId}/workflows`);
     await page.getByTestId('workflows-agents-tab').click();
     await page.getByTestId('metacognition-add').click();
+    // Prefilled from the agent document (CU-wdqcq05rkp): its instructions
+    // name "the notes folder" and say "Propose nothing", so it reads notes and
+    // only leaves comments — each with a "from the agent document" hint.
+    await expect(page.getByTestId('metacognition-read-folder-notes')).toBeChecked();
+    await expect(page.getByTestId('metacognition-propose-none')).toBeChecked();
+    await expect(page.getByTestId('metacognition-prefill-hint').first()).toBeVisible();
+    await expect(page.getByTestId('metacognition-summary')).toContainText('reads notes, only leaves comments');
     await page.getByTestId('metacognition-name').fill('Archivist');
-    await page.getByTestId('metacognition-read').fill('notes');
-    await page.getByTestId('metacognition-propose').fill('notes');
+    await page.getByTestId('metacognition-propose-folders').check();
+    await page.getByTestId('metacognition-propose-folder-notes').check();
+    await expect(page.getByTestId('metacognition-summary')).toContainText('may suggest edits in notes');
     await page.getByTestId('metacognition-save').click();
     const row = page.getByTestId('metacognition-agent-row');
     await expect(row).toHaveCount(1);
