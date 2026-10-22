@@ -2670,7 +2670,7 @@ export async function updateNode(
       }
       if (patch.description !== undefined) {
         const description = normalizeDescription(patch.description);
-        if (description !== ((node.frontmatter as any).description ?? "")) {
+        if (description !== (node.frontmatter.description ?? "")) {
           const frontmatter: Record<string, unknown> = { ...node.frontmatter };
           if (description) frontmatter.description = description;
           else delete frontmatter.description;

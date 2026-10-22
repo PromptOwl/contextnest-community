@@ -848,6 +848,7 @@ export const TOOL_DEFINITIONS = [
         },
         description: {
           type: "string",
+          maxLength: 500,
           description:
             "One-line summary stored in frontmatter (at most 500 characters) — the public docs site uses it as the page's meta description. An empty string removes it.",
         },

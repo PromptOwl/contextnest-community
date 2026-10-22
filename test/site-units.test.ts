@@ -103,6 +103,14 @@ describe("docs site Markdown rendering", () => {
     expect(twin).not.toContain("inline");
     expect(twin).toContain("`<!-- in code -->`");
     expect(twin).toContain("<!-- in fence -->");
+    // A comment that quotes code is still one comment (review finding).
+    const tricky = "Before <!-- TODO: rename `foo` before launch --> after.\n\n<!--\n```\nold\n```\n-->\n\nEnd.";
+    for (const out of [html(tricky), rewriteDocumentLinks(tricky, () => null), describeBody(tricky)]) {
+      expect(out).not.toContain("TODO");
+      expect(out).not.toContain("old");
+      expect(out).not.toContain("--&gt;");
+      expect(out).not.toContain("-->");
+    }
     expect(describeBody("Lead <!-- hidden --> sentence that is long enough to stand as the description of this page.")).not.toContain("hidden");
   });
 });
@@ -117,6 +125,10 @@ describe("docs site tag hub titles", () => {
     ["sdk", "SDK"],
     ["getting-started", "Getting Started"],
     ["governance", "Governance"],
+    ["apis", "APIs"],
+    ["llms-txt", "LLMs Txt"],
+    ["rest", "Rest"],
+    ["--", "--"],
   ])("%s → %s", (tag, title) => {
     expect(tagTitle(tag)).toBe(title);
   });

@@ -73,13 +73,18 @@ function outsideCode(body: string, fn: (prose: string) => string): string {
     .join("");
 }
 
+/** Fences, comments and code spans, matched left to right in one pass. */
+const CODE_OR_COMMENT = /```[\s\S]*?```|~~~[\s\S]*?~~~|<!--[\s\S]*?-->|`[^`\n]*`/g;
+
 /**
  * Drop HTML comments outside code. `html: false` would otherwise escape an
  * editor's `<!-- note -->` into visible text on the page, and the Markdown
- * twin and llms-full.txt would publish it verbatim.
+ * twin and llms-full.txt would publish it verbatim. One left-to-right pass,
+ * so a comment that quotes code (`<!-- rename \`foo\` -->`) is still one
+ * comment, and a comment inside a fence or code span is kept.
  */
 export function stripHtmlComments(body: string): string {
-  return outsideCode(body, (prose) => prose.replace(/<!--[\s\S]*?-->/g, ""));
+  return body.replace(CODE_OR_COMMENT, (m) => (m.startsWith("<!--") ? "" : m));
 }
 
 /** `target#fragment|label` inside `[[ ]]`, with the label the page shows. */
@@ -99,9 +104,8 @@ function wikiParts(inner: string): { path: string; fragment: string | undefined;
  * Code spans and fences are left as written.
  */
 export function rewriteDocumentLinks(body: string, resolve: (target: string) => string | null): string {
-  return outsideCode(body, (part) =>
+  return outsideCode(stripHtmlComments(body), (part) =>
     part
-      .replace(/<!--[\s\S]*?-->/g, "")
       .replace(/\[\[([^\]\n]+)\]\]/g, (_, inner: string) => {
         const { path, fragment, label } = wikiParts(inner);
         const url = resolve(path);
@@ -283,9 +287,8 @@ export function renderMarkdown(
 
 /** Plain text of a Markdown body, for meta descriptions and llms.txt. */
 export function plainText(body: string): string {
-  return body
+  return stripHtmlComments(body)
     .replace(/```[\s\S]*?```/g, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/^\s{0,3}#{1,6}\s.*$/gm, " ")
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]]+)\]\]/g, (_m, t: string) => t.split("/").pop() ?? t)

@@ -236,6 +236,8 @@ describe("public docs site", () => {
     // API clients keep their answer: a bearer token, or JSON-only Accept.
     expect((await get(`/nest/${nestId}`, authed(owner.apiKey))).status).not.toBe(301);
     expect((await get(`/nest/${nestId}`, { Accept: "application/json" })).status).not.toBe(301);
+    // axios' default: JSON first, with */* as a fallback — still an API client.
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json, text/plain, */*" })).status).not.toBe(301);
     expect((await get(`/nest/${nestId}?app=1`, {})).status).not.toBe(301);
   });
 

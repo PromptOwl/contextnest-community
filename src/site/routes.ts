@@ -247,10 +247,12 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (url.searchParams.get("app") === "1") return null;
   // An Authorization header means an API client, not a crawler.
   if (c.req.header("Authorization")) return null;
-  // So does asking for JSON and nothing a page could satisfy — unless it is
-  // a crawler, which gets the page whatever it asks for.
+  // So does asking for JSON without naming HTML — `application/json`, or
+  // axios' `application/json, text/plain, */*` — unless it is a crawler,
+  // which gets the page whatever it asks for. No Accept or `*/*` alone (curl,
+  // link checkers, AI fetchers) is redirected.
   const accept = (c.req.header("Accept") ?? "").toLowerCase();
-  if (/json/.test(accept) && !/text\/html|\*\/\*|text\/\*/.test(accept) && !isCrawler(c)) return null;
+  if (/json/.test(accept) && !/text\/html/.test(accept) && !isCrawler(c)) return null;
   const nestId = /^\/nest\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? (url.pathname === "/" ? url.searchParams.get("nest") : null);
   if (!nestId) return null;
   const nest: SiteNest | undefined = (await siteNests()).find((n) => n.id === nestId);

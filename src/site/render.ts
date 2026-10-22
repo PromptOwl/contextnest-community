@@ -398,16 +398,20 @@ function renderToc(site: Site): string {
   });
 }
 
-/** Words a tag hub keeps upper-case: "mcp" reads "MCP", never "Mcp". */
+/**
+ * Words a tag hub keeps upper-case: "mcp" reads "MCP", never "Mcp". Only
+ * letters that are never an ordinary English word — "rest", "id" and "soc"
+ * are left out, so a "rest" tag reads "Rest", not "REST".
+ */
 const ACRONYMS = new Set([
   "ai", "api", "cli", "sdk", "sso", "mcp", "llm", "rag", "ui", "ux", "url", "http", "https",
-  "json", "yaml", "sql", "rest", "seo", "pdf", "csv", "html", "css", "jwt", "oidc", "saml", "rbac", "soc", "gdpr",
-  "hipaa", "id", "ide", "gtm", "crm", "erp", "kpi", "okr", "faq", "dns", "aws", "gcp",
+  "json", "yaml", "sql", "seo", "pdf", "csv", "html", "css", "jwt", "oidc", "saml", "rbac", "gdpr",
+  "hipaa", "gtm", "crm", "erp", "kpi", "okr", "faq", "dns", "aws", "gcp",
 ]);
 
 /** A tag as a heading: "api-design" → "API Design", "getting_started" → "Getting Started". */
 export function tagTitle(tag: string): string {
-  return tag
+  const title = tag
     .replace(/^#/, "")
     .split(/[-_\s/]+/)
     .filter(Boolean)
@@ -419,6 +423,8 @@ export function tagTitle(tag: string): string {
       return w[0].toUpperCase() + w.slice(1);
     })
     .join(" ");
+  // A tag of separators only still needs a heading.
+  return title || tag;
 }
 
 /** ~155 characters, cut on a word. */
