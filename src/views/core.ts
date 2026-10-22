@@ -318,6 +318,9 @@ export async function resolveBlocks(
 }
 
 // ─── nest-data ──────────────────────────────────────────────────────────
+// The nest-data wire shape (entry kinds, error codes, caps, placement) is
+// owned here until §1.12 specifies it: proposed upstream in
+// PromptOwl/ContextNest#215. Once the engine exports it, consume it from there.
 
 /** Escape serialized JSON so it can sit inside <script>…</script> (§2.4):
  *  no literal `<` survives, so `</script>` cannot close the element, and

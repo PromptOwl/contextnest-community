@@ -272,6 +272,9 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
   ) {
     return notFound();
   }
+  // readArtifact reads the approved version once and reconstructs exactly
+  // that version, returning it as `artifact.version`: the author chain below
+  // is listed for the same version whose bytes are injected.
   let artifact: Awaited<ReturnType<typeof readArtifact>>;
   try {
     artifact = await readArtifact(s.nestId, target.id);

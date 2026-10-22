@@ -505,3 +505,30 @@ describe("frame serves are audit-logged (review finding)", () => {
     expect(ids.has("nodes/intro")).toBe(false);
   });
 });
+
+describe("every served frame carries the sandbox CSP (review finding)", () => {
+  it("each 200 from the frame route has `sandbox` first and connect-src 'none'", async () => {
+    const cases: [string, string][] = [
+      [vId, "h"],
+      [pinView, "h"],
+      [bigView, "h"],
+      [bigView, "hf"],
+      [draftArtViewId, "h"],
+      [pinnedMdView, "h"],
+    ];
+    let served = 0;
+    for (const [view, block] of cases) {
+      for (const headers of [{}, { "Sec-Fetch-Dest": "iframe" }]) {
+        const res = await app.request(frame(view, block), { headers: { ...authed(member.apiKey), ...headers } });
+        if (res.status !== 200) continue;
+        served++;
+        const csp = res.headers.get("content-security-policy")!;
+        expect(csp.startsWith("sandbox allow-scripts allow-modals"), csp).toBe(true);
+        expect(csp).toContain("connect-src 'none'");
+        expect(csp).not.toContain("allow-popups");
+        expect(csp).not.toContain("allow-same-origin");
+      }
+    }
+    expect(served).toBeGreaterThanOrEqual(10);
+  });
+});
