@@ -253,8 +253,8 @@ SSO via PromptOwl. Used by web UI; not typically called from Postman. Subject to
 ### GET `/auth/admin-status`
 Returns whether the caller is the license admin + license metadata.
 
-### POST `/auth/device` / GET `/auth/device/poll`
-Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
+### POST `/auth/device` / POST `/auth/device/poll`
+Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`. `POST /auth/device` returns `deviceCode` and `clientSecret`. Poll with `POST /auth/device/poll` and body `{ "code": "<deviceCode>", "client_secret": "<clientSecret>" }`; the response is `{ "status": "pending" | "approved" | ..., "token"? }`. Missing or non-string fields → `400`. **Deprecated:** `GET /auth/device/poll?code=...&client_secret=...` still works for older CLIs, but it puts the secret in the URL where access logs can record it.
 
 ### GET `/auth/sso`
 One-click SSO auto-login from an **official community site** (**not for self-hosted deployments** — see below). A trusted site redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server tries the ticket's signature against every configured official community site's secret (`GET/POST/PATCH/DELETE /admin/community-sites`, plus the legacy `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair for backward compatibility), checks `aud` against this deployment's own `PUBLIC_BASE_URL` (not the matched site's `url`, which is a display/uniqueness field only), enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When no official community site is configured** (i.e. every self-hosted server, by default) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without a matching secret no ticket can be verified, so the feature stays exclusive to configured official sites regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
@@ -332,6 +332,13 @@ Response (201 one-shot, 200 finalize):
 { "nest": { ... }, "permission": "owner" | "admin" | "write" | "read" }
 ```
 404 if caller has no permission.
+
+### PATCH `/nests/:nestId` (owner/admin)
+Rename a nest and/or change its description.
+```json
+{ "name": "New Name", "description": "What this nest holds" }
+```
+Both fields optional; only the ones present change. `description: null` or `""` clears it. A new `name` re-derives the nest's slug, so it must contain a letter or number and not collide with another nest of the same owner (`400`). Shared collaborators with write access get `403` — renaming changes user-visible URLs. Returns `{ "nest": { ... } }`.
 
 ### DELETE `/nests/:nestId`
 Owner only. Permanent — documents, versions and governance state all go.
@@ -581,7 +588,7 @@ Configure **Public Docs Reader Mode** — a clean, read-only public docs view of
 - `enabled` (optional boolean) — toggle reader mode. When on, read-only callers (public/anonymous readers) get a stripped three-pane docs reader instead of the tabbed authoring UI; owners/editors/reviewers/admins keep the full UI.
 - `home_node` (optional string | null) — the designated landing/hub node id. `null` (or a blank string) clears it, so the landing node resolves by convention (first node whose id/title is `welcome | index | readme | home | overview`, case-insensitive; else the synthesized Contents table). A non-string, non-null value is rejected `400`.
 - At least one of `enabled` / `home_node` must be present (`400` otherwise).
-- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader matches on either the full node id (`nodes/welcome`) or its bare slug (`welcome`), case-insensitively; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
+- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader and the public docs site (`/d/:key/`) match it the same way: on the full node id (`nodes/welcome`) or its bare slug — the last id segment, so `welcome` also finds `nodes/docs/welcome` — case-insensitively. A full-id match wins; a full id that matches no node (say the page was deleted) still falls back to any node with the same last segment; when several nodes share the slug, the lowest node id wins; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
 
 Rejections are the standard error shape:
 ```json
@@ -603,7 +610,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 | URL | What |
 |---|---|
-| `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
+| `/d/:key/` | Home: `reader_home_node` (full id or bare slug, matched as the reader does), else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
 | `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
 | `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
 | `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |
@@ -622,7 +629,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 **Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
 
-**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+**Redirects from the app.** In key mode, any anonymous `GET` or `HEAD` of `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization, Accept`, plus `User-Agent` when a crawler asked only for JSON) to the page, whatever its `Accept` or `User-Agent` — a browser, a crawler, a link checker and plain `curl` all see the same live link. A `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`), API clients whose `Accept` names JSON but not `text/html` (e.g. `application/json`, or axios' `application/json, text/plain, */*`) from a non-crawler User-Agent, and `?app=1` still get the app's answer.
 
 **IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
 
@@ -1219,6 +1226,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 {
   "title": "...",
   "content": "...",
+  "description": "One-line summary.",
   "tags": ["..."],
   "changeNote": "fixed typo",
   "schedule": "0 7 * * *",
@@ -1227,6 +1235,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
+- `description` — the frontmatter one-line summary, which the public docs site uses as the page's meta description. Trimmed; one line, at most 500 characters (`400` otherwise). `""` removes it. MCP `context_update` takes the same field.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
