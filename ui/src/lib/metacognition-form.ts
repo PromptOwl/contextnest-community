@@ -59,7 +59,7 @@ export function presetOf(caps: Caps): Effort | "custom" {
  */
 const ROUGH_USD_PER_MTOK = 3;
 
-/** "about 5 minutes, up to 5 suggestions and 5 comments, ≈$0.90 at most".
+/** "about 5 minutes, up to 5 suggestions and 5 comments, roughly $0.90".
  *  No $ figure for a chosen model: the rough rate is a default-model guess. */
 export function effortText(caps: Caps, model = ""): string {
   const mins = caps.max_seconds / 60;
@@ -67,7 +67,7 @@ export function effortText(caps: Caps, model = ""): string {
   const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
   const cost = (caps.max_tokens / 1_000_000) * ROUGH_USD_PER_MTOK;
   const work = `${time}, up to ${plural(caps.max_proposals, "suggestion")} and ${plural(caps.max_comments, "comment")}`;
-  return model.trim() ? work : `${work}, ≈$${cost.toFixed(2)} at most`;
+  return model.trim() ? work : `${work}, roughly $${cost.toFixed(2)}`;
 }
 
 export type ProposeMode = "none" | "reads" | "folders";
@@ -185,10 +185,16 @@ export function toggleReadFolder(f: FormState, folder: string, on: boolean): For
   return { ...f, readAll: false, read, propose: f.propose.filter((p) => within(p, read)) };
 }
 
+/** The server's persona-name rule (NAME_RE in src/metacognition/config.ts). */
+const PERSONA_NAME = /^[A-Za-z0-9][\w .'-]{0,59}$/;
+
 /** What stops this form saving, in plain words; empty when it can save. */
 export function formProblems(f: FormState): string[] {
   const out: string[] = [];
   if (!f.name.trim()) out.push("Give it a name.");
+  else if (!PERSONA_NAME.test(f.name.trim())) {
+    out.push("Its name may use letters, numbers, spaces and . ' - _ (start with a letter or number, up to 60).");
+  }
   if (!f.readAll && f.read.length === 0) out.push('Pick at least one folder for it to look at, or choose "The whole nest".');
   if (f.proposeMode === "folders" && f.propose.length === 0) {
     out.push('Pick at least one folder it may change, or choose "Nothing".');

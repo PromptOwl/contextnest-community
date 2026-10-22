@@ -275,3 +275,15 @@ describe("review round 4", () => {
     expect(wideScopeWarning(formFromConfig("n", true, { ...base, scope: { read: [], propose: [] } }))).toBeNull();
   });
 });
+
+describe("review round 6", () => {
+  it("says in plain words when the name has characters the server refuses", () => {
+    const f = emptyForm("nodes/a", "🤖 Pricing watcher");
+    expect(formProblems(f).join(" ")).toMatch(/name/i);
+    expect(formProblems({ ...f, name: "Pricing watcher" })).toEqual([]);
+  });
+
+  it("calls the cost a rough figure, not a ceiling", () => {
+    expect(effortText(PRESETS.standard)).toMatch(/roughly \$0\.90/);
+  });
+});
