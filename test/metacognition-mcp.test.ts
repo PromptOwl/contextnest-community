@@ -199,6 +199,16 @@ describe("metacognition_configure", () => {
     expect(after.status).toBe(404);
   });
 
+  it("dry_run that isn't a boolean is refused, never treated as a save", async () => {
+    for (const dry_run of ["true", 1, "yes", null]) {
+      const r = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run });
+      expect(r.result?.isError, JSON.stringify(dry_run)).toBe(true);
+      expect(text(r)).toBe("dry_run must be true or false");
+    }
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition/nodes/archivist`, undefined, owner.apiKey);
+    expect(after.status).toBe(404);
+  });
+
   it("an invalid body fails with parseConfig's message, verbatim, as REST does", async () => {
     for (const bad of [
       { ...CONFIG, scope: { read: ["gtm"], propose: ["ops"] } },
@@ -273,6 +283,8 @@ describe("metacognition_run", () => {
       expect(r.result?.isError).toBe(true);
       expect(text(r)).toBe(rest.data.error);
       expect(r.result.structuredContent.http_status).toBe(409);
+      // "Try again later", not "fix your input".
+      expect(r.result.structuredContent.code).toBe("CONFLICT");
     } finally {
       await getDb().run("UPDATE runs SET status = 'cancelled' WHERE id = 'run_busy_fixture'");
     }
@@ -323,6 +335,19 @@ describe("the server-wide /mcp", () => {
     );
     expect(isError(dry)).toBe(false);
     expect(dry.result.structuredContent.summary).toContain("Scout will read gtm and ops");
+  });
+
+  it("an admin of another nest sees them but is refused on a nest where they only write", async () => {
+    const other = (await jsonRequest(app, "POST", "/nests", { name: "Editor Own" }, editor.apiKey)).data.nest?.id;
+    expect(other).toBeTruthy();
+    const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
+    for (const t of TOOLS) expect(names).toContain(t);
+    const r = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
+    expect(r.result?.isError).toBe(true);
+    expect(text(r)).toMatch(/owner or an admin/);
+    const own = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: other } }, editor.apiKey);
+    expect(isError(own)).toBe(false);
+    await jsonRequest(app, "DELETE", `/nests/${other}`, undefined, editor.apiKey);
   });
 
   it("a writer doesn't see them and is refused a call naming the nest", async () => {
@@ -385,6 +410,17 @@ describe("metacognition is owner/admin only on REST too", () => {
     // An ordinary agent is unchanged.
     const ok = await jsonRequest(app, "POST", `/nests/${nestId}/schedules`, { agent_node: "nodes/scout", every_minutes: 60 }, editor.apiKey);
     expect(ok.status).toBe(201);
+  });
+
+  it("a switched-off metacognition agent is still gated: a writer can't schedule it to come back", async () => {
+    const off = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: false });
+    expect(isError(off)).toBe(false);
+    try {
+      const hook = await jsonRequest(app, "POST", `/nests/${nestId}/hooks`, { agent_node: "nodes/archivist" }, editor.apiKey);
+      expect(hook.status).toBe(403);
+    } finally {
+      await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: true });
+    }
   });
 
   it("a writer can't retune or switch on an owner's schedule of a metacognition agent", async () => {

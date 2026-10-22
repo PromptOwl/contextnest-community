@@ -703,14 +703,26 @@ function createServerMcp(
  * least one nest these credentials reach — the per-nest endpoint's rule, over
  * every nest, since the nest is only named at call time.
  */
-async function offersMetacognition(userId: string, nestScope: string | null): Promise<boolean> {
+async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise<boolean> {
   if (!metacognitionEnabled()) return false;
+  // The server is rebuilt per request, so only pay for the lookup when this
+  // request can use the answer: a tools/list, or a call to one of these tools
+  // (which re-checks owner/admin on the named nest anyway).
+  const body = await c.req.raw
+    .clone()
+    .json()
+    .catch(() => null);
+  const msgs = (Array.isArray(body) ? body : [body]) as Array<{ method?: string; params?: { name?: string } } | null>;
+  const wants = msgs.some(
+    (m) => m?.method === "tools/list" || (m?.method === "tools/call" && isMetacognitionTool(String(m.params?.name ?? ""))),
+  );
+  if (!wants) return false;
   if (await isSystemUser(userId)) return false;
   const person = (await getDb().get("SELECT COALESCE(is_service, 0) AS s FROM users WHERE id = ?", [userId])) as
     | { s: number }
     | undefined;
   if (config.AUTH_MODE !== "open" && (!person || person.s)) return false;
-  const nests = await buildNestIndex(userId, nestScope);
+  const nests = await buildNestIndex(userId, c.get("nestScope"));
   return nests.some((n) => n.permission === "owner" || n.permission === "admin");
 }
 
@@ -733,7 +745,7 @@ serverMcpRoutes.all("/", async (c) => {
     c,
     headless,
     capability,
-    !headless && capability === "write" && (await offersMetacognition(userId, c.get("nestScope"))),
+    !headless && capability === "write" && (await offersMetacognition(c, userId)),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

@@ -17,7 +17,7 @@
  *    headless keys;
  *  - every call re-checks: no system key, then owner/admin on the nest.
  */
-import { AppError, NotFoundError } from "../shared/errors.js";
+import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { summarizeConfig } from "../metacognition/summary.js";
 import { listAgents } from "../metacognition/store.js";
@@ -83,7 +83,7 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
         mcp_servers: { type: "array", items: { type: "object" }, description: "[{ name, url, allowed_tools: string[], auth_env? }]" },
         model: { type: "string", description: "Model override (default: the nest's Hootie model)" },
         enabled: { type: "boolean", description: "false keeps the settings but stops it running (default true)" },
-        dry_run: { type: "boolean", description: "true = validate and summarize, save nothing. Do this first." },
+        dry_run: { type: "boolean", description: "true = validate and summarize, save nothing. Do this first. Must be a JSON boolean." },
       },
       required: ["agent"],
     },
@@ -120,7 +120,9 @@ const NAMES = new Set(METACOGNITION_TOOL_DEFINITIONS.map((t) => t.name));
 export const METACOGNITION_TOOL_NAMES: ReadonlySet<string> = NAMES;
 export const isMetacognitionTool = (name: string): boolean => NAMES.has(name);
 
-/** An operation's refusal → a tool error carrying its message unchanged. */
+/** An operation's refusal → a tool error carrying its message unchanged.
+ *  CONFLICT (409: already running, too many starts this hour) means "try
+ *  again later", not "fix the input". */
 function refusal(err: unknown): ToolResult {
   if (!(err instanceof AppError)) throw err;
   const code =
@@ -130,7 +132,9 @@ function refusal(err: unknown): ToolResult {
         ? err.message === NOT_ENABLED
           ? "CONFIG_ERROR"
           : "DOCUMENT_NOT_FOUND"
-        : "VALIDATION_FAILED";
+        : err.statusCode === 409
+          ? "CONFLICT"
+          : "VALIDATION_FAILED";
   return { text: err.message, isError: true, data: { code, message: err.message, http_status: err.statusCode } };
 }
 
@@ -173,6 +177,10 @@ export async function runMetacognitionTool(
       }
       case "metacognition_configure": {
         const { agent: _agent, dry_run, nest: _nest, client: _client, confirm_billing: _cb, ...body } = args;
+        // Fail closed: a dry_run of "true" or 1 must never read as "save it".
+        if (dry_run !== undefined && typeof dry_run !== "boolean") {
+          throw new ValidationError("dry_run must be true or false");
+        }
         if (dry_run === true) {
           const v = await validateAgentConfig(ctx.nestId, agentArg(args), body);
           const summary = summarizeConfig(v.config, { enabled: v.enabled });
