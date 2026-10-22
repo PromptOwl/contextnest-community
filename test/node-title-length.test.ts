@@ -1,5 +1,6 @@
 /**
- * Titles are bounded at 120 chars on create AND rename. The pre-existing
+ * Titles are bounded at the engine's TITLE_MAX_LENGTH (200) on create AND
+ * rename, so hosted accepts every title a local vault does. The pre-existing
  * 100-char bound is on the *slug*, which a title of emoji or non-latin text
  * slips past entirely — leaving an unbounded string in frontmatter that
  * stretches every header rendering it.
@@ -24,8 +25,8 @@ beforeAll(async () => {
 
 afterAll(() => env.cleanup());
 
-// 121 emoji: slugifies to "" so the slug bound never sees it.
-const overlong = "🦉".repeat(121);
+// 201 emoji: slugifies to "" so the slug bound never sees it.
+const overlong = "🦉".repeat(201);
 
 describe("title length bound", () => {
   it("rejects an overlong title on create", async () => {
@@ -37,13 +38,13 @@ describe("title length bound", () => {
       alice.apiKey,
     );
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.data)).toMatch(/at most 120 characters/i);
+    expect(JSON.stringify(res.data)).toMatch(/at most 200 characters/i);
   });
 
   it("accepts a long-but-legal title by truncating the derived id slug", async () => {
-    // 119 chars of slug-safe text: under the 120 title cap, over the 100-char
-    // path-segment bound. Must create, not 400.
-    const title = `${"r".repeat(100)} ${"t".repeat(18)}`;
+    // 150 chars of slug-safe text: legal locally (engine cap 200), so a push
+    // must not refuse it; over the 100-char path-segment bound. Must create, not 400.
+    const title = `${"r".repeat(100)} ${"t".repeat(49)}`;
     const res = await jsonRequest(
       app,
       "POST",
@@ -73,7 +74,7 @@ describe("title length bound", () => {
       app,
       "PATCH",
       `/nests/${nestId}/nodes/${encodeURIComponent(nodeId)}`,
-      { title: "a".repeat(120) },
+      { title: "a".repeat(200) },
       alice.apiKey,
     );
     expect(atLimit.status).toBe(200);
@@ -86,7 +87,7 @@ describe("title length bound", () => {
       alice.apiKey,
     );
     expect(tooLong.status).toBe(400);
-    expect(JSON.stringify(tooLong.data)).toMatch(/at most 120 characters/i);
+    expect(JSON.stringify(tooLong.data)).toMatch(/at most 200 characters/i);
   });
 
   it("lets a doc whose title predates the bound keep saving under that title", async () => {
@@ -100,7 +101,8 @@ describe("title length bound", () => {
     const nodeId = created.data.node.id;
 
     // Simulate a doc created before the bound existed: rewrite its stored
-    // frontmatter title in place, bypassing the service entirely.
+    // frontmatter title in place, bypassing the service entirely. At the cap,
+    // not past it: the engine itself refuses to publish a title over 200.
     const legacyTitle = "L".repeat(200);
     // Live doc only — NOT the .versions/ snapshot beside it.
     const file = join(env.dataDir, "nests", nestId, `${nodeId}.md`);
@@ -213,7 +215,7 @@ describe("title length bound", () => {
       "POST",
       `/nests/${nestId}/nodes`,
       {
-        title: "A".repeat(120),
+        title: "A".repeat(200),
         content: "<h1>deck</h1>",
         type: "artifact",
       },
@@ -240,6 +242,6 @@ describe("title length bound", () => {
       alice.apiKey,
     );
     expect(derived.status).toBe(200);
-    expect(derived.data.node.title.length).toBeLessThanOrEqual(120);
+    expect(derived.data.node.title.length).toBeLessThanOrEqual(200);
   });
 });
