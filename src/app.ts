@@ -48,7 +48,7 @@ import {
   titleScore,
 } from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import { credentialMayContribute } from "./governance/org-contribution.js";
+import { assertSoleNodePatchRoute, credentialMayContribute } from "./governance/org-contribution.js";
 import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
@@ -3917,6 +3917,10 @@ export function createApp(): Hono<AuthEnv> {
       500,
     );
   });
+
+  // Fail closed: the org-contributor admission above assumes the node update
+  // is the only PATCH under /nodes (see assertSoleNodePatchRoute).
+  assertSoleNodePatchRoute(app.routes);
 
   return app;
 }

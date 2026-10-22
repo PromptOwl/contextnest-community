@@ -16,7 +16,9 @@ import { getDb } from "../db/client.js";
 export async function markEmailVerified(userId: string, source: string): Promise<void> {
   try {
     await getDb().run(
-      "UPDATE users SET email_verified_at = ? WHERE id = ?",
+      // First verification only: keeps the original timestamp, and a sign-in
+      // of an already-verified account costs no write.
+      "UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL",
       [new Date().toISOString(), userId],
     );
   } catch (err) {

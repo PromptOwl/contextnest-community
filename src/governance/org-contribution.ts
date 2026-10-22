@@ -153,23 +153,34 @@ export async function contributeDocument(
   userEmail: string,
   opts: { baseUrl?: string; note?: string } = {},
 ): Promise<ContributionResult> {
-  const made = await createNode(
-    nestId,
-    {
-      title: input.title,
-      content: input.content,
-      tags: input.tags,
-      folder: input.folder,
-      client: input.client,
-    },
-    userEmail,
-    // Never published, never stewarded: creator-reviews would make the
-    // contributor this document's reviewer, and v1 would publish on that.
-    // No mention fan-out from an unreviewed suggestion by someone outside
-    // the roster (inbox rows and channel posts naming a draft); the reviewer
-    // sees the text in review.
-    { alwaysDraft: true, creatorReviews: false, notifyMentions: false },
-  );
+  let made: NodeMutationResult;
+  try {
+    made = await createNode(
+      nestId,
+      {
+        title: input.title,
+        content: input.content,
+        tags: input.tags,
+        folder: input.folder,
+        client: input.client,
+      },
+      userEmail,
+      // Never published, never stewarded: creator-reviews would make the
+      // contributor this document's reviewer, and v1 would publish on that.
+      // No mention fan-out from an unreviewed suggestion by someone outside
+      // the roster (inbox rows and channel posts naming a draft); the reviewer
+      // sees the text in review.
+      { alwaysDraft: true, creatorReviews: false, notifyMentions: false },
+    );
+  } catch (err) {
+    // The stock message names the occupying document's id, which may be
+    // someone else's draft this contributor can't see. Say only that the
+    // title is taken.
+    if (err instanceof ConflictError) {
+      throw new ConflictError("That title is already used in this nest. Choose a different title.");
+    }
+    throw err;
+  }
   const review = await submitForReview({
     nestId,
     nodeId: made.node.id,
@@ -206,6 +217,11 @@ export async function proposeEdit(
   userEmail: string,
   opts: { baseUrl?: string } = {},
 ): Promise<ContributionResult> {
+  // The head the checks below are made against. updateNode re-checks it inside
+  // the node's write lock, so a change landing between these checks and the
+  // write (another contributor's proposal, a collaborator's save) is refused
+  // with 409 instead of overwritten.
+  const head = await versions.getCurrentVersion(nestId, nodeId);
   const own = await ownsWorkingDraft(nestId, nodeId, userEmail);
   if (!own && !(await canReadNode(nestId, nodeId, userId, userEmail))) {
     // Same answer as a missing document: an unapproved draft is invisible.
@@ -226,6 +242,7 @@ export async function proposeEdit(
   const res = await updateNode(nestId, nodeId, patch, userEmail, {
     alwaysDraft: true,
     notifyMentions: false,
+    expectHead: head,
   });
   // Revising their own open submission repoints that review (updateNode);
   // anything else goes to review now.
@@ -288,25 +305,25 @@ export async function listMyContributions(
   // The newest version is theirs and unreviewed, so the working file IS their
   // draft (a draft lives in the file, not the version row — see updateNode).
   const { storage } = await engineCache.get(nestId);
-  const out: MyContribution[] = [];
-  for (const r of rows) {
-    let doc;
-    try {
-      doc = await storage.readDocument(r.node_id);
-    } catch {
-      continue; // gone from disk: nothing to show or revise
-    }
-    out.push({
-      node_id: r.node_id,
-      title: (doc.frontmatter.title as string | undefined) ?? null,
-      version: Number(r.version),
-      status: r.status,
-      created_at: r.created_at,
-      review_id: r.review_id,
-      content: doc.body ?? "",
-    });
-  }
-  return out;
+  const read = await Promise.all(
+    rows.map(async (r) => {
+      try {
+        const doc = await storage.readDocument(r.node_id);
+        return {
+          node_id: r.node_id,
+          title: (doc.frontmatter.title as string | undefined) ?? null,
+          version: Number(r.version),
+          status: r.status,
+          created_at: r.created_at,
+          review_id: r.review_id,
+          content: doc.body ?? "",
+        } satisfies MyContribution;
+      } catch {
+        return null; // gone from disk: nothing to show or revise
+      }
+    }),
+  );
+  return read.filter((c): c is MyContribution => c !== null);
 }
 
 /**
@@ -334,4 +351,25 @@ export async function orgContributorRequesters(
     if (access.orgContributor && access.isPublicReader) out.add(u.email.toLowerCase());
   }
   return out;
+}
+
+/**
+ * Boot-time guard for the access gate's contributor admission (app.ts): it
+ * admits an org contributor's PATCH anywhere under /nests/:nestId/nodes/, on
+ * the strength of the node update being the ONLY PATCH there. If another
+ * PATCH route ever appears, a read-tier contributor would reach it — so the
+ * app refuses to start instead of relying on someone heeding a test.
+ */
+export function assertSoleNodePatchRoute(routes: Array<{ method: string; path: string }>): void {
+  const patches = new Set(
+    routes
+      .filter((r) => r.method === "PATCH" && r.path.startsWith("/nests/:nestId/nodes"))
+      .map((r) => r.path),
+  );
+  const extra = [...patches].filter((p) => p !== "/nests/:nestId/nodes/:nodeId{.+}");
+  if (extra.length > 0) {
+    throw new Error(
+      `PATCH ${extra.join(", ")} is under /nests/:nestId/nodes, where the access gate admits org contributors (CU-wdqcq05rz6) for the node update only. Narrow isContributionRoute in app.ts before adding it.`,
+    );
+  }
 }

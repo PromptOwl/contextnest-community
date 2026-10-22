@@ -394,6 +394,28 @@ describe("org contributors — drafts without being added", () => {
     }
   });
 
+  it("two contributors proposing at once: one lands, the other is refused — never an overwrite", async () => {
+    const made = await create(owner.apiKey, { title: "Race Target", content: "v1" });
+    const id = made.data.node.id;
+    expect(await approvedVersion(nestId, id)).not.toBeNull();
+    const [a, b] = await Promise.all([
+      jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "bob's take" }, bob.apiKey),
+      jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "carol's take" }, carol.apiKey),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses[0]).toBe(200);
+    expect([409, 423]).toContain(statuses[1]);
+    const winner = a.status === 200 ? bob.email : carol.email;
+    expect((await pendingReview(nestId, id))?.requested_by).toBe(winner);
+    expect((await latestVersionRow(nestId, id))?.author).toBe(winner);
+  });
+
+  it("a duplicate title on a contributor's create doesn't echo the hidden document's id", async () => {
+    const res = await create(carol.apiKey, { title: "Bob Proposal", content: "same title as bob's hidden draft" });
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(res.data)).not.toContain(bobDoc);
+  });
+
   // ── What they still can't do ──────────────────────────────────────────
 
   it("can't approve, delete, move, or change settings (403)", async () => {
@@ -700,7 +722,38 @@ describe("email verification is recorded, never assumed", () => {
   });
 });
 
+describe("markEmailVerified keeps the first verification", () => {
+  it("doesn't rewrite email_verified_at on later sign-ins", async () => {
+    const env = setupTestEnv();
+    const app = await createTestApp("key");
+    resetAuthRateLimit();
+    const u = await registerUser(app, "sso@acme.com");
+    const { markEmailVerified } = await import("../src/auth/email-verified.js");
+    await markEmailVerified(u.userId, "test");
+    const first = ((await (await db()).get("SELECT email_verified_at AS v FROM users WHERE id = ?", [u.userId])) as { v: string }).v;
+    expect(first).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 15));
+    await markEmailVerified(u.userId, "test");
+    const second = ((await (await db()).get("SELECT email_verified_at AS v FROM users WHERE id = ?", [u.userId])) as { v: string }).v;
+    expect(second).toBe(first);
+    await env.cleanup();
+  });
+});
+
 describe("route table: the contributor PATCH can only ever reach the node update", () => {
+  it("the app refuses to boot if another PATCH appears under /nests/:nestId/nodes", async () => {
+    const { assertSoleNodePatchRoute } = await import("../src/governance/org-contribution.js");
+    expect(() =>
+      assertSoleNodePatchRoute([
+        { method: "PATCH", path: "/nests/:nestId/nodes/:nodeId{.+}" },
+        { method: "PATCH", path: "/nests/:nestId/nodes/:nodeId{.+}/pin" },
+      ]),
+    ).toThrow(/org contributor/i);
+    expect(() =>
+      assertSoleNodePatchRoute([{ method: "PATCH", path: "/nests/:nestId/nodes/:nodeId{.+}" }]),
+    ).not.toThrow();
+  });
+
   it("there is exactly one PATCH route under /nests/:nestId/nodes", async () => {
     const env = setupTestEnv();
     const app = await createTestApp("key");
