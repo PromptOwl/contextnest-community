@@ -95,10 +95,13 @@ export function stripLeadingBlankLines(content: string): string {
   return content.replace(/^(?:[ \t]*\r?\n)+/, "");
 }
 
-/** The docs that will actually be written (title + content present). The
- *  manifest and the held-push content view both index into this list. */
+/** The docs that will actually be written (title + content present), with
+ *  content as stored. The manifest and the held-push content view both index
+ *  into this list. A body of only blank lines strips to empty and is dropped. */
 export function publishableDocs(body: PublishPayload): PublishDoc[] {
-  return (body.documents || []).filter((d) => d.title && d.content);
+  return (body.documents || [])
+    .map((d) => (d.content ? { ...d, content: stripLeadingBlankLines(d.content) } : d))
+    .filter((d) => d.title && d.content);
 }
 
 /** Build the confirm-modal manifest for a payload (title·type·tags per doc). */
@@ -141,8 +144,7 @@ export async function applyPublish(
     });
   }
 
-  for (const doc of body.documents || []) {
-    if (!doc.title || !doc.content) continue;
+  for (const doc of publishableDocs(body)) {
 
     // Route through the canonical create (engine `context_create` underneath)
     // instead of hand-assembling documents here: same slugs, same governance
@@ -155,7 +157,7 @@ export async function applyPublish(
         nestId,
         {
           title: doc.title,
-          content: stripLeadingBlankLines(doc.content),
+          content: doc.content,
           type: doc.type,
           tags: doc.tags,
           scope: doc.scope,

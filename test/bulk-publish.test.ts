@@ -145,16 +145,23 @@ describe("bulk publish — partial-batch reporting", () => {
         documents: [
           { title: "Page", type: "artifact", content: "\n\n<!doctype html>\n<html><body>Hi</body></html>\n" },
           { title: "Indented", content: "\n   \n    code on line one\n" },
+          { title: "Crlf", type: "artifact", content: "\r\n\r\n<!doctype html>\r\n" },
+          // Nothing left after the strip: dropped, not stored as an empty doc.
+          { title: "Blank", content: "\n  \n" },
         ],
       },
       admin.apiKey,
     );
     expect(res.status).toBe(201);
+    expect(res.data.published).toBe(3);
+    expect(res.data.node_ids).not.toContain("nodes/blank");
 
     const page = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/page`, undefined, admin.apiKey);
     expect(page.data.node.content.startsWith("<!doctype html>")).toBe(true);
     // Only whole blank lines go: the first real line keeps its indentation.
     const md = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/indented`, undefined, admin.apiKey);
     expect(md.data.node.content.startsWith("    code on line one")).toBe(true);
+    const crlf = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/crlf`, undefined, admin.apiKey);
+    expect(crlf.data.node.content.startsWith("<!doctype html>")).toBe(true);
   });
 });
