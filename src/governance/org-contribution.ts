@@ -397,8 +397,12 @@ export async function orgContributorRequesters(
       WHERE LOWER(email) IN (${distinct.map(() => "?").join(",")}) AND is_service = 0`,
     distinct,
   )) as Array<{ id: string; email: string }>;
-  for (const u of users) {
-    const access = await resolveNestAccess(nestId, u.id);
+  // The label means "not someone you added": a read collaborator who is also
+  // an org contributor isn't labelled (isPublicReader is false for them).
+  const resolved = await Promise.all(
+    users.map(async (u) => ({ u, access: await resolveNestAccess(nestId, u.id) })),
+  );
+  for (const { u, access } of resolved) {
     if (access.orgContributor && access.isPublicReader) out.add(u.email.toLowerCase());
   }
   return out;

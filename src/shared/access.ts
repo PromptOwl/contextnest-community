@@ -381,7 +381,10 @@ async function resolveNestAccessRaw(
     visibilityRead && !row.collab_permission && !base.isSteward;
 
   // Org contributor (CU-wdqcq05rz6): someone in the organization, on an org
-  // nest that opted in, who holds nothing above read. Every condition fails
+  // nest that opted in, who holds nothing above read. That includes a read
+  // collaborator / viewer steward / team viewer, on purpose: the setting says
+  // "anyone in the organization", and a viewer is in it. (They already see
+  // drafts; the review queue just doesn't label them "not a collaborator".) Every condition fails
   // closed: a service identity (system, headless key, agent persona) is never
   // a person in the org, an archived nest takes no writes, and the setting is
   // inert unless the nest is 'org' right now — flipping it private or public

@@ -13,6 +13,10 @@ import { config } from "../config.js";
  *
  * Best-effort: a failure leaves the account unverified (fail closed) and
  * never fails the sign-in itself.
+ *
+ * The timestamp vouches for the address the account had WHEN it was set.
+ * Nothing changes users.email today; any future email-change flow must clear
+ * email_verified_at in the same write.
  */
 export async function markEmailVerified(userId: string, source: string): Promise<void> {
   try {

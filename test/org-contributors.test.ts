@@ -443,6 +443,24 @@ describe("org contributors — drafts without being added", () => {
     expect(out.text).toMatch(/rename|title/i);
   });
 
+  it("a READ collaborator is a contributor too (deliberate), but not labelled 'not a collaborator'", async () => {
+    resetAuthRateLimit();
+    const viewer = await registerUser(app, "viewer@acme.com");
+    await markVerified(viewer.userId);
+    const added = await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: viewer.email, permission: "read" }, owner.apiKey);
+    expect(added.status).toBeLessThan(300);
+    const { resolveNestAccess } = await import("../src/shared/access.js");
+    const access = await resolveNestAccess(nestId, viewer.userId);
+    expect(access.permission).toBe("read");
+    expect(access.orgContributor).toBe(true);
+    const res = await create(viewer.apiKey, { title: "Viewer Suggestion", content: "x" });
+    expect(res.status).toBe(201);
+    expect(await approvedVersion(nestId, res.data.node.id)).toBeNull();
+    const queue = await jsonRequest(app, "GET", `/nests/${nestId}/review-queue`, undefined, owner.apiKey);
+    const req = queue.data.requests.find((r: any) => r.nodeId === res.data.node.id);
+    expect(req?.requestedByOrgContributor).toBe(false);
+  });
+
   // ── What they still can't do ──────────────────────────────────────────
 
   it("can't approve, delete, move, or change settings (403)", async () => {
