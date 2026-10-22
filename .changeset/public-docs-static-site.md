@@ -1,5 +1,0 @@
----
-"@promptowl/contextnest-community": minor
----
-
-Public docs sites: a nest that is public with Reader Mode on is now also published as a static, search-engine- and AI-ready docs site — complete HTML per page (no JavaScript needed), clean URLs, titles, descriptions, canonicals, structured data, a sitemap with real lastmod, robots.txt that welcomes AI search crawlers, llms.txt, Markdown copies of every page, IndexNow pings, and "Copy page / Open in ChatGPT / Claude" actions. Pages link to each other semantically: backlinks, related pages ranked by shared topics and links, topic hub pages for tags, and a glossary whose terms are linked where they're mentioned. Owners configure it from **Reader mode → Public site**: a custom domain (verified by DNS), custom page URLs with automatic redirects from old ones (and 410 for deleted pages), manual redirects, SEO and AI-crawler settings. Anonymous visitors to the nest's app URL are redirected to the page. Built from approved content only. Before this, every public docs URL returned the same empty app page to crawlers.
