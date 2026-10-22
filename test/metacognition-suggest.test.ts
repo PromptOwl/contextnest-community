@@ -164,6 +164,33 @@ describe("suggestConfig (pure heuristics)", () => {
     expect(s.config.feeds.map((f) => f.url)).toEqual(["https://feeds.example.com/a.xml", "https://feeds.example.org/feed"]);
   });
 
+  // Review round 3.
+  it("a negation about one kind of document doesn't stop edits named elsewhere", () => {
+    const s = suggestConfig({ title: "A", frontmatter: {}, instructions: "Never edit pricing docs. Fix typos in gtm/.", folders: FOLDERS });
+    expect(s.config.scope.read).toEqual(["gtm"]);
+    expect(s.config.scope.propose).toEqual(["*"]);
+  });
+
+  it("doesn't read a folder named with a common word used in plain prose", () => {
+    const s = suggestConfig({
+      title: "A",
+      frontmatter: {},
+      instructions: "Take notes on what you find and link the docs you used.",
+      folders: ["notes", "docs", "gtm"],
+    });
+    expect(s.config.scope.read).toEqual([]);
+  });
+
+  it("only scans the first 100k characters of the instructions", () => {
+    const s = suggestConfig({
+      title: "A",
+      frontmatter: {},
+      instructions: `${"x ".repeat(60_000)}Watch nodes/gtm/.`,
+      folders: FOLDERS,
+    });
+    expect(s.config.scope.read).toEqual([]);
+  });
+
   it("returns a config parseConfig accepts unchanged, with the Standard caps", () => {
     const s = suggestConfig({
       title: "Archivist",

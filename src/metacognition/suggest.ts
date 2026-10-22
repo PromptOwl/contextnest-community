@@ -166,8 +166,13 @@ function keyFor(url: string, taken: Set<string>, fallback: string): string {
   return key;
 }
 
+/** Bounds on what is scanned: instructions are user-authored and unbounded,
+ *  and each folder named in them costs a few regex passes. */
+const MAX_TEXT = 100_000;
+const MAX_FOLDERS = 2_000;
+
 export function suggestConfig(input: SuggestInput): Suggestion {
-  const text = input.instructions ?? "";
+  const text = (input.instructions ?? "").slice(0, MAX_TEXT);
   const why: Record<string, string> = {};
 
   const name = personaName(input.title);
@@ -175,7 +180,7 @@ export function suggestConfig(input: SuggestInput): Suggestion {
   const emoji = frontmatterEmoji(input.frontmatter);
   if (emoji) why["persona.avatar"] = `The document's ${emoji.key} is ${emoji.glyph}.`;
 
-  const hits = mentionedFolders(text, input.folders);
+  const hits = mentionedFolders(text, input.folders.slice(0, MAX_FOLDERS));
   const read = hits.map((h) => h.folder);
   why["scope.read"] = hits.length
     ? `The instructions mention ${hits.map((h) => `"${h.as}"`).join(", ")}.`
