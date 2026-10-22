@@ -129,6 +129,14 @@ describe("suggestConfig (pure heuristics)", () => {
     });
   }
 
+  // Review round 4: edit verbs aimed at the person, not the nest.
+  for (const text of ["Correct me if I get a fact wrong.", "Propose ideas to the user when asked.", "Update the user on what you found."]) {
+    it(`doesn't grant edits for "${text}"`, () => {
+      const s = suggestConfig({ title: "A", frontmatter: {}, instructions: text, folders: FOLDERS });
+      expect(s.config.scope.propose).toEqual([]);
+    });
+  }
+
   it("a narrow 'do not update the footer' doesn't override 'fix stale pricing'", () => {
     const s = suggestConfig({
       title: "A",

@@ -266,3 +266,12 @@ describe("review round 2", () => {
     expect(effortText(PRESETS.standard, "")).toMatch(/\$/);
   });
 });
+
+describe("review round 4", () => {
+  it("warns when it may suggest edits anywhere in the whole nest", async () => {
+    const { wideScopeWarning } = await import("./metacognition-form");
+    expect(wideScopeWarning(formFromConfig("n", true, { ...base, scope: { read: [], propose: ["*"] } }))).toMatch(/every document/i);
+    expect(wideScopeWarning(formFromConfig("n", true, { ...base, scope: { read: ["gtm"], propose: ["*"] } }))).toBeNull();
+    expect(wideScopeWarning(formFromConfig("n", true, { ...base, scope: { read: [], propose: [] } }))).toBeNull();
+  });
+});

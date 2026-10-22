@@ -32,6 +32,7 @@ import {
   saveBlocked,
   summarize,
   toggleReadFolder,
+  wideScopeWarning,
   type Caps,
   type Effort,
   type FormState,
@@ -215,6 +216,11 @@ export function ChangeSection({ form, update, prefilled, folders }: SectionProps
           }
           testPrefix="metacognition-propose-folder"
         />
+      )}
+      {wideScopeWarning(form) && (
+        <p className="text-xs text-amber-700 dark:text-amber-400" data-testid="metacognition-wide-scope">
+          {wideScopeWarning(form)}
+        </p>
       )}
       <FromDoc why={prefilled["scope.propose"]} />
     </Question>

@@ -291,3 +291,11 @@ export function canManageMetacognition(enabled: boolean, nestPermission: string 
 export function saveBlocked(f: FormState, state: { saving: boolean; suggesting: boolean }): boolean {
   return state.saving || state.suggesting || !f.node_id || formProblems(f).length > 0;
 }
+
+/** The widest grant there is — every document in the nest may get an edit
+ *  suggestion — gets said out loud next to the choice; null otherwise. */
+export function wideScopeWarning(f: FormState): string | null {
+  return f.readAll && f.proposeMode === "reads"
+    ? "That is every document in the nest. A reviewer still approves each change, but you can narrow it to some folders."
+    : null;
+}

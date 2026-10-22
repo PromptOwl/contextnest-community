@@ -111,13 +111,15 @@ const READ_ONLY = [
 // An edit verb used as an instruction: at the start of a sentence or clause,
 // or after "and", "to", "please", "then", "also", "or". So "update stale
 // pricing" and "and fix typos" count; "a weekly status update" (a noun) does
-// not. One about the agent's own output ("improve your reply", "update the
-// team in Slack") doesn't either: that isn't an edit to the nest.
+// not. One aimed at a person or the agent's own output ("correct me",
+// "update the user", "propose ideas", "improve your reply") doesn't either:
+// that isn't an edit to the nest.
 const EDIT_VERB =
   /(?:^|[.!?;:\n]\s*|[-*•]\s+|\b(?:and|to|please|then|also|or)\s+)((?:edit|fix|update|correct|rewrite|revise|amend|propose)\w*)\b([^.!?;\n]*)/gi;
 const KEEP_CURRENT =
   /(?:^|[.!?;:\n]\s*|[-*•]\s+|\b(?:and|to|please|then|also)\s+)(keep\s+(?:[\w/'-]+\s+){0,4}(?:current|up[ -]to[ -]date|accurate))/i;
-const NOT_THE_NEST = /\b(?:your|yourself|reply|response|answer|message|slack|email|team|memory|chat)\b/i;
+const NOT_THE_NEST =
+  /\b(?:me|us|you|your|yourself|user|users|people|ideas|reply|response|answer|message|slack|email|team|memory|chat)\b/i;
 
 function editInstruction(text: string): string | null {
   for (const m of text.matchAll(EDIT_VERB)) {
