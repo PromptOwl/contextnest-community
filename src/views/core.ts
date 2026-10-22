@@ -95,6 +95,9 @@ interface BlockBase {
    *  user id: those must start with a letter). */
   id: string;
   kind: string;
+  /** Node ids whose content this block disclosed (md / data / list members).
+   *  Server-side only: buildNestData never copies it into nest-data. */
+  sources?: string[];
 }
 
 export type ResolvedBlock =
@@ -203,7 +206,7 @@ async function resolveOne(
       try {
         const md = await deps.readMd(nestId, target.id, version);
         if (!md.ok) return fail(base, md.error);
-        return { ...base, kind: "md", ok: true, text: md.text, version: md.version };
+        return { ...base, kind: "md", ok: true, text: md.text, version: md.version, sources: [target.id] };
       } catch {
         return fail(base, "history_error");
       }
@@ -229,7 +232,8 @@ async function resolveOne(
       } catch {
         return fail(base, "query_failed");
       }
-      const items = matched.slice(0, limit).map((m) => {
+      const shown = matched.slice(0, limit);
+      const items = shown.map((m) => {
         const item: Record<string, unknown> = {};
         for (const f of fields) {
           const v = f === "tags" ? (m.tags ?? []) : m[f];
@@ -242,6 +246,7 @@ async function resolveOne(
         kind: "list",
         ok: true,
         items,
+        sources: shown.map((m) => m.id),
         ...(matched.length > limit ? { truncated: true as const } : {}),
       };
     }
@@ -265,6 +270,7 @@ async function resolveOne(
         ...base,
         kind: "data",
         ok: true,
+        sources: [target.id],
         columns: out.columns,
         rows: out.rows.slice(0, caps.MAX_ROWS),
         ...(truncated ? { truncated: true as const } : {}),
@@ -439,13 +445,33 @@ export function serializeNestData(data: NestData): string {
 }
 
 const DOCTYPE_RE = /^\uFEFF?\s*<!doctype\b[^>]*>/i;
-const INSERT_BEFORE_RE = /<script[\s>/]|<\/head[\s>]/i;
+/**
+ * One left-to-right pass over the markup. Alternatives that are NOT an
+ * insertion point are consumed whole so their text can't match: comments,
+ * raw-text / inert elements (title, textarea, style, xmp, noscript, template)
+ * and ordinary start tags with quoted attribute values. Group 2 is the
+ * insertion point: a real `<script` start tag or `</head>`. Every repeated
+ * piece matches one character or one closed quote, so there is no
+ * nested-quantifier backtracking.
+ */
+const SCAN_RE =
+  /<!--[\s\S]*?(?:-->|$)|<(title|textarea|style|xmp|noscript|template)\b[\s\S]*?(?:<\/\1\s*>|$)|(<script[\s>/]|<\/head[\s>])|<[a-zA-Z][^\s/<>]*(?:\s|"[^"]*"|'[^']*'|[^\s"'<>])*>/gi;
+
+function insertionPoint(html: string): number {
+  SCAN_RE.lastIndex = 0;
+  for (let m = SCAN_RE.exec(html); m; m = SCAN_RE.exec(html)) {
+    if (m[2]) return m.index;
+    if (m[0].length === 0) SCAN_RE.lastIndex++;
+  }
+  return -1;
+}
 
 /**
  * Insert exactly one `<script type="application/json" id="nest-data">`:
  * after the doctype (so the page stays out of quirks mode), before the first
- * `<script` or `</head>` (so the artifact's own scripts can read it
- * synchronously), else right after the doctype or at byte 0. Ours always
+ * `<script` or `</head>` tag (so the artifact's own scripts can read it
+ * synchronously; text inside comments, raw-text elements and attribute
+ * values is skipped), else right after the doctype or at byte 0. Ours always
  * comes first, so `getElementById("nest-data")` returns it even when the
  * artifact ships an element of its own with that id.
  */
@@ -454,8 +480,8 @@ export function injectNestData(html: string, json: string): string {
   const doctype = DOCTYPE_RE.exec(html);
   const start = doctype ? doctype[0].length : 0;
   const rest = html.slice(start);
-  const m = INSERT_BEFORE_RE.exec(rest);
-  const at = start + (m ? m.index : 0);
+  const i = insertionPoint(rest);
+  const at = start + (i >= 0 ? i : 0);
   return html.slice(0, at) + tag + html.slice(at);
 }
 
@@ -535,11 +561,12 @@ export async function frameNestData(i: {
   deps: ViewDeps;
   trust: TrustInput;
   caps?: Caps;
-}): Promise<{ data: NestData; trust: TrustDecision }> {
+}): Promise<{ data: NestData; trust: TrustDecision; sources: string[] }> {
   const caps = i.caps ?? CAPS;
   const trust = decideDataTrust(i.trust);
-  if (!trust.ok) return { data: withheldNestData(i.view, i.dataFrom), trust };
+  if (!trust.ok) return { data: withheldNestData(i.view, i.dataFrom), trust, sources: [] };
   const ids = normalizeDataFrom(i.dataFrom).slice(0, caps.MAX_DATA_FROM);
   const resolved = await resolveBlocks(i.view, i.nestId, trust.principals, i.deps, ids, caps);
-  return { data: buildNestData(resolved, i.dataFrom, caps), trust };
+  const sources = [...new Set(resolved.flatMap((b) => (b.ok && b.sources) || []))];
+  return { data: buildNestData(resolved, i.dataFrom, caps), trust, sources };
 }

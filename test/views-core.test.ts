@@ -142,6 +142,34 @@ describe("injectNestData placement (AC-18)", () => {
     expect(count(out)).toBe(2); // ours + the artifact's own, untouched
     expect(out.indexOf('{"real":1}')).toBeLessThan(out.indexOf('{"fake":1}'));
   });
+
+  // Review finding: a `<script` or `</head>` that is not a tag (inside a
+  // comment, a raw-text element or an attribute value) must not be taken as
+  // the insertion point, or the tag lands where getElementById can't see it.
+  const NEST = '<script type="application/json" id="nest-data">{}</script>';
+  for (const [name, html, before] of [
+    ["an HTML comment", "<!doctype html><html><head><!-- <script src=x> --><script>app()</script></head></html>", "<script>app()"],
+    ["a <title>", "<!doctype html><html><head><title>a </head> b</title><script>app()</script></head></html>", "<script>app()"],
+    ["a <textarea>", "<!doctype html><body><textarea><script>no</script></textarea><script>app()</script></body>", "<script>app()"],
+    ["an attribute value", '<!doctype html><head><meta name="x" content="<script>"></head><body></body>', "</head>"],
+    ["a single-quoted attribute with >", "<!doctype html><head><meta content='a > <script>'><script>app()</script></head>", "<script>app()"],
+  ] as const) {
+    it(`skips a <script / </head> inside ${name}`, () => {
+      const out = injectNestData(html, "{}");
+      expect(count(out)).toBe(1);
+      const at = out.indexOf(NEST);
+      expect(out.slice(at + NEST.length).startsWith(before)).toBe(true);
+      expect(out.replace(NEST, "")).toBe(html);
+    });
+  }
+
+  it("stays linear on hostile markup (no catastrophic backtracking)", () => {
+    for (const html of ["<a".repeat(50_000), '<a "'.repeat(50_000), "<!--" + "<a b=c ".repeat(50_000), "<a " + "b".repeat(200_000)]) {
+      const t0 = Date.now();
+      expect(count(injectNestData(html, "{}"))).toBe(1);
+      expect(Date.now() - t0).toBeLessThan(1000);
+    }
+  });
 });
 
 describe("buildNestData", () => {

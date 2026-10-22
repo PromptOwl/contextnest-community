@@ -291,7 +291,7 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
     if (viewAuthors === null || artAuthors === null) authorsIncomplete = true;
     else authors = await authorInfos(s.nestId, [...viewAuthors, ...artAuthors]);
   }
-  const { data } = await frameNestData({
+  const { data, sources } = await frameNestData({
     view: s.layout.meta,
     dataFrom: block.dataFrom,
     nestId: s.nestId,
@@ -313,5 +313,17 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
   // frame-ancestors a handler set).
   c.header("Content-Security-Policy", `${ARTIFACT_SANDBOX_CSP_NO_POPUPS}; frame-ancestors 'self'`);
   viewerHeaders(c, s.served);
+  // The frame is where data leaves the server: record the artifact and every
+  // node whose content was resolved into its nest-data, against the viewer.
+  recordNodeAccess({
+    nestId: s.nestId,
+    nodeIds: [target.id, ...sources],
+    action: "read",
+    surface: "api",
+    userId: s.viewer.userId,
+    userEmail: s.viewer.email,
+    ...(artifact.version != null ? { versions: { [target.id]: artifact.version } } : {}),
+    detail: `view frame ${s.viewId}#${decoded(c.req.param("blockId")!)}`,
+  });
   return c.html(body);
 });

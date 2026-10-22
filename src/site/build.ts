@@ -366,6 +366,10 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
     }
     // HTML artifacts render under the artifact sandbox (/p), not as a docs page.
     if (fm.type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body)) continue;
+    // A §1.12 view is intro-only on the open web, as on /p: its blocks resolve
+    // other nodes and feed data to frames, which only a nest member may see.
+    // The `view:` frontmatter is never emitted; a note stands in for the blocks.
+    if (fm.type === "view") body = viewIntroForSite(body);
     const rel = row.node_id.replace(/^nodes\//, "");
     sources.push({
       nodeId: row.node_id,
@@ -379,6 +383,14 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
     });
   }
   return sources;
+}
+
+/** Notice that stands in for a view's blocks on the public docs site. */
+export const SITE_VIEW_NOTICE = "This page is a live view. Its data is available to nest members.";
+
+function viewIntroForSite(intro: string): string {
+  const text = intro.trim();
+  return `${text ? `${text}\n\n` : ""}> ${SITE_VIEW_NOTICE}\n`;
 }
 
 /**

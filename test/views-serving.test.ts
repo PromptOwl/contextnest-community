@@ -25,6 +25,8 @@ import {
 import { mergeFrameAncestors } from "../src/shared/artifact-sandbox.js";
 import { ARTIFACT_SANDBOX_CSP_NO_POPUPS, ARTIFACT_SANDBOX_CSP } from "../src/shared/artifact-sandbox.js";
 import { CAPS } from "../src/views/core.js";
+import { flushAccessLog } from "../src/governance/access-log.js";
+import { getDb } from "../src/db/client.js";
 
 type User = { apiKey: string; userId: string; email: string };
 
@@ -482,5 +484,24 @@ describe("AC-14: access errors", () => {
   it("?v=N of a version that does not exist is 404; a junk v falls back like /hosted", async () => {
     expect((await get(page(vId, "?v=999"))).status).toBe(404);
     expect((await get(page(vId, "?v=abc"))).status).toBe(200);
+  });
+});
+
+describe("frame serves are audit-logged (review finding)", () => {
+  it("records the artifact and every node resolved into nest-data, against the viewer", async () => {
+    const res = await get(frame(vId, "h"));
+    expect(res.status).toBe(200);
+    await flushAccessLog();
+    const rows = (await getDb().all(
+      "SELECT node_id, user_email, detail FROM node_access_events WHERE nest_id = ? AND detail = ?",
+      [nestId, `view frame ${vId}#h`],
+    )) as { node_id: string; user_email: string }[];
+    const ids = new Set(rows.filter((r) => r.user_email === member.email).map((r) => r.node_id));
+    expect(ids.has(aId)).toBe(true);
+    expect(ids.has(tId)).toBe(true);
+    expect(ids.has("nodes/metric-one")).toBe(true);
+    expect(ids.has("nodes/metric-two")).toBe(true);
+    // Blocks not named in data_from are not disclosed, so not logged.
+    expect(ids.has("nodes/intro")).toBe(false);
   });
 });
