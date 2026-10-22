@@ -205,3 +205,64 @@ describe("Save (review round 1)", () => {
     expect(saveBlocked({ ...f, node_id: "" }, { saving: false, suggesting: false })).toBe(true);
   });
 });
+
+describe("review round 2", () => {
+  const suggestion = {
+    config: {
+      ...base,
+      persona: { name: "Doc Name", avatar: null },
+      scope: { read: ["ops"], propose: [] },
+      feeds: [{ name: "news", url: "https://feeds.example.com/a.xml" }],
+    },
+    why: { "scope.read": "The instructions mention nodes/ops/." },
+    mcp_candidates: [
+      { name: "desk", url: "https://desk.example.com/mcp" },
+      { name: "wiki", url: "https://wiki.example.com/mcp" },
+    ],
+    instructions: "approved" as const,
+  };
+
+  it("picking another document starts from an empty, fail-closed form, never the previous one's scope", async () => {
+    const { pickDocument } = await import("./metacognition-form");
+    const a = formFromConfig("nodes/a", false, { ...base, scope: { read: [], propose: ["*"] }, feeds: [{ name: "n", url: "https://x.example.com/f.xml" }] });
+    const b = pickDocument(a, "nodes/b", "Bee");
+    expect(b).toEqual({ ...emptyForm("nodes/b", "Bee"), enabled: false });
+    expect(configFromForm(b).scope).toEqual({ read: [], propose: [] });
+  });
+
+  it("re-suggesting an existing agent keeps its caps, model, MCP servers and feeds", async () => {
+    const { applySuggestion: apply } = await import("./metacognition-form");
+    const saved = formFromConfig("nodes/a", true, {
+      ...base,
+      caps: { ...PRESETS.thorough, max_seconds: 600 },
+      model: "claude-opus-5",
+      feeds: [{ name: "old", url: "https://old.example.com/feed" }],
+      mcp_servers: [{ name: "desk", url: "https://desk.example.com/mcp", allowed_tools: ["search"], auth_env: "MCP_DESK_TOKEN" }],
+    });
+    const { form } = apply(saved, suggestion, { keepSettings: true });
+    expect(form.caps).toEqual(saved.caps);
+    expect(form.model).toBe("claude-opus-5");
+    // The configured desk row is kept as-is; only the new MCP link is added.
+    expect(form.mcp).toEqual([
+      { name: "desk", url: "https://desk.example.com/mcp", tools: "search", auth_env: "MCP_DESK_TOKEN" },
+      { name: "wiki", url: "https://wiki.example.com/mcp", tools: "", auth_env: "" },
+    ]);
+    expect(form.feeds).toEqual([
+      { name: "old", url: "https://old.example.com/feed" },
+      { name: "news", url: "https://feeds.example.com/a.xml" },
+    ]);
+    // What the suggestion has an opinion on still comes from the document.
+    expect(form).toMatchObject({ name: "Doc Name", readAll: false, read: ["ops"], proposeMode: "none" });
+  });
+
+  it("prefilledFrom gives the hints of a suggestion alone", async () => {
+    const { prefilledFrom } = await import("./metacognition-form");
+    expect(prefilledFrom(suggestion)).toMatchObject({ "scope.read": "The instructions mention nodes/ops/." });
+    expect(prefilledFrom(suggestion).mcp_servers).toBeTruthy();
+  });
+
+  it("leaves out the $ estimate when a non-default model is set", () => {
+    expect(effortText(PRESETS.standard, "claude-opus-5")).not.toMatch(/\$/);
+    expect(effortText(PRESETS.standard, "")).toMatch(/\$/);
+  });
+});

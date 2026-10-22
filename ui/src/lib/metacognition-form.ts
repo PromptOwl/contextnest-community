@@ -59,13 +59,15 @@ export function presetOf(caps: Caps): Effort | "custom" {
  */
 const ROUGH_USD_PER_MTOK = 3;
 
-/** "about 5 minutes, up to 5 suggestions and 5 comments, ≈$0.90 at most" */
-export function effortText(caps: Caps): string {
+/** "about 5 minutes, up to 5 suggestions and 5 comments, ≈$0.90 at most".
+ *  No $ figure for a chosen model: the rough rate is a default-model guess. */
+export function effortText(caps: Caps, model = ""): string {
   const mins = caps.max_seconds / 60;
   const time = mins < 1 ? `about ${caps.max_seconds} seconds` : `about ${Math.round(mins)} minute${Math.round(mins) === 1 ? "" : "s"}`;
   const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
   const cost = (caps.max_tokens / 1_000_000) * ROUGH_USD_PER_MTOK;
-  return `${time}, up to ${plural(caps.max_proposals, "suggestion")} and ${plural(caps.max_comments, "comment")}, ≈$${cost.toFixed(2)} at most`;
+  const work = `${time}, up to ${plural(caps.max_proposals, "suggestion")} and ${plural(caps.max_comments, "comment")}`;
+  return model.trim() ? work : `${work}, ≈$${cost.toFixed(2)} at most`;
 }
 
 export type ProposeMode = "none" | "reads" | "folders";
@@ -220,20 +222,8 @@ export function summarize(c: MetacognitionAgentConfig): string {
   return `${who} ${reads}, ${changes}, and never publishes anything itself.`;
 }
 
-/**
- * Fill the form from the document's suggestion. Returns the new form and,
- * per prefilled field, why it was filled that way (for the "from the agent
- * document" hints). The agent document and on/off stay the owner's.
- */
-export function applySuggestion(
-  f: FormState,
-  s: MetacognitionSuggestion,
-): { form: FormState; prefilled: Record<string, string> } {
-  const fromDoc = formFromConfig(f.node_id, f.enabled, s.config);
-  const form: FormState = {
-    ...fromDoc,
-    mcp: s.mcp_candidates.map((m) => ({ name: m.name, url: m.url, tools: "", auth_env: "" })),
-  };
+/** Why each field a suggestion fills was filled that way, for the hints. */
+export function prefilledFrom(s: MetacognitionSuggestion): Record<string, string> {
   const prefilled: Record<string, string> = {};
   for (const k of ["persona.name", "persona.avatar", "scope.read", "scope.propose", "feeds", "mcp_servers"]) {
     if (s.why[k]) prefilled[k] = s.why[k];
@@ -241,7 +231,46 @@ export function applySuggestion(
   if (s.mcp_candidates.length && !prefilled.mcp_servers) {
     prefilled.mcp_servers = "The instructions link an MCP server. Name the tools it may call before saving.";
   }
-  return { form, prefilled };
+  return prefilled;
+}
+
+/**
+ * Fill the form from the document's suggestion. Returns the new form and,
+ * per prefilled field, why it was filled that way (for the "from the agent
+ * document" hints). The agent document and on/off stay the owner's.
+ *
+ * `keepSettings` (re-suggesting an agent that is already set up): the
+ * suggestion only has an opinion on the name, picture, scope and links, so
+ * the saved limits, model and configured MCP servers and feeds are kept, and
+ * links the document names are added next to them.
+ */
+export function applySuggestion(
+  f: FormState,
+  s: MetacognitionSuggestion,
+  opts: { keepSettings?: boolean } = {},
+): { form: FormState; prefilled: Record<string, string> } {
+  const fromDoc = formFromConfig(f.node_id, f.enabled, s.config);
+  const candidates: McpRow[] = s.mcp_candidates.map((m) => ({ name: m.name, url: m.url, tools: "", auth_env: "" }));
+  const form: FormState = opts.keepSettings
+    ? {
+        ...fromDoc,
+        caps: { ...f.caps },
+        model: f.model,
+        feeds: [...f.feeds, ...fromDoc.feeds.filter((r) => !f.feeds.some((o) => o.url === r.url))],
+        mcp: [...f.mcp, ...candidates.filter((r) => !f.mcp.some((o) => o.url === r.url))],
+      }
+    : { ...fromDoc, mcp: candidates };
+  return { form, prefilled: prefilledFrom(s) };
+}
+
+/**
+ * Switch the form to another agent document. It starts empty (the whole
+ * nest, comments only, no links) rather than carrying the previous
+ * document's scope, so if the new document's suggestion fails to load, what
+ * could be saved is the fail-closed default, never another agent's grants.
+ */
+export function pickDocument(f: FormState, node_id: string, title: string): FormState {
+  return { ...emptyForm(node_id, title), enabled: f.enabled };
 }
 
 /**

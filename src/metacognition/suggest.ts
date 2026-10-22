@@ -42,6 +42,8 @@ function personaName(title: string): string {
   return NAME_RE.test(cleaned) ? cleaned : "Agent";
 }
 
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 /** A frontmatter emoji, if one is set — never a URL or anything else. */
 function frontmatterEmoji(fm: Record<string, unknown>): { key: string; glyph: string } | null {
   for (const key of ["avatar", "emoji", "icon"]) {
@@ -49,7 +51,7 @@ function frontmatterEmoji(fm: Record<string, unknown>): { key: string; glyph: st
     if (typeof v !== "string") continue;
     const s = v.trim();
     if (!s || /[<>"'`\\/:\s]/.test(s)) continue;
-    const graphemes = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].length;
+    const graphemes = [...GRAPHEMES.segment(s)].length;
     if (graphemes > 4) continue;
     return { key, glyph: s };
   }
@@ -66,7 +68,10 @@ const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  */
 function mentionedFolders(text: string, folders: string[]): Array<{ folder: string; as: string }> {
   const hits: Array<{ folder: string; as: string }> = [];
+  const lower = text.toLowerCase();
   for (const folder of folders) {
+    // Cheap prefilter: most folders aren't named at all.
+    if (!lower.includes(folder.toLowerCase())) continue;
     const f = escape(folder);
     // The path ends at whitespace, clause punctuation or the end of the text:
     // "gtm/" or "gtm." count, "gtm/deals" (the subfolder), "gtm.md" and
@@ -99,7 +104,8 @@ const READ_ONLY = [
   /\b(?:do not|don't|never|must not|should not|shouldn't|mustn't)\s+(?:directly\s+)?(?:edit|change|modify|update|rewrite|fix|propose|touch)\w*(?:\s+(?:anything|any\s+\w+|documents?|docs?|files?|content|the nest|it|them|nodes?))?\s*(?=[.,;!\n]|$)/i,
   /\bonly\s+(?:flag|comment|review|report|point out|note|summari[sz]e)\w*/i,
   /\b(?:comments?|read)[ -]only\b/i,
-  /\bpropose\s+nothing\b/i,
+  /\b(?:propose|fix|edit|change|update)\s+nothing\b/i,
+  /\bno\s+(?:edits|changes)\b/i,
 ];
 
 // An edit verb used as an instruction: at the start of a sentence or clause,

@@ -26,6 +26,8 @@ import {
   configFromForm,
   effortText,
   formProblems,
+  pickDocument,
+  prefilledFrom,
   presetOf,
   saveBlocked,
   summarize,
@@ -246,7 +248,7 @@ export function EffortSection({ form, update }: SectionProps) {
         )}
       </div>
       <p className="text-xs text-muted-foreground" data-testid="metacognition-effort-label">
-        {EFFORT_LABEL[current]}: {effortText(form.caps)}.
+        {EFFORT_LABEL[current]}: {effortText(form.caps, form.model)}.
       </p>
     </Question>
   );
@@ -408,13 +410,15 @@ export function MetacognitionForm({
     const ticket = ++latest.current;
     setSuggesting(true);
     setError(null);
+    // Hints describe one answer; none show while the next one loads.
+    setPrefilled({});
     try {
       const s = await suggestMetacognitionConfig(nestId, nodeId);
       // A slower answer for a document the owner already switched away from.
       if (ticket !== latest.current) return;
-      setForm((f) => applySuggestion({ ...f, node_id: nodeId }, s).form);
-      // The hints depend on the suggestion alone, not on the form.
-      setPrefilled(applySuggestion(initial, s).prefilled);
+      // Re-suggesting a saved agent keeps its limits, model and links.
+      setForm((f) => applySuggestion({ ...f, node_id: nodeId }, s, { keepSettings: !isNew }).form);
+      setPrefilled(prefilledFrom(s));
       setNoInstructions(s.instructions === "none");
       setFillKey((k) => k + 1);
     } catch (err) {
@@ -477,7 +481,10 @@ export function MetacognitionForm({
               value={form.node_id}
               onChange={(e) => {
                 const id = e.target.value;
-                setForm((f) => ({ ...f, node_id: id }));
+                // Start the new document from the empty, fail-closed form: if
+                // its suggestion fails, the previous document's scope must not
+                // be what Save writes.
+                setForm((f) => pickDocument(f, id, agentDocs.find((d) => d.id === id)?.title ?? ""));
                 void suggest(id);
               }}
               className="h-9 w-full rounded-md border bg-background px-2 text-sm"

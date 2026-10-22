@@ -121,6 +121,14 @@ describe("suggestConfig (pure heuristics)", () => {
     });
   }
 
+  // Review round 2: phrasings that say "no edits" without "do not".
+  for (const text of ["Fix nothing; just report what looks stale.", "Never update.", "No edits, only notes.", "Make no changes to documents."]) {
+    it(`comments only for "${text}"`, () => {
+      const s = suggestConfig({ title: "A", frontmatter: {}, instructions: text, folders: FOLDERS });
+      expect(s.config.scope.propose).toEqual([]);
+    });
+  }
+
   it("a narrow 'do not update the footer' doesn't override 'fix stale pricing'", () => {
     const s = suggestConfig({
       title: "A",
