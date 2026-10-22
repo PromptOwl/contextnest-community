@@ -106,6 +106,56 @@ describe("suggestConfig (pure heuristics)", () => {
     expect(s.config.mcp_servers).toEqual([]);
   });
 
+  // Review round 1: "update"/"improve" as nouns or about the agent's own
+  // reply must not grant edits; "do not update the footer" must not make a
+  // fixing agent comments-only.
+  for (const text of [
+    "Send a weekly status update to the team.",
+    "Improve the summary in your reply.",
+    "Post an update in Slack when you are done.",
+    "Refresh your memory of the gtm folder before answering.",
+  ]) {
+    it(`doesn't grant edits for "${text}"`, () => {
+      const s = suggestConfig({ title: "A", frontmatter: {}, instructions: text, folders: FOLDERS });
+      expect(s.config.scope.propose).toEqual([]);
+    });
+  }
+
+  it("a narrow 'do not update the footer' doesn't override 'fix stale pricing'", () => {
+    const s = suggestConfig({
+      title: "A",
+      frontmatter: {},
+      instructions: "Fix stale pricing in nodes/gtm/. Do not update the footer.",
+      folders: FOLDERS,
+    });
+    expect(s.config.scope.propose).toEqual(["*"]);
+  });
+
+  it("a whole-agent 'do not edit anything' still means comments only", () => {
+    const s = suggestConfig({ title: "A", frontmatter: {}, instructions: "Fix nothing. Do not edit anything; flag stale pricing.", folders: FOLDERS });
+    expect(s.config.scope.propose).toEqual([]);
+  });
+
+  it("matches folder names with regex characters literally", () => {
+    const s = suggestConfig({
+      title: "A",
+      frontmatter: {},
+      instructions: "Review nodes/c++/ and nodes/a.b/ only.",
+      folders: ["c++", "a.b", "axb", "c"],
+    });
+    expect(s.config.scope.read.sort()).toEqual(["a.b", "c++"]);
+  });
+
+  it("trims a trailing ')' or '.' off a feed link", () => {
+    const s = suggestConfig({
+      title: "A",
+      frontmatter: {},
+      instructions: "Sources (https://feeds.example.com/a.xml) and https://feeds.example.org/feed.",
+      folders: [],
+    });
+    expect(s.config.feeds.map((f) => f.url)).toEqual(["https://feeds.example.com/a.xml", "https://feeds.example.org/feed"]);
+  });
+
   it("returns a config parseConfig accepts unchanged, with the Standard caps", () => {
     const s = suggestConfig({
       title: "Archivist",

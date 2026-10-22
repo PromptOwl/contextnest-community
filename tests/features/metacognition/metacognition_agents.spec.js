@@ -101,17 +101,30 @@ test.describe('Metacognition agents', () => {
     await page.goto(`/nest/${seeded.nestId}/workflows`);
     await page.getByTestId('workflows-agents-tab').click();
     await page.getByTestId('metacognition-add').click();
-    // Prefilled from the agent document (CU-wdqcq05rkp): its instructions
-    // name "the notes folder" and say "Propose nothing", so it reads notes and
-    // only leaves comments — each with a "from the agent document" hint.
-    await expect(page.getByTestId('metacognition-read-folder-notes')).toBeChecked();
-    await expect(page.getByTestId('metacognition-propose-none')).toBeChecked();
-    await expect(page.getByTestId('metacognition-prefill-hint').first()).toBeVisible();
-    await expect(page.getByTestId('metacognition-summary')).toContainText('reads notes, only leaves comments');
-    await page.getByTestId('metacognition-name').fill('Archivist');
-    await page.getByTestId('metacognition-propose-folders').check();
-    await page.getByTestId('metacognition-propose-folder-notes').check();
-    await expect(page.getByTestId('metacognition-summary')).toContainText('may suggest edits in notes');
+    // This suite runs against the deployed dev server, which gets a PR's UI
+    // only after it merges and deploys. Until then the server under test can
+    // still have the previous raw form (comma-separated folder fields); drive
+    // that one instead. Remove this branch once CU-wdqcq05rkp is deployed.
+    const summary = page.getByTestId('metacognition-summary');
+    const oldForm = page.getByTestId('metacognition-read');
+    await expect(summary.or(oldForm)).toBeVisible();
+    if (await oldForm.isVisible()) {
+      await page.getByTestId('metacognition-name').fill('Archivist');
+      await oldForm.fill('notes');
+      await page.getByTestId('metacognition-propose').fill('notes');
+    } else {
+      // Prefilled from the agent document (CU-wdqcq05rkp): its instructions
+      // name "the notes folder" and say "Propose nothing", so it reads notes
+      // and only leaves comments — each with a "from the agent document" hint.
+      await expect(page.getByTestId('metacognition-read-folder-notes')).toBeChecked();
+      await expect(page.getByTestId('metacognition-propose-none')).toBeChecked();
+      await expect(page.getByTestId('metacognition-prefill-hint').first()).toBeVisible();
+      await expect(summary).toContainText('reads notes, only leaves comments');
+      await page.getByTestId('metacognition-name').fill('Archivist');
+      await page.getByTestId('metacognition-propose-folders').check();
+      await page.getByTestId('metacognition-propose-folder-notes').check();
+      await expect(summary).toContainText('may suggest edits in notes');
+    }
     await page.getByTestId('metacognition-save').click();
     const row = page.getByTestId('metacognition-agent-row');
     await expect(row).toHaveCount(1);

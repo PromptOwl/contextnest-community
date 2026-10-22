@@ -68,14 +68,15 @@ function mentionedFolders(text: string, folders: string[]): Array<{ folder: stri
   const hits: Array<{ folder: string; as: string }> = [];
   for (const folder of folders) {
     const f = escape(folder);
-    // Ends the path: "gtm/" or "gtm" at a word break — but not "gtm/deals"
-    // (that is the subfolder) or "gtm.md".
-    const end = "(?:/(?![\\w.-])|(?![\\w/-]|\\.\\w))";
+    // The path ends at whitespace, clause punctuation or the end of the text:
+    // "gtm/" or "gtm." count, "gtm/deals" (the subfolder), "gtm.md" and
+    // "c++" (when the folder is "c") don't.
+    const stop = "(?=[\\s,;:!?)\\]'\"`]|\\.(?!\\w)|$)";
     const forms = [
-      new RegExp(`(?<![\\w/.-])nodes/${f}${end}`, "i"),
-      new RegExp(`(?<![\\w/.-])${f}/(?![\\w.-])`, "i"),
+      new RegExp(`(?<![\\w/.-])nodes/${f}/?${stop}`, "i"),
+      new RegExp(`(?<![\\w/.-])${f}/${stop}`, "i"),
       new RegExp("`(?:nodes/)?" + f + "/?`", "i"),
-      new RegExp(`\\b${f}\\s+folder\\b|\\bfolders?\\s+(?:called\\s+|named\\s+)?["']?${f}\\b`, "i"),
+      new RegExp(`(?<![\\w/.-])${f}\\s+folder\\b|\\bfolders?\\s+(?:called\\s+|named\\s+)?["']?${f}${stop}`, "i"),
     ];
     for (const re of forms) {
       const m = text.match(re);
@@ -91,26 +92,46 @@ function mentionedFolders(text: string, folders: string[]): Array<{ folder: stri
 
 // "Do not edit", "only flag", "comments only" — the instructions ask for
 // review, not changes. Checked first: "only flag problems, do not edit" also
-// contains "edit".
+// contains "edit". A negation counts only when it covers the whole agent
+// ("do not edit", "never change anything"): "do not update the footer" is
+// one exception inside an agent that may otherwise fix things.
 const READ_ONLY = [
-  /\b(?:do not|don't|never|must not|should not|shouldn't|mustn't)\s+(?:\w+\s+){0,2}?(?:edit|change|modify|update|rewrite|fix|propose|touch)\w*/i,
+  /\b(?:do not|don't|never|must not|should not|shouldn't|mustn't)\s+(?:directly\s+)?(?:edit|change|modify|update|rewrite|fix|propose|touch)\w*(?:\s+(?:anything|any\s+\w+|documents?|docs?|files?|content|the nest|it|them|nodes?))?\s*(?=[.,;!\n]|$)/i,
   /\bonly\s+(?:flag|comment|review|report|point out|note|summari[sz]e)\w*/i,
   /\b(?:comments?|read)[ -]only\b/i,
   /\bpropose\s+nothing\b/i,
 ];
-const EDITS =
-  /\b(?:edit|fix|update|correct|rewrite|revise|refresh|amend|propose|improve|keep\s+(?:[\w/'-]+\s+){0,4}(?:current|up[ -]to[ -]date|accurate))\w*/i;
+
+// An edit verb used as an instruction: at the start of a sentence or clause,
+// or after "and", "to", "please", "then", "also", "or". So "update stale
+// pricing" and "and fix typos" count; "a weekly status update" (a noun) does
+// not. One about the agent's own output ("improve your reply", "update the
+// team in Slack") doesn't either: that isn't an edit to the nest.
+const EDIT_VERB =
+  /(?:^|[.!?;:\n]\s*|[-*•]\s+|\b(?:and|to|please|then|also|or)\s+)((?:edit|fix|update|correct|rewrite|revise|amend|propose)\w*)\b([^.!?;\n]*)/gi;
+const KEEP_CURRENT =
+  /(?:^|[.!?;:\n]\s*|[-*•]\s+|\b(?:and|to|please|then|also)\s+)(keep\s+(?:[\w/'-]+\s+){0,4}(?:current|up[ -]to[ -]date|accurate))/i;
+const NOT_THE_NEST = /\b(?:your|yourself|reply|response|answer|message|slack|email|team|memory|chat)\b/i;
+
+function editInstruction(text: string): string | null {
+  for (const m of text.matchAll(EDIT_VERB)) {
+    const object = m[2].trim().split(/\s+/).slice(0, 6).join(" ");
+    if (NOT_THE_NEST.test(object)) continue;
+    return `${m[1]}${object ? ` ${object}` : ""}`.trim();
+  }
+  return text.match(KEEP_CURRENT)?.[1] ?? null;
+}
 
 function proposeMode(text: string): { propose: string[]; why: string } {
   for (const re of READ_ONLY) {
     const m = text.match(re);
     if (m) return { propose: [], why: `The instructions say "${m[0]}", so it only leaves comments.` };
   }
-  const m = text.match(EDITS);
-  if (m) {
+  const edit = editInstruction(text);
+  if (edit) {
     return {
       propose: ["*"],
-      why: `The instructions say "${m[0]}", so it may suggest edits wherever it reads. A reviewer still approves each one.`,
+      why: `The instructions say "${edit}", so it may suggest edits wherever it reads. A reviewer still approves each one.`,
     };
   }
   return {

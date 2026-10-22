@@ -252,3 +252,13 @@ export function applySuggestion(
 export function canManageMetacognition(enabled: boolean, nestPermission: string | undefined): boolean {
   return enabled && (nestPermission === "owner" || nestPermission === "admin");
 }
+
+/**
+ * Is Save off? Also while a suggestion is loading: picking another document
+ * sets node_id at once, but the scope on screen is still the previous
+ * document's until its suggestion lands, and saving then would grant the new
+ * document the old one's scope.
+ */
+export function saveBlocked(f: FormState, state: { saving: boolean; suggesting: boolean }): boolean {
+  return state.saving || state.suggesting || !f.node_id || formProblems(f).length > 0;
+}

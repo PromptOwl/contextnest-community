@@ -193,3 +193,15 @@ describe("who sees the Agents tab (admin-only feature)", () => {
     expect(canManageMetacognition(false, "owner")).toBe(false);
   });
 });
+
+describe("Save (review round 1)", () => {
+  it("is blocked while a suggestion for a newly picked document is loading", async () => {
+    const { saveBlocked } = await import("./metacognition-form");
+    const f = formFromConfig("nodes/a", true, base);
+    expect(saveBlocked(f, { saving: false, suggesting: false })).toBe(false);
+    expect(saveBlocked(f, { saving: false, suggesting: true })).toBe(true);
+    expect(saveBlocked(f, { saving: true, suggesting: false })).toBe(true);
+    expect(saveBlocked({ ...f, name: "" }, { saving: false, suggesting: false })).toBe(true);
+    expect(saveBlocked({ ...f, node_id: "" }, { saving: false, suggesting: false })).toBe(true);
+  });
+});

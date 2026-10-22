@@ -27,6 +27,7 @@ import {
   effortText,
   formProblems,
   presetOf,
+  saveBlocked,
   summarize,
   toggleReadFolder,
   type Caps,
@@ -393,7 +394,9 @@ export function MetacognitionForm({
   const [noInstructions, setNoInstructions] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bumps the Advanced section's key so it re-reads "open when prefilled".
+  // Bumps the Advanced section's key on every fill, remounting it so it
+  // re-reads "open when the document suggested a feed or MCP server" — its
+  // open state is its own after that, so a re-suggest must reset it.
   const [fillKey, setFillKey] = useState(0);
   const latest = useRef(0);
 
@@ -548,7 +551,7 @@ export function MetacognitionForm({
         </ul>
       )}
       <div className="flex gap-2">
-        <Button size="sm" onClick={save} disabled={saving || problems.length > 0 || !form.node_id} data-testid="metacognition-save">
+        <Button size="sm" onClick={save} disabled={saveBlocked(form, { saving, suggesting })} data-testid="metacognition-save">
           {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
           Save
         </Button>
