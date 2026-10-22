@@ -944,12 +944,12 @@ authRoutes.post("/device", async (c) => {
   return c.json(data);
 });
 
-// GET /auth/device/poll — poll for device approval
-authRoutes.get("/device/poll", async (c) => {
+// POST /auth/device/poll — poll for device approval, secret in the JSON body so
+// access logs never see it. GET with query params is deprecated, kept for
+// older CLIs.
+const devicePoll = async (c: Context, code?: string, clientSecret?: string) => {
   const blocked = await deviceGateBlocked(c);
   if (blocked) return c.json(blocked, 403);
-  const code = c.req.query("code");
-  const clientSecret = c.req.query("client_secret");
 
   if (!code || !clientSecret) {
     return c.json({ error: "code and client_secret are required" }, 400);
@@ -963,7 +963,19 @@ authRoutes.get("/device/poll", async (c) => {
 
   const data = await res.json();
   return c.json(data, res.status as any);
+};
+
+authRoutes.post("/device/poll", async (c) => {
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  return devicePoll(c, str(body?.code), str(body?.client_secret));
 });
+
+authRoutes.get("/device/poll", (c) =>
+  devicePoll(c, c.req.query("code"), c.req.query("client_secret")),
+);
 
 // POST /auth/promptowl — exchange PromptOwl token for a browser session
 authRoutes.post("/promptowl", async (c) => {
