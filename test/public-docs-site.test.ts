@@ -27,6 +27,8 @@ describe("public docs site", () => {
   let nestId: string;
   let privateId: string;
   let noReaderId: string;
+  /** CU-wdqcq05ran: one nest per home_node form, each with a root convention page. */
+  const homeNests: Record<string, string> = {};
 
   const get = (path: string, headers: Record<string, string> = HTML) =>
     app.request(`http://localhost${path}`, { headers });
@@ -60,6 +62,24 @@ describe("public docs site", () => {
     const rm = await jsonRequest(app, "PATCH", `/nests/${nestId}/reader-mode`, { enabled: true, home_node: "nodes/docs/welcome" }, owner.apiKey);
     expect(rm.status, JSON.stringify(rm.data)).toBe(200);
 
+    // CU-wdqcq05ran: each nest has a root `overview` (what the naming convention
+    // picks) and a `welcome` one folder down (what home_node designates).
+    for (const [name, home] of [
+      ["Home Slug", "welcome"],
+      ["Home Mixed Case", "Nodes/Docs/Guides/WELCOME"],
+      ["Home Missing", "no-such-page"],
+    ] as const) {
+      const n = await jsonRequest(app, "POST", "/nests", { name }, owner.apiKey);
+      const id = n.data.nest.id;
+      homeNests[name] = id;
+      // Both under "docs", so the site strips it and overview sits at the root.
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Overview", content: "# Overview\n\nconvention page", folder: "docs" }, owner.apiKey);
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Welcome", content: "# Welcome\n\ndesignated home", folder: "docs/guides" }, owner.apiKey);
+      await jsonRequest(app, "PATCH", `/nests/${id}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+      const hrm = await jsonRequest(app, "PATCH", `/nests/${id}/reader-mode`, { enabled: true, home_node: home }, owner.apiKey);
+      expect(hrm.status, JSON.stringify(hrm.data)).toBe(200);
+    }
+
     const priv = await jsonRequest(app, "POST", "/nests", { name: "Private Docs" }, owner.apiKey);
     privateId = priv.data.nest.id;
     await jsonRequest(app, "POST", `/nests/${privateId}/nodes`, { title: "Hidden", content: "# Hidden\n\nnope" }, owner.apiKey);
@@ -90,6 +110,31 @@ describe("public docs site", () => {
     expect(html.match(/<h1[\s>]/g)?.length).toBe(1);
     // No app bundle: the content is in the HTML, not behind JavaScript.
     expect(html).not.toContain('id="root"');
+  });
+
+  // CU-wdqcq05ran: home_node resolves on the site the way the reader resolves
+  // it — full id or bare slug, case-insensitively — not by exact id only.
+  const siteHome = async (name: string) => {
+    const { buildSiteFiles } = await import("../src/site/build.js");
+    const files = await buildSiteFiles(homeNests[name], "https://site.example.com");
+    return String(files["index.html"]);
+  };
+
+  it("makes a bare-slug home_node the home page, as the reader does", async () => {
+    const html = await siteHome("Home Slug");
+    expect(html).toMatch(/<title>Welcome[^<]*Home Slug<\/title>/);
+    expect(html).toContain("designated home");
+  });
+
+  it("matches a home_node full id case-insensitively", async () => {
+    const html = await siteHome("Home Mixed Case");
+    expect(html).toMatch(/<title>Welcome[^<]*Home Mixed Case<\/title>/);
+  });
+
+  it("falls back to the naming convention when home_node matches no page", async () => {
+    const html = await siteHome("Home Missing");
+    expect(html).toMatch(/<title>Overview[^<]*Home Missing<\/title>/);
+    expect(html).toContain("convention page");
   });
 
   it("serves a page at its clean path, wikilinks as plain anchors", async () => {

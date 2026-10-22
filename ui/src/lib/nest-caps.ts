@@ -153,6 +153,30 @@ export function isHomeNode(node: any, homeNode: string): boolean {
 }
 
 /**
+ * The designated reader-mode home node among `nodes`, or undefined when
+ * `homeNode` matches none (the caller then applies the naming convention).
+ * Mirrors `pickHomeNode` in src/shared/reader-home.ts, which the static docs
+ * site uses, so the reader and the site land on the same page (CU-wdqcq05ran);
+ * test/site-units.test.ts runs the same cases through both. A full id match,
+ * case-insensitive, wins; otherwise the bare slug (last id segment); when
+ * several nodes share that slug the lowest id wins, whatever the list order.
+ */
+export function pickHomeNode<T extends { id?: string }>(nodes: readonly T[], homeNode: string | null | undefined): T | undefined {
+  const want = (homeNode ?? "").trim().toLowerCase();
+  if (!want) return undefined;
+  const idOf = (n: T) => n?.id || "";
+  const exact = nodes.find((n) => idOf(n).toLowerCase() === want);
+  if (exact) return exact;
+  const leaf = leafOf(want);
+  let best: T | undefined;
+  for (const n of nodes) {
+    if (!idOf(n) || leafOf(idOf(n)) !== leaf) continue;
+    if (best === undefined || idOf(n) < idOf(best)) best = n;
+  }
+  return best;
+}
+
+/**
  * Node id/title keys matched against the home-node naming convention when no
  * home node is designated.
  */
