@@ -443,21 +443,21 @@ On an `org` nest with `org_contributions: "drafts"`, a person **in the organizat
 - revise their own pending draft the same way, and send their own draft to review (`POST …/submit-review`);
 - see their own drafts — `GET /nests/:nestId/contributions/mine`.
 
-Both writes land as a **draft submitted for review** and answer with the review (`{ "node": …, "review": { "id": … }, "org_contribution": true }`). They never publish, whatever the nest's postures say: `creator_is_reviewer`, `prime_only_review`, self-approve and task-skip-review don't apply, and the contributor is never made a steward. The published text, and what every other reader sees, stays the same until a reviewer approves. Any other field (`prime`, `status`, `type` other than `document`, schedules, models, task or custom fields) is `403`. A proposal is refused before anything is written when someone else's change is under review on that document (`423`), when the working copy holds someone else's unreviewed draft (`409`), or when the contributor can't read the document (`404`).
+Both writes land as a **draft submitted for review** and answer with the review (`{ "node": …, "review": { "id": … }, "org_contribution": true }`). They never publish, whatever the nest's postures say: `creator_is_reviewer`, `prime_only_review`, self-approve and task-skip-review don't apply, and the contributor is never made a steward. The published text, and what every other reader sees, stays the same until a reviewer approves. Any other field (`prime`, `status`, `type` other than `document`, schedules, models, task or custom fields) is `403`. A proposal is refused before anything is written when someone else's change is under review on that document (`423`), when the working copy holds someone else's unreviewed draft (`409`), or when the contributor can't read the document (`404`). A contributor may have at most **25 open suggestions per nest** (newest version an unreviewed one they wrote; `429` past that, and a decided suggestion frees its slot), and a suggestion's text is capped at 500,000 characters (`413`). A duplicate title on create is `409` with a message that doesn't name the existing document.
 
 Who counts as in the organization:
 
 | Deployment | Who |
 |---|---|
 | Self-hosted, no `org_domains` | any signed-in person (the same boundary `org` visibility uses) |
-| Any deployment with `org_domains` | a person whose email domain **equals** one entry **and** whose address an identity provider verified (`users.email_verified_at`, set on an OIDC sign-in, an IdP token exchange or a PromptOwl sign-in) |
+| Any deployment with `org_domains` | a person whose email domain **equals** one entry **and** whose address an identity provider verified (`users.email_verified_at`, set on a PromptOwl sign-in, or an OIDC sign-in / IdP token exchange whose token vouches for the address: `email_verified: true`, or — on a single-organization server only — an absent claim with an `email` claim present; never Entra's `preferred_username` fallback) |
 | Shared deployment, no `org_domains` | nobody |
 
 A password sign-up never verifies an address, so on a domain-limited nest it never qualifies — otherwise anyone could register `x@acme.com` and claim the domain. An existing SSO user becomes verified at their next SSO sign-in.
 
 What it is **not**: a permission. The caller's nest permission stays `read`, and the request gate admits exactly the two routes above for them, so everything else that needs `write` or more still refuses them — approve, reject, delete, move, discard, bulk actions, settings, visibility, collaborators, teams, hooks, env, connectors and the rest. Only a person's own full credential contributes: a browser session, an unscoped personal API key, or an MCP OAuth grant. A nest-scoped key, a read-only key, a named system key, a headless key, a PromptOwl service ticket and the anonymous caller get nothing new. A nest that holds agent writes (`require_push_confirmation`) refuses contributions over a key or MCP with `403` (a held write would later replay on the confirmer's authority); people still contribute from the web app. Archived nests take no contributions.
 
-MCP `context_create`, `context_update` and `context_submit_review` behave the same way for an org contributor: a draft sent to review, with `org_contribution: true` and the `review` in the structured result.
+MCP `context_create`, `context_update` and `context_submit_review` behave the same way for an org contributor: a draft sent to review, with `org_contribution: true` and the `review` in the structured result. `context_update` names the document by `id` or `title`, so a contributor's `context_update` carrying an `id` and a different `title` is refused rather than silently dropping the rename.
 
 Someone still has to approve: on a nest with no reviewer steward, that is the owner or an admin with self-approve on, exactly as for any other draft.
 

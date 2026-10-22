@@ -2093,6 +2093,10 @@ function contributorFields(args: Record<string, any>, drop: string[] = []): Reco
 
 function contributorError(err: unknown): ToolResult {
   if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  // The suggestion cap (429) and size bound (413).
+  if (err instanceof AppError && (err.statusCode === 429 || err.statusCode === 413)) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
   if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
   if (err instanceof ValidationError || err instanceof ConflictError || err instanceof LockedError) {
     return toolError(err.message, "VALIDATION_FAILED");
@@ -2150,6 +2154,19 @@ async function proposeOverMcp(
   args: Record<string, any>,
 ): Promise<ToolResult> {
   const { nestId, userId, userEmail } = ctx;
+  // context_update names the document by id or title, so it can't carry a new
+  // title too. A title sent alongside an id would otherwise be dropped while
+  // the reply says "proposed" — refuse it instead.
+  if (args.id && typeof args.title === "string" && args.title.trim()) {
+    const { storage } = ctx;
+    const current = await storage.readDocument(nodeId).catch(() => null);
+    if (!current || args.title.trim() !== String(current.frontmatter.title ?? "")) {
+      return toolError(
+        "As an org contributor you can't rename a document through context_update (its title names the document). Suggest the new title from the web app, or mention it in changeNote.",
+        "VALIDATION_FAILED",
+      );
+    }
+  }
   let made: Awaited<ReturnType<typeof proposeEdit>>;
   try {
     // id / title name the document here; they aren't edits.

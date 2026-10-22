@@ -138,7 +138,7 @@ export async function getNestFeed(params: {
     // their OWN requests: a request names an unapproved draft. Same rule as
     // GET /review-queue (CU-wdqcq05rz6).
     const ownOnly = await isPublicReader(params.nestId, params.userId);
-    const mine = ownOnly ? " AND requested_by = ?" : "";
+    const mine = ownOnly ? " AND LOWER(requested_by) = ?" : "";
     const mineArgs = ownOnly ? [params.userEmail.toLowerCase()] : [];
     // Number(): Postgres returns COUNT(*) as a bigint, which `pg` hands back
     // as a string — the totals below are summed, and "12" + "3" is "123".

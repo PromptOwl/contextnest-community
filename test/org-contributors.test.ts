@@ -416,6 +416,33 @@ describe("org contributors — drafts without being added", () => {
     expect(JSON.stringify(res.data)).not.toContain(bobDoc);
   });
 
+  it("caps a contributor's open suggestions per nest (429), and bounds their size (413)", async () => {
+    const { MAX_OPEN_CONTRIBUTIONS } = await import("../src/governance/org-contribution.js");
+    const open = (await jsonRequest(app, "POST", "/nests", { name: "Cap Org" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${open}/visibility`, { visibility: "org" }, owner.apiKey);
+    expect((await settings({ org_contributions: "drafts" }, open)).status).toBe(200);
+    for (let i = 0; i < MAX_OPEN_CONTRIBUTIONS; i++) {
+      const ok = await create(carol.apiKey, { title: `Cap ${i}`, content: "x" }, open);
+      expect(ok.status, `create ${i}`).toBe(201);
+    }
+    const over = await create(carol.apiKey, { title: "Cap over", content: "x" }, open);
+    expect(over.status).toBe(429);
+    // Someone else in the org isn't held to carol's count.
+    expect((await create(bob.apiKey, { title: "Bob in cap nest", content: "x" }, open)).status).toBe(201);
+    const huge = await create(bob.apiKey, { title: "Huge", content: "x".repeat(600_000) }, open);
+    expect(huge.status).toBe(413);
+  });
+
+  it("MCP context_update refuses a rename instead of silently ignoring it", async () => {
+    const out = await callTool(app, nestId, bob.apiKey, "context_update", {
+      id: publishedId,
+      title: "Renamed by Bob",
+      content: "x",
+    });
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/rename|title/i);
+  });
+
   // ── What they still can't do ──────────────────────────────────────────
 
   it("can't approve, delete, move, or change settings (403)", async () => {
@@ -719,6 +746,26 @@ describe("email verification is recorded, never assumed", () => {
       email_verified_at: string | null;
     };
     expect(row.email_verified_at).toBeNull();
+  });
+});
+
+describe("which IdP sign-ins vouch for an address", () => {
+  afterEach(() => {
+    delete process.env.SHARED_DEPLOYMENT;
+  });
+  it("trusts email_verified: true; never false; an absent claim only for an `email` claim on a single-org server", async () => {
+    const { idpVouchesForEmail } = await import("../src/auth/email-verified.js");
+    expect(idpVouchesForEmail({ email: "a@acme.com", email_verified: true })).toBe(true);
+    expect(idpVouchesForEmail({ email: "a@acme.com", email_verified: "true" })).toBe(true);
+    expect(idpVouchesForEmail({ email: "a@acme.com", email_verified: false })).toBe(false);
+    expect(idpVouchesForEmail({ email: "a@acme.com", email_verified: "false" })).toBe(false);
+    expect(idpVouchesForEmail({ email: "a@acme.com" })).toBe(true);
+    // Entra's UPN fallback is not an email claim the IdP asserted.
+    expect(idpVouchesForEmail({ preferred_username: "a@acme.com" })).toBe(false);
+    process.env.SHARED_DEPLOYMENT = "true";
+    // On a shared server the domain is the tenant boundary: only an explicit true.
+    expect(idpVouchesForEmail({ email: "a@acme.com" })).toBe(false);
+    expect(idpVouchesForEmail({ email: "a@acme.com", email_verified: true })).toBe(true);
   });
 });
 

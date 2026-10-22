@@ -1,4 +1,5 @@
 import { getDb } from "../db/client.js";
+import { config } from "../config.js";
 
 /**
  * Record that an identity provider just vouched for this account's email
@@ -24,4 +25,25 @@ export async function markEmailVerified(userId: string, source: string): Promise
   } catch (err) {
     console.error(`[auth] recording a verified email failed (${source}; sign-in continues):`, err);
   }
+}
+
+/**
+ * Does this ID token vouch for the address it carries? Sign-in already refuses
+ * an explicit `email_verified: false`; this is the stricter question of
+ * whether the address may then stand for a DOMAIN (org contributions).
+ *
+ * - `email_verified: true` → yes.
+ * - Absent → only for an `email` claim (not Entra's `preferred_username`
+ *   fallback, which isn't an address the IdP asserted), and only on a
+ *   single-organization server. That is the documented Entra/Google trust
+ *   assumption sign-in already makes. On a shared deployment the domain list
+ *   is the tenant boundary, so a multi-tenant or self-registration IdP that
+ *   omits the claim must not get to claim a domain.
+ */
+export function idpVouchesForEmail(claims: Record<string, unknown>): boolean {
+  const v = claims.email_verified;
+  if (v === true || v === "true") return true;
+  if (v !== undefined && v !== null) return false;
+  if (config.SHARED_DEPLOYMENT) return false;
+  return typeof claims.email === "string" && claims.email.trim().length > 0;
 }

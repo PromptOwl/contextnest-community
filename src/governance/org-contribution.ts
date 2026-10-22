@@ -22,17 +22,19 @@ import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { resolveNestAccess } from "../shared/access.js";
 import {
+  AppError,
   ConflictError,
   ForbiddenError,
   LockedError,
   NotFoundError,
+  PayloadTooLargeError,
 } from "../shared/errors.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { canReadNode } from "./access-guard.js";
 import * as versions from "./version-service.js";
 import { getPendingReview, submitForReview } from "./review-service.js";
 import type { ReviewRequest } from "./types.js";
-import { nestRequiresPushConfirmation } from "../nests/service.js";
+import { nestOrgContributions, nestRequiresPushConfirmation } from "../nests/service.js";
 import { isPushAllowlisted } from "../nests/push-confirmation-service.js";
 import { createNode, updateNode, type NodeMutationResult } from "../nodes/service.js";
 import { engineCache } from "../nodes/engine.js";
@@ -114,6 +116,49 @@ export async function assertNotPushGated(params: {
   );
 }
 
+/**
+ * Limits on what one org contributor can put in front of reviewers. On a
+ * self-hosted server with no domain list ANY signed-in account qualifies, so
+ * without a cap one account could fill a nest's review queue. Open = the
+ * newest version is an unreviewed one they wrote (draft, pending, rejected);
+ * a decided suggestion frees its slot. The body bound matches what an agent
+ * proposal may carry (metacognition).
+ */
+export const MAX_OPEN_CONTRIBUTIONS = 25;
+export const MAX_CONTRIBUTION_CHARS = 500_000;
+
+async function openContributionCount(nestId: string, email: string): Promise<number> {
+  const row = (await getDb().get(
+    `SELECT COUNT(*) AS c FROM node_versions v
+      WHERE v.nest_id = ? AND LOWER(v.author) = ?
+        AND v.status IN ('draft', 'pending_review', 'rejected')
+        AND v.version = (SELECT MAX(v2.version) FROM node_versions v2
+                          WHERE v2.nest_id = v.nest_id AND v2.node_id = v.node_id)`,
+    [nestId, email.toLowerCase()],
+  )) as { c: number | string } | undefined;
+  return Number(row?.c ?? 0);
+}
+
+async function assertWithinLimits(
+  nestId: string,
+  email: string,
+  body: { content?: string; append?: string },
+  newSlot: boolean,
+): Promise<void> {
+  const size = (body.content?.length ?? 0) + (body.append?.length ?? 0);
+  if (size > MAX_CONTRIBUTION_CHARS) {
+    throw new PayloadTooLargeError(
+      `A suggestion can be at most ${MAX_CONTRIBUTION_CHARS.toLocaleString("en-US")} characters.`,
+    );
+  }
+  if (newSlot && (await openContributionCount(nestId, email)) >= MAX_OPEN_CONTRIBUTIONS) {
+    throw new AppError(
+      429,
+      `You have ${MAX_OPEN_CONTRIBUTIONS} suggestions waiting in this nest. Once a reviewer decides some of them you can suggest more.`,
+    );
+  }
+}
+
 /** The newest version row is an unreviewed one (draft, pending or rejected)
  *  written by this person — i.e. the working copy is theirs. */
 export async function ownsWorkingDraft(
@@ -153,6 +198,7 @@ export async function contributeDocument(
   userEmail: string,
   opts: { baseUrl?: string; note?: string } = {},
 ): Promise<ContributionResult> {
+  await assertWithinLimits(nestId, userEmail, input, true);
   let made: NodeMutationResult;
   try {
     made = await createNode(
@@ -223,6 +269,8 @@ export async function proposeEdit(
   // with 409 instead of overwritten.
   const head = await versions.getCurrentVersion(nestId, nodeId);
   const own = await ownsWorkingDraft(nestId, nodeId, userEmail);
+  // Revising one of their own suggestions takes no new slot.
+  await assertWithinLimits(nestId, userEmail, patch, !own);
   if (!own && !(await canReadNode(nestId, nodeId, userId, userEmail))) {
     // Same answer as a missing document: an unapproved draft is invisible.
     throw new NotFoundError(`Node not found: ${nodeId}`);
@@ -287,7 +335,7 @@ export async function listMyContributions(
               WHERE r.nest_id = v.nest_id AND r.node_id = v.node_id
                 AND r.status = 'pending' LIMIT 1) AS review_id
        FROM node_versions v
-      WHERE v.nest_id = ? AND v.author = ?
+      WHERE v.nest_id = ? AND LOWER(v.author) = ?
         AND v.status IN ('draft', 'pending_review', 'rejected')
         AND v.version = (SELECT MAX(v2.version) FROM node_versions v2
                           WHERE v2.nest_id = v.nest_id AND v2.node_id = v.node_id)
@@ -339,6 +387,9 @@ export async function orgContributorRequesters(
   const out = new Set<string>();
   const distinct = [...new Set(emails.map((e) => e.toLowerCase()))];
   if (distinct.length === 0) return out;
+  // Nobody is an org contributor on a nest with the setting off — skip the
+  // per-requester resolution entirely (the common case).
+  if ((await nestOrgContributions(nestId)).org_contributions !== "drafts") return out;
   const users = (await getDb().all(
     // A service identity is never a person in the org (resolveNestAccess
     // refuses it too); filtered here so it isn't even resolved.
