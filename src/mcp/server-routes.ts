@@ -47,6 +47,7 @@ import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
+  isServerAdminUserId,
   type NestPermission,
 } from "../shared/access.js";
 import {
@@ -654,9 +655,10 @@ function createServerMcp(
       if (def.type === "string") field = z.string();
       else if (def.type === "number") field = z.number();
       else if (def.type === "array")
-        // A list of objects (metacognition feeds, MCP servers) is checked by
-        // the handler's own parser; everything else is a list of strings.
-        field = def.items?.type === "object" ? z.array(z.any()) : z.array(z.string());
+        // A list of objects (metacognition feeds, MCP servers): each item must
+        // be an object; its fields are the handler's parser's to check.
+        // Everything else is a list of strings.
+        field = def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
       else field = z.any();
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
@@ -708,6 +710,9 @@ async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise
   // The server is rebuilt per request, so only pay for the lookup when this
   // request can use the answer: a tools/list, or a call to one of these tools
   // (which re-checks owner/admin on the named nest anyway).
+  // Don't peek at a large body: tools/list and a metacognition call are a few
+  // KB at most, so a declared size past 64 KB is some other tool's write.
+  if (Number(c.req.header("content-length") ?? 0) > 64 * 1024) return false;
   const body = await c.req.raw
     .clone()
     .json()
@@ -722,8 +727,20 @@ async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise
     | { s: number }
     | undefined;
   if (config.AUTH_MODE !== "open" && (!person || person.s)) return false;
-  const nests = await buildNestIndex(userId, c.get("nestScope"));
-  return nests.some((n) => n.permission === "owner" || n.permission === "admin");
+  // Open mode is the owner everywhere; a server admin administers any nest
+  // (resolveNestPermission), the ones it can only reach by link included.
+  if (config.AUTH_MODE === "open" || (await isServerAdminUserId(userId))) return true;
+  // Owning a nest settles it without a lookup per nest; otherwise check the
+  // nests shared with the caller (no document counts — buildNestIndex's cost).
+  const scope = c.get("nestScope");
+  const owned = (await listNests(userId)).filter((n) => !scope || n.id === scope);
+  if (owned.length) return true;
+  for (const n of await listSharedNests(userId)) {
+    if (scope && n.id !== scope) continue;
+    const perm = await resolveNestPermission(n.id, userId);
+    if (perm === "owner" || perm === "admin") return true;
+  }
+  return false;
 }
 
 export const serverMcpRoutes = new Hono<AuthEnv>();

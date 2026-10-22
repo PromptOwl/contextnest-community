@@ -431,6 +431,9 @@ describe("metacognition is owner/admin only on REST too", () => {
     expect(patch.status).toBe(403);
     const byOwner = await jsonRequest(app, "PATCH", `/nests/${nestId}/schedules/${id}`, { every_minutes: 120 }, owner.apiKey);
     expect(byOwner.status).toBe(200);
+    // Stopping spend stays at write: a writer may still delete it.
+    const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/schedules/${id}`, undefined, editor.apiKey);
+    expect(del.status).toBe(200);
   });
 });
 

@@ -105,9 +105,10 @@ function createMcpServerForNest(
       if (def.type === "string") field = z.string();
       else if (def.type === "number") field = z.number();
       else if (def.type === "array")
-        // A list of objects (metacognition feeds, MCP servers) is checked by
-        // the handler's own parser; everything else is a list of strings.
-        field = def.items?.type === "object" ? z.array(z.any()) : z.array(z.string());
+        // A list of objects (metacognition feeds, MCP servers): each item must
+        // be an object; its fields are the handler's parser's to check.
+        // Everything else is a list of strings.
+        field = def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
       else field = z.any();
 
       if (!required.includes(key)) field = field.optional();

@@ -31,12 +31,8 @@ import {
   removeAgent,
   runAgent,
 } from "../metacognition/manage.js";
+import { METACOGNITION_INPUT_SCHEMAS } from "../metacognition/schemas.js";
 import type { McpToolContext, ToolResult } from "./tools.js";
-
-const AGENT_ARG = {
-  type: "string",
-  description: 'Node id of the agent document, e.g. "nodes/archivist" (metacognition_list shows them).',
-} as const;
 
 const EXAMPLE_BODY = JSON.stringify({
   agent: "nodes/archivist",
@@ -54,7 +50,7 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "whose only way to change the nest is a proposal a reviewer approves. Returns the configured agents (each with " +
       "its config and a plain-language summary of what it may do) and the agent documents not set up yet. " +
       "Call this first when the user asks about their metacognition agents or wants to set one up. Owner/admin only.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: METACOGNITION_INPUT_SCHEMAS.list,
   },
   {
     name: "metacognition_configure",
@@ -69,24 +65,7 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "(clamped to server limits); feeds [{name, url: public https}]; mcp_servers [{name, url, allowed_tools: [...], auth_env?: MCP_*}]; " +
       "model (default: the nest's); enabled (default true). Unknown fields are ignored. The agent never publishes: every change it " +
       `makes goes to a reviewer. Owner/admin only. Example: ${EXAMPLE_BODY}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent: AGENT_ARG,
-        persona: { type: "object", description: "{ name, avatar? } — avatar is an emoji or up to 4 letters" },
-        scope: {
-          type: "object",
-          description: '{ read: string[] ([] = whole nest), propose: string[] ([] = comments only, ["*"] = anywhere it reads) }',
-        },
-        caps: { type: "object", description: "{ max_steps?, max_tokens?, max_seconds?, max_proposals?, max_comments? }" },
-        feeds: { type: "array", items: { type: "object" }, description: "[{ name, url }] — public https feeds it reads as untrusted data" },
-        mcp_servers: { type: "array", items: { type: "object" }, description: "[{ name, url, allowed_tools: string[], auth_env? }]" },
-        model: { type: "string", description: "Model override (default: the nest's Hootie model)" },
-        enabled: { type: "boolean", description: "false keeps the settings but stops it running (default true)" },
-        dry_run: { type: "boolean", description: "true = validate and summarize, save nothing. Do this first. Must be a JSON boolean." },
-      },
-      required: ["agent"],
-    },
+    inputSchema: METACOGNITION_INPUT_SCHEMAS.configure,
   },
   {
     name: "metacognition_run",
@@ -94,25 +73,14 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "Start a metacognition agent now. The server runs it in the background and returns its run_id at once; follow it with " +
       "workflow_run_get { run_id }, and see its track record with workflow_runs_list { agent, agent_stats: true }. " +
       "Refused while the same agent is already running, and after too many starts in an hour. Owner/admin only.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent: AGENT_ARG,
-        inputs: { type: "object", description: "Optional request for this run; the agent treats it as a request to consider, not as instructions" },
-      },
-      required: ["agent"],
-    },
+    inputSchema: METACOGNITION_INPUT_SCHEMAS.run,
   },
   {
     name: "metacognition_remove",
     description:
       "Stop a document being a metacognition agent. The agent document itself stays, as do its past runs and proposals. " +
       "Owner/admin only.",
-    inputSchema: {
-      type: "object",
-      properties: { agent: AGENT_ARG },
-      required: ["agent"],
-    },
+    inputSchema: METACOGNITION_INPUT_SCHEMAS.remove,
   },
 ];
 
