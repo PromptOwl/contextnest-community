@@ -179,6 +179,7 @@ describe("POST /nodes/bulk-update", () => {
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "tomorrow" } })).status).toBe(400);
     // A day that doesn't exist, which Date.parse would roll into March.
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "2026-02-31" } })).status).toBe(400);
+    expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "0020-09-02" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { assignee: "stranger@else.com" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { column: "done" } })).status).toBe(400);
   });
@@ -367,6 +368,7 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
     // Rita reads the nest and holds a write share on one document only.
     const g = await mcp(owner.apiKey, "context_grant", {
       email: rita.email, target_type: "document", target: "nodes/echo", role: "write",
+      confirm_billing: true,
     });
     expect(g.content[0].text).toMatch(/Shared document/);
     const res = await mcp(rita.apiKey, "context_bulk_update", { ids: ["nodes/alpha", "nodes/echo"], patch: { priority: "medium" } });

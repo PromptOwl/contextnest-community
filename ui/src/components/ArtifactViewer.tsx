@@ -25,7 +25,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { AnnotationThread } from "../lib/api";
-import { extractText, buildAnchor } from "../lib/artifact-text";
+import { extractText, buildAnchor, isHtmlBody } from "../lib/artifact-text";
 import {
   buildTextIndex,
   caretAt,
@@ -155,7 +155,7 @@ export function ArtifactViewer({
   // would render it as one run-on paragraph, so Preview renders it as
   // markdown instead. null until fetched.
   const [rawBody, setRawBody] = useState<string | null>(null);
-  const bodyIsHtml = rawBody == null || /^s*</.test(rawBody);
+  const bodyIsHtml = rawBody == null || isHtmlBody(rawBody);
   const [textLoading, setTextLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<number | null>(snapshotVersion ?? null);
   const [iframeKey, setIframeKey] = useState(0);

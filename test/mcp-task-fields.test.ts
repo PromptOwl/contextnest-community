@@ -188,6 +188,8 @@ describeTask("task fields over MCP", () => {
     await bad({ assignee: outsider.email }, /isn't on this nest/);
     await bad({ assignee: "not-an-email" }, /must be an email/);
     await bad({ due: "10/31/2026" }, /due must be a date/);
+    await bad({ due: "0020-09-02" }, /due must be a date/);
+    await bad({ due: "2026-02-31" }, /due must be a date/);
     await bad({ due: 20261031 }, /due must be a string or null/);
     await bad({ priority: "p1" }, /priority must be one of/);
     await bad({ parent: "nodes/nope" }, /doesn't exist/);

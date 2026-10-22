@@ -13,7 +13,7 @@
  * its version row, its vault lock, its id-occupancy check and its governance
  * rows. Nothing here hand-assembles a document.
  */
-import { engineCache } from "./engine.js";
+import { writeInstructions } from "../nests/instructions-service.js";
 import { createNode, derivedNodeId } from "./service.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { config } from "../config.js";
@@ -87,10 +87,21 @@ export function validatePublishPayload(body: PublishPayload): void {
   }
 }
 
-/** The docs that will actually be written (title + content present). The
- *  manifest and the held-push content view both index into this list. */
+/** A pushed body as the vault file holds it after the frontmatter: `ctx push`
+ *  sends it from just under the closing `---`, so it starts with a blank line.
+ *  Drop whole blank lines only — HTML must open on its first tag to be served
+ *  as a page, and an indented first line of markdown means something. */
+export function stripLeadingBlankLines(content: string): string {
+  return content.replace(/^(?:[ \t]*\r?\n)+/, "");
+}
+
+/** The docs that will actually be written (title + content present), with
+ *  content as stored. The manifest and the held-push content view both index
+ *  into this list. A body of only blank lines strips to empty and is dropped. */
 export function publishableDocs(body: PublishPayload): PublishDoc[] {
-  return (body.documents || []).filter((d) => d.title && d.content);
+  return (body.documents || [])
+    .map((d) => (d.content ? { ...d, content: stripLeadingBlankLines(d.content) } : d))
+    .filter((d) => d.title && d.content);
 }
 
 /** Build the confirm-modal manifest for a payload (title·type·tags per doc). */
@@ -124,16 +135,16 @@ export async function applyPublish(
   const failed: Array<{ title: string; error: string }> = [];
 
   if (body.context_md) {
-    // No engine op exists for context.md, so this stays a direct write; the
-    // index regen keeps graph-mode reads (seeded from context.yaml) aware of
-    // it. Document creation below regenerates per doc via the engine.
-    const { storage } = await engineCache.get(nestId);
-    await storage.writeContextMd(body.context_md);
-    await storage.regenerateIndex();
+    // Through the instructions service, so a push lands in the Instructions
+    // history like any other edit, attributed to the submitter.
+    await writeInstructions(nestId, body.context_md, {
+      authorEmail,
+      note: "ctx push",
+      source: "push",
+    });
   }
 
-  for (const doc of body.documents || []) {
-    if (!doc.title || !doc.content) continue;
+  for (const doc of publishableDocs(body)) {
 
     // Route through the canonical create (engine `context_create` underneath)
     // instead of hand-assembling documents here: same slugs, same governance

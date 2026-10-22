@@ -43,10 +43,16 @@ export function localToday(now = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
+/** Whether a date-input value is worth saving. Typing a year fires a change per
+ *  digit (0002, 0020, 0202, 2026), so a year before 1900 is mid-typing. */
+export function isPickedDue(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number(value.slice(0, 4)) >= 1900;
+}
+
 /** "Oct 31" — the year only when it isn't this year. */
 export function formatDue(due: string, today: string): string {
-  const [y, m, d] = due.split("-").map(Number);
-  const date = new Date(y!, m! - 1, d!);
+  // Parse as local midnight; new Date(y, m, d) would turn year 20 into 1920.
+  const date = new Date(`${due}T00:00`);
   return date.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
@@ -96,6 +102,13 @@ export function matchesBlockedFilter(
   hideBlocked: boolean,
 ): boolean {
   return !hideBlocked || openBlockers(node) === 0;
+}
+
+/** The filter box, as typed: part of a title, any case. A leading "#" means a
+ *  tag still being typed (Enter adds it as a tag chip), so it filters nothing. */
+export function matchesTitleFilter(node: Pick<BoardNode, "title">, text: string): boolean {
+  const q = text.trim().toLowerCase();
+  return !q || q.startsWith("#") || node.title.toLowerCase().includes(q);
 }
 
 /** Parent id → its sub-items, for the card's sub-item chip. */

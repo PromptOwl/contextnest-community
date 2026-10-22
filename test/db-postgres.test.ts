@@ -224,6 +224,33 @@ d("PostgresAdapter conformance", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("creates the docs-site tables (068/069) and allows one nest per verified domain", async () => {
+    // Running the migrations again must be a no-op (CREATE / ADD COLUMN IF NOT EXISTS).
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const cols = await adapter.all<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nest_sites'",
+    );
+    expect(cols.map((c) => c.column_name)).toEqual(
+      expect.arrayContaining(["site_key", "domain", "domain_verified_at", "settings", "public_url_host"]),
+    );
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["site-u", "site@example.com", "h"]);
+    for (const id of ["site-a", "site-b"]) {
+      await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", [id, "site-u", id, id]);
+      await adapter.run(
+        "INSERT INTO nest_sites (nest_id, domain, domain_token, indexnow_key) VALUES (?, ?, ?, ?)",
+        [id, "docs.example.com", `t-${id}`, `k-${id}`],
+      );
+    }
+    // Both may claim the domain; the partial unique index lets only one verify it.
+    await adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-a"]);
+    await expect(
+      adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-b"]),
+    ).rejects.toThrow(/unique|duplicate/i);
+    await adapter.run("UPDATE nest_sites SET public_url_host = ? WHERE nest_id = ?", ["example.com", "site-a"]);
+    expect((await adapter.get<{ h: string }>("SELECT public_url_host AS h FROM nest_sites WHERE nest_id = ?", ["site-a"]))?.h).toBe("example.com");
+  });
+
   it("adds the run claim columns to a runs table that predates them", async () => {
     // Prod's runs table was created before claimed_by existed; boot crashed
     // building the metacognition index on it (42703).
@@ -236,6 +263,32 @@ d("PostgresAdapter conformance", () => {
     expect(cols.map((c) => c.column_name)).toEqual(
       expect.arrayContaining(["claimed_by", "claimed_at"]),
     );
+  });
+
+  it("runs the doc stream's JSON id-list scope and facet SQL (CU-wdqcq02crv)", async () => {
+    const { jsonTextValues } = await import("../src/db/sql.js");
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["u-ds", "ds@example.com", "h"]);
+    await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", ["n-ds", "u-ds", "DS", "ds"]);
+    for (const [node, v, author] of [["nodes/a", 1, "Ds@Example.com"], ["nodes/a", 2, "ds@example.com"], ["nodes/b", 1, "ds@example.com"]] as const) {
+      await adapter.run(
+        `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, created_at)
+         VALUES (?, ?, ?, 'h', ?, 'published', ?)`,
+        ["n-ds", node, v, author, `2026-10-0${v} 00:00:00`],
+      );
+    }
+    const rows = await adapter.all<{ node_id: string }>(
+      `SELECT v.node_id FROM node_versions v
+        WHERE v.nest_id = ? AND v.node_id IN (${jsonTextValues(adapter)}) AND v.created_at >= ?
+        ORDER BY v.created_at DESC, v.id DESC LIMIT ? OFFSET ?`,
+      ["n-ds", JSON.stringify(["nodes/a"]), "2026-10-01 00:00:00", 10, 0],
+    );
+    expect(rows.map((r: { node_id: string }) => r.node_id)).toEqual(["nodes/a", "nodes/a"]);
+    const authors = await adapter.all<{ value: string; n: number | string }>(
+      `SELECT LOWER(v.author) AS value, COUNT(*) AS n FROM node_versions v
+        WHERE v.nest_id = ? GROUP BY LOWER(v.author)`,
+      ["n-ds"],
+    );
+    expect(authors.map((a: { value: string; n: number | string }) => [a.value, Number(a.n)])).toEqual([["ds@example.com", 3]]);
   });
 });
 

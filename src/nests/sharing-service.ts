@@ -70,7 +70,7 @@ export async function addCollaborator(params: {
     ((params.email
       ? await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [params.email])
       : undefined) as { id: string } | undefined)?.id;
-  await assertCanGrant([{ userId: existing, next: permissionClass(params.permission) }]);
+  await assertCanGrant([{ userId: existing, next: permissionClass(params.permission), email: params.email }]);
 
   // Resolve the target user, creating a placeholder for an unregistered email
   // (they claim it by registering with the same address — see auth claim flow).

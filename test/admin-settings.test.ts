@@ -43,6 +43,8 @@ const SETTING_ENV = [
   "POSTHOG_KEY",
   "POSTHOG_HOST",
   "TELEMETRY_ENABLED",
+  "FEATURE_METACOGNITION",
+  "EXPERIMENTAL_DOC_STREAM",
 ];
 
 beforeEach(() => {
@@ -309,6 +311,70 @@ describe("/admin/settings — validation", () => {
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: false }, admin.apiKey);
     expect(off.data.settings.metacognition_enabled).toBe(false);
     expect(await persistedSetting("FEATURE_METACOGNITION")).toBeNull();
+  });
+
+  it("experimental doc stream: its own switch beside plane + metacognition, each reported as set", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.experimental_doc_stream_enabled).toBe(false);
+
+    // One PATCH flips all three; each switch reports exactly what it was set to.
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { workflow_plane_enabled: true, metacognition_enabled: true, experimental_doc_stream_enabled: true },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.workflow_plane_enabled).toBe(true);
+    expect(on.data.settings.metacognition_enabled).toBe(true);
+    expect(on.data.settings.experimental_doc_stream_enabled).toBe(true);
+    expect(await persistedSetting("EXPERIMENTAL_DOC_STREAM")).toBe("true");
+    const health = await jsonRequest(app, "GET", "/health");
+    expect(health.data.workflow_plane_enabled).toBe(true);
+    expect(health.data.metacognition_enabled).toBe(true);
+    expect(health.data.experimental.doc_stream).toBe(true);
+
+    // Turning the stream off leaves the other switches alone.
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { experimental_doc_stream_enabled: false }, admin.apiKey);
+    expect(off.status).toBe(200);
+    expect(off.data.settings.experimental_doc_stream_enabled).toBe(false);
+    expect(off.data.settings.workflow_plane_enabled).toBe(true);
+    expect(off.data.settings.metacognition_enabled).toBe(true);
+    expect(await persistedSetting("EXPERIMENTAL_DOC_STREAM")).toBeNull();
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
+  });
+
+  it("doc stream: switching it off beats a deploy env of true, live and after a restart", async () => {
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(true);
+
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { experimental_doc_stream_enabled: false }, admin.apiKey);
+    expect(off.status).toBe(200);
+    expect(off.data.settings.experimental_doc_stream_enabled).toBe(false);
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
+    expect(await persistedSetting("EXPERIMENTAL_DOC_STREAM")).toBeNull();
+
+    // Same deploy env on the next boot: the stored "off" still wins.
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    const { loadServerSettings } = await import("../src/db/settings.js");
+    await loadServerSettings();
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
+  });
+
+  it("403s a non-admin PATCH of the doc stream switch and persists nothing", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    await registerUser(app, OWNER_EMAIL);
+    const stranger = await registerUser(app, "stranger@example.com");
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { experimental_doc_stream_enabled: true }, stranger.apiKey);
+    expect(res.status).toBe(403);
+    expect(await persistedSetting("EXPERIMENTAL_DOC_STREAM")).toBeUndefined();
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
   });
 
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {

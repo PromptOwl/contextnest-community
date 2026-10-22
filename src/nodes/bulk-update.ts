@@ -24,7 +24,7 @@ import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { updateNode } from "./service.js";
 import * as versions from "../governance/version-service.js";
-import { taskFieldsOf, TASK_PRIORITIES } from "./task-fields.js";
+import { isDueDate, taskFieldsOf, TASK_PRIORITIES } from "./task-fields.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
 import { listNestPeople } from "../nests/people-service.js";
@@ -48,7 +48,6 @@ export const BULK_UPDATE_MAX = 100;
 /** Most raw selector matches one call will permission-check. */
 const BULK_SELECTOR_SCAN_MAX = 2000;
 const MAX_TAGS = 50;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface BulkPatch {
   /** Tags to add (with or without "#"). */
@@ -139,10 +138,7 @@ export function cleanBulkPatch(raw: unknown): BulkPatch {
     out.priority = r.priority as string | null;
   }
   if (r.due !== undefined) {
-    // Round-trip, so a rolled-over day (2026-02-31 → Mar 3) is refused.
-    const realDay = (d: string) =>
-      DATE_RE.test(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d;
-    if (r.due !== null && (typeof r.due !== "string" || !realDay(r.due))) {
+    if (r.due !== null && (typeof r.due !== "string" || !isDueDate(r.due))) {
       throw new ValidationError("patch.due must be a date like 2026-10-31, or null");
     }
     out.due = r.due as string | null;

@@ -36,6 +36,11 @@ export const keys = {
   nest: (nestId: string) => [...keys.nests, "detail", nestId] as const,
 
   settings: (nestId: string) => [...keys.nest(nestId), "settings"] as const,
+  // CONTEXT.md and its history (CU-wdqcq05mty). Revisions sit under it, so a
+  // save that drops the instructions drops the history with them.
+  instructions: (nestId: string) => [...keys.nest(nestId), "instructions"] as const,
+  instructionsRevisions: (nestId: string) =>
+    [...keys.instructions(nestId), "revisions"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
   // Under keys.nodes so every write that drops the listing drops the lazily
   // loaded folder levels with it — see the invalidation table below.
@@ -49,6 +54,9 @@ export const keys = {
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
   census: (nestId: string) => [...keys.nodes(nestId), "census"] as const,
+  // Experimental document pins (CU-wdqcq02crw). Under keys.nodes so every
+  // document write (rename, move, delete) drops the strip with the listing.
+  docPins: (nestId: string) => [...keys.nodes(nestId), "pins"] as const,
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
@@ -338,6 +346,8 @@ const NEST_WRITE_SCOPES: Array<{
   // Branding rides GET /nests/:id (nest.branding), which the reader and the
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
+  // CONTEXT.md (CU-wdqcq05mty): its text and history, nothing else.
+  { match: /^\/instructions/, affects: (n) => [keys.instructions(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   // A structure check judges, never writes; saving rules changes only the rules.
   { match: /^\/structure\/check$/, affects: () => [] },
@@ -379,6 +389,9 @@ const NEST_WRITE_SCOPES: Array<{
   // Pinning reorders the dashboard grid and the palette's nest rows, both of
   // which read `pinned` off the cached nest list. Nothing inside the nest
   // changes, so this deliberately does NOT drop keys.nest(n).
+  // Document pins (CU-wdqcq02crw) — BEFORE the nest-pin rule below, whose
+  // `/pin` is a prefix of `/pins`.
+  { match: /^\/pins(?:\/|$)/, affects: (n) => [keys.docPins(n)] },
   { match: /^\/pin/, affects: () => [keys.nestList()] },
 ];
 
@@ -497,6 +510,18 @@ export const reads = {
       queryFn: () => api.getNest(nestId),
       staleTime: STALE.reference,
     }),
+  instructions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructions(nestId),
+      queryFn: () => api.getInstructions(nestId),
+      staleTime: STALE.reference,
+    }),
+  instructionsRevisions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructionsRevisions(nestId),
+      queryFn: () => api.listInstructionsRevisions(nestId),
+      staleTime: STALE.reference,
+    }),
   settings: (nestId: string) =>
     queryOptions({
       queryKey: keys.settings(nestId),
@@ -551,6 +576,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.peopleSuggest(q),
       queryFn: () => api.suggestPeople(q),
+      staleTime: STALE.reference,
+    }),
+  docPins: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.docPins(nestId),
+      queryFn: () => api.getDocPins(nestId),
       staleTime: STALE.reference,
     }),
   fields: (nestId: string) =>

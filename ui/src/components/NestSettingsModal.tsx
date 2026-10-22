@@ -99,6 +99,8 @@ export function NestSettingsModal({
   const [accessLog, setAccessLog] = useState(accessLogEnabled);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Shown under the SLA field: it's the last control, so the top banner is off-screen.
+  const [slaError, setSlaError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
   // OFF (was on, now off). Toggling on, or no change, doesn't need it.
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
@@ -186,7 +188,7 @@ export function NestSettingsModal({
       nextSla !== null &&
       (!Number.isInteger(nextSla) || nextSla < 1 || nextSla > 8760)
     ) {
-      setError("Review SLA must be a whole number of hours (1–8760), or empty for off.");
+      setSlaError("Review SLA must be a whole number of hours (1–8760), or empty for off.");
       return;
     }
     const slaChanged = nextSla !== (reviewSlaHours ?? null);
@@ -515,10 +517,20 @@ export function NestSettingsModal({
               max={8760}
               step={1}
               value={slaText}
-              onChange={(e) => setSlaText(e.target.value)}
+              onChange={(e) => {
+                setSlaText(e.target.value);
+                setSlaError(null);
+              }}
               placeholder="Off"
               className="w-32"
+              aria-invalid={slaError !== null}
+              aria-describedby={slaError ? "review-sla-error" : undefined}
             />
+            {slaError && (
+              <p id="review-sla-error" role="alert" className="text-xs text-destructive">
+                {slaError}
+              </p>
+            )}
           </div>
           )}
           {/* Read log — the record of what each person and agent read. Any
