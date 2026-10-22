@@ -199,6 +199,15 @@ describe("suggestConfig (pure heuristics)", () => {
     expect(s.config.scope.read).toEqual([]);
   });
 
+  // Review round 5: no catastrophic backtracking on hostile input.
+  it("stays fast on 100k characters of slashes, backticks and folder names", () => {
+    const folders = Array.from({ length: 2000 }, (_, i) => `f${i}/sub`);
+    const hostile = `${"/".repeat(20_000)}${"`nodes/f1".repeat(5_000)}${" f2 folder f3/ ".repeat(2_000)}${"a".repeat(20_000)}`;
+    const t0 = performance.now();
+    suggestConfig({ title: "A", frontmatter: {}, instructions: hostile, folders: ["f1", "f2", "f3", ...folders] });
+    expect(performance.now() - t0).toBeLessThan(2_000);
+  });
+
   it("returns a config parseConfig accepts unchanged, with the Standard caps", () => {
     const s = suggestConfig({
       title: "Archivist",

@@ -138,7 +138,9 @@ async function readAgentDoc(nestId: string, nodeId: string) {
 // prefill (CU-wdqcq05rkp). Same gates as PUT, since what it returns is what a
 // PUT would grant; it saves nothing. It reads the approved instructions — the
 // text a run reads — so an unreviewed draft can't widen the suggested scope.
-// Registered before GET /:nodeId so the catch-all doesn't swallow "/suggest".
+// Registered before GET /:nodeId so the catch-all doesn't swallow "/suggest"
+// (as with "/stats", a document id ending in /suggest can't be read through
+// GET /:nodeId — agent ids don't, in practice).
 metacognitionRoutes.get("/:nodeId{.+}/suggest", requireMetacognition, async (c) => {
   requireTier(c, "admin");
   const nestId = c.req.param("nestId")!;
