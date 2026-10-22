@@ -6,9 +6,9 @@
  * the nest reads them in words and can try names against them. Every verdict
  * comes from the server.
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Loader2, Plus, Copy } from "lucide-react";
+import { ListChecks, Loader2, Plus, Copy, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -496,7 +496,18 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
                           }`}
                           style={{ paddingLeft: `${10 + Math.min(depth, 4) * 12}px` }}
                         >
-                          <span className={`block break-all font-mono text-sm ${has ? "text-red-700 dark:text-red-400" : ""}`}>{p}</span>
+                          {/* Wrap at "/" first; a single over-long segment still breaks rather than overflowing. */}
+                          <span className={`flex items-start gap-1.5 break-words font-mono text-sm ${has ? "text-red-700 dark:text-red-400" : ""}`}>
+                            <FolderOpen className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" aria-hidden />
+                            <span className="min-w-0">
+                              {p.split("/").map((seg, i) => (
+                                <Fragment key={i}>
+                                  {i > 0 && <>/<wbr /></>}
+                                  {seg}
+                                </Fragment>
+                              ))}
+                            </span>
+                          </span>
                           {badges.length > 0 && (
                             <span className="mt-1 flex flex-wrap gap-1">
                               {badges.map((b) => (
