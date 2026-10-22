@@ -472,8 +472,10 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
       expect(res.status, headers["User-Agent"]).toBe(301);
       expect(res.headers.get("location")).toMatch(new RegExp(`/d/${otherId}/$|/d/acme-docs/$`));
     }
-    // A non-crawler client without a page Accept keeps the JSON 404.
-    const api = await get(live, { "User-Agent": "curl/8.0", Accept: "*/*" });
+    // So does curl or a link checker (CU-wdqcq05raw): a 404 there made every
+    // inbound link look dead. Only a JSON-only API client keeps the JSON 404.
+    expect((await get(live, { "User-Agent": "curl/8.0", Accept: "*/*" })).status).toBe(301);
+    const api = await get(live, { "User-Agent": "curl/8.0", Accept: "application/json" });
     expect(api.status).toBe(404);
     expect(await api.json()).toEqual({ error: "Not found" });
     // A crawler on an unrelated unknown path still gets JSON 404, not the shell.

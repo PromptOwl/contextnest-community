@@ -26,7 +26,6 @@ import {
   robotsTxt,
   sitemapIndex,
   legacySiteRedirect,
-  isCrawler,
   siteDomainCheck,
 } from "./site/routes.js";
 import { siteSettingsRoutes } from "./site/settings-routes.js";
@@ -3754,13 +3753,13 @@ export function createApp(): Hono<AuthEnv> {
     "*",
     async (c, next) => {
       const navigation = isDocumentNavigation(c);
-      // An anonymous visitor to a docs-site nest's app URL gets the page. So
-      // does a crawler, which often sends `Accept: */*` or no Accept at all:
-      // without this, links already out there lose their value to it.
-      if (navigation || isCrawler(c)) {
-        const moved = await legacySiteRedirect(c);
-        if (moved) return moved;
-      }
+      // An anonymous GET or HEAD of a docs-site nest's app URL gets the page,
+      // whatever it Accepts: link checkers, AI fetchers and plain curl send
+      // `*/*` or no Accept at all, and a 404 there made every link already out
+      // there look dead. legacySiteRedirect keeps API clients, signed-in
+      // users and `?app=1` on the app.
+      const moved = await legacySiteRedirect(c);
+      if (moved) return moved;
       if (!navigation) return c.json({ error: "Not found" }, 404);
       return next();
     },

@@ -217,6 +217,28 @@ describe("public docs site", () => {
     expect(b.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
   });
 
+  it("301s the SPA URL for any anonymous GET or HEAD, whatever it Accepts (CU-wdqcq05raw)", async () => {
+    const want = "http://localhost/d/acme-docs/";
+    // Plain curl, a link checker or an AI fetcher: no Accept, generic UA.
+    const bare = await get(`/nest/${nestId}`, {});
+    expect(bare.status).toBe(301);
+    expect(bare.headers.get("location")).toBe(want);
+    const mozilla = await get(`/nest/${nestId}`, { "User-Agent": "Mozilla/5.0" });
+    expect(mozilla.status).toBe(301);
+    const any = await get(`/nest/${nestId}`, { Accept: "*/*" });
+    expect(any.status).toBe(301);
+    const head = await app.request(`http://localhost/nest/${nestId}`, { method: "HEAD" });
+    expect(head.status).toBe(301);
+    expect(head.headers.get("location")).toBe(want);
+    const doc = await get(`/?nest=${nestId}&doc=nodes/docs/guides/setup`, {});
+    expect(doc.status).toBe(301);
+    expect(doc.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
+    // API clients keep their answer: a bearer token, or JSON-only Accept.
+    expect((await get(`/nest/${nestId}`, authed(owner.apiKey))).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json" })).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}?app=1`, {})).status).not.toBe(301);
+  });
+
   it("picks up a newly approved version without a restart", async () => {
     const before = await get("/d/acme-docs/guides/advanced");
     const etag = before.headers.get("etag")!;

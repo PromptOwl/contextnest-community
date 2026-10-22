@@ -629,7 +629,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 **Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
 
-**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+**Redirects from the app.** In key mode, any anonymous `GET` or `HEAD` of `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page, whatever its `Accept` or `User-Agent` — a browser, a crawler, a link checker and plain `curl` all see the same live link. A `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`), API clients asking only for JSON (`Accept: application/json` with no `text/html` or `*/*`, from a non-crawler User-Agent), and `?app=1` still get the app's answer.
 
 **IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
 

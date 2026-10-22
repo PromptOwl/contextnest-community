@@ -235,9 +235,11 @@ export function isCrawler(c: Context): boolean {
 }
 
 /**
- * 301 an anonymous browser from the app's URL for a site nest to the page.
- * Returns null when the request should go on to the app as before. A `doc`
- * that is not on the site (a draft, a typo) lands on the site's home page.
+ * 301 an anonymous visitor from the app's URL for a site nest to the page —
+ * any GET or HEAD, with or without an Accept header, so a crawler, a link
+ * checker or curl sees the same live link a browser does. Returns null when
+ * the request should go on to the app as before. A `doc` that is not on the
+ * site (a draft, a typo) lands on the site's home page.
  */
 export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (config.AUTH_MODE !== "key") return null; // open mode: every visitor is the operator
@@ -245,6 +247,10 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (url.searchParams.get("app") === "1") return null;
   // An Authorization header means an API client, not a crawler.
   if (c.req.header("Authorization")) return null;
+  // So does asking for JSON and nothing a page could satisfy — unless it is
+  // a crawler, which gets the page whatever it asks for.
+  const accept = (c.req.header("Accept") ?? "").toLowerCase();
+  if (/json/.test(accept) && !/text\/html|\*\/\*|text\/\*/.test(accept) && !isCrawler(c)) return null;
   const nestId = /^\/nest\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? (url.pathname === "/" ? url.searchParams.get("nest") : null);
   if (!nestId) return null;
   const nest: SiteNest | undefined = (await siteNests()).find((n) => n.id === nestId);
