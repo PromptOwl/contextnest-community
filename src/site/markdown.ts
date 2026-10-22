@@ -62,9 +62,30 @@ function documentTarget(href: string): string | null {
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** Fences and code spans, kept apart so the passes below never touch code. */
+const CODE_SPLIT = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/;
+
+/** Apply `fn` to the prose of a body only — fences and code spans pass through as written. */
+function outsideCode(body: string, fn: (prose: string) => string): string {
+  return body
+    .split(CODE_SPLIT)
+    .map((part, i) => (i % 2 ? part : fn(part)))
+    .join("");
+}
+
+/**
+ * Drop HTML comments outside code. `html: false` would otherwise escape an
+ * editor's `<!-- note -->` into visible text on the page, and the Markdown
+ * twin and llms-full.txt would publish it verbatim.
+ */
+export function stripHtmlComments(body: string): string {
+  return outsideCode(body, (prose) => prose.replace(/<!--[\s\S]*?-->/g, ""));
+}
+
 /** `target#fragment|label` inside `[[ ]]`, with the label the page shows. */
 function wikiParts(inner: string): { path: string; fragment: string | undefined; label: string } {
-  const [rawTarget, ...rest] = inner.split("|");
+  // `\|` is the table-safe form of the alias pipe (see renderMarkdown).
+  const [rawTarget, ...rest] = inner.split(/\\?\|/);
   const [path, fragment] = rawTarget.split("#");
   const label = rest.join("|").trim() || fragment?.trim() || path.trim().split("/").pop() || path.trim();
   return { path: path.trim(), fragment, label };
@@ -74,29 +95,26 @@ function wikiParts(inner: string): { path: string; fragment: string | undefined;
  * The body as Markdown for the `.md` twin and llms-full.txt, with links
  * handled as in the HTML: a document link points at its page URL, and one to
  * anything not on the site (a draft, a typo) keeps only its label, so an
- * unpublished path never leaks. Code spans and fences are left as written.
+ * unpublished path never leaks. HTML comments are dropped, as in the HTML.
+ * Code spans and fences are left as written.
  */
 export function rewriteDocumentLinks(body: string, resolve: (target: string) => string | null): string {
-  return body
-    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/)
-    .map((part, i) =>
-      i % 2
-        ? part
-        : part
-            .replace(/\[\[([^\]\n]+)\]\]/g, (_, inner: string) => {
-              const { path, fragment, label } = wikiParts(inner);
-              const url = resolve(path);
-              return url ? `[${label}](${fragment ? `${url}#${slugifyHeading(fragment)}` : url})` : label;
-            })
-            .replace(/(!?)\[([^\]\n]*)\]\(([^)\s]+)(\s+"[^"\n]*")?\)/g, (m, bang: string, label: string, href: string) => {
-              const target = bang ? null : documentTarget(href);
-              if (target === null) return m;
-              const url = resolve(target);
-              const frag = href.includes("#") ? `#${href.split("#").pop()}` : "";
-              return url ? `[${label}](${url}${frag})` : label;
-            }),
-    )
-    .join("");
+  return outsideCode(body, (part) =>
+    part
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/\[\[([^\]\n]+)\]\]/g, (_, inner: string) => {
+        const { path, fragment, label } = wikiParts(inner);
+        const url = resolve(path);
+        return url ? `[${label}](${fragment ? `${url}#${slugifyHeading(fragment)}` : url})` : label;
+      })
+      .replace(/(!?)\[([^\]\n]*)\]\(([^)\s]+)(\s+"[^"\n]*")?\)/g, (m, bang: string, label: string, href: string) => {
+        const target = bang ? null : documentTarget(href);
+        if (target === null) return m;
+        const url = resolve(target);
+        const frag = href.includes("#") ? `#${href.split("#").pop()}` : "";
+        return url ? `[${label}](${url}${frag})` : label;
+      }),
+  );
 }
 
 export function renderMarkdown(
@@ -104,6 +122,9 @@ export function renderMarkdown(
   opts: RenderOptions,
 ): { html: string; headings: Heading[]; linked: Set<string> } {
   const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
+  // Only links with a scheme (https://…, mailto:) autolink. Fuzzy matching
+  // turned bare filenames into dead links — CONTEXT.md → http://CONTEXT.md.
+  md.linkify.set({ fuzzyLink: false });
   const linked = new Set<string>();
 
   md.inline.ruler.before("link", "wikilink", (state, silent) => {
@@ -250,7 +271,13 @@ export function renderMarkdown(
     return defaultLinkOpen(tokens, idx, options, env, self);
   };
 
-  const html = md.render(body);
+  // Comments go before parsing. An aliased wikilink's `|` is escaped so a
+  // table row doesn't split on it — the table parser runs before any inline
+  // rule, so `| [[a|b]] | x |` rendered as `[[a`. Code is left as written.
+  const source = outsideCode(stripHtmlComments(body), (prose) =>
+    prose.replace(/\[\[([^\]\n]+)\]\]/g, (_m, inner: string) => `[[${inner.replace(/\\?\|/g, "\\|")}]]`),
+  );
+  const html = md.render(source);
   return { html, headings, linked };
 }
 
@@ -258,6 +285,7 @@ export function renderMarkdown(
 export function plainText(body: string): string {
   return body
     .replace(/```[\s\S]*?```/g, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/^\s{0,3}#{1,6}\s.*$/gm, " ")
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]]+)\]\]/g, (_m, t: string) => t.split("/").pop() ?? t)

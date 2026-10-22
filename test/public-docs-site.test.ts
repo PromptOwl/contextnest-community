@@ -49,6 +49,12 @@ describe("public docs site", () => {
       "docs/guides",
     );
     await add("Advanced", "# Advanced\n\nApproved advanced text.", "docs/guides");
+    // CU-wdqcq05raw: comments, filenames and aliased wikilinks in a table.
+    await add(
+      "Matrix",
+      "# Matrix\n\n<!-- editor note: do not ship -->\n\nEdit CONTEXT.md first.\n\n| Guide | Use |\n| --- | --- |\n| [[docs/guides/advanced|Deep dive]] | later |",
+      "docs/guides",
+    );
 
     // Governed from here on: new docs and edits wait for review.
     await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
@@ -126,6 +132,17 @@ describe("public docs site", () => {
       // Code stays as written.
       expect(out).toContain("`[[docs/guides/advanced]]` stays code.");
     }
+  });
+
+  it("renders table wikilinks, plain filenames and no HTML comments, in every output (CU-wdqcq05raw)", async () => {
+    const html = await (await get("/d/acme-docs/guides/matrix")).text();
+    expect(html).toContain('<td><a href="/d/acme-docs/guides/advanced">Deep dive</a></td>');
+    expect(html).not.toContain("http://CONTEXT.md");
+    expect(html).toContain("Edit CONTEXT.md first.");
+    const twin = await (await get("/d/acme-docs/guides/matrix.md", {})).text();
+    const full = await (await get("/d/acme-docs/llms-full.txt", {})).text();
+    for (const out of [html, twin, full]) expect(out).not.toContain("editor note");
+    expect(twin).toContain("| [Deep dive](http://localhost/d/acme-docs/guides/advanced) | later |");
   });
 
   it("escapes raw HTML and leaves code alone", async () => {

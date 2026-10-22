@@ -846,6 +846,11 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description: "New content (replaces)",
         },
+        description: {
+          type: "string",
+          description:
+            "One-line summary stored in frontmatter (at most 500 characters) — the public docs site uses it as the page's meta description. An empty string removes it.",
+        },
         append: { type: "string", description: "Content to append" },
         tags: {
           type: "array",
@@ -3082,6 +3087,7 @@ async function runTool(
             content: args.content,
             append: args.append,
             tags: args.tags,
+            ...(args.description !== undefined ? { description: args.description } : {}),
             status: args.status,
             ...(args.type !== undefined ? { type: args.type } : {}),
             changeNote: args.changeNote,

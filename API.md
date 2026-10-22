@@ -1226,6 +1226,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 {
   "title": "...",
   "content": "...",
+  "description": "One-line summary.",
   "tags": ["..."],
   "changeNote": "fixed typo",
   "schedule": "0 7 * * *",
@@ -1234,6 +1235,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
+- `description` — the frontmatter one-line summary, which the public docs site uses as the page's meta description. Trimmed; one line, at most 500 characters (`400` otherwise). `""` removes it. MCP `context_update` takes the same field.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
