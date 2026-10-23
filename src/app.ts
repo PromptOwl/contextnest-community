@@ -696,6 +696,10 @@ export function createApp(): Hono<AuthEnv> {
       // Who may create nests (admins | everyone) — the Nests page hides the
       // create buttons from non-admins when it's admins-only.
       nest_creation: config.NEST_CREATION,
+      // Who may widen a nest to public / org (owners | admins) — the
+      // visibility pickers disable an admins-only tier for everyone else.
+      nest_public_visibility: config.NEST_PUBLIC_VISIBILITY,
+      nest_org_visibility: config.NEST_ORG_VISIBILITY,
       // Product analytics for the SPA. The PostHog project key is a public
       // client key, but it only ships while usage telemetry is on — one switch
       // covers everything this server sends outward.
@@ -1012,6 +1016,8 @@ export function createApp(): Hono<AuthEnv> {
     // Enterprise identity providers allowed (licence feature sso). Google is on every plan.
     sso_available: hasEntitlement("sso"),
     nest_creation: config.NEST_CREATION,
+    nest_public_visibility: config.NEST_PUBLIC_VISIBILITY,
+    nest_org_visibility: config.NEST_ORG_VISIBILITY,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
@@ -1599,6 +1605,18 @@ export function createApp(): Hono<AuthEnv> {
       if (v !== "admins" && v !== "everyone")
         addError("nest_creation", "Nest creation must be admins or everyone.");
       else pending.push({ name: "NEST_CREATION", value: v });
+    }
+    // Who may widen a nest to public / org. "owners" is the default and
+    // persists as null (unset), like the other default-off switches.
+    for (const [field, name, label] of [
+      ["nest_public_visibility", "NEST_PUBLIC_VISIBILITY", "Who can make nests public"],
+      ["nest_org_visibility", "NEST_ORG_VISIBILITY", "Who can make nests organization-wide"],
+    ] as const) {
+      if (!(field in body)) continue;
+      const v = String(body[field] ?? "").trim().toLowerCase();
+      if (v !== "owners" && v !== "admins")
+        addError(field, `${label} must be owners or admins.`);
+      else pending.push({ name, value: v === "admins" ? "admins" : null });
     }
     if ("people_suggest_all_users" in body) {
       pending.push({

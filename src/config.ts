@@ -535,6 +535,27 @@ export const config = {
     return process.env.SHARED_DEPLOYMENT === "true";
   },
   /**
+   * Who may widen a nest to Public. "owners" (default): anyone who
+   * administers the nest — today's behaviour, still behind the
+   * acknowledgement. "admins": server admins only, so an owner can't publish
+   * by accident. Narrowing is never restricted, and nests already public stay
+   * public. Enforced in nests/visibility-service.ts for REST and MCP alike;
+   * superadmin-editable via /admin/settings.
+   */
+  get NEST_PUBLIC_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_PUBLIC_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /** Who may widen a nest to Organization — same values and rules as
+   *  NEST_PUBLIC_VISIBILITY. On a SHARED_DEPLOYMENT 'org' reaches every
+   *  customer on the server, which is why it has its own switch. */
+  get NEST_ORG_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_ORG_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /**
    * MCP OAuth authorization server. Default OFF, and off means the surface
    * does not exist: `/.well-known/*` keeps 404ing and `/mcp` answers
    * unauthenticated callers exactly as it did before.

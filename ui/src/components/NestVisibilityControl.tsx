@@ -20,6 +20,10 @@
  * tiers are worded to say who they reach. The dialog also shows the nest's
  * description — that is all a stranger discovering the nest will see beside
  * its name — and offers to add one when it is empty (CU-wdqcq02mek).
+ *
+ * A server admin can restrict widening to Public or Organization to server
+ * admins (/health nest_public_visibility / nest_org_visibility). A blocked
+ * tier is shown disabled with the reason; the server refuses it regardless.
  */
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
@@ -56,6 +60,7 @@ import {
   visibilityNeedsAcknowledgement,
   visibilityTierHint,
   visibilityConfirmCopy,
+  visibilityBlockedReason,
 } from "../lib/visibility-confirm";
 import { OrgContributionsSetting } from "./OrgContribution";
 
@@ -91,8 +96,14 @@ export function NestVisibilityControl({
   // for 'public', and for 'org' on a shared deployment. Holds the tier being
   // confirmed; null = closed.
   const [confirming, setConfirming] = useState<"org" | "public" | null>(null);
-  const { sharedDeployment } = useAuth();
+  const { sharedDeployment, nestPublicVisibility, nestOrgVisibility, isAdmin, authMode } =
+    useAuth();
   const ctx = { sharedDeployment };
+  const policy = {
+    publicBy: nestPublicVisibility,
+    orgBy: nestOrgVisibility,
+    isServerAdmin: isAdmin || authMode === "open",
+  };
   const qc = useQueryClient();
   // The description is what a discovering reader sees beside the name, so
   // the dialog shows it and lets an empty one be filled in on the spot.
@@ -113,6 +124,10 @@ export function NestVisibilityControl({
   useEffect(() => {
     if (serverVisibility) setVisibility(serverVisibility);
   }, [serverVisibility]);
+  // Measured from the server value, not the optimistic one, so a pending
+  // change can't unlock a tier.
+  const blockedReason = (tier: api.NestVisibility) =>
+    visibilityBlockedReason(tier, serverVisibility ?? visibility, policy);
 
   const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
     // Optimistic change, reverting to the PREVIOUS value on failure — never
@@ -144,6 +159,11 @@ export function NestVisibilityControl({
 
   const choose = async (next: api.NestVisibility) => {
     if (next === visibility) return;
+    const blocked = blockedReason(next);
+    if (blocked) {
+      onError?.(blocked);
+      return;
+    }
     // The value only changes once acknowledged. Private never needs it; the
     // rule for the other two lives in visibility-confirm.ts with the server.
     if (next !== "private" && visibilityNeedsAcknowledgement(next, ctx)) {
@@ -254,6 +274,7 @@ export function NestVisibilityControl({
               <DropdownMenuItem
                 key={t.value}
                 onClick={() => void choose(t.value)}
+                disabled={!!blockedReason(t.value)}
                 className="flex items-start gap-2"
               >
                 {t.value === visibility ? (
@@ -264,7 +285,7 @@ export function NestVisibilityControl({
                 <span className="flex flex-col">
                   <span className="text-sm">{t.label}</span>
                   <span className="text-xs text-muted-foreground">
-                    {visibilityTierHint(t.value, ctx)}
+                    {blockedReason(t.value) ?? visibilityTierHint(t.value, ctx)}
                   </span>
                 </span>
               </DropdownMenuItem>
@@ -315,13 +336,22 @@ export function NestVisibilityControl({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="private">Private</SelectItem>
-              <SelectItem value="org">Organization</SelectItem>
-              <SelectItem value="public">Public</SelectItem>
+              {TIERS.map((t) => (
+                <SelectItem key={t.value} value={t.value} disabled={!!blockedReason(t.value)}>
+                  {t.label}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
       </div>
+      {TIERS.map((t) => blockedReason(t.value))
+        .filter((r): r is string => !!r)
+        .map((r) => (
+          <p key={r} className="text-xs text-muted-foreground">
+            {r} Ask a server admin to change it.
+          </p>
+        ))}
 
       {/* CU-wdqcq05rz6: only meaningful on an org nest, and only an owner or
           admin may change it (the server enforces both). */}

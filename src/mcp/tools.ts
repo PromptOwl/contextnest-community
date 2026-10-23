@@ -131,6 +131,7 @@ import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
+import { setNestVisibility } from "../nests/visibility-service.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -490,6 +491,8 @@ export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
+  // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
+  "context_set_visibility",
   "context_systems",
   "context_instructions_update",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
@@ -1536,6 +1539,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_set_visibility",
+    description:
+      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        visibility: {
+          type: "string",
+          enum: ["private", "org", "public"],
+          description: "The new tier.",
+        },
+        acknowledge: {
+          type: "boolean",
+          description: "The user confirmed who the nest will reach (needed to widen to public, and to org on a shared server).",
+        },
+      },
+      required: ["visibility"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -2250,6 +2273,26 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_set_visibility": {
+      const refused = await nestAdminRefusal(ctx);
+      if (refused) return refused;
+      const r = await setNestVisibility(
+        nestId,
+        ctx.userId,
+        args.visibility,
+        args.acknowledge === true || args.acknowledge === "true",
+      );
+      if (!r.ok) {
+        // Same refusal as REST; the acknowledgement case carries the warning
+        // the agent should put to the user before retrying with acknowledge.
+        const msg = r.requires_acknowledgement ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.` : r.error;
+        return toolError(
+          msg,
+          r.status === 404 ? "DOCUMENT_NOT_FOUND" : r.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
+        );
+      }
+      return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
+    }
     case "context_systems":
       return runSystemsTool(args, ctx);
 

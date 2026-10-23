@@ -80,3 +80,29 @@ export function visibilityConfirmCopy(
     confirm: "Open to everyone here",
   };
 }
+
+/** Who may widen a nest, from /health (NEST_PUBLIC_VISIBILITY /
+ *  NEST_ORG_VISIBILITY), plus whether the viewer is a server admin. */
+export interface VisibilityPolicy {
+  publicBy: "owners" | "admins";
+  orgBy: "owners" | "admins";
+  isServerAdmin: boolean;
+}
+
+const TIER_RANK: Record<NestVisibility, number> = { private: 0, org: 1, public: 2 };
+
+/** Why the viewer can't move a nest from `current` to `target`, or null when
+ *  they can. Mirrors the server (nests/visibility-service.ts): only widening
+ *  to an admins-only tier is restricted; narrowing never is. */
+export function visibilityBlockedReason(
+  target: NestVisibility,
+  current: NestVisibility,
+  policy: VisibilityPolicy,
+): string | null {
+  if (TIER_RANK[target] <= TIER_RANK[current] || policy.isServerAdmin) return null;
+  if (target === "public" && policy.publicBy === "admins")
+    return "Only a server admin can make nests public on this server.";
+  if (target === "org" && policy.orgBy === "admins")
+    return "Only a server admin can make nests organization-wide on this server.";
+  return null;
+}

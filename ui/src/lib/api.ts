@@ -305,6 +305,9 @@ export async function getHealth() {
     email_configured?: boolean;
     /** Who may create nests; "admins" hides the create CTAs from everyone else. */
     nest_creation?: "admins" | "everyone";
+    /** Who may widen a nest to public / org; "admins" = server admins only. */
+    nest_public_visibility?: "owners" | "admins";
+    nest_org_visibility?: "owners" | "admins";
     suspended_reason?: string;
   }>("/health");
 }
@@ -401,6 +404,10 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   nest_creation: "admins" | "everyone";
+  /** Who may widen a nest to public / org (default owners). Narrowing is
+   *  always allowed; server admins are never restricted. */
+  nest_public_visibility: "owners" | "admins";
+  nest_org_visibility: "owners" | "admins";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
