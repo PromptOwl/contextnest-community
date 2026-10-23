@@ -150,6 +150,10 @@ describe("defangNotice", () => {
     expect(out).not.toMatch(/javascript:|data:/i);
   });
 
+  it("markup nested to survive one strip is still dropped", () => {
+    expect(defangNotice("ping <<!channel>!channel> and <<@U1>@U1>", own)).not.toMatch(/<!channel>|<@U1>/);
+  });
+
   it("an own link followed by punctuation stays a link", () => {
     const link = "https://nest.example.com/?nest=n1&doc=nodes%2Fa";
     expect(defangNotice(`(see ${link}).`, own)).toContain(link);
@@ -554,5 +558,24 @@ describe("a run that notifies", () => {
     const step = notifySteps(done)[0];
     expect(step.detail.channels).toEqual(["email"]);
     expect(step.detail.skipped_channels).toEqual(["connectors"]);
+  });
+
+  it("leaving out node_id doesn't lift the checks: they cover every document the run read", async () => {
+    // The guest from the test above can open only "Open Doc". The run reads
+    // pricing, then notifies with no node_id, so the note may carry pricing.
+    expect((await configure({ recipients: ["owner", "guest@acme.com"], channels: ["email", "connectors"] })).status).toBe(200);
+    const done = await run([
+      call(toolUse("read_node", { id: "nodes/gtm/pricing" })),
+      call(toolUse("notify", { to: "owner", subject: "Pricing", message: "It says $8 per seat." })),
+      call(toolUse("notify", { to: "guest@acme.com", subject: "Pricing", message: "It says $8 per seat." })),
+      say("ok"),
+    ]);
+    expect(dispatchSpy.mock.calls.filter((c) => (c[0] as any).kind === "agent_notify")).toHaveLength(0);
+    expect(agentMail()).toHaveLength(1);
+    expect(agentMail()[0].to).toBe("owner@acme.com");
+    const [sent, refused] = notifySteps(done);
+    expect(sent.detail.skipped_channels).toEqual(["connectors"]);
+    expect(refused.detail.refused).toBe("not_reachable");
+    expect(done.run.trace.notifications).toBe(1);
   });
 });

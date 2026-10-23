@@ -362,6 +362,7 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
       comments: { made: 0 },
       accessRequests: { made: 0 },
       notifications,
+      read: new Set(),
       mcp,
       signal: ac.signal,
     };

@@ -84,6 +84,8 @@ export interface ToolContext {
   comments: { made: number };
   accessRequests: { made: number };
   notifications: { made: number };
+  /** Documents read_node opened this run: a notify may carry what they say. */
+  read: Set<string>;
   mcp: McpPool;
   signal: AbortSignal;
 }
@@ -322,10 +324,15 @@ export function defangNotice(text: string, ownPrefix: string): string {
       .replace(/^(h)tt(ps?)/i, "$1xx$2")
       .replace(/:\/\//, "[:]//")
       .replace(/\./g, "[.]");
-  return defang(text)
+  let out = defang(text)
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-    .replace(/\[([^\]\n]{0,300})\]\(([^)\s]{1,2000})\)/g, "$1 ($2)")
-    .replace(/<[a-z!/?@#][^>\n]{0,1000}>/gi, "")
+    .replace(/\[([^\]\n]{0,300})\]\(([^)\s]{1,2000})\)/g, "$1 ($2)");
+  // Until nothing changes: one pass turns `<<!channel>!channel>` into `<!channel>`.
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/<[a-z!/?@#][^>\n]{0,1000}>/gi, "");
+  }
+  return out
     .replace(
       /\b[a-z][a-z0-9+.-]{1,20}:\/\/[^\s<>"'`]+|\b(?:javascript|data|vbscript|file|mailto):|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b/gi,
       (m) => (own(m) ? m : /:$/.test(m) ? `${m.slice(0, -1)}[:]` : broken(m)),
@@ -489,6 +496,7 @@ async function readNode(ctx: ToolContext, input: Record<string, unknown>): Promi
   }
   const body = await resolveExportBody(ctx.nestId, id, doc.body || "");
   await step(ctx, { action: "read", node_id: id, detail: { tool: "read_node" } });
+  ctx.read.add(id);
   if (body === null) return { content: `${id} has no approved version yet, so there is nothing to read.` };
   const text = body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}\n…[truncated]` : body;
   // The nest's own approved text — but it can quote a feed or an email, so
@@ -780,8 +788,11 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
     if (denied) return accessNeeded(ctx, "notify", nodeId, "read", denied);
   }
 
+  // Leaving out node_id must not lift the access checks: the note may carry
+  // anything the run read, so they cover those documents too.
+  const docs = [...new Set([...(nodeId ? [nodeId] : []), ...ctx.read])];
   // Re-checked now, not trusted from when the config was saved.
-  const { people, reason } = await resolveNotifyRecipients(ctx.nestId, key, nodeId);
+  const { people, reason } = await resolveNotifyRecipients(ctx.nestId, key, nodeId, docs);
   if (!people.length) {
     return notifyRefused(ctx, "not_reachable", key, `Not sent: ${reason}. This was recorded.`, nodeId ?? undefined);
   }
@@ -814,14 +825,14 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
       { senderKind: "persona", senderId: persona.email, nestId: ctx.nestId, nodeId, runId: ctx.runId },
     );
     if (outcome === "sent") channels.push("email");
-    else failed = true;
+    else if (outcome === "failed") failed = true;
   }
   if (cfg.channels.includes("connectors") && (await hasAnyConnector(ctx.nestId, "agent_notify"))) {
     // A channel is a room, not the recipient, and its audience is set per
     // nest, not by who can open this document: a note about a document some
     // members can't open (written from what the agent read in it) stays out
     // of the room. The email above already went only to people who can.
-    const open = nodeId ? await openToWholeNest(ctx.nestId, nodeId) : "open";
+    const open = await openToWholeNest(ctx.nestId, docs);
     if (open !== "open") {
       skipped.push("connectors");
       roomWhy = open;
@@ -845,9 +856,9 @@ async function notify(ctx: ToolContext, input: Record<string, unknown>): Promise
     const why = failed
       ? "Not sent: the email could not be delivered (the server's mail transport failed). This was recorded; don't retry this run."
       : roomWhy === "too_many"
-        ? "Not sent: the only way your owner chose is the nest's chat channel, and this nest has too many people to confirm they can all open that document, so a note about it isn't posted there. Notify without node_id, or put it in your summary. This was recorded."
+        ? "Not sent: the only way your owner chose is the nest's chat channel, and there are too many people and documents to confirm everyone there can open what this note is about or drew on. Put it in your summary instead. This was recorded."
         : roomWhy
-        ? "Not sent: the only way your owner chose is the nest's chat channel, and that document isn't open to everyone on the nest, so it can't be posted there. This was recorded."
+        ? "Not sent: the only way your owner chose is the nest's chat channel, and a document this note is about or drew on isn't open to everyone on the nest, so it can't be posted there. This was recorded."
         : "Not sent: none of the ways your owner chose is set up on this server (no email transport, or no connector listening for agent notifications). This was recorded.";
     return notifyRefused(ctx, failed ? "delivery_failed" : "no_channel", key, why, nodeId ?? undefined);
   }

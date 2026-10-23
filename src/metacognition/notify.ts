@@ -95,6 +95,7 @@ export async function resolveNotifyRecipients(
   nestId: string,
   key: string,
   nodeId: string | null,
+  docs: string[],
 ): Promise<{ people: NotifyPerson[]; reason?: string }> {
   const members = await notifyMembers(nestId);
   const found = await candidates(nestId, key, nodeId, members);
@@ -107,30 +108,38 @@ export async function resolveNotifyRecipients(
           : `${key === "owner" ? "the nest owner" : key} is no longer a member of this nest`,
     };
   }
-  if (!nodeId) return { people: found };
-  // A notification names the document (title, path, link): only someone who
-  // can open it hears about it.
+  if (!docs.length) return { people: found };
+  // `docs` = the document named plus every one the run read: the note may
+  // carry any of them, so only someone who can open them all hears it.
   const allowed: NotifyPerson[] = [];
   for (const p of found) {
-    if (await canOpenNode(nestId, nodeId, p.userId, p.email)) allowed.push(p);
+    if (await canOpenAll(nestId, docs, p)) allowed.push(p);
   }
-  return allowed.length ? { people: allowed } : { people: [], reason: `nobody in "${key}" can open ${nodeId}` };
+  return allowed.length
+    ? { people: allowed }
+    : { people: [], reason: `nobody in "${key}" can open every document this note is about or drew on (${docs.join(", ")})` };
 }
 
-/** Past this many people the sweep isn't run and the answer is "too_many"
- *  (fail closed): a room post about a document isn't worth an unbounded
- *  access check per notification. */
-const OPEN_CHECK_MAX = 200;
+async function canOpenAll(nestId: string, docs: string[], p: NotifyPerson): Promise<boolean> {
+  for (const d of docs) if (!(await canOpenNode(nestId, d, p.userId, p.email))) return false;
+  return true;
+}
+
+/** Past this many access checks (people × documents) the sweep isn't run and
+ *  the answer is "too_many" (fail closed): a room post isn't worth an
+ *  unbounded access check per notification. */
+const OPEN_CHECK_MAX = 1000;
 
 /**
- * Can everyone on the nest open this document? The bar for posting about it
- * to the nest's chat channel, whose audience isn't tied to the document's.
+ * Can everyone on the nest open all these documents? The bar for posting
+ * about them to the nest's chat channel, whose audience isn't tied to theirs.
  */
-export async function openToWholeNest(nestId: string, nodeId: string): Promise<"open" | "restricted" | "too_many"> {
+export async function openToWholeNest(nestId: string, docs: string[]): Promise<"open" | "restricted" | "too_many"> {
+  if (!docs.length) return "open";
   const members = [...(await notifyMembers(nestId)).values()];
-  if (members.length > OPEN_CHECK_MAX) return "too_many";
+  if (members.length * docs.length > OPEN_CHECK_MAX) return "too_many";
   for (const p of members) {
-    if (!(await canOpenNode(nestId, nodeId, p.userId, p.email))) return "restricted";
+    if (!(await canOpenAll(nestId, docs, p))) return "restricted";
   }
   return "open";
 }
