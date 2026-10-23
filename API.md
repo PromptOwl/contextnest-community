@@ -1309,6 +1309,23 @@ The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?a
 
 Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
 
+### POST `/nests/:nestId/nodes/office`
+Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The text is extracted into the document body:
+- **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
+- **docx** — headings (`Title`, `Heading 1…6` or an outline level) as `#` headings, paragraphs, bulleted and numbered lists, and tables as markdown tables. Deleted tracked changes and field codes are left out.
+
+The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned; re-uploading creates a new document.
+
+- `400` — no `file`; not `.pptx`/`.docx` (legacy `.ppt`/`.doc` and macro-enabled `.pptm`/`.docm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped (only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- Returns `201` `{ node, version, stewards? }`.
+
+### GET `/nests/:nestId/originals/:file`
+The original file behind an Office document. Read permission, and the caller must be able to read the document that binds it (the same gate as `GET /nodes/:nodeId`, so a public reader needs an approved version). Only server-minted `<uuid>.pptx` / `<uuid>.docx` names are accepted; a name that isn't bound to a document the caller can read is a `404`. The bytes are verified against the recorded sha256 before they are served.
+
+Headers: the Office `Content-Type`, `Content-Disposition: attachment` (always — never inline), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). The link survives a move of the document, since it names the file, not the node.
+
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
 

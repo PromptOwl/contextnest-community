@@ -96,6 +96,13 @@ import { forPeople } from "./structure/writes.js";
 import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
+  officeNodeRoutes,
+  originalRoutes,
+  OFFICE_UPLOAD_PATH,
+  officeMaxRequestBytes,
+  officeTooLargeMessage,
+} from "./nodes/office-routes.js";
+import {
   pdfNodeRoutes,
   PDF_UPLOAD_PATH,
   pdfMaxRequestBytes,
@@ -618,19 +625,24 @@ export function createApp(): Hono<AuthEnv> {
       const len = parseInt(lenStr, 10);
       const isPost = c.req.method === "POST";
       const isPdf = isPost && PDF_UPLOAD_PATH.test(c.req.path);
+      const isOffice = isPost && OFFICE_UPLOAD_PATH.test(c.req.path);
       const cap =
         isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
           : isPdf
             ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
-            : config.MAX_BODY_BYTES;
+            : isOffice
+              ? Math.max(config.MAX_BODY_BYTES, officeMaxRequestBytes())
+              : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            // A PDF gets the same message as the route's own gates.
+            // A PDF or Office file gets the same message as its route's own gates.
             error: isPdf
               ? pdfTooLargeMessage(len)
-              : `Request body too large (${len} bytes, max ${cap})`,
+              : isOffice
+                ? officeTooLargeMessage(len)
+                : `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
@@ -3431,9 +3443,11 @@ export function createApp(): Hono<AuthEnv> {
         );
       } else if (
         c.req.method === "POST" &&
-        // POST /nodes (create) and POST /nodes/pdf (PDF upload — a create, or
-        // a new version of a pdf node) share the nest-scope editor rule.
-        (parts.length === 2 || (parts.length === 3 && parts[2] === "pdf"))
+        // POST /nodes (create), POST /nodes/pdf (PDF upload — a create, or
+        // a new version of a pdf node) and POST /nodes/office (an Office
+        // upload, always a create) share the nest-scope editor rule.
+        (parts.length === 2 ||
+          (parts.length === 3 && (parts[2] === "pdf" || parts[2] === "office")))
       ) {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
         const resolved = await resolveStewardsForNode(nestId, "");
@@ -3691,6 +3705,8 @@ export function createApp(): Hono<AuthEnv> {
   //      GET falls through (next()) when the id is not a pdf node, so a
   //      document whose own id ends in /pdf still reads.
   nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
+  //   0b. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
@@ -3728,6 +3744,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
+  nestsApp.route("/:nestId/originals", originalRoutes);
   nestsApp.route("/:nestId/systems", nestSystemRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 

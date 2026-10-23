@@ -2039,6 +2039,31 @@ export async function createPdfNode(
 }
 
 /**
+ * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * server extracts the slides/text into the body and keeps the original file
+ * as a download linked from it.
+ */
+export async function createOfficeNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[] } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/office`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
  * Same-origin URL of a pdf node's binary. The server picks the version a
  * caller may see (a public reader always gets the approved one); `approvedOnly`
  * asks for that view explicitly, `download` for an attachment disposition.

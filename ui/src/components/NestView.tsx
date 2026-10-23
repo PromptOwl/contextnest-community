@@ -1171,10 +1171,11 @@ export function NestView({
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
 
-  const kindForFile = (name: string): "document" | "artifact" | "pdf" | null => {
+  const kindForFile = (name: string): "document" | "artifact" | "pdf" | "office" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
     if (ext === "pdf") return "pdf";
+    if (ext === "pptx" || ext === "docx") return "office";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1184,7 +1185,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md, .html or .pdf files to add them to this vault.");
+        toast.error("Drop .md, .html, .pdf, .pptx or .docx files to add them to this vault.");
         return;
       }
       setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
@@ -1192,7 +1193,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf|pptx|docx)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1206,11 +1207,15 @@ export function NestView({
           }
           try {
             // A PDF is uploaded as bytes and becomes a governed `pdf` document
-            // (the server extracts its text); everything else is read as text.
+            // (the server extracts its text); a .pptx/.docx becomes a markdown
+            // document with the original kept as a download; everything else
+            // is read as text.
             const res =
               type === "pdf"
                 ? await api.createPdfNode(nestId, file, { title, folder })
-                : await api.createNode(nestId, { title, content: await file.text(), type, folder });
+                : type === "office"
+                  ? await api.createOfficeNode(nestId, file, { title, folder })
+                  : await api.createNode(nestId, { title, content: await file.text(), type, folder });
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1304,7 +1309,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact · .pdf → PDF document
+              .md → document · .html → hosted artifact · .pdf → PDF document · .pptx/.docx → document
             </div>
           </div>
         </div>
@@ -1620,7 +1625,7 @@ export function NestView({
               ref={importInputRef}
               type="file"
               multiple
-              accept=".md,.markdown,.txt,.html,.htm,.pdf"
+              accept=".md,.markdown,.txt,.html,.htm,.pdf,.pptx,.docx"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void importFiles(e.target.files);
@@ -2384,7 +2389,7 @@ export function NestView({
           </DialogHeader>
           <div className="grid gap-2">
             {[
-              { ref: importInputRef, label: "Files", detail: ".md, .html or .pdf — one or many", testId: undefined },
+              { ref: importInputRef, label: "Files", detail: ".md, .html, .pdf, .pptx or .docx — one or many", testId: undefined },
               { ref: pdfInputRef, label: "Upload PDF", detail: "Becomes a PDF document with its text extracted", testId: "nest-upload-pdf" },
               { ref: importDirRef, label: "Whole vault", detail: "A folder, keeping its structure", testId: undefined },
             ].map((o) => (
