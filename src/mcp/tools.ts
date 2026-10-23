@@ -116,7 +116,9 @@ import {
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import * as systems from "../auth/systems.js";
@@ -455,6 +457,14 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edge_types_list",
 ]);
 
+/** The zod field for an `array` property in a tool's JSON schema, shared by
+ *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
+ *  (metacognition feeds, MCP servers): each item must be an object, its fields
+ *  are the handler's parser's to check. Everything else is a list of strings. */
+export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+  return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
  *  UI/REST parity. Advertised only to a person who owns/administers the nest
  *  and holds a full credential (mcp/routes.ts), and re-checked on every call
@@ -464,6 +474,13 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   "context_systems",
   "context_instructions_update",
+  // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
+  // action; only advertised while both feature flags are on (mcp/routes.ts).
+  "context_metacognition_list",
+  "context_metacognition_suggest",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -4254,6 +4271,11 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Metacognition tools: same deal, behind both flags; each call re-checks
+      // owner/admin and refuses system keys in metacognition/manage.ts.
+      if (isMetacognitionTool(toolName)) {
+        return runMetacognitionTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

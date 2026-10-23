@@ -32,9 +32,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   49->52 comment tools (CU-wdqcq01uqn); 45->48 access-request trio (CU-wdqcq041jn, ContextNest#167);
 //   48->51 task-relation trio (edges table); 51->55 custom-field defs (ContextNest#178);
 //   55->58 boards + bulk update; 58->59 context_task_log; 59->61 headless + systems (CU-wdqcq0538g);
-//   61->63 instructions history/update (CU-wdqcq05mty; instructions_revisions table).
+//   61->63 instructions history/update (CU-wdqcq05mty; instructions_revisions table);
+//   63->68 metacognition list/suggest/configure/run/remove (CU-wdqcq05rqq; metacognition_agents table).
 // 52->56 server-level write tools (CU-wdqcq02cxu), then 56->45 once they derived from per-nest.
-const BASELINE = 63;
+const BASELINE = 68;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
