@@ -2,7 +2,7 @@
  * Metacognition over MCP (CU-wdqcq05rqq), and metacognition as an owner/admin
  * feature end to end.
  *
- * The MCP tools (metacognition_list / _configure / _run / _remove) wrap the same
+ * The MCP tools (context_metacognition_list / _suggest / _configure / _run / _remove) wrap the same
  * service functions the REST routes call, so the gates, parseConfig's messages,
  * the 409s and the saved config are the REST ones. Every metacognition action
  * — list, view, stats, run, configure, remove, and pointing a schedule or hook
@@ -25,7 +25,7 @@ const MCP_HEADERS = {
   Accept: "application/json, text/event-stream",
 };
 
-const TOOLS = ["metacognition_list", "metacognition_configure", "metacognition_run", "metacognition_remove"];
+const TOOLS = ["context_metacognition_list", "context_metacognition_suggest", "context_metacognition_configure", "context_metacognition_run", "context_metacognition_remove"];
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -122,9 +122,9 @@ describe("feature switches off", () => {
         const server = (await listTools(owner.apiKey, "/mcp")).map((t) => t.name);
         for (const t of TOOLS) expect(server, `${off} server-wide: ${t}`).not.toContain(t);
         // Over the transport an unadvertised tool is refused before it runs.
-        expect(isError(await call("metacognition_list", {}))).toBe(true);
+        expect(isError(await call("context_metacognition_list", {}))).toBe(true);
         // Dispatched straight into the shared seam, it says why.
-        const out = await direct("metacognition_list", {}, owner);
+        const out = await direct("context_metacognition_list", {}, owner);
         expect(out.isError).toBe(true);
         expect(outText(out)).toMatch(/not enabled on this server/);
       } finally {
@@ -147,7 +147,7 @@ describe("who sees the tools", () => {
   });
 
   it("the configure description tells a harness to dry-run first and needs an approved agent document", async () => {
-    const configure = (await listTools(owner.apiKey)).find((t) => t.name === "metacognition_configure")!;
+    const configure = (await listTools(owner.apiKey)).find((t) => t.name === "context_metacognition_configure")!;
     expect(configure.description).toMatch(/dry_run/);
     expect(configure.description).toMatch(/summary/i);
     expect(configure.description).toMatch(/type agent/i);
@@ -157,24 +157,25 @@ describe("who sees the tools", () => {
 });
 
 describe("a writer who is not an owner or admin", () => {
-  it("is refused metacognition_configure with REST's 403 message, and nothing is saved", async () => {
+  it("is refused context_metacognition_configure with REST's 403 message, and nothing is saved", async () => {
     const rest = await jsonRequest(app, "PUT", `/nests/${nestId}/metacognition/nodes/archivist`, CONFIG, editor.apiKey);
     expect(rest.status).toBe(403);
     // Not advertised, so over the transport it never runs…
-    expect(isError(await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG }, editor.apiKey))).toBe(true);
+    expect(isError(await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG }, editor.apiKey))).toBe(true);
     // …and dispatched directly the service refuses it in REST's words.
-    const out = await direct("metacognition_configure", { agent: "nodes/archivist", ...CONFIG }, editor);
+    const out = await direct("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG }, editor);
     expect(out.isError).toBe(true);
     expect(outText(out)).toBe(rest.data.error);
     const after = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition/nodes/archivist`, undefined, owner.apiKey);
     expect(after.status).toBe(404);
   });
 
-  it("is refused list, run and remove the same way", async () => {
+  it("is refused list, suggest, run and remove the same way", async () => {
     for (const [name, args] of [
-      ["metacognition_list", {}],
-      ["metacognition_run", { agent: "nodes/archivist" }],
-      ["metacognition_remove", { agent: "nodes/archivist" }],
+      ["context_metacognition_list", {}],
+      ["context_metacognition_suggest", { agent: "nodes/archivist" }],
+      ["context_metacognition_run", { agent: "nodes/archivist" }],
+      ["context_metacognition_remove", { agent: "nodes/archivist" }],
     ] as const) {
       const out = await direct(name, args, editor);
       expect(out.isError, name).toBe(true);
@@ -183,9 +184,28 @@ describe("a writer who is not an owner or admin", () => {
   });
 });
 
-describe("metacognition_configure", () => {
+describe("context_metacognition_suggest", () => {
+  it("returns REST's GET …/suggest result and saves nothing", async () => {
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition/nodes/archivist/suggest`, undefined, owner.apiKey);
+    expect(rest.status).toBe(200);
+    const r = await call("context_metacognition_suggest", { agent: "nodes/archivist" });
+    expect(isError(r)).toBe(false);
+    expect(r.result.structuredContent.suggestion).toEqual(rest.data.suggestion);
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition/nodes/archivist`, undefined, owner.apiKey);
+    expect(after.status).toBe(404);
+  });
+});
+
+describe("context_metacognition_configure", () => {
+  it("passes notify through to parseConfig, as the PUT body does", async () => {
+    const notify = { recipients: ["owner"], channels: ["connectors"], max_per_run: 2 };
+    const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, notify, dry_run: true });
+    expect(isError(r)).toBe(false);
+    expect(r.result.structuredContent.config.notify).toEqual(notify);
+  });
+
   it("dry_run validates and summarizes without saving", async () => {
-    const r = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run: true });
+    const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run: true });
     expect(isError(r)).toBe(false);
     const data = r.result.structuredContent;
     expect(data.dry_run).toBe(true);
@@ -204,7 +224,7 @@ describe("metacognition_configure", () => {
 
   it("dry_run that isn't a boolean is refused, never treated as a save", async () => {
     for (const dry_run of ["true", 1, "yes", null]) {
-      const r = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run });
+      const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run });
       expect(r.result?.isError, JSON.stringify(dry_run)).toBe(true);
       expect(text(r)).toBe("dry_run must be true or false");
     }
@@ -221,24 +241,24 @@ describe("metacognition_configure", () => {
       const rest = await jsonRequest(app, "PUT", `/nests/${nestId}/metacognition/nodes/archivist`, bad, owner.apiKey);
       expect(rest.status).toBe(400);
       for (const dry_run of [true, false]) {
-        const r = await call("metacognition_configure", { agent: "nodes/archivist", ...bad, dry_run });
+        const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...bad, dry_run });
         expect(r.result?.isError, JSON.stringify(bad)).toBe(true);
         expect(text(r)).toBe(rest.data.error);
       }
     }
-    expect(text(await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, scope: { read: ["gtm"], propose: ["ops"] } }))).toBe(
+    expect(text(await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, scope: { read: ["gtm"], propose: ["ops"] } }))).toBe(
       'scope.propose "ops" is outside scope.read',
     );
   });
 
   it("refuses a document that isn't an agent, as REST does", async () => {
-    const r = await call("metacognition_configure", { agent: "nodes/gtm/pricing", ...CONFIG, dry_run: true });
+    const r = await call("context_metacognition_configure", { agent: "nodes/gtm/pricing", ...CONFIG, dry_run: true });
     expect(r.result?.isError).toBe(true);
     expect(text(r)).toMatch(/only an agent document can be a metacognition agent/);
   });
 
   it("a real save: REST GET returns the same config, and the response carries the summary", async () => {
-    const r = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG });
+    const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG });
     expect(isError(r)).toBe(false);
     const data = r.result.structuredContent;
     expect(data.saved).toBe(true);
@@ -251,14 +271,14 @@ describe("metacognition_configure", () => {
   });
 
   it("an admin collaborator may configure one too", async () => {
-    const r = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run: true }, admin.apiKey);
+    const r = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, dry_run: true }, admin.apiKey);
     expect(isError(r)).toBe(false);
   });
 });
 
-describe("metacognition_list", () => {
+describe("context_metacognition_list", () => {
   it("returns configured agents and the agent documents not yet configured, each with a summary", async () => {
-    const r = await call("metacognition_list", {});
+    const r = await call("context_metacognition_list", {});
     expect(isError(r)).toBe(false);
     const data = r.result.structuredContent;
     expect(data.agents.map((a: any) => a.node_id)).toEqual(["nodes/archivist"]);
@@ -269,7 +289,7 @@ describe("metacognition_list", () => {
   });
 });
 
-describe("metacognition_run", () => {
+describe("context_metacognition_run", () => {
   it("is refused while a run is in progress, with REST's 409 message", async () => {
     const { getDb } = await import("../src/db/client.js");
     const { SERVER_CLAIM } = await import("../src/metacognition/store.js");
@@ -282,7 +302,7 @@ describe("metacognition_run", () => {
     try {
       const rest = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
       expect(rest.status).toBe(409);
-      const r = await call("metacognition_run", { agent: "nodes/archivist" });
+      const r = await call("context_metacognition_run", { agent: "nodes/archivist" });
       expect(r.result?.isError).toBe(true);
       expect(text(r)).toBe(rest.data.error);
       expect(r.result.structuredContent.http_status).toBe(409);
@@ -294,7 +314,7 @@ describe("metacognition_run", () => {
   });
 
   it("starts a run and returns its run_id", async () => {
-    const r = await call("metacognition_run", { agent: "nodes/archivist", inputs: { note: "check pricing" } });
+    const r = await call("context_metacognition_run", { agent: "nodes/archivist", inputs: { note: "check pricing" } });
     expect(isError(r)).toBe(false);
     expect(r.result.structuredContent.run_id).toMatch(/^run_/);
     expect(r.result.structuredContent.executes).toBe("server");
@@ -324,16 +344,16 @@ describe("the server-wide /mcp", () => {
   });
 
   it("without nest it is a validation error; with nest it behaves as the per-nest endpoint", async () => {
-    const missing = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: {} }, owner.apiKey);
+    const missing = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: {} }, owner.apiKey);
     expect(isError(missing)).toBe(true);
-    const viaServer = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, owner.apiKey);
-    const viaNest = await call("metacognition_list", {});
+    const viaServer = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, owner.apiKey);
+    const viaNest = await call("context_metacognition_list", {});
     expect(isError(viaServer)).toBe(false);
     expect(viaServer.result.structuredContent).toEqual(viaNest.result.structuredContent);
     const dry = await mcp(
       "/mcp",
       "tools/call",
-      { name: "metacognition_configure", arguments: { nest: "Meta MCP", agent: "nodes/scout", ...CONFIG, persona: { name: "Scout" }, dry_run: true } },
+      { name: "context_metacognition_configure", arguments: { nest: "Meta MCP", agent: "nodes/scout", ...CONFIG, persona: { name: "Scout" }, dry_run: true } },
       owner.apiKey,
     );
     expect(isError(dry)).toBe(false);
@@ -345,10 +365,10 @@ describe("the server-wide /mcp", () => {
     expect(other).toBeTruthy();
     const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
     for (const t of TOOLS) expect(names).toContain(t);
-    const r = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
+    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
     expect(r.result?.isError).toBe(true);
     expect(text(r)).toMatch(/owner or an admin/);
-    const own = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: other } }, editor.apiKey);
+    const own = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: other } }, editor.apiKey);
     expect(isError(own)).toBe(false);
     await jsonRequest(app, "DELETE", `/nests/${other}`, undefined, editor.apiKey);
   });
@@ -356,7 +376,7 @@ describe("the server-wide /mcp", () => {
   it("a writer doesn't see them and is refused a call naming the nest", async () => {
     const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
     for (const t of TOOLS) expect(names).not.toContain(t);
-    const r = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
+    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
     expect(isError(r)).toBe(true);
   });
 });
@@ -416,13 +436,13 @@ describe("metacognition is owner/admin only on REST too", () => {
   });
 
   it("a switched-off metacognition agent is still gated: a writer can't schedule it to come back", async () => {
-    const off = await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: false });
+    const off = await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: false });
     expect(isError(off)).toBe(false);
     try {
       const hook = await jsonRequest(app, "POST", `/nests/${nestId}/hooks`, { agent_node: "nodes/archivist" }, editor.apiKey);
       expect(hook.status).toBe(403);
     } finally {
-      await call("metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: true });
+      await call("context_metacognition_configure", { agent: "nodes/archivist", ...CONFIG, enabled: true });
     }
   });
 
@@ -445,9 +465,9 @@ describe("which requests on the server-level /mcp consider the metacognition too
     const { requestMayUseMetacognition } = await import("../src/mcp/metacognition-tools.js");
     const call = (name: string) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name } });
     expect(requestMayUseMetacognition({ jsonrpc: "2.0", id: 1, method: "tools/list" })).toBe(true);
-    expect(requestMayUseMetacognition(call("metacognition_run"))).toBe(true);
+    expect(requestMayUseMetacognition(call("context_metacognition_run"))).toBe(true);
     expect(requestMayUseMetacognition(call("context_get"))).toBe(false);
-    expect(requestMayUseMetacognition([call("context_get"), call("metacognition_list")])).toBe(true);
+    expect(requestMayUseMetacognition([call("context_get"), call("context_metacognition_list")])).toBe(true);
     expect(requestMayUseMetacognition([call("context_get")])).toBe(false);
     expect(requestMayUseMetacognition([{ jsonrpc: "2.0", id: 2, method: "tools/list" }])).toBe(true);
     expect(requestMayUseMetacognition(null)).toBe(false);
@@ -478,19 +498,19 @@ describe("which requests on the server-level /mcp consider the metacognition too
       return (j.result?.tools ?? []).map((t: any) => t.name) as string[];
     };
     const small = await names(await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })));
-    expect(small).toContain("metacognition_list");
+    expect(small).toContain("context_metacognition_list");
     // Past the cap the peek gives up (the request itself is still served).
     const big = await names(
       await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { pad: "x".repeat(70 * 1024) } } })),
     );
     expect(big).toContain("nest_index");
-    expect(big).not.toContain("metacognition_list");
+    expect(big).not.toContain("context_metacognition_list");
   });
 
   it("a server admin who owns no nest is offered them, and may use them on any nest", async () => {
     const names = (await listTools(root.apiKey, "/mcp")).map((t) => t.name);
-    expect(names).toContain("metacognition_list");
-    const r = await mcp("/mcp", "tools/call", { name: "metacognition_list", arguments: { nest: nestId } }, root.apiKey);
+    expect(names).toContain("context_metacognition_list");
+    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, root.apiKey);
     expect(isError(r)).toBe(false);
   });
 
@@ -499,9 +519,9 @@ describe("which requests on the server-level /mcp consider the metacognition too
     const minted = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nestId }, editor.apiKey);
     expect(minted.status).toBe(201);
     const names = (await listTools(minted.data.api_key, "/mcp")).map((t) => t.name);
-    expect(names).not.toContain("metacognition_list");
+    expect(names).not.toContain("context_metacognition_list");
     // Unscoped, the same person (owner of `own`) is offered them.
-    expect((await listTools(editor.apiKey, "/mcp")).map((t) => t.name)).toContain("metacognition_list");
+    expect((await listTools(editor.apiKey, "/mcp")).map((t) => t.name)).toContain("context_metacognition_list");
     await jsonRequest(app, "DELETE", `/nests/${own}`, undefined, editor.apiKey);
   });
 });
@@ -520,7 +540,7 @@ describe("tool errors", () => {
   });
 });
 
-describe("approval state in metacognition_list", () => {
+describe("approval state in context_metacognition_list", () => {
   it("says whether each agent document has approved instructions, so a harness can warn before setting up one that would never run", async () => {
     const gov = (await jsonRequest(app, "POST", "/nests", { name: "Governed Meta" }, owner.apiKey)).data.nest.id;
     await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Ready", content: "Approved instructions.", type: "agent" }, owner.apiKey);
@@ -528,7 +548,7 @@ describe("approval state in metacognition_list", () => {
     expect(steward.status).toBe(201);
     // Created once the nest is governed: a draft until a reviewer approves it.
     await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Pending", content: "Not yet reviewed.", type: "agent" }, owner.apiKey);
-    const r = await mcp(`/nests/${gov}/mcp`, "tools/call", { name: "metacognition_list", arguments: {} }, owner.apiKey);
+    const r = await mcp(`/nests/${gov}/mcp`, "tools/call", { name: "context_metacognition_list", arguments: {} }, owner.apiKey);
     expect(isError(r)).toBe(false);
     const byId = Object.fromEntries(r.result.structuredContent.unconfigured.map((d: any) => [d.node_id, d]));
     expect(byId["nodes/ready"].instructions_approved).toBe(true);
@@ -538,14 +558,14 @@ describe("approval state in metacognition_list", () => {
   });
 });
 
-describe("metacognition_remove", () => {
+describe("context_metacognition_remove", () => {
   it("stops it being a metacognition agent; the document stays", async () => {
-    const r = await call("metacognition_remove", { agent: "nodes/archivist" });
+    const r = await call("context_metacognition_remove", { agent: "nodes/archivist" });
     expect(isError(r)).toBe(false);
     expect(r.result.structuredContent.removed).toBe(true);
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/metacognition/nodes/archivist`, undefined, owner.apiKey)).status).toBe(404);
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/archivist`, undefined, owner.apiKey)).status).toBe(200);
-    const again = await call("metacognition_remove", { agent: "nodes/archivist" });
+    const again = await call("context_metacognition_remove", { agent: "nodes/archivist" });
     expect(again.result?.isError).toBe(true);
     expect(text(again)).toBe("nodes/archivist is not a metacognition agent");
   });

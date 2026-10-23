@@ -1,6 +1,6 @@
 /**
- * Metacognition over MCP (CU-wdqcq05rqq): list, configure (with a dry run),
- * run and remove metacognition agents from a harness like Claude, without
+ * Metacognition over MCP (CU-wdqcq05rqq): list, suggest, configure (with a dry
+ * run), run and remove metacognition agents from a harness like Claude, without
  * hand-written REST calls.
  *
  * Each tool calls the same operation in metacognition/manage.ts that the REST
@@ -12,7 +12,7 @@
  *  - advertised only when FEATURE_WORKFLOW_PLANE and FEATURE_METACOGNITION are
  *    on (mcp/routes.ts, mcp/server-routes.ts); a call that gets here anyway
  *    with either off is refused as not enabled;
- *  - all four are in MCP_ADMIN_TOOLS: offered only to a person holding a full
+ *  - all five are in MCP_ADMIN_TOOLS: offered only to a person holding a full
  *    credential who owns or administers the nest, never to read-only or
  *    headless keys;
  *  - every call re-checks: no system key, then owner/admin on the nest.
@@ -31,9 +31,32 @@ import {
   configureAgent,
   removeAgent,
   runAgent,
+  suggestAgentConfig,
 } from "../metacognition/manage.js";
-import { CONFIG_PROPERTIES, METACOGNITION_INPUT_SCHEMAS } from "../metacognition/schemas.js";
 import type { McpToolContext, ToolResult } from "./tools.js";
+
+const AGENT_REF = {
+  type: "string",
+  description: 'Node id of the agent document, e.g. "nodes/archivist" (context_metacognition_list shows them).',
+} as const;
+
+/** The PUT body's fields — also the allow-list of what configure passes to parseConfig. */
+const CONFIG_PROPERTIES = {
+  persona: { type: "object", description: "{ name, avatar? } — avatar is an emoji or up to 4 letters" },
+  scope: {
+    type: "object",
+    description: '{ read: string[] ([] = whole nest), propose: string[] ([] = comments only, ["*"] = anywhere it reads) }',
+  },
+  caps: { type: "object", description: "{ max_steps?, max_tokens?, max_seconds?, max_proposals?, max_comments? }" },
+  feeds: { type: "array", items: { type: "object" }, description: "[{ name, url }] — public https feeds it reads as untrusted data" },
+  mcp_servers: { type: "array", items: { type: "object" }, description: "[{ name, url, allowed_tools: string[], auth_env? }]" },
+  model: { type: "string", description: "Model override (default: the nest's Hootie model)" },
+  notify: {
+    type: "object",
+    description: '{ recipients: ("owner"|"reviewers"|member email)[], channels: ("email"|"connectors")[], max_per_run? } — default: nobody',
+  },
+  enabled: { type: "boolean", description: "false keeps the settings but stops it running (default true)" },
+} as const;
 
 const EXAMPLE_BODY = JSON.stringify({
   agent: "nodes/archivist",
@@ -45,16 +68,25 @@ const EXAMPLE_BODY = JSON.stringify({
 
 export const METACOGNITION_TOOL_DEFINITIONS = [
   {
-    name: "metacognition_list",
+    name: "context_metacognition_list",
     description:
       "List this nest's metacognition agents — agent documents the SERVER runs on its own, as a named persona, " +
       "whose only way to change the nest is a proposal a reviewer approves. Returns the configured agents (each with " +
       "its config and a plain-language summary of what it may do) and the agent documents not set up yet. " +
       "Call this first when the user asks about their metacognition agents or wants to set one up. Owner/admin only.",
-    inputSchema: METACOGNITION_INPUT_SCHEMAS.list,
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
   {
-    name: "metacognition_configure",
+    name: "context_metacognition_suggest",
+    description:
+      "Suggest a starting config for an agent document, read off its approved instructions (persona from the title, folders it " +
+      "names, whether it should edit or only comment, feed links). Saves nothing. Returns { config, why, mcp_candidates, instructions }: " +
+      "config passes context_metacognition_configure as is; why explains each filled field; mcp_candidates are MCP links that need " +
+      "allowed_tools named by a person before they go in mcp_servers. Use it before configure when setting a new agent up. Owner/admin only.",
+    inputSchema: { type: "object", properties: { agent: AGENT_REF }, required: ["agent"] },
+  },
+  {
+    name: "context_metacognition_configure",
     description:
       "Turn an agent document into a metacognition agent, or change one's settings. The document must be type agent, " +
       "and the server runs its APPROVED text as the agent's instructions (an unapproved agent document is skipped at run time). " +
@@ -64,24 +96,40 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "scope {read: folders it may read, [] = the whole nest; propose: folders it may suggest edits in, inside read — " +
       '[] = no edits, comments only; ["*"] = anywhere it reads}; caps {max_steps, max_tokens, max_seconds, max_proposals, max_comments} ' +
       "(clamped to server limits); feeds [{name, url: public https}]; mcp_servers [{name, url, allowed_tools: [...], auth_env?: MCP_*}]; " +
-      "model (default: the nest's); enabled (default true). Unknown fields are ignored. The agent never publishes: every change it " +
+      "model (default: the nest's); notify {recipients: owner | reviewers | a member's email, channels: email | connectors, max_per_run} " +
+      "(default: nobody); enabled (default true). Unknown fields are ignored. The agent never publishes: every change it " +
       `makes goes to a reviewer. Owner/admin only. Example: ${EXAMPLE_BODY}`,
-    inputSchema: METACOGNITION_INPUT_SCHEMAS.configure,
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent: AGENT_REF,
+        ...CONFIG_PROPERTIES,
+        dry_run: { type: "boolean", description: "true = validate and summarize, save nothing. Do this first. Must be a JSON boolean." },
+      },
+      required: ["agent"],
+    },
   },
   {
-    name: "metacognition_run",
+    name: "context_metacognition_run",
     description:
       "Start a metacognition agent now. The server runs it in the background and returns its run_id at once; follow it with " +
       "workflow_run_get { run_id }, and see its track record with workflow_runs_list { agent, agent_stats: true }. " +
       "Refused while the same agent is already running, and after too many starts in an hour. Owner/admin only.",
-    inputSchema: METACOGNITION_INPUT_SCHEMAS.run,
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent: AGENT_REF,
+        inputs: { type: "object", description: "Optional request for this run; the agent treats it as a request to consider, not as instructions" },
+      },
+      required: ["agent"],
+    },
   },
   {
-    name: "metacognition_remove",
+    name: "context_metacognition_remove",
     description:
       "Stop a document being a metacognition agent. The agent document itself stays, as do its past runs and proposals. " +
       "Owner/admin only.",
-    inputSchema: METACOGNITION_INPUT_SCHEMAS.remove,
+    inputSchema: { type: "object", properties: { agent: AGENT_REF }, required: ["agent"] },
   },
 ];
 
@@ -138,7 +186,7 @@ export async function runMetacognitionTool(
     if (!metacognitionEnabled()) return metacognitionRefusal(new NotFoundError(NOT_ENABLED));
     await assertCanManageMetacognition(ctx.nestId, ctx.userId);
     switch (toolName) {
-      case "metacognition_list": {
+      case "context_metacognition_list": {
         // The run skips an agent whose document has no approved version, so
         // say which do — a harness should warn before setting up one that
         // would never run.
@@ -165,7 +213,7 @@ export async function runMetacognitionTool(
             title: d.frontmatter.title,
             instructions_approved: approved.get(d.id) ?? false,
             summary: approved.get(d.id)
-              ? "Not a metacognition agent yet. Set it up with metacognition_configure (dry_run first)."
+              ? "Not a metacognition agent yet. Set it up with context_metacognition_configure (dry_run first)."
               : "Not a metacognition agent yet, and its instructions have no approved version: runs would be skipped until a reviewer approves the document.",
           }))
           .sort((a, b) => a.node_id.localeCompare(b.node_id));
@@ -186,7 +234,7 @@ export async function runMetacognitionTool(
         }
         return { text: lines.join("\n"), data: { agents, unconfigured } };
       }
-      case "metacognition_configure": {
+      case "context_metacognition_configure": {
         // The PUT body is exactly its own fields: nothing a wrapper adds to the
         // call (nest, client, confirm_billing, …) reaches parseConfig.
         const { dry_run } = args;
@@ -220,7 +268,14 @@ export async function runMetacognitionTool(
           data: { dry_run: false, saved: true, agent, summary },
         };
       }
-      case "metacognition_run": {
+      case "context_metacognition_suggest": {
+        const suggestion = await suggestAgentConfig(ctx.nestId, agentArg(args));
+        return {
+          text: `Suggested config for ${agentArg(args)} — nothing saved.\n\n${JSON.stringify(suggestion, null, 2)}`,
+          data: { suggestion },
+        };
+      }
+      case "context_metacognition_run": {
         const started = await runAgent({
           nestId: ctx.nestId,
           nodeId: agentArg(args),
@@ -232,7 +287,7 @@ export async function runMetacognitionTool(
           data: started,
         };
       }
-      case "metacognition_remove": {
+      case "context_metacognition_remove": {
         await removeAgent(ctx.nestId, agentArg(args));
         return {
           text: `${agentArg(args)} is no longer a metacognition agent. The document stays.`,

@@ -476,10 +476,11 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_instructions_update",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
   // action; only advertised while both feature flags are on (mcp/routes.ts).
-  "metacognition_list",
-  "metacognition_configure",
-  "metacognition_run",
-  "metacognition_remove",
+  "context_metacognition_list",
+  "context_metacognition_suggest",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool

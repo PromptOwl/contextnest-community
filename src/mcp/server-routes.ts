@@ -19,7 +19,7 @@
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
- * Metacognition (`metacognition_list` / `_configure` / `_run` / `_remove`, nest
+ * Metacognition (`context_metacognition_list` / `_suggest` / `_configure` / `_run` / `_remove`, nest
  * required) is offered to people who own or administer a nest while its flags
  * are on, and re-checked on the named nest per call.
  *
@@ -98,9 +98,9 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_request_access",
   "context_task_log",
   "context_bulk_update",
-  "metacognition_configure",
-  "metacognition_run",
-  "metacognition_remove",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -977,9 +977,10 @@ Streamable HTTP, stateless. Two endpoints:
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too — also on
-    \`${B}/mcp\` with \`nest\`): \`metacognition_list\`, \`metacognition_configure\`
+    \`${B}/mcp\` with \`nest\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
+    (a starting config read off the agent document), \`context_metacognition_configure\`
     (call with \`dry_run: true\` first and show the person the returned \`summary\`
-    before saving), \`metacognition_run\`, \`metacognition_remove\`; stats via
+    before saving), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
     \`workflow_runs_list { agent, agent_stats: true }\`
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`

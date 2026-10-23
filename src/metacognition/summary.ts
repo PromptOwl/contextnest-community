@@ -1,7 +1,7 @@
 /**
  * A metacognition agent's config in plain words — what an MCP harness shows the
- * person before it saves one (metacognition_configure dry_run), and the line
- * metacognition_list gives each agent.
+ * person before it saves one (context_metacognition_configure dry_run), and the line
+ * context_metacognition_list gives each agent.
  *
  * Pure: the parsed config in, one paragraph out. The wording follows the scope
  * semantics in config.ts exactly — read empty = the whole nest, propose [] =

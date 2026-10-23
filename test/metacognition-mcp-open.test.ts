@@ -45,9 +45,9 @@ afterAll(async () => {
 describe("open mode, server-level /mcp", () => {
   it("offers the metacognition tools and serves them on a named nest", async () => {
     const names = ((await mcp("tools/list", {})).result?.tools ?? []).map((t: any) => t.name);
-    expect(names).toContain("metacognition_configure");
+    expect(names).toContain("context_metacognition_configure");
     const r = await mcp("tools/call", {
-      name: "metacognition_configure",
+      name: "context_metacognition_configure",
       arguments: { nest: nestId, agent: "nodes/archivist", persona: { name: "Archivist" }, dry_run: true },
     });
     expect(r.result?.isError).not.toBe(true);
