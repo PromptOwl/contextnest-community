@@ -83,6 +83,8 @@ export function ReviewTab({
   // First page from the cache; later pages accumulate here. A write that
   // drops keys.feed re-reads page one and resets the rest.
   const firstPage = useFeedComments(nestId, enabled);
+  // Roster for comment author names — same cached read as the comments panel.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled });
   const [morePages, setMorePages] = useState<api.FeedCommentItem[]>([]);
   const [feedLoadingMore, setFeedLoadingMore] = useState(false);
   const firstComments = (firstPage.data?.items ?? []).filter(
@@ -403,6 +405,7 @@ export function ReviewTab({
         // Feed mode (interleaved comment rows) except on the Changes
         // chip, which renders the legacy changes-only queue untouched.
         comments={feedFilter === "changes" ? undefined : feedComments}
+        people={roster?.people}
         onSelectComment={(cm) =>
           onOpenDocument(cm.nodeId, { thread: cm.threadId })
         }

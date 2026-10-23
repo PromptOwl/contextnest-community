@@ -47,7 +47,7 @@ import {
   discoverForSearch,
   titleScore,
 } from "./nodes/search.js";
-import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
+import { resolveCallerEmail, filterAccessible, canReadNode } from "./governance/access-guard.js";
 import { assertSoleNodePatchRoute, credentialMayContribute } from "./governance/org-contribution.js";
 import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
@@ -3559,6 +3559,23 @@ export function createApp(): Hono<AuthEnv> {
   // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
   nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
     assertSafeNodeId(c.req.param("nodeId")!);
+    return next();
+  });
+
+  // A browser opening a node's API URL (a pasted or agent-written link) gets
+  // the app's document page, not raw JSON. Such links often drop the `nodes/`
+  // id prefix, so that form is tried too. Anything else falls through (CU-wdqcq05rah).
+  nestsApp.get("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    if (c.req.header("Sec-Fetch-Dest") !== "document" || new URL(c.req.url).search) return next();
+    const nestId = c.req.param("nestId")!;
+    const raw = c.req.param("nodeId")!;
+    const userEmail = await resolveCallerEmail(c.get("userId"));
+    const { storage } = await engineCache.get(nestId);
+    for (const id of raw.startsWith("nodes/") ? [raw] : [raw, `nodes/${raw}`]) {
+      if (!(await canReadNode(nestId, id, c.get("userId"), userEmail))) continue;
+      const found = await storage.readDocument(id).then(() => true, () => false);
+      if (found) return c.redirect(`/nest/${encodeURIComponent(nestId)}?${new URLSearchParams({ doc: id })}`, 302);
+    }
     return next();
   });
 

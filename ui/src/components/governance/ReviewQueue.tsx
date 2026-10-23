@@ -29,6 +29,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { parseServerDate } from "@/lib/dates";
 import { showPriorityBadge } from "../../lib/review-pane";
+import { displayNameFor } from "../../lib/person-name";
 
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
@@ -88,6 +89,8 @@ interface ReviewQueueProps {
   onToggleSelect?: (nodeId: string) => void;
   /** The change open in the review pane, highlighted in the list. */
   activeNodeId?: string | null;
+  /** Nest roster, so comment rows show a name instead of the email. */
+  people?: Array<{ email: string; name: string | null }>;
 }
 
 const priorityConfig: Record<
@@ -127,6 +130,7 @@ export function ReviewQueue({
   selectedNodeIds,
   onToggleSelect,
   activeNodeId,
+  people,
 }: ReviewQueueProps) {
   // Feed mode (comments provided, even if empty): interleave change rows and
   // comment rows newest-first. Legacy mode keeps the server's priority order
@@ -276,13 +280,13 @@ export function ReviewQueue({
                         )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1" title={c.author}>
                           <Avatar className="h-4 w-4">
                             <AvatarFallback className="text-[8px]">
-                              {c.author[0]?.toUpperCase() || "?"}
+                              {displayNameFor(c.author, people)[0]?.toUpperCase() || "?"}
                             </AvatarFallback>
                           </Avatar>
-                          <span>{c.author}</span>
+                          <span>{displayNameFor(c.author, people)}</span>
                         </div>
                         <span>•</span>
                         <Clock className="h-3 w-3" />

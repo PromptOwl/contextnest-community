@@ -30,6 +30,7 @@ import { MentionTextarea, CommentBody } from "./MentionTextarea";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import { formatServerDate } from "../lib/dates";
 import { splitThreads } from "../lib/comment-threads";
+import { displayNameFor } from "../lib/person-name";
 
 interface Props {
   nestId: string;
@@ -265,8 +266,8 @@ export function AnnotationsPanel({
       {t.comments.length > 0 && (
         <div className="text-sm">
           <div className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">
-              {t.comments[0].author}
+            <span className="font-medium text-foreground" title={t.comments[0].author}>
+              {displayNameFor(t.comments[0].author, members)}
             </span>{" "}
             · {when(t.comments[0].createdAt)}
             {t.comments[0].runId && (
@@ -284,7 +285,9 @@ export function AnnotationsPanel({
           {t.comments.slice(1).map((c) => (
             <li key={c.id} className="text-sm">
               <div className="text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{c.author}</span>{" "}
+                <span className="font-medium text-foreground" title={c.author}>
+                  {displayNameFor(c.author, members)}
+                </span>{" "}
                 replied · {when(c.createdAt)}
                 {c.runId && (
                   <>
