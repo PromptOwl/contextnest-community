@@ -92,6 +92,33 @@ Prime documents carry a **Prime** badge in the nest's document list, with a tool
 
 Flipping any of this only affects **future** writes. Marking a published document prime doesn't unpublish it; the next edit is what needs approval.
 
+## Always-include documents (standing instructions)
+
+CONTEXT.md is pulled: an agent reads it only if it calls `context_init`. **Always-include** documents are pushed. Their approved text, with CONTEXT.md, reaches every agent and model that enters the nest, however it connects: the MCP connect message (`initialize`) on both the per-nest and server-wide endpoints, `context_init`, Hootie, metacognition agents and workflow run bundles. Use it for the rules you need present everywhere, such as house style, compliance constraints, or "never quote prices".
+
+### How a document becomes always-include
+
+Same scope order as prime, first match wins:
+
+| # | Scope | How it's set |
+|---|-------|--------------|
+| 1 | **Document** | The **Always include** switch in the document editor (owner/admin only). `true` includes it; `false` **exempts** this one doc from an always-include tag. |
+| 2 | **Tag** | The doc carries one of the nest's **always-include tags** (Settings → Always-include tags; `always-include` out of the box). |
+| 3 | **Nest** | Nothing matched → not included. |
+
+Changing the tag set or a document's flag is an owner/admin act.
+
+### What's guaranteed
+
+- **Approved text only.** The server injects the approved version, and it reads whether a document is always-include from that approved version. A draft, including one that adds the tag, injects nothing until a steward approves it.
+- **Always-include means prime.** In a governed nest every change to an always-include document goes through draft → pending → approved, even for an owner with auto-publish on, and `prime: false` can't exempt it. The rules agents are given can't change without a second person. (With stewardship off, nothing is reviewed and the latest published text is what's injected — so anyone who can edit the nest can add the tag, or change an always-include document, and their text reaches every agent at once. Turn stewardship on before relying on always-include.)
+- **Readers get only what they may read.** Each caller receives the always-include documents they can read. Someone reaching the nest through a document share gets only the shared ones.
+- **Bounded.** 24,000 characters, in node-id order. A document that doesn't fit is listed by title and id, never cut mid-text, and smaller documents after it still go in.
+
+### The honest limit
+
+For outside clients (Claude Code, Cursor, …) the server guarantees the rules are **delivered**. MCP's `instructions` field is what most clients put into the model's system prompt, but the server can't make an outside model **obey** them. For the models this server runs itself (Hootie, metacognition agents), it owns the system prompt. For workflow runs it hands the runner the block to put there.
+
 ## Creators review their own documents (`creator_is_reviewer`)
 
 A per-nest flag (**off** by default; nest Settings → "Creators review their own documents") for the GitHub posture: anyone with write access creates documents, and the person who created a document is the one who approves changes to it.

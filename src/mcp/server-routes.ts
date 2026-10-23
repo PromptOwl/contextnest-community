@@ -69,6 +69,7 @@ import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../a
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
+import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -615,10 +616,12 @@ function createServerMcp(
   c: Context<AuthEnv>,
   headless = false,
   capability: "read" | "write" = "write",
+  /** Returned in the `initialize` result (connect-instructions.ts). */
+  instructions?: string,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
   const toolDefs = headless
@@ -683,16 +686,33 @@ export const serverMcpRoutes = new Hono<AuthEnv>();
 serverMcpRoutes.all("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
+  const baseUrl = requestBaseUrl(c.req.url);
+  // Every readable nest's standing instructions, on the initialize request
+  // only (CU-wdqcq05rn0). The index is the same scoped, deduped list
+  // nest_index serves, so a nest-scoped key hears about its nest alone.
+  let instructions: string | undefined;
+  if (await isInitializeRequest(c.req.raw)) {
+    try {
+      instructions = await serverConnectInstructions(
+        await buildNestIndex(userId, c.get("nestScope")),
+        { userId, userEmail },
+        baseUrl,
+      );
+    } catch (err) {
+      console.error("[mcp] server connect instructions unavailable", err);
+    }
+  }
   const server = createServerMcp(
     userId,
     userEmail,
     c.get("nestScope"),
-    requestBaseUrl(c.req.url),
+    baseUrl,
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
     c,
     await isHeadlessIdentity(userId),
     c.get("keyCapability") ?? "write",
+    instructions,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -852,7 +872,7 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
-  - read: \`context_init\` (operating instructions — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
   - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
@@ -865,6 +885,11 @@ Streamable HTTP, stateless. Two endpoints:
   — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
   (\`nodes/gtm/deals\`). The recipient reaches exactly that document, or
   everything under that folder, and nothing else in the nest. Owner/admin only.
+
+Both endpoints answer \`initialize\` with \`instructions\`: the nest's CONTEXT.md
+(per-nest) and the approved text of its **always-include** documents — the
+standing rules for any work in the nest, filtered to what these credentials can
+read. Most clients put them in the system prompt; follow them.
 
 Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`Authorization: Bearer\` header. Claude Desktop needs the mcp-remote bridge:

@@ -1037,6 +1037,9 @@ export interface NestSettings {
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** Tags that mark a document always-include: its approved text is pushed
+   *  to every agent and model entering the nest. Default ["always-include"]. */
+  always_include_tags?: string[];
   /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
@@ -1050,10 +1053,21 @@ export interface NestSettings {
 
 // ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
 
+/** An always-include document as the instructions page reports it. */
+export interface StandingRef {
+  id: string;
+  title: string;
+  version: number;
+}
+
 export async function getInstructions(nestId: string) {
-  return request<{ content: string; revision: InstructionsRevision | null }>(
-    `/nests/${nestId}/instructions`,
-  );
+  return request<{
+    content: string;
+    revision: InstructionsRevision | null;
+    /** The always-include documents agents receive with these instructions
+     *  (those this reader can read); `overflow` is past the size budget. */
+    always_included?: { documents: StandingRef[]; overflow: StandingRef[] };
+  }>(`/nests/${nestId}/instructions`);
 }
 
 /** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
@@ -1104,6 +1118,7 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    always_include_tags?: string[];
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
@@ -1221,15 +1236,32 @@ export async function removeFromAllowlist(
 /**
  * Does this document need steward approval regardless of who edits it?
  * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
- * the badge is advisory, the server gate is authoritative.
+ * the badge is advisory, the server gate is authoritative. An always-include
+ * document is prime whatever its own prime flag says.
  */
 export function isPrimeNode(
-  node: { tags?: string[]; prime?: boolean },
+  node: { tags?: string[]; prime?: boolean; always_include?: boolean },
   primeTags: string[],
+  alwaysIncludeTags: string[] = [],
 ): boolean {
+  if (isAlwaysIncludeNode(node, alwaysIncludeTags)) return true;
   if (typeof node.prime === "boolean") return node.prime;
   if (!primeTags.length) return false;
   const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
+  );
+}
+
+/** Same resolution as the server's `isAlwaysIncludeDocument`: the document
+ *  flag, else the nest's always-include tags. */
+export function isAlwaysIncludeNode(
+  node: { tags?: string[]; always_include?: boolean },
+  alwaysIncludeTags: string[],
+): boolean {
+  if (typeof node.always_include === "boolean") return node.always_include;
+  if (!alwaysIncludeTags.length) return false;
+  const wanted = new Set(alwaysIncludeTags);
   return (node.tags || []).some((t) =>
     wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
@@ -1891,6 +1923,9 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Push this document to every agent entering the nest (it becomes
+     *  prime too). Owner/admin only. */
+    always_include?: boolean;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
     assignee?: string | null;
     due?: string | null;
@@ -1976,6 +2011,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Owner/admin only; `null` clears it back to the always-include tags. */
+    always_include?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */

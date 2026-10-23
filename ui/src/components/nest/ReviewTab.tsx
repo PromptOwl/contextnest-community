@@ -50,6 +50,7 @@ interface Props {
   canEditDocs: boolean;
   /** Prime documents can't take approve-with-edits. */
   primeTags: string[];
+  alwaysIncludeTags?: string[];
   onResolveDeletion: (request: api.DeletionRequest, action: "delete" | "decline") => void;
   /** Your own pending submission back to Draft. */
   onWithdrawSubmission: (nodeId: string) => void;
@@ -73,6 +74,7 @@ export function ReviewTab({
   currentUser,
   canEditDocs,
   primeTags,
+  alwaysIncludeTags = [],
   onResolveDeletion,
   onWithdrawSubmission,
 }: Props) {
@@ -507,6 +509,7 @@ export function ReviewTab({
           currentUser={currentUser}
           canEditDocs={canEditDocs}
           primeTags={primeTags}
+          alwaysIncludeTags={alwaysIncludeTags}
           onApprove={(note) =>
             decideAndAdvance(openRequest.nodeId, () => onApproveReview(openRequest.nodeId, note))
           }
