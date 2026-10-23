@@ -514,6 +514,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
+| Document uploads — MCP `context_upload` (pdf/pptx/docx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
 | `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
@@ -1293,7 +1294,7 @@ A node with a pending review is frozen — `423` — for callers who can't clear
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
 ### POST `/nests/:nestId/nodes/pdf`
-Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Or the JSON body from [Uploading files](#uploading-files) with the same fields (`tags` as an array or a comma-separated string). Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
 
@@ -1310,7 +1311,7 @@ The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?a
 Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
 
 ### POST `/nests/:nestId/nodes/office`
-Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The text is extracted into the document body:
 - **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
@@ -1327,16 +1328,16 @@ The original file behind an Office document. Read permission, and the caller mus
 Headers: the Office `Content-Type`, `Content-Disposition: attachment` (always — never inline), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). The link survives a move of the document, since it names the file, not the node.
 
 ### POST `/nests/:nestId/assets`
-Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
+Upload of an image or video referenced from documents: multipart (field `file`), or the JSON body described in [Uploading files](#uploading-files). Write permission.
 
 Supported types and per-type size caps:
 
 | Type | Extensions | Max size |
 |------|-----------|----------|
 | Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB |
-| Video | `mp4`, `webm` | 100 MB |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) |
 
-SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
+SVG is deliberately not accepted (stored-XSS surface). An unsupported type or a file over its cap is a `400` that names the allowed types and caps. Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
 
 ### GET `/nests/:nestId/assets/:file`
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
@@ -1352,6 +1353,37 @@ Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_
 - `DELETE` (write) → the fresh `GET` shape. `404` unless the relation touches `:nodeId`.
 
 Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
+
+---
+
+## Uploading files
+
+Three routes take files, by what the file becomes. One allowlist and one set of caps covers all of them and the MCP `context_upload` tool:
+
+| File | Extensions | Max size | Route | Becomes |
+|---|---|---|---|---|
+| Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB | `POST /nests/:id/assets` | an asset; reference it with the returned `markdown` |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) | `POST /nests/:id/assets` | an asset; the returned `markdown` is its URL on its own line |
+| PDF | `pdf` (judged by its `%PDF-` bytes on the PDF route) | 25 MB (`PDF_MAX_MB`) | `POST /nests/:id/nodes/pdf` | a governed `pdf` document with its text extracted |
+| PowerPoint / Word | `pptx`, `docx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
+
+SVG, HTML, executables, legacy `.ppt`/`.doc` and everything else are refused with a `400` listing the types above. Document uploads are governed exactly like `POST /nodes` (a draft in a governed nest).
+
+**Multipart or JSON.** Each route takes multipart (field `file`, plus the route's other fields) or, with `Content-Type: application/json`, a body naming the bytes so a script never has to build multipart:
+
+```json
+{ "filename": "q3-deck.pptx", "content_base64": "UEsDBBQABgAIAAAAIQ…", "title": "Q3 deck", "folder": "decks", "tags": ["q3"] }
+```
+```json
+{ "url": "https://files.example.com/q3-deck.pptx", "folder": "decks" }
+```
+
+- Send exactly one of `content_base64` or `url`. `filename` is required with `content_base64` — its extension decides the type — and defaults to the URL's file name with `url`. A `data:…;base64,` prefix and line breaks in the base64 are accepted.
+- `content_base64` is refused on its decoded size before it is decoded. It travels inside the request, so the route's request ceiling (its file cap plus 1 MB) applies to the base64 text, which is a third larger than the file: base64 reaches about three quarters of the cap — use `url` or multipart for files near it.
+- `url` is fetched by the server: `https://` only, no credentials in the URL, and the host's addresses are checked when the connection is opened — loopback, private (RFC 1918, CGNAT, IPv6 ULA), link-local and cloud-metadata addresses are refused, including a public name that resolves to one, with no second lookup to rebind. Redirects are not followed (`400` — pass the final URL). The download is refused when its `Content-Length` is over the cap and torn down when the body passes it, before anything is buffered; it times out after 120 seconds. Not routed through `HTTPS_PROXY`, so the address check can't be bypassed by the proxy's resolver.
+- On a nest that holds agent writes (`require_push_confirmation`), a **document** upload from an API key is refused with `403` — a pending push carries markdown, not a file — unless the key is always-allowed. Session-cookie uploads from the web app and asset uploads are not affected.
+
+**MCP: `context_upload`.** `{ filename?, content_base64? | url?, title?, folder?, tags?, as? }`, write tier (the same create check as `context_create`; a read-only key or a viewer gets `UNAUTHORIZED_ACTION`). Routed by extension through the same service as the routes above: an image or video comes back as `{ kind, file, url, markdown }`; a PDF or Office file creates the governed document and comes back as `{ kind, id, title, type, version, status, markdown: "[[Title]]", original? }`. `as: "asset" | "document"` is an optional check that refuses a file of the other kind. Like `context_create`, a title already used anywhere in the nest is refused, and on a nest that holds agent writes a document upload is refused (assets still upload). The base64 rides in the MCP request, which is capped at `MAX_BODY_BYTES` (default 10 MB, about 7.5 MB of file) — use `url` for anything bigger. Also on the server-level `/mcp` endpoint (with `nest`).
 
 ---
 

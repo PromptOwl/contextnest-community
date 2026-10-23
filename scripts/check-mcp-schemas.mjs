@@ -34,8 +34,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   55->58 boards + bulk update; 58->59 context_task_log; 59->61 headless + systems (CU-wdqcq0538g);
 //   61->63 instructions history/update (CU-wdqcq05mty; instructions_revisions table);
 //   63->68 metacognition list/suggest/configure/run/remove (CU-wdqcq05rqq; metacognition_agents table).
+// Repo upload routes, not engine ops (asset store + /nodes/pdf + /nodes/office):
+//   68->69 context_upload (community-nest-upload-files-over-mcp-without-handling-binaries).
 // 52->56 server-level write tools (CU-wdqcq02cxu), then 56->45 once they derived from per-nest.
-const BASELINE = 68;
+const BASELINE = 69;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

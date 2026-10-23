@@ -640,6 +640,7 @@ Startup logs the proxy in use (credentials masked), or says why a configured pro
 - SMTP (nodemailer opens its own TCP connection) and PostgreSQL.
 - AWS SES, which goes through the AWS SDK's HTTP client.
 - **Metacognition agent feeds and MCP servers — on purpose.** Those URLs come from agent configuration, so the server resolves each host itself and refuses private addresses (`169.254.169.254`, `10.x`, …) at connect time. Through a proxy, the proxy would do the resolving and that check would never run. If your network only allows egress via the proxy, these agent fetches fail closed rather than bypass the check.
+- **File uploads by URL** (`url` on the upload routes and MCP `context_upload`) — the same fetch and the same check, for the same reason; the private-address fence is always on for these, whatever `METACOGNITION_ALLOW_PRIVATE_URLS` says.
 
 Give those direct egress, or put them on a path the firewall allows.
 
@@ -655,6 +656,7 @@ Outbound destinations to allow, through the proxy or the firewall:
 | Your SMTP server | 25 / 465 / 587 | Email notifications — **direct, not proxied** | `SMTP_URL` |
 | Your PostgreSQL server | 5432 | Database, when not SQLite — **direct, not proxied** | `DATABASE_URL` / `DB_HOST` |
 | Hosts your metacognition agents read (feeds, MCP servers) | 443 | Agent research — **direct, never proxied** (SSRF check) | Agent configuration |
+| Hosts files are uploaded from by URL | 443 | `url` uploads — **direct, never proxied** (SSRF check) | The caller |
 
 ### Hosted / commercial SaaS
 
