@@ -228,6 +228,8 @@ export function suggestConfig(input: SuggestInput): Suggestion {
       feeds,
       mcp_servers: [],
       model: null,
+      // Who to notify is the owner's pick, never the document's.
+      notify: { recipients: [], channels: [], max_per_run: CAPS.max_notifications.default },
     },
     why,
     mcp_candidates: mcp,

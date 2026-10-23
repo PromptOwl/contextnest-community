@@ -37,6 +37,7 @@ import {
   type Effort,
   type FormState,
 } from "../lib/metacognition-form";
+import { MetacognitionNotifySection } from "./MetacognitionNotifySection";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -555,6 +556,7 @@ export function MetacognitionForm({
       {SECTIONS.map((Section, i) => (
         <Section key={Section === AdvancedSection ? `adv-${fillKey}` : i} {...props} />
       ))}
+      <MetacognitionNotifySection nestId={nestId} value={form.notify} onChange={(notify) => setForm((f) => ({ ...f, notify }))} />
 
       {problems.length > 0 && (
         <ul className="text-xs text-amber-700 dark:text-amber-400 list-disc pl-5" data-testid="metacognition-problems">

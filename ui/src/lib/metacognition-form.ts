@@ -10,6 +10,7 @@
  * edits (comments only); propose ["*"] = anywhere it reads.
  */
 import type { MetacognitionAgentConfig, MetacognitionSuggestion } from "./api";
+import { EMPTY_NOTIFY, toNotifyConfig, toNotifyDraft, type NotifyDraft } from "../components/MetacognitionNotifySection";
 
 export interface Caps {
   max_steps: number;
@@ -100,6 +101,7 @@ export interface FormState {
   feeds: FeedRow[];
   mcp: McpRow[];
   model: string;
+  notify: NotifyDraft;
 }
 
 export function emptyForm(node_id: string, title: string): FormState {
@@ -116,6 +118,7 @@ export function emptyForm(node_id: string, title: string): FormState {
     feeds: [],
     mcp: [],
     model: "",
+    notify: EMPTY_NOTIFY,
   };
 }
 
@@ -152,6 +155,7 @@ export function formFromConfig(node_id: string, enabled: boolean, c: Metacogniti
       auth_env: m.auth_env ?? "",
     })),
     model: c.model ?? "",
+    notify: toNotifyDraft(c.notify),
   };
 }
 
@@ -172,6 +176,7 @@ export function configFromForm(f: FormState): MetacognitionAgentConfig & { enabl
       ...(r.auth_env.trim() ? { auth_env: r.auth_env.trim() } : {}),
     })),
     model: f.model.trim() || null,
+    notify: toNotifyConfig(f.notify),
   };
 }
 
@@ -264,8 +269,10 @@ export function applySuggestion(
         model: f.model,
         feeds: [...f.feeds, ...fromDoc.feeds.filter((r) => !f.feeds.some((o) => o.url === r.url))],
         mcp: [...f.mcp, ...candidates.filter((r) => !f.mcp.some((o) => o.url === r.url))],
+        notify: f.notify,
       }
-    : { ...fromDoc, mcp: candidates };
+    : // The document never chooses who gets notified; that stays the owner's.
+      { ...fromDoc, mcp: candidates, notify: f.notify };
   return { form, prefilled: prefilledFrom(s) };
 }
 

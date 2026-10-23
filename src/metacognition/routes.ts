@@ -16,9 +16,10 @@ import { getDb } from "../db/client.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { engineCache } from "../nodes/engine.js";
-import { parseConfig } from "./config.js";
+import { parseConfig, CAPS } from "./config.js";
 import { suggestConfig } from "./suggest.js";
 import { listNestFolders } from "../nodes/service.js";
+import { notifyMembers } from "./notify.js";
 import { resolveExportBody } from "../nodes/readable-body.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { startMetacognitionRun } from "./service.js";
@@ -60,6 +61,8 @@ function toResponse(a: MetacognitionAgent) {
     // auth_env is a NAME of an env value, never the value — safe to return.
     mcp_servers: a.config.mcp_servers,
     model: a.config.model,
+    // Configs saved before notify existed have no block: off.
+    notify: a.config.notify ?? { recipients: [], channels: [], max_per_run: CAPS.max_notifications.default },
     // The owner: who set it up (or took it over when they could no longer
     // run it). Saving the settings does not change it.
     configured_by: a.created_by,
@@ -174,7 +177,8 @@ metacognitionRoutes.put("/:nodeId{.+}", requireMetacognition, async (c) => {
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     throw new ValidationError("enabled must be true or false");
   }
-  const parsed = parseConfig(body);
+  // Notify recipients must be on the nest now; the run checks them again.
+  const parsed = parseConfig(body, { members: new Set((await notifyMembers(nestId)).keys()) });
   const agent = await upsertAgent({
     nestId,
     nodeId,

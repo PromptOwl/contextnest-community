@@ -33,6 +33,8 @@ const base: MetacognitionAgentConfig = {
   feeds: [],
   mcp_servers: [],
   model: null,
+  // The server always returns a notify block; no recipients = off.
+  notify: { recipients: [], channels: [], max_per_run: 3 },
 };
 
 describe("effort presets", () => {
@@ -93,9 +95,14 @@ describe("form ⇄ config", () => {
           { name: "wiki", url: "https://wiki.example.com/mcp", allowed_tools: ["read"] },
         ],
         model: "claude-sonnet-5",
+        notify: { recipients: [], channels: [], max_per_run: 3 },
       },
     ],
     ["a folder the nest no longer has", { ...base, scope: { read: ["gone"], propose: ["gone"] } }],
+    [
+      "notify on: people and both channels",
+      { ...base, notify: { recipients: ["owner", "ann@example.com"], channels: ["email", "connectors"], max_per_run: 5 } },
+    ],
   ];
 
   for (const [label, cfg] of configs) {
@@ -285,5 +292,23 @@ describe("review round 6", () => {
 
   it("calls the cost a rough figure, not a ceiling", () => {
     expect(effortText(PRESETS.standard)).toMatch(/roughly \$0\.90/);
+  });
+});
+
+describe("notify (merged with CU-wdqcq05rkq)", () => {
+  const notify = { recipients: ["owner"], channels: ["email" as const], max_per_run: 2 };
+  const suggestion = { config: base, why: {}, mcp_candidates: [], instructions: "approved" as const };
+
+  it("a suggestion never changes who it may notify, new setup or re-suggest", () => {
+    const f = formFromConfig("nodes/a", true, { ...base, notify });
+    for (const keepSettings of [true, false]) {
+      expect(configFromForm(applySuggestion(f, suggestion, { keepSettings }).form).notify).toEqual(notify);
+    }
+  });
+
+  it("picking another document turns notify off", async () => {
+    const { pickDocument } = await import("./metacognition-form");
+    const f = formFromConfig("nodes/a", true, { ...base, notify });
+    expect(configFromForm(pickDocument(f, "nodes/b", "Bee")).notify?.recipients).toEqual([]);
   });
 });

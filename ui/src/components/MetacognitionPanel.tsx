@@ -48,7 +48,9 @@ export function RunCost({ trace }: { trace: MetacognitionTrace | null | undefine
   const total = u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0;
   return (
     <span className="text-muted-foreground" data-testid="metacognition-run-cost">
-      {trace.proposals ?? 0} proposal{trace.proposals === 1 ? "" : "s"} · {tokens(total)} tokens
+      {trace.proposals ?? 0} proposal{trace.proposals === 1 ? "" : "s"} ·{" "}
+      {trace.notifications ? `${trace.notifications} notification${trace.notifications === 1 ? "" : "s"} · ` : ""}
+      {tokens(total)} tokens
       {typeof trace.est_cost_usd === "number" ? ` · ~$${trace.est_cost_usd.toFixed(3)}` : ""} ·{" "}
       {trace.billing === "own_key" ? "your key (not billed by PromptOwl)" : "PromptOwl credits"}
       {trace.stopped_by && trace.stopped_by !== "end_turn" ? ` · stopped: ${trace.stopped_by.replace(/_/g, " ")}` : ""}
