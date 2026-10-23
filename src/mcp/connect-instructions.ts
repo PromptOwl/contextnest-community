@@ -17,6 +17,7 @@ import {
   alwaysIncludeDocs,
   fitBudget,
   newBudget,
+  PER_DOCUMENT_OVERHEAD,
   readableAlwaysInclude,
   renderStandingInstructions,
   type StandingCaller,
@@ -42,7 +43,10 @@ export async function isInitializeRequest(req: Request): Promise<boolean> {
   const length = Number(req.headers.get("content-length"));
   if (Number.isFinite(length) && length > MAX_INITIALIZE_BYTES) return false;
   try {
-    const body = (await req.clone().json()) as unknown;
+    // No content-length (chunked, in-process) → read the clone, but stop past the cap.
+    const text = await readCapped(req.clone(), MAX_INITIALIZE_BYTES);
+    if (text === null) return false;
+    const body = JSON.parse(text) as unknown;
     const msgs = Array.isArray(body) ? body : [body];
     return msgs.some(
       (m) => !!m && typeof m === "object" && (m as { method?: unknown }).method === "initialize",
@@ -50,6 +54,26 @@ export async function isInitializeRequest(req: Request): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The body as text, or null once it passes `max` bytes. */
+async function readCapped(req: Request, max: number): Promise<string | null> {
+  const reader = req.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      // Not awaited: a tee branch's cancel settles only once the transport's branch is done.
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function clipContextMd(text: string): string {
@@ -93,8 +117,8 @@ export async function nestConnectInstructions(
  * Server-wide endpoint: every readable nest's always-include documents under
  * ONE budget, nests in name order, plus a pointer to the per-nest endpoint's
  * `context_init` (which this endpoint doesn't have). Nests resolve a few at a
- * time (each is cached until its approvals change); the budget is then spent
- * in order. A nest that can't be resolved is named, not silently skipped.
+ * time, spending the budget in order; once nothing more can fit, the rest
+ * aren't resolved, only counted. A nest that can't be resolved is named.
  */
 export async function serverConnectInstructions(
   nests: Array<{ id: string; name: string }>,
@@ -104,27 +128,29 @@ export async function serverConnectInstructions(
   const ordered = [...nests].sort(
     (a, b) => a.name.localeCompare(b.name, "en") || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
-  // Resolved without a budget (filtered to the caller), then fitted in order.
-  const resolved: Array<StandingDocument[] | null> = new Array(ordered.length).fill(null);
-  for (let i = 0; i < ordered.length; i += NEST_CONCURRENCY) {
-    await Promise.all(
-      ordered.slice(i, i + NEST_CONCURRENCY).map(async (n, j) => {
-        try {
-          resolved[i + j] = await readableAlwaysInclude(n.id, caller);
-        } catch (err) {
-          console.error(`[mcp] ${n.id}: standing instructions unavailable`, err);
-        }
-      }),
-    );
-  }
   const budget = newBudget();
   const sections: StandingSection[] = [];
   const failed: string[] = [];
-  ordered.forEach((n, i) => {
-    const docs = resolved[i];
-    if (docs === null) failed.push(n.name);
-    else sections.push({ nest: n, set: fitBudget(docs, budget) });
-  });
+  let checked = 0;
+  // Stop once no document could fit what's left of the budget.
+  while (checked < ordered.length && budget.remaining >= PER_DOCUMENT_OVERHEAD) {
+    const batch = ordered.slice(checked, checked + NEST_CONCURRENCY);
+    const resolved = await Promise.all(
+      batch.map((n) =>
+        readableAlwaysInclude(n.id, caller).catch((err): StandingDocument[] | null => {
+          console.error(`[mcp] ${n.id}: standing instructions unavailable`, err);
+          return null;
+        }),
+      ),
+    );
+    batch.forEach((n, j) => {
+      const docs = resolved[j];
+      if (docs === null) failed.push(n.name);
+      else sections.push({ nest: n, set: fitBudget(docs, budget) });
+    });
+    checked += batch.length;
+  }
+  const unchecked = ordered.length - checked;
   const lines = [
     "Each nest has operating instructions (CONTEXT.md). Before working in a nest, read them: " +
       `connect to ${baseUrl}/nests/<nest-id>/mcp and call context_init (nest_index lists the ids).`,
@@ -134,6 +160,12 @@ export async function serverConnectInstructions(
     fetchHint: "read them with context_get and the nest argument",
   });
   if (block) lines.push("", block);
+  if (unchecked) {
+    lines.push(
+      "",
+      `The budget is spent; ${unchecked} more nest${unchecked === 1 ? " was" : "s were"} not checked for standing instructions — connect to that nest's own endpoint, or call context_init there.`,
+    );
+  }
   if (failed.length) {
     lines.push(
       "",

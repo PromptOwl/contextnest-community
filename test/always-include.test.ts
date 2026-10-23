@@ -441,6 +441,48 @@ describe("the size budget", () => {
   });
 });
 
+describe("server-wide budget", () => {
+  it("stops resolving nests once the budget is spent, and counts the rest", async () => {
+    const { serverConnectInstructions } = await import("../src/mcp/connect-instructions.js");
+    const full = await governedNest("AA Full");
+    // Text + title + 80 overhead = exactly the 24,000-char budget.
+    const d = await createDoc(editor, { title: "Full", content: "F".repeat(24_000 - 80 - 4), tags: ["always-include"] }, full);
+    await approve(editor, d.id, full);
+    const later = await governedNest("AB Later");
+    const l = await createDoc(editor, { title: "Later", content: "LATER-RULE-TEXT", tags: ["always-include"] }, later);
+    await approve(editor, l.id, later);
+    // Nests resolve 8 at a time: the 9th falls in a batch that never runs.
+    const laters = Array.from({ length: 8 }, (_, i) => ({ id: later, name: `AB Later ${i}` }));
+    const text = await serverConnectInstructions(
+      [...laters, { id: full, name: "AA Full" }],
+      { userId: owner.userId, userEmail: owner.email },
+      "http://x",
+    );
+    expect(text).not.toContain("LATER-RULE-TEXT");
+    expect(text).toContain("1 more nest was not checked");
+  });
+});
+
+describe("ungoverned nest", () => {
+  it("injects an editor's self-published tagged document — nothing is reviewed", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Open Nest" }, owner.apiKey);
+    const open = data.nest.id as string;
+    await jsonRequest(app, "POST", `/nests/${open}/collaborators`, { email: editor.email, permission: "write" }, owner.apiKey);
+    await createDoc(editor, { title: "Open Rules", content: "OPEN-RULE-TEXT", tags: ["always-include"] }, open);
+    expect(await initialize(`/nests/${open}/mcp`, owner.apiKey)).toContain("OPEN-RULE-TEXT");
+  });
+});
+
+describe("isInitializeRequest", () => {
+  it("reads a body with no content-length, but not past the cap", async () => {
+    const { isInitializeRequest } = await import("../src/mcp/connect-instructions.js");
+    const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    expect(await isInitializeRequest(new Request("http://x/", { method: "POST", body: init }))).toBe(true);
+    const padded = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { pad: "x".repeat(20_000) } });
+    expect(await isInitializeRequest(new Request("http://x/", { method: "POST", body: padded }))).toBe(false);
+  });
+});
+
 describe("the nest instructions page", () => {
   it("tells the reader which documents are always included", async () => {
     const r = await jsonRequest(app, "GET", `/nests/${nestId}/instructions`, undefined, owner.apiKey);

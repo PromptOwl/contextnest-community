@@ -49,7 +49,7 @@ const MAX_OVERFLOW_LISTED = 50;
 
 /** What a document costs on top of its text: the fence, id, version and title
  *  line the block wraps it in. */
-const PER_DOCUMENT_OVERHEAD = 80;
+export const PER_DOCUMENT_OVERHEAD = 80;
 
 /**
  * Resolved sets, per nest, keyed by a fingerprint of everything the result
@@ -57,10 +57,13 @@ const PER_DOCUMENT_OVERHEAD = 80;
  * pin. The decision and the text both come from approved versions, so the
  * fingerprint changes exactly when the answer can — an approval, a heal, a
  * move, a delete, a tag-setting change — and a cache hit skips the rebuilds.
- * Bounded; the oldest nest is evicted first.
+ * Bounded: at most MAX_CACHED_NESTS nests of MAX_CACHED_CHARS each (worst
+ * case ≈ 200 × 48k chars ≈ 19 MB); the oldest nest is evicted first, and a
+ * nest with more text than that is rebuilt on every call instead.
  */
 const resolvedCache = new Map<string, { fingerprint: string; docs: StandingDocument[] }>();
 const MAX_CACHED_NESTS = 200;
+const MAX_CACHED_CHARS = 2 * ALWAYS_INCLUDE_BUDGET_CHARS;
 
 function fingerprintOf(tags: string[], approved: Map<string, number>): string {
   const pins = [...approved.entries()]
@@ -108,7 +111,7 @@ async function approvedAlwaysInclude(nestId: string): Promise<StandingDocument[]
   if (hit && hit.fingerprint === fingerprint) return hit.docs;
   const { docs, complete } = await resolveApprovedAlwaysInclude(nestId, approved, tags);
   // A rebuild that failed may succeed next time; only a clean result is kept.
-  if (complete) {
+  if (complete && docs.reduce((n, d) => n + d.content.length, 0) <= MAX_CACHED_CHARS) {
     resolvedCache.delete(nestId);
     resolvedCache.set(nestId, { fingerprint, docs });
     if (resolvedCache.size > MAX_CACHED_NESTS) {
@@ -317,7 +320,7 @@ export function renderStandingInstructions(
   if (overflow.length) {
     lines.push(
       "",
-      `Also always-include, but past the ${ALWAYS_INCLUDE_BUDGET_CHARS.toLocaleString("en-US")}-character budget, so not included here — ${opts.fetchHint}:`,
+      `Also always-include, but past the size budget, so not included here — ${opts.fetchHint}:`,
     );
     for (const o of overflow.slice(0, MAX_OVERFLOW_LISTED)) {
       lines.push(`- ${oneLine(o.title)} (${o.id}, v${o.version}${o.nest ? `, nest ${o.nest}` : ""})`);

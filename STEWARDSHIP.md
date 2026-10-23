@@ -111,7 +111,7 @@ Changing the tag set or a document's flag is an owner/admin act.
 ### What's guaranteed
 
 - **Approved text only.** The server injects the approved version, and it reads whether a document is always-include from that approved version. A draft, including one that adds the tag, injects nothing until a steward approves it.
-- **Always-include means prime.** In a governed nest every change to an always-include document goes through draft → pending → approved, even for an owner with auto-publish on, and `prime: false` can't exempt it. The rules agents are given can't change without a second person. (With stewardship off, nothing is reviewed and the latest published text is what's injected.)
+- **Always-include means prime.** In a governed nest every change to an always-include document goes through draft → pending → approved, even for an owner with auto-publish on, and `prime: false` can't exempt it. The rules agents are given can't change without a second person. (With stewardship off, nothing is reviewed and the latest published text is what's injected — so anyone who can edit the nest can add the tag, or change an always-include document, and their text reaches every agent at once. Turn stewardship on before relying on always-include.)
 - **Readers get only what they may read.** Each caller receives the always-include documents they can read. Someone reaching the nest through a document share gets only the shared ones.
 - **Bounded.** 24,000 characters, in node-id order. A document that doesn't fit is listed by title and id, never cut mid-text, and smaller documents after it still go in.
 
