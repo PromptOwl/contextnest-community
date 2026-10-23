@@ -1,8 +1,7 @@
-# Proposed .github/workflows/deploy.yml (move it there; the Claude app cannot write to .github/workflows).
-#
-# Manual deploy (Actions -> Deploy (Cloud Run) -> Run workflow): pick `dev` or `prod`,
-# optionally a ref. Builds the image, pushes it to Artifact Registry, and rolls the
+# Deploy to Cloud Run. Builds the image, pushes it to Artifact Registry, and rolls the
 # environment's Cloud Run service to it.
+#   - Push to `development` (i.e. a merged PR) auto-deploys `dev`.
+#   - Manual (Actions -> Deploy (Cloud Run) -> Run workflow): pick `dev` or `prod`, optionally a ref.
 #
 # Env vars are deliberately NOT managed here. `gcloud run deploy --image` keeps
 # the service's existing env vars, secrets, volumes, Cloud SQL and VPC settings,
@@ -22,6 +21,8 @@
 name: Deploy (Cloud Run)
 
 on:
+  push:
+    branches: [development]
   workflow_dispatch:
     inputs:
       environment:
@@ -36,7 +37,7 @@ on:
         required: false
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-${{ inputs.environment || 'dev' }}
   cancel-in-progress: false
 
 permissions:
@@ -46,9 +47,9 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: ${{ inputs.environment || 'dev' }}
     env:
-      ENVIRONMENT: ${{ inputs.environment }}
+      ENVIRONMENT: ${{ inputs.environment || 'dev' }}
       PROJECT: ${{ vars.GCP_PROJECT }}
       REGION: ${{ vars.GCP_REGION || 'us-central1' }}
       SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
