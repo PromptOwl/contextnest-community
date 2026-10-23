@@ -51,7 +51,11 @@ import {
   nestReviewsPrimeOnly,
   nestCreatorIsReviewer,
 } from "../nests/service.js";
-import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
+import {
+  isPrimeDocument,
+  documentPrimeFlag,
+  documentAlwaysIncludeFlag,
+} from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
 import {
@@ -471,6 +475,9 @@ export interface NodeResponse extends TaskFields {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
+   *  doc inherits from the nest's `always_include_tags`. */
+  always_include?: boolean;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
@@ -659,6 +666,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     model:
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
@@ -1595,6 +1603,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Document-scope always-include flag — see `isAlwaysIncludeDocument`.
+   *  Owner/admin only, like `prime`. */
+  alwaysInclude?: boolean;
   /** Caller attribution recorded on the version this create seals (§9.4).
    *  Optional everywhere — an unattributed write is a valid write. */
   client?: ClientMetadata;
@@ -1623,6 +1634,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Document-scope always-include flag. `null` clears it back to the tags. */
+  alwaysInclude?: boolean | null;
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1734,12 +1747,13 @@ async function actorAutoPublishes(
  */
 async function assertMayFlagPrime(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  what = "prime flag",
 ): Promise<void> {
   const roles = await resolveUserRoles(nestId, userEmail);
   if (!roles.includes("owner") && !roles.includes("admin")) {
     throw new ForbiddenError(
-      "Only the nest owner or an admin can change a document's prime flag."
+      `Only the nest owner or an admin can change a document's ${what}.`
     );
   }
 }
@@ -1962,12 +1976,21 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    // Always-include pushes this document to every agent entering the nest,
+    // so flagging it is a governance act too (CU-wdqcq05rn0).
+    if (input.alwaysInclude !== undefined) {
+      if (typeof input.alwaysInclude !== "boolean") {
+        throw new ValidationError("always_include must be true or false");
+      }
+      await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+    }
     const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
     };
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
@@ -2744,6 +2767,20 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.alwaysInclude !== undefined) {
+        if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {
+          throw new ValidationError("always_include must be true, false or null");
+        }
+        await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.alwaysInclude === null) delete metadata.always_include;
+        else metadata.always_include = patch.alwaysInclude;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          always_include: patch.alwaysInclude,
+        };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(

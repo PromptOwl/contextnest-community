@@ -85,6 +85,7 @@ import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
 import { NestPageHeader } from "./NestPageHeader";
 import { MetacognitionPanel, RunCost } from "./MetacognitionPanel";
+import { canManageMetacognition } from "../lib/metacognition-form";
 
 interface Props {
   nestId: string;
@@ -145,13 +146,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
     setTab("run");
   };
   const { metacognitionEnabled } = useAuth();
-  // Configuring an agent takes owner/admin on the nest (the server enforces it).
+  // Metacognition agents are owner/admin only, for every action: a writer
+  // doesn't see the Agents tab at all.
   const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
   const permission = (nestMeta as { permission?: string } | undefined)?.permission;
-  const canConfigureAgents = permission === "owner" || permission === "admin";
-  // Metacognition is owner/admin only for every action (CU-wdqcq05rqq): a
-  // writer would get 403s, so the tab isn't shown to them at all.
-  const showAgents = metacognitionEnabled && canConfigureAgents;
+  const showAgents = canManageMetacognition(metacognitionEnabled, permission);
 
   return (
     <div>
@@ -188,7 +187,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         </TabsContent>
         {showAgents && (
           <TabsContent value="agents" className="mt-4">
-            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} onOpenRun={openRun} />
+            <MetacognitionPanel nestId={nestId} onOpenRun={openRun} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="mt-4 space-y-6">

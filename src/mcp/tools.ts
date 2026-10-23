@@ -9,6 +9,7 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
 import {
   canReadNode,
@@ -514,7 +515,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
     description:
-      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines. Call this FIRST in every conversation.",
+      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines, followed by the nest's always-include documents (standing instructions, approved versions). Call this FIRST in every conversation.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -2109,9 +2110,13 @@ async function runTool(
         {},
         await opContext(nestId, userEmail),
       );
-      if (!context_md)
-        return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
+      // The nest's always-include documents follow CONTEXT.md (CU-wdqcq05rn0):
+      // the same approved, access-filtered set the connect message carries.
+      const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
+      const head = context_md
+        ? `# Vault Instructions (CONTEXT.md)\n\n${context_md}`
+        : "No CONTEXT.md found. Use context_overview to see what's available.";
+      return standing ? `${head}\n\n${standing}` : head;
     }
 
     case "context_instructions_history": {

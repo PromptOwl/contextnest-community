@@ -29,6 +29,7 @@ import {
   Eye,
   SlidersHorizontal,
   ChevronRight,
+  Megaphone,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -39,6 +40,8 @@ interface NestSettingsModalProps {
   allowSelfApprove: boolean;
   primeOnlyReview: boolean;
   primeTags: string[];
+  /** Tags whose documents are pushed to every agent (always-include). */
+  alwaysIncludeTags?: string[];
   /** Push Confirmation Gate (superadmin-set). */
   requirePushConfirmation: boolean;
   /** True only for a server superadmin — gates the push-confirmation switch. */
@@ -60,6 +63,7 @@ interface NestSettingsModalProps {
     allowSelfApprove: boolean;
     primeOnlyReview: boolean;
     primeTags: string[];
+    alwaysIncludeTags: string[];
     requirePushConfirmation: boolean;
     creatorIsReviewer: boolean;
     reviewSlaHours: number | null;
@@ -74,6 +78,7 @@ export function NestSettingsModal({
   allowSelfApprove,
   primeOnlyReview,
   primeTags,
+  alwaysIncludeTags = ["always-include"],
   requirePushConfirmation,
   isServerAdmin,
   creatorIsReviewer,
@@ -90,6 +95,7 @@ export function NestSettingsModal({
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
   const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
+  const [alwaysIncludeText, setAlwaysIncludeText] = useState(alwaysIncludeTags.join(", "));
   const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
   // Text, not a number: an empty box means "off", and the field must allow
   // the transient empty state while someone retypes it.
@@ -162,14 +168,16 @@ export function NestSettingsModal({
 
   // Normalized the same way the server does, so the dirty check below doesn't
   // fire on cosmetic differences ("#Prime, " vs "prime").
-  const nextPrimeTags = [
+  const tagList = (text: string) => [
     ...new Set(
-      primeTagText
+      text
         .split(",")
         .map((t) => t.trim().replace(/^#+/, "").toLowerCase())
         .filter(Boolean),
     ),
   ];
+  const nextPrimeTags = tagList(primeTagText);
+  const nextAlwaysIncludeTags = tagList(alwaysIncludeText);
 
   const handleSave = async () => {
     const stewardshipChanged = enabled !== stewardshipEnabled;
@@ -177,6 +185,8 @@ export function NestSettingsModal({
     const primeOnlyChanged = primeOnly !== primeOnlyReview;
     const primeTagsChanged =
       nextPrimeTags.join(",") !== primeTags.join(",");
+    const alwaysIncludeTagsChanged =
+      nextAlwaysIncludeTags.join(",") !== alwaysIncludeTags.join(",");
     // Only a superadmin may change this; never send it otherwise (a per-field
     // 403 would otherwise reject the whole PATCH for a non-superadmin).
     const pushConfirmChanged =
@@ -198,6 +208,7 @@ export function NestSettingsModal({
       !selfApproveChanged &&
       !primeOnlyChanged &&
       !primeTagsChanged &&
+      !alwaysIncludeTagsChanged &&
       !pushConfirmChanged &&
       !creatorReviewsChanged &&
       !slaChanged &&
@@ -214,6 +225,7 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
+        ...(alwaysIncludeTagsChanged ? { always_include_tags: nextAlwaysIncludeTags } : {}),
         ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
         ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
         ...(slaChanged ? { review_sla_hours: nextSla } : {}),
@@ -243,6 +255,7 @@ export function NestSettingsModal({
         allowSelfApprove: result.allow_self_approve,
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
+        alwaysIncludeTags: result.always_include_tags ?? nextAlwaysIncludeTags,
         requirePushConfirmation: result.require_push_confirmation,
         creatorIsReviewer: result.creator_is_reviewer,
         reviewSlaHours: result.review_sla_hours ?? null,
@@ -459,6 +472,31 @@ export function NestSettingsModal({
                 editor, which overrides its tags.
               </p>
             </div>
+          </div>
+          )}
+
+          {/* Always include — any nest, governed or not: what every agent is
+              told when it connects (CU-wdqcq05rn0). */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-1">
+            <Label className="flex items-center gap-2 text-sm font-medium">
+              <Megaphone className="h-4 w-4" />
+              Always-include tags
+            </Label>
+            <Input
+              value={alwaysIncludeText}
+              onChange={(e) => setAlwaysIncludeText(e.target.value)}
+              placeholder="always-include"
+              data-testid="nest-settings-always-include-tags"
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma-separated. The approved text of any document carrying one
+              of these tags, with the nest instructions, goes to every agent
+              and model that works in this nest — MCP connections, Hootie,
+              agents and workflow runs. They are also prime: with stewardship
+              on, a change to them needs steward approval. A single document
+              can also be switched on or off from its editor.
+            </p>
           </div>
           )}
 

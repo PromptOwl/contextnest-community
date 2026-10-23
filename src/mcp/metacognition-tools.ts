@@ -210,9 +210,9 @@ export async function runMetacognitionTool(
           savedBy: await resolveCallerEmail(ctx.userId),
         });
         // Summarized from what was stored, so it describes the saved agent.
-        const { persona, scope, caps, feeds, mcp_servers, model, enabled } = agent;
+        const { persona, scope, caps, feeds, mcp_servers, model, notify, enabled } = agent;
         const summary = summarizeConfig(
-          { persona: { name: persona.name, avatar: persona.avatar }, scope, caps, feeds, mcp_servers, model },
+          { persona: { name: persona.name, avatar: persona.avatar }, scope, caps, feeds, mcp_servers, model, notify },
           { enabled },
         );
         return {

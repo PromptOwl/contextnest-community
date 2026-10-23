@@ -245,6 +245,7 @@ nodeRoutes.post("/", async (c) => {
     model?: string;
     folder?: string;
     prime?: boolean;
+    always_include?: boolean;
     client?: unknown;
     assignee?: string | null;
     due?: string | null;
@@ -287,6 +288,7 @@ nodeRoutes.post("/", async (c) => {
             model: body.model,
             folder: body.folder,
             prime: body.prime,
+            alwaysInclude: body.always_include,
             ...customFieldsFromBody(body),
           },
         ],
@@ -308,6 +310,7 @@ nodeRoutes.post("/", async (c) => {
       model: body.model,
       folder: body.folder,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
@@ -710,6 +713,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     schedule?: string;
     model?: string;
     prime?: boolean | null;
+    always_include?: boolean | null;
     client?: unknown;
     type?: string;
     assignee?: string | null;
@@ -757,6 +761,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       schedule: body.schedule,
       model: body.model,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       type: body.type,
       ...taskFieldsFromInput(body),

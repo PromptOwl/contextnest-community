@@ -1037,6 +1037,9 @@ export interface NestSettings {
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** Tags that mark a document always-include: its approved text is pushed
+   *  to every agent and model entering the nest. Default ["always-include"]. */
+  always_include_tags?: string[];
   /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
@@ -1050,10 +1053,21 @@ export interface NestSettings {
 
 // ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
 
+/** An always-include document as the instructions page reports it. */
+export interface StandingRef {
+  id: string;
+  title: string;
+  version: number;
+}
+
 export async function getInstructions(nestId: string) {
-  return request<{ content: string; revision: InstructionsRevision | null }>(
-    `/nests/${nestId}/instructions`,
-  );
+  return request<{
+    content: string;
+    revision: InstructionsRevision | null;
+    /** The always-include documents agents receive with these instructions
+     *  (those this reader can read); `overflow` is past the size budget. */
+    always_included?: { documents: StandingRef[]; overflow: StandingRef[] };
+  }>(`/nests/${nestId}/instructions`);
 }
 
 /** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
@@ -1104,6 +1118,7 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    always_include_tags?: string[];
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
@@ -1221,15 +1236,32 @@ export async function removeFromAllowlist(
 /**
  * Does this document need steward approval regardless of who edits it?
  * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
- * the badge is advisory, the server gate is authoritative.
+ * the badge is advisory, the server gate is authoritative. An always-include
+ * document is prime whatever its own prime flag says.
  */
 export function isPrimeNode(
-  node: { tags?: string[]; prime?: boolean },
+  node: { tags?: string[]; prime?: boolean; always_include?: boolean },
   primeTags: string[],
+  alwaysIncludeTags: string[] = [],
 ): boolean {
+  if (isAlwaysIncludeNode(node, alwaysIncludeTags)) return true;
   if (typeof node.prime === "boolean") return node.prime;
   if (!primeTags.length) return false;
   const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
+  );
+}
+
+/** Same resolution as the server's `isAlwaysIncludeDocument`: the document
+ *  flag, else the nest's always-include tags. */
+export function isAlwaysIncludeNode(
+  node: { tags?: string[]; always_include?: boolean },
+  alwaysIncludeTags: string[],
+): boolean {
+  if (typeof node.always_include === "boolean") return node.always_include;
+  if (!alwaysIncludeTags.length) return false;
+  const wanted = new Set(alwaysIncludeTags);
   return (node.tags || []).some((t) =>
     wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
@@ -1891,6 +1923,9 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Push this document to every agent entering the nest (it becomes
+     *  prime too). Owner/admin only. */
+    always_include?: boolean;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
     assignee?: string | null;
     due?: string | null;
@@ -1976,6 +2011,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Owner/admin only; `null` clears it back to the always-include tags. */
+    always_include?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
@@ -4335,6 +4372,15 @@ export interface MetacognitionAgentConfig {
   feeds: Array<{ name: string; url: string }>;
   mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
   model: string | null;
+  /** Who it may notify (CU-wdqcq05rkq). Empty recipients = off. */
+  notify?: MetacognitionNotifyConfig;
+}
+
+/** "owner" = the nest owner, "reviewers" = its reviewers, else a member's email. */
+export interface MetacognitionNotifyConfig {
+  recipients: string[];
+  channels: Array<"email" | "connectors">;
+  max_per_run: number;
 }
 
 export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
@@ -4358,6 +4404,7 @@ export interface MetacognitionTrace {
   };
   est_cost_usd?: number | null;
   proposals?: number;
+  notifications?: number;
   stopped_by?: string;
   summary?: string;
   skipped?: string;
@@ -4381,6 +4428,28 @@ export async function saveMetacognitionAgent(
   return r.agent;
 }
 
+/** GET /nests/:id/metacognition/:node/suggest — a starting config read off
+ *  the agent document (never saved), each field with a plain-words `why`. */
+export interface MetacognitionSuggestion {
+  config: MetacognitionAgentConfig;
+  why: Record<string, string>;
+  /** MCP links in the instructions; a person names their tools before saving. */
+  mcp_candidates: Array<{ name: string; url: string }>;
+  /** "none" when the document has no approved instructions yet. */
+  instructions: "approved" | "none";
+}
+
+export async function suggestMetacognitionConfig(nestId: string, nodeId: string) {
+  const r = await request<{ suggestion: MetacognitionSuggestion }>(`/nests/${nestId}/metacognition/${nodeId}/suggest`);
+  return r.suggestion;
+}
+
+/** GET /nests/:id/folders — every folder path in the nest (no documents). */
+export async function listNestFolderPaths(nestId: string) {
+  const r = await request<{ folders: Array<{ path: string; count: number; total: number }> }>(`/nests/${nestId}/folders`);
+  return r.folders.map((f) => f.path);
+}
+
 export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
 }
@@ -4400,6 +4469,7 @@ export interface AgentRunSummary {
   approved: number;
   rejected: number;
   comments: number;
+  notifications?: number;
   error: string | null;
 }
 
@@ -4419,6 +4489,7 @@ export interface AgentStats {
     approval_rate: number | null;
   };
   comments: number;
+  notifications?: number;
   access_requests: number;
   blocked_by_scope: number;
   last_run_at: string | null;

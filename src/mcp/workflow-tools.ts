@@ -289,6 +289,7 @@ export async function runWorkflowTool(
         triggeredBy,
         storage: ctx.storage,
         parentRunId: args.parent_run_id,
+        userId: ctx.userId,
       });
       return json(bundle);
     }

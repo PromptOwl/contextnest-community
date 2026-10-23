@@ -16,7 +16,11 @@ import { getDb } from "../db/client.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { engineCache } from "../nodes/engine.js";
 import { isSystemUser } from "../auth/systems.js";
-import { parseConfig, type MetacognitionConfig } from "./config.js";
+import { parseConfig, CAPS, type MetacognitionConfig } from "./config.js";
+import { suggestConfig } from "./suggest.js";
+import { notifyMembers } from "./notify.js";
+import { listNestFolders } from "../nodes/service.js";
+import { resolveExportBody } from "../nodes/readable-body.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { agentStats } from "./stats.js";
 
@@ -73,6 +77,8 @@ export function agentView(a: MetacognitionAgent) {
     // auth_env is a NAME of an env value, never the value — safe to return.
     mcp_servers: a.config.mcp_servers,
     model: a.config.model,
+    // Configs saved before notify existed have no block: off.
+    notify: a.config.notify ?? { recipients: [], channels: [], max_per_run: CAPS.max_notifications.default },
     // The owner: who set it up (or took it over when they could no longer
     // run it). Saving the settings does not change it.
     configured_by: a.created_by,
@@ -113,6 +119,17 @@ export async function validateAgentConfig(
   body: Record<string, unknown>,
 ): Promise<{ nodeId: string; config: MetacognitionConfig; enabled: boolean }> {
   const nodeId = assertSafeNodeId(rawNodeId);
+  await readAgentDoc(nestId, nodeId);
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+    throw new ValidationError("enabled must be true or false");
+  }
+  // Notify recipients must be on the nest now; the run checks them again.
+  const parsed = parseConfig(body, { members: new Set((await notifyMembers(nestId)).keys()) });
+  return { nodeId, config: parsed, enabled: body.enabled !== false };
+}
+
+/** The agent document behind a config; 400 when there is none, or it isn't an agent. */
+async function readAgentDoc(nestId: string, nodeId: string) {
   const { storage } = await engineCache.get(nestId);
   let doc;
   try {
@@ -124,10 +141,26 @@ export async function validateAgentConfig(
   if ((doc.frontmatter.type || "document") !== "agent") {
     throw new ValidationError(`${nodeId} is a "${doc.frontmatter.type || "document"}" — only an agent document can be a metacognition agent.`);
   }
-  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
-    throw new ValidationError("enabled must be true or false");
-  }
-  return { nodeId, config: parseConfig(body), enabled: body.enabled !== false };
+  return doc;
+}
+
+/**
+ * A starting config read off the agent document (CU-wdqcq05rkp); saves
+ * nothing. It reads the approved instructions — the text a run reads — so an
+ * unreviewed draft can't widen the suggested scope.
+ */
+export async function suggestAgentConfig(nestId: string, rawNodeId: string) {
+  const nodeId = assertSafeNodeId(rawNodeId);
+  const doc = await readAgentDoc(nestId, nodeId);
+  const instructions = await resolveExportBody(nestId, nodeId, doc.body || "");
+  const folders = (await listNestFolders(nestId)).map((f) => f.path);
+  const suggestion = suggestConfig({
+    title: String(doc.frontmatter.title || nodeId.replace(/^nodes\//, "")),
+    frontmatter: { ...doc.frontmatter } as Record<string, unknown>,
+    instructions,
+    folders,
+  });
+  return { ...suggestion, instructions: instructions === null ? ("none" as const) : ("approved" as const) };
 }
 
 export async function configureAgent(opts: {

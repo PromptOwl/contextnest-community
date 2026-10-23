@@ -21,6 +21,7 @@ import {
   removeAgent,
   runAgent,
   agentStatsFor,
+  suggestAgentConfig,
 } from "./manage.js";
 
 export { ownerCanRun } from "./manage.js";
@@ -66,6 +67,14 @@ metacognitionRoutes.get("/:nodeId{.+}/stats", requireMetacognition, async (c) =>
   // Existence before the query params, as before: a bad agent is a 404 first.
   await getAgentView(nestId, nodeId);
   return c.json({ stats: await agentStatsFor(nestId, nodeId, { days: num("days"), limit: num("limit") }) });
+});
+
+// A starting config for the setup form to prefill (CU-wdqcq05rkp); saves
+// nothing. Registered before GET /:nodeId so the catch-all doesn't swallow
+// "/suggest" (as with "/stats").
+metacognitionRoutes.get("/:nodeId{.+}/suggest", requireMetacognition, async (c) => {
+  requireMetacognitionAdmin(c.get("nestPermission"));
+  return c.json({ suggestion: await suggestAgentConfig(c.req.param("nestId")!, c.req.param("nodeId")!) });
 });
 
 metacognitionRoutes.get("/:nodeId{.+}", requireMetacognition, async (c) => {
