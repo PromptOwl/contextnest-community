@@ -6,10 +6,14 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  adminSettingsAfterSave,
   buildConfigureBody,
   draftFromPlugin,
   pluginFields,
+  pluginFormKey,
   pluginRole,
+  pluginRoleFromNest,
+  savePluginConfig,
   roleAllows,
   runCounts,
   runTrigger,
@@ -21,6 +25,7 @@ import {
   nestPluginHealth,
   removeNestPlugin,
   runNestPlugin,
+  type AdminSettings,
   type NestPlugin,
 } from "./api";
 import { githubMarkdown, memoConfigured, pluginsResponse } from "./nest-plugins.fixtures";
@@ -252,5 +257,90 @@ describe("plugins API client (mocked responses)", () => {
   it("a refused configure surfaces the server's words", async () => {
     mock({ error: "Only a nest owner or admin can configure plugins on this nest." }, 403);
     await expect(configureNestPlugin("n1", "memo", { enabled: true })).rejects.toThrow(/owner or admin/);
+  });
+});
+
+describe("review follow-ups", () => {
+  it("pluginRoleFromNest: null until the nest read lands, typed fields only", () => {
+    expect(pluginRoleFromNest(undefined)).toBeNull();
+    expect(pluginRoleFromNest({ permission: "owner", nest: { archived_at: null } })).toBe("admin");
+    expect(pluginRoleFromNest({ permission: "owner", nest: { archived_at: "2026-10-01" } })).toBe("viewer");
+    expect(pluginRoleFromNest({ permission: "write" }, { isArchived: true })).toBe("viewer");
+  });
+
+  it("replacing a stored secret: the form key still changes after the save, so the typed token is dropped", () => {
+    // The server answers "••••" before and after a replace — settings look identical.
+    const before = pluginFormKey(memoConfigured, 0);
+    const after = pluginFormKey({ ...memoConfigured, settings: { ...memoConfigured.settings } }, 1);
+    expect(after).not.toBe(before);
+    expect(pluginFormKey(memoConfigured, 1)).toBe(pluginFormKey({ ...memoConfigured }, 1));
+    // A changed config from elsewhere changes it too.
+    expect(pluginFormKey({ ...memoConfigured, folder: "x" }, 0)).not.toBe(before);
+  });
+
+  it("savePluginConfig: invalid never calls the server", async () => {
+    const configure = vi.fn();
+    const out = await savePluginConfig("n1", githubMarkdown, draftFromPlugin(githubMarkdown), { enabled: true }, configure);
+    expect(out).toEqual({ kind: "invalid", errors: { repo: "Required" } });
+    expect(configure).not.toHaveBeenCalled();
+  });
+
+  it("savePluginConfig: a replaced secret goes out once, and the saved plugin comes back", async () => {
+    const configure = vi.fn(async () => ({ plugin: memoConfigured }));
+    const d = draftFromPlugin(memoConfigured);
+    d.values.token = "new-secret";
+    const out = await savePluginConfig("n1", memoConfigured, d, {}, configure);
+    expect(out).toEqual({ kind: "saved", plugin: memoConfigured });
+    expect(configure).toHaveBeenCalledWith("n1", "memo", { folder: null, settings: { prefix: "Memo", token: "new-secret" } });
+    // The fresh form for the saved plugin holds no secret.
+    expect(draftFromPlugin(out.kind === "saved" ? out.plugin : memoConfigured).values.token).toBe("");
+  });
+
+  it("savePluginConfig: a refusal is the server's words, not a throw", async () => {
+    const configure = vi.fn(async () => {
+      throw new Error("memo: prefix is required");
+    });
+    const d = draftFromPlugin(memoConfigured);
+    expect(await savePluginConfig("n1", memoConfigured, d, {}, configure)).toEqual({ kind: "refused", message: "memo: prefix is required" });
+  });
+
+  it("booleans: sent only when they differ from what is in effect", () => {
+    const p: NestPlugin = {
+      ...githubMarkdown,
+      settingsSchema: { type: "object", properties: { on: { type: "boolean", default: true } } },
+      secretKeys: [],
+    };
+    const d = draftFromPlugin(p);
+    expect(d.values.on).toBe(true);
+    let r = buildConfigureBody(p, d);
+    expect(r.ok && r.body.settings).toEqual({});
+    d.values.on = false;
+    r = buildConfigureBody(p, d);
+    expect(r.ok && r.body.settings).toEqual({ on: false });
+    const stored: NestPlugin = { ...p, settings: { on: false } };
+    const d2 = draftFromPlugin(stored);
+    expect(d2.values.on).toBe(false);
+    r = buildConfigureBody(stored, d2);
+    expect(r.ok && r.body.settings).toEqual({});
+    d2.values.on = true;
+    r = buildConfigureBody(stored, d2);
+    expect(r.ok && r.body.settings).toEqual({ on: true });
+  });
+
+  it("adminSettingsAfterSave: re-reads GET when plugin settings moved, keeps the lists otherwise", async () => {
+    const loaded = [{ name: "memo", version: "0.0.1", displayName: "Memo", capabilities: ["pull"] }];
+    const saved = { community_name: "x" } as unknown as AdminSettings;
+    const prev = { plugins_loaded: loaded, plugins_load_errors: [] } as unknown as AdminSettings;
+    const fresh = { community_name: "x", plugins_loaded: [], plugins_load_errors: [{ spec: "@a/b", error: "nope" }] } as unknown as AdminSettings;
+    const refetch = vi.fn(async () => fresh);
+    expect(await adminSettingsAfterSave({ plugins_packages: "@a/b" }, saved, prev, refetch)).toBe(fresh);
+    expect(refetch).toHaveBeenCalledTimes(1);
+    const kept = await adminSettingsAfterSave({ community_name: "x" }, saved, prev, refetch);
+    expect(refetch).toHaveBeenCalledTimes(1);
+    expect(kept.plugins_loaded).toBe(loaded);
+    const failing = vi.fn(async () => {
+      throw new Error("down");
+    });
+    expect(await adminSettingsAfterSave({ plugins_enabled: true }, saved, prev, failing)).toBe(saved);
   });
 });

@@ -25,8 +25,7 @@ import { NestPluginsList, type PluginBusy } from "./NestPluginsList";
 import * as api from "../../lib/api";
 import type { NestPlugin, NestPluginsResponse, PluginRun } from "../../lib/api";
 import { keys, reads } from "../../lib/queries";
-import { isNestArchived } from "../../lib/nest-caps";
-import { buildConfigureBody, pluginRole, runToast, type PluginDraft, type PluginRole } from "../../lib/nest-plugins";
+import { pluginRoleFromNest, runToast, savePluginConfig, type PluginDraft } from "../../lib/nest-plugins";
 
 interface Props {
   nestId: string;
@@ -42,16 +41,16 @@ export function PluginsPage({ nestId, nestName, isArchived, onBack, openDocument
   const qc = useQueryClient();
   const list = useQuery(reads.plugins(nestId));
   const nest = useQuery(reads.nest(nestId));
-  // Until the nest read lands the page is read-only, never a form that vanishes.
-  const role: PluginRole = nest.data
-    ? pluginRole((nest.data as any).permission, { isArchived: isArchived || isNestArchived((nest.data as any).nest) })
-    : "viewer";
+  // null until the nest read lands: the page waits rather than showing a
+  // read-only form that turns editable a moment later.
+  const role = pluginRoleFromNest(nest.data, { isArchived });
 
   const [busy, setBusy] = useState<PerPlugin<PluginBusy>>({});
   const [health, setHealth] = useState<PerPlugin<{ ok: boolean; detail?: string }>>({});
   const [errors, setErrors] = useState<PerPlugin<string>>({});
   const [fieldErrors, setFieldErrors] = useState<PerPlugin<Record<string, string>>>({});
   const [moreRuns, setMoreRuns] = useState<PerPlugin<PluginRun[]>>({});
+  const [revisions, setRevisions] = useState<PerPlugin<number>>({});
   const [removing, setRemoving] = useState<NestPlugin | null>(null);
   useEffect(() => {
     setBusy({});
@@ -59,33 +58,29 @@ export function PluginsPage({ nestId, nestName, isArchived, onBack, openDocument
     setErrors({});
     setFieldErrors({});
     setMoreRuns({});
+    setRevisions({});
   }, [nestId]);
 
   const mark = (name: string, b: PluginBusy | undefined) => setBusy((m) => ({ ...m, [name]: b }));
-  const replace = (next: NestPlugin) =>
+  const replace = (next: NestPlugin) => {
     qc.setQueryData<NestPluginsResponse>(keys.plugins(nestId), (cur) =>
       cur ? { ...cur, plugins: cur.plugins.map((p) => (p.name === next.name ? next : p)) } : cur,
     );
+    // Start the form over from the server's state, typed secrets included.
+    setRevisions((m) => ({ ...m, [next.name]: (m[next.name] ?? 0) + 1 }));
+  };
 
   const save = async (plugin: NestPlugin, draft: PluginDraft, opts: { enabled?: boolean }) => {
-    const built = buildConfigureBody(plugin, draft, opts);
     setErrors((m) => ({ ...m, [plugin.name]: undefined }));
-    if (!built.ok) {
-      setFieldErrors((m) => ({ ...m, [plugin.name]: built.errors }));
-      return;
-    }
-    setFieldErrors((m) => ({ ...m, [plugin.name]: undefined }));
     mark(plugin.name, "save");
-    try {
-      const { plugin: next } = await api.configureNestPlugin(nestId, plugin.name, built.body);
-      replace(next);
-      setHealth((m) => ({ ...m, [plugin.name]: undefined }));
-      toast.success(opts.enabled ? `${plugin.displayName} is on` : `${plugin.displayName} saved`);
-    } catch (e: any) {
-      setErrors((m) => ({ ...m, [plugin.name]: e?.message || "Could not save" }));
-    } finally {
-      mark(plugin.name, undefined);
-    }
+    const out = await savePluginConfig(nestId, plugin, draft, opts, api.configureNestPlugin);
+    mark(plugin.name, undefined);
+    setFieldErrors((m) => ({ ...m, [plugin.name]: out.kind === "invalid" ? out.errors : undefined }));
+    if (out.kind === "refused") setErrors((m) => ({ ...m, [plugin.name]: out.message }));
+    if (out.kind !== "saved") return;
+    replace(out.plugin);
+    setHealth((m) => ({ ...m, [plugin.name]: undefined }));
+    toast.success(opts.enabled ? `${plugin.displayName} is on` : `${plugin.displayName} saved`);
   };
 
   const toggle = async (plugin: NestPlugin, enabled: boolean) => {
@@ -188,7 +183,7 @@ export function PluginsPage({ nestId, nestName, isArchived, onBack, openDocument
             </Button>
           </AlertDescription>
         </Alert>
-      ) : !list.data ? (
+      ) : !list.data || !role ? (
         <div className="py-12 text-center text-sm text-muted-foreground">Loading plugins…</div>
       ) : (
         <NestPluginsList
@@ -199,6 +194,7 @@ export function PluginsPage({ nestId, nestName, isArchived, onBack, openDocument
           errors={errors}
           fieldErrors={fieldErrors}
           moreRuns={moreRuns}
+          revisions={revisions}
           onSave={save}
           onToggle={toggle}
           onRun={run}

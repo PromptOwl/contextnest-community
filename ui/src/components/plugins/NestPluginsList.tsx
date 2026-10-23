@@ -14,7 +14,7 @@
  *   editor (write)    run
  *   viewer (read)     read settings (secrets masked) and run history
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -41,6 +41,7 @@ import {
   SECRET_MASK,
   draftFromPlugin,
   pluginFields,
+  pluginFormKey,
   roleAllows,
   runCounts,
   runTrigger,
@@ -64,6 +65,8 @@ export interface NestPluginsListProps {
   errors?: Record<string, string | undefined>;
   /** Field-level problems from the last save, per plugin name. */
   fieldErrors?: Record<string, Record<string, string> | undefined>;
+  /** Bumped per plugin on every successful save: resets that card's form. */
+  revisions?: Record<string, number | undefined>;
   /** Extra runs loaded past the list's last ten, per plugin name. */
   moreRuns?: Record<string, PluginRun[] | undefined>;
   onSave: (plugin: NestPlugin, draft: PluginDraft, opts: { enabled?: boolean }) => void;
@@ -252,7 +255,7 @@ function PluginCard({
   onCheckHealth,
   onLoadMoreRuns,
   onOpenDocument,
-}: Omit<NestPluginsListProps, "data" | "busy" | "health" | "errors" | "fieldErrors" | "moreRuns"> & {
+}: Omit<NestPluginsListProps, "data" | "busy" | "health" | "errors" | "fieldErrors" | "moreRuns" | "revisions"> & {
   plugin: NestPlugin;
   defaultOpen: boolean;
   busy?: PluginBusy;
@@ -265,10 +268,9 @@ function PluginCard({
   const canRun = roleAllows(role, "run");
   const fields = useMemo(() => pluginFields(plugin), [plugin]);
   const [open, setOpen] = useState(defaultOpen || plugin.configured);
+  // The list keys this card by pluginFormKey, so a save or a changed config
+  // remounts it and the form starts over from what the server holds.
   const [draft, setDraft] = useState(() => draftFromPlugin(plugin));
-  // A saved or refetched config resets the form to what the server holds.
-  const savedKey = JSON.stringify([plugin.configured, plugin.folder, plugin.settings]);
-  useEffect(() => setDraft(draftFromPlugin(plugin)), [savedKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const runs = moreRuns ?? plugin.runs;
   const canPull = plugin.faces.pull;
@@ -450,7 +452,7 @@ function PluginCard({
 }
 
 export function NestPluginsList(props: NestPluginsListProps) {
-  const { data, role, busy, health, errors, fieldErrors, moreRuns } = props;
+  const { data, role, busy, health, errors, fieldErrors, moreRuns, revisions } = props;
   const canConfigure = roleAllows(role, "configure");
   const canRun = roleAllows(role, "run");
   // A short list opens every card; a long one opens the ones in use.
@@ -497,7 +499,7 @@ export function NestPluginsList(props: NestPluginsListProps) {
       ) : (
         data.plugins.map((p) => (
           <PluginCard
-            key={p.name}
+            key={pluginFormKey(p, revisions?.[p.name])}
             role={role}
             onSave={props.onSave}
             onToggle={props.onToggle}

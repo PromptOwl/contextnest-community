@@ -6,7 +6,7 @@
  * tabs by role so the page stays short. Add a new setting to a tab's <Card>
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -50,6 +50,7 @@ import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { PluginsSettingsCard } from "./PluginsSettingsCard";
+import { adminSettingsAfterSave } from "../../../lib/nest-plugins";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -2658,6 +2659,8 @@ export default function SettingsRoute() {
   const qc = useQueryClient();
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
+  const serverSettingsRef = useRef(serverSettings);
+  serverSettingsRef.current = serverSettings;
   useEffect(() => {
     if (!isAdmin) return;
     getAdminSettings()
@@ -2671,15 +2674,7 @@ export default function SettingsRoute() {
       const res = await updateAdminSettings(patch);
       // What loaded from the plugin allowlist comes only with GET (the server
       // reloads the set on save), so re-read when the plugin settings moved.
-      if ("plugins_enabled" in patch || "plugins_packages" in patch) {
-        setServerSettings(await getAdminSettings().catch(() => res.settings));
-      } else {
-        setServerSettings((prev) => ({
-          ...res.settings,
-          plugins_loaded: prev?.plugins_loaded,
-          plugins_load_errors: prev?.plugins_load_errors,
-        }));
-      }
+      setServerSettings(await adminSettingsAfterSave(patch, res.settings, serverSettingsRef.current, getAdminSettings));
       // Feature flags gate other views (workflow-plane nav, sub-agent picker,
       // PromptOwl teams …) off the /health-sourced AuthContext state, not
       // serverSettings. Always re-read health after a save so ANY flag exposed

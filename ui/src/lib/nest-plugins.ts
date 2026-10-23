@@ -7,7 +7,7 @@
  * owner/admin; run: write; read: anyone with access). A mistake here is a
  * confusing button, never a security hole.
  */
-import type { ConfigurePluginBody, NestPlugin, PluginRun } from "./api";
+import type { AdminSettings, ConfigurePluginBody, NestPlugin, PluginRun } from "./api";
 
 /** The server sends a stored secret back as this, and only this. */
 export const SECRET_MASK = "••••";
@@ -23,6 +23,15 @@ export function pluginRole(
   if (permission === "owner" || permission === "admin") return "admin";
   if (permission === "write") return "editor";
   return "viewer";
+}
+
+/** The role from the nest read (GET /nests/:id); null until it lands. */
+export function pluginRoleFromNest(
+  meta: { permission?: string | null; nest?: { archived_at?: string | null } } | undefined,
+  opts: { isArchived?: boolean } = {},
+): PluginRole | null {
+  if (!meta) return null;
+  return pluginRole(meta.permission, { isArchived: opts.isArchived || !!meta.nest?.archived_at });
 }
 
 export function roleAllows(role: PluginRole, action: "configure" | "run"): boolean {
@@ -106,8 +115,7 @@ export type BuildResult =
   | { ok: false; errors: Record<string, string> };
 
 function patternLabel(f: PluginField): string {
-  // The schema's description usually names the expected form ("owner/name").
-  return f.description && f.description.length <= 40 ? `Use the format ${f.description}.` : "Doesn't match the expected format.";
+  return f.description ? `Doesn't match the expected format (${f.description}).` : "Doesn't match the expected format.";
 }
 
 /**
@@ -135,7 +143,9 @@ export function buildConfigureBody(
       continue;
     }
     if (f.kind === "boolean") {
-      if (raw !== (stored ?? f.defaultValue ?? false) || stored !== undefined) settings[f.key] = raw === true;
+      // Sent when it differs from what is in effect: the stored value, else the default.
+      const current = stored === undefined || stored === null ? f.defaultValue === true : stored === true;
+      if ((raw === true) !== current) settings[f.key] = raw === true;
       continue;
     }
     const s = typeof raw === "string" ? raw.trim() : "";
@@ -220,4 +230,51 @@ export function runToast(displayName: string, run: PluginRun): string {
   const parts = [plural(run.created, "new document"), `${run.updated} updated`];
   if (run.conflicts.length) parts.push(`${run.conflicts.length} kept because they were edited here`);
   return `${displayName}: ${parts.join(", ")}`;
+}
+
+/**
+ * The form's identity. The card is keyed by it, so it starts over from the
+ * server's state when the saved config changes AND after every successful
+ * save — replacing a stored secret leaves `settings` at "••••" both before
+ * and after, so without the revision the typed token would stay in the input.
+ */
+export function pluginFormKey(plugin: NestPlugin, revision = 0): string {
+  return `${plugin.name}:${revision}:${JSON.stringify([plugin.configured, plugin.folder, plugin.settings])}`;
+}
+
+export type SaveOutcome =
+  | { kind: "invalid"; errors: Record<string, string> }
+  | { kind: "saved"; plugin: NestPlugin }
+  | { kind: "refused"; message: string };
+
+/** Validate the form, then PUT it. Never throws: the page shows each outcome. */
+export async function savePluginConfig(
+  nestId: string,
+  plugin: NestPlugin,
+  draft: PluginDraft,
+  opts: { enabled?: boolean },
+  configure: (nestId: string, name: string, body: ConfigurePluginBody) => Promise<{ plugin: NestPlugin }>,
+): Promise<SaveOutcome> {
+  const built = buildConfigureBody(plugin, draft, opts);
+  if (!built.ok) return { kind: "invalid", errors: built.errors };
+  try {
+    return { kind: "saved", plugin: (await configure(nestId, plugin.name, built.body)).plugin };
+  } catch (e) {
+    return { kind: "refused", message: (e as Error)?.message || "Could not save" };
+  }
+}
+
+/**
+ * Server settings after a save. PATCH answers without `plugins_loaded` /
+ * `plugins_load_errors` (only GET reloads and reports them): when the plugin
+ * settings moved, read GET; otherwise keep the lists we had.
+ */
+export async function adminSettingsAfterSave(
+  patch: Partial<AdminSettings>,
+  saved: AdminSettings,
+  prev: AdminSettings | null,
+  refetch: () => Promise<AdminSettings>,
+): Promise<AdminSettings> {
+  if ("plugins_enabled" in patch || "plugins_packages" in patch) return refetch().catch(() => saved);
+  return { ...saved, plugins_loaded: prev?.plugins_loaded, plugins_load_errors: prev?.plugins_load_errors };
 }
