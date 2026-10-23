@@ -166,6 +166,14 @@ describe("summary sentence", () => {
   it("uses a placeholder name until one is typed", () => {
     expect(summarize({ ...base, persona: { name: "", avatar: null } })).toMatch(/^This agent reads/);
   });
+
+  it("says who it may notify, only when notify is on", () => {
+    const notify = { recipients: ["owner", "ann@example.com"], channels: ["email" as const], max_per_run: 3 };
+    expect(summarize({ ...base, notify })).toBe(
+      "Archivist reads gtm and ops, may suggest edits in gtm, up to 5 per run, may notify the nest owner and ann@example.com, and never publishes anything itself.",
+    );
+    expect(summarize({ ...base, notify: { ...notify, channels: [] } })).not.toMatch(/notify/);
+  });
 });
 
 describe("prefill from the agent document", () => {

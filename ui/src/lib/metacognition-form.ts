@@ -230,7 +230,10 @@ export function summarize(c: MetacognitionAgentConfig): string {
     c.scope.propose.length === 0
       ? `only leaves comments (up to ${comments} per run)`
       : `may suggest edits ${c.scope.propose[0] === "*" ? "anywhere it reads" : `in ${joinList(c.scope.propose)}`}, up to ${c.caps.max_proposals} per run`;
-  return `${who} ${reads}, ${changes}, and never publishes anything itself.`;
+  const n = c.notify;
+  const roles: Record<string, string> = { owner: "the nest owner", reviewers: "reviewers" };
+  const notifies = n?.recipients.length && n.channels.length ? `, may notify ${joinList(n.recipients.map((r) => roles[r] ?? r))}` : "";
+  return `${who} ${reads}, ${changes}${notifies}, and never publishes anything itself.`;
 }
 
 /** Why each field a suggestion fills was filled that way, for the hints. */

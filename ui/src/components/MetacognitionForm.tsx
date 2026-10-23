@@ -52,6 +52,7 @@ export interface SectionProps {
   prefilled: Record<string, string>;
   /** Every folder in the nest. */
   folders: string[];
+  nestId: string;
 }
 
 /** The subtle "filled in from the agent document" note, with its reason. */
@@ -377,7 +378,11 @@ export function AdvancedSection({ form, update, prefilled }: SectionProps) {
 }
 
 /** The questions, in order. A new section (e.g. who it may notify) goes here. */
-const SECTIONS: Array<React.FC<SectionProps>> = [LookSection, ChangeSection, EffortSection, AdvancedSection];
+function NotifySection({ form, update, nestId }: SectionProps) {
+  return <MetacognitionNotifySection nestId={nestId} value={form.notify} onChange={(notify) => update((f) => ({ ...f, notify }))} />;
+}
+
+const SECTIONS: Array<React.FC<SectionProps>> = [LookSection, ChangeSection, EffortSection, NotifySection, AdvancedSection];
 
 export function MetacognitionForm({
   nestId,
@@ -466,7 +471,7 @@ export function MetacognitionForm({
     }
   };
 
-  const props: SectionProps = { form, update, prefilled, folders };
+  const props: SectionProps = { form, update, prefilled, folders, nestId };
   return (
     <div className="rounded-lg border p-4 space-y-4" data-testid="metacognition-form">
       <div
@@ -556,7 +561,6 @@ export function MetacognitionForm({
       {SECTIONS.map((Section, i) => (
         <Section key={Section === AdvancedSection ? `adv-${fillKey}` : i} {...props} />
       ))}
-      <MetacognitionNotifySection nestId={nestId} value={form.notify} onChange={(notify) => setForm((f) => ({ ...f, notify }))} />
 
       {problems.length > 0 && (
         <ul className="text-xs text-amber-700 dark:text-amber-400 list-disc pl-5" data-testid="metacognition-problems">
