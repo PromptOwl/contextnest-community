@@ -150,6 +150,14 @@ const testRun = [
     independent: true, // Reads the accounts; never saves to them
   },
   {
+    // Sidebar rail (CN-RAIL-001 … CN-RAIL-008). Serial: the cases read the rail
+    // as two accounts. Read-only; /health switches are stubbed per browser.
+    file: 'sidebar-rail/sidebar_rail.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the rail; writes nothing
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -258,7 +266,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -507,6 +515,17 @@ export default defineConfig({
           name: 'account',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/account/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'sidebar-rail',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/sidebar-rail/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
