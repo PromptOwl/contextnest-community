@@ -364,15 +364,19 @@ export function deliverableRecipients(to: string | string[]): string[] {
   return (Array.isArray(to) ? to : [to]).filter((a) => !!a && !/\.invalid$/i.test(a.trim()));
 }
 
+/** What a send came to: "off" = no transport/sender configured. Callers that
+ *  fire and forget can ignore it; an agent's notify reports it honestly. */
+export type EmailOutcome = "sent" | "failed" | "skipped" | "off";
+
 export async function sendEmailToRecipient(
   rawTo: string | string[],
   details: EmailEventDetails,
   ctx: OutboundContext = {},
-): Promise<void> {
+): Promise<EmailOutcome> {
   const from = config.NOTIFY_EMAIL_FROM;
   const to = deliverableRecipients(rawTo);
   const hasRecipient = to.length > 0;
-  if (!transportSettings() || !from) return;
+  if (!transportSettings() || !from) return "off";
   const secrets = [details.tempPassword];
   if (!hasRecipient) {
     // Every address was a service identity (.invalid) — nothing to deliver,
@@ -386,12 +390,12 @@ export async function sendEmailToRecipient(
       error: "No deliverable recipient (service identities only).",
       secrets,
     });
-    return;
+    return "skipped";
   }
   let rendered: { subject: string; text: string } = { subject: details.docTitle, text: "" };
   try {
     const transporter = await getTransporter();
-    if (!transporter) return;
+    if (!transporter) return "off";
     const { subject, text, html } = renderEmail(details);
     rendered = { subject, text };
     const info = await sendMailWithRetry(transporter, {
@@ -413,6 +417,7 @@ export async function sendEmailToRecipient(
       providerId: info?.messageId ?? null,
       secrets,
     });
+    return "sent";
   } catch (err) {
     await recordOutbound({
       channel: "email",
@@ -431,5 +436,6 @@ export async function sendEmailToRecipient(
         err instanceof Error ? err.message : err,
       );
     }
+    return "failed";
   }
 }

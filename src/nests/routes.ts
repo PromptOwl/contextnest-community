@@ -38,6 +38,8 @@ import {
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
   nestPrimeTags,
+  nestAlwaysIncludeTags,
+  setAlwaysIncludeTags,
   setPrimeTags,
   nestDoneTags,
   setDoneTags,
@@ -784,6 +786,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
@@ -821,6 +824,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    always_include_tags?: string[] | string;
     done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
@@ -929,6 +933,16 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Always-include tags change what agents are TOLD from the next connect
+  // on; only approved versions are ever injected, so this can't publish a draft.
+  if (body.always_include_tags !== undefined) {
+    await setAlwaysIncludeTags(
+      nestId,
+      Array.isArray(body.always_include_tags)
+        ? body.always_include_tags
+        : [body.always_include_tags],
+    );
+  }
   // Done columns only change how FUTURE task moves are stamped.
   if (body.done_tags !== undefined) {
     await setDoneTags(
@@ -957,6 +971,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),

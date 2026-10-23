@@ -38,6 +38,7 @@ export interface PublishDoc {
   schedule?: string;
   model?: string;
   prime?: boolean;
+  alwaysInclude?: boolean;
   /** Custom field values — validated on replay, like any create. */
   fields?: Record<string, unknown>;
 }
@@ -166,6 +167,7 @@ export async function applyPublish(
           schedule: doc.schedule,
           model: doc.model,
           prime: doc.prime,
+          alwaysInclude: doc.alwaysInclude,
           ...(doc.fields !== undefined ? { fields: doc.fields } : {}),
         },
         authorEmail,

@@ -111,6 +111,8 @@ interface Props {
   stewardshipEnabled: boolean;
   allowSelfApprove: boolean;
   primeTags: string[];
+  /** Always-include tags — those documents are prime too. */
+  alwaysIncludeTags?: string[];
   visibility: api.NestVisibility;
   hasRoleOnNode: (node: Node, role: string) => boolean;
   canReviewNode: (node: Node) => boolean;
@@ -155,6 +157,7 @@ export function DocumentsTab({
   stewardshipEnabled,
   allowSelfApprove,
   primeTags,
+  alwaysIncludeTags = [],
   visibility,
   hasRoleOnNode,
   canReviewNode,
@@ -1379,7 +1382,7 @@ export function DocumentsTab({
                           {/* Prime — the doc always needs approval, whoever
                               edits it. Only meaningful in a governed nest. */}
                           {stewardshipEnabled &&
-                            api.isPrimeNode(node, primeTags) && (
+                            api.isPrimeNode(node, primeTags, alwaysIncludeTags) && (
                             <span
                               className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
                               title={

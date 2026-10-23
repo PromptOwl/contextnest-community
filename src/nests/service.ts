@@ -498,6 +498,31 @@ export async function setPrimeTags(
 }
 
 /**
+ * Tags that mark a document always-include (default "always-include"): its
+ * approved text is pushed to every agent and model entering the nest (see
+ * governance/always-include-service.ts). Same storage and normalisation as
+ * prime tags; empty means no tag does it (document flags still apply).
+ */
+export async function nestAlwaysIncludeTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get(
+    "SELECT always_include_tags FROM nests WHERE id = ?",
+    [nestId],
+  )) as { always_include_tags: string | null } | undefined;
+  return parsePrimeTags(row?.always_include_tags);
+}
+
+/** Replace the nest's always-include tag set (admin-only). */
+export async function setAlwaysIncludeTags(
+  nestId: string,
+  tags: string[],
+): Promise<void> {
+  await getDb().run("UPDATE nests SET always_include_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
  * Tags whose board column means "completed" for a task (default "done").
  * Same storage and normalisation as prime tags.
  */
