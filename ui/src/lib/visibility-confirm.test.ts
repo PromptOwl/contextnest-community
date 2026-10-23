@@ -3,6 +3,7 @@ import {
   visibilityNeedsAcknowledgement,
   visibilityTierHint,
   visibilityConfirmCopy,
+  visibilityBlockedReason,
 } from "./visibility-confirm";
 
 // Who a tier reaches depends on what the server is. 'org' = every account on
@@ -67,5 +68,38 @@ describe("visibilityConfirmCopy — the acknowledgement dialog", () => {
     expect(c.body).toMatch(/other organi[sz]ations/i);
     expect(c.body).not.toMatch(/anyone on the internet/i);
     expect(c.confirm.length).toBeGreaterThan(0);
+  });
+});
+
+// Server admins can stop owners widening a nest (NEST_PUBLIC_VISIBILITY /
+// NEST_ORG_VISIBILITY = admins). The picker disables a blocked tier and says
+// why; the server refuses it regardless.
+describe("visibilityBlockedReason", () => {
+  const open = { publicBy: "owners", orgBy: "owners", isServerAdmin: false } as const;
+  const locked = { publicBy: "admins", orgBy: "admins", isServerAdmin: false } as const;
+
+  it("defaults (owners) block nothing", () => {
+    for (const t of ["private", "org", "public"] as const) {
+      expect(visibilityBlockedReason(t, "private", open)).toBeNull();
+    }
+  });
+
+  it("admins-only tiers are blocked for an owner, with a reason naming the server admin", () => {
+    expect(visibilityBlockedReason("public", "private", locked)).toMatch(/server admin/i);
+    expect(visibilityBlockedReason("org", "private", locked)).toMatch(/server admin/i);
+    expect(visibilityBlockedReason("public", "org", { ...open, publicBy: "admins" })).toMatch(/public/i);
+    expect(visibilityBlockedReason("org", "private", { ...open, orgBy: "admins" })).toMatch(/organization/i);
+  });
+
+  it("narrowing and staying put are never blocked", () => {
+    expect(visibilityBlockedReason("private", "public", locked)).toBeNull();
+    expect(visibilityBlockedReason("org", "public", locked)).toBeNull();
+    expect(visibilityBlockedReason("public", "public", locked)).toBeNull();
+  });
+
+  it("a server admin is never blocked", () => {
+    const admin = { ...locked, isServerAdmin: true };
+    expect(visibilityBlockedReason("public", "private", admin)).toBeNull();
+    expect(visibilityBlockedReason("org", "private", admin)).toBeNull();
   });
 });
