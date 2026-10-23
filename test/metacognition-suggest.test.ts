@@ -179,6 +179,14 @@ describe("suggestConfig (pure heuristics)", () => {
     expect(s.config.scope.propose).toEqual(["*"]);
   });
 
+  it("an exception joined by 'but' in one sentence still allows the edits it names", () => {
+    const propose = (instructions: string) => suggestConfig({ title: "A", frontmatter: {}, instructions, folders: [] }).config.scope.propose;
+    expect(propose("Never update the footer, but fix typos.")).toEqual(["*"]);
+    // A whole-agent negation still wins: comments only.
+    expect(propose("Do not edit anything, but flag typos.")).toEqual([]);
+    expect(propose("Never edit anything, but fix typos.")).toEqual([]);
+  });
+
   it("doesn't read a folder named with a common word used in plain prose", () => {
     const s = suggestConfig({
       title: "A",
