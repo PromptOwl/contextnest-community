@@ -44,10 +44,44 @@ export class PayloadTooLargeError extends AppError {
   }
 }
 
+/** A role change would take the server past its pricing plan (402). */
+export class PlanLimitError extends AppError {
+  constructor(
+    public limit: "users" | "subscribers" | "account_owners",
+    public max: number,
+    message: string,
+  ) {
+    super(402, message);
+    this.name = "PlanLimitError";
+  }
+}
+
+/** A role change raises someone's billed class and wasn't confirmed (409). */
+export class BillingConfirmError extends AppError {
+  constructor(
+    public changes: Array<{ userId: string | null; email: string | null; from: string; to: string }>,
+  ) {
+    super(409, "This change raises what someone is billed. Confirm it to continue.");
+    this.name = "BillingConfirmError";
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(409, message);
     this.name = "ConflictError";
+  }
+}
+
+/**
+ * The write would land as a draft for a reviewer, and the caller asked for
+ * publish-or-nothing (WriteOptions.publishOnly — bulk board edits). 409: the
+ * document's governance, not the request, is what stands in the way.
+ */
+export class ReviewRequiredError extends AppError {
+  constructor(message: string) {
+    super(409, message);
+    this.name = "ReviewRequiredError";
   }
 }
 

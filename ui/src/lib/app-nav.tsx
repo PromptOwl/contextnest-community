@@ -13,8 +13,14 @@ export interface AppNav {
     isAnonOwned: boolean,
     isArchived?: boolean,
   ) => void;
-  /** Open a document straight from a queue row. */
-  openReview: (nestId: string, nestName: string, nodeId: string) => void;
+  /** Open a document straight from a queue row — `thread` focuses that
+   *  comment thread (the ?thread= deep link). */
+  openReview: (
+    nestId: string,
+    nestName: string,
+    nodeId: string,
+    opts?: { thread?: string },
+  ) => void;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
 }

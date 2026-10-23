@@ -14,7 +14,7 @@ Concretely, it lets you:
 
 - Write Markdown documents — plus hosted HTML artifacts and CSV tables agents can query row by row — filed in folders, linked with `[[Title]]`, tagged, commented on, and versioned
 - Import an existing folder of Markdown in one step; export a nest as a portable bundle
-- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you
+- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you, including board tasks assigned to you
 - Share a nest with people or teams, share a single document or folder, or publish read-only to the public
 - Give agents deterministic reads: the same selector returns the same context every time, with a trace of what was pulled
 - Run agents against a nest (Workflows, Beta): an agent is a document whose body is instructions; its output lands as a pending review
@@ -69,8 +69,9 @@ The key is read at boot. The server validates against PromptOwl on startup; if v
 
 ### 3. How licensing behaves at runtime
 
-- **Unlicensed / setup mode** — reads work; every non-GET (write) request returns `503` until a valid key is installed.
-- **Live revocation** — a long-poll watcher tracks license state against PromptOwl. If your key is revoked, the server blocks writes within seconds (no restart required) and returns to setup mode.
+- **Unlicensed / Free tier** — a server with 10 or fewer users accepts writes without a key, matching the published Free tier ("free for up to 10 users"). Users are counted as a Free key counts them (nest owners, admins, reviewers, server admins); viewers are free and never count. With more than 10 users and no valid key, reads still work but every write returns `503` until a key is installed.
+- **Live license checks** — the server re-checks its key with PromptOwl every minute. If the key is rejected or suspended, the server goes read-only within minutes: reads keep working, nobody is signed out, and writing comes back on its own once the key is valid again.
+- **Plans, seats and models** — the key's plan (Free, Self-Hosted, Enterprise) sets how many users, editors and server admins you can have, and how AI models are paid for. See [LICENSING.md](./LICENSING.md).
 - **Admin identity follows the license** — the admin user is whichever PromptOwl account owns the installed key, resolved live per request. Transferring the license to another account immediately promotes the new owner and demotes the old one.
 
 For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **hoot@promptowl.ai**.
@@ -92,7 +93,7 @@ One sidebar, grouped:
 | Group | Pages | Who |
 |---|---|---|
 | — | **Nests** — every nest you can see, pinned first | everyone |
-| Work | **My Work** (reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) | everyone |
+| Work | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) · **Stream** (*experimental*, off by default — every document version across your nests, with comments inline; `EXPERIMENTAL_DOC_STREAM`) | everyone |
 | Workspace | **Teams** · **API keys** | everyone |
 | Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
 | Help | **How it works** | everyone |
@@ -103,6 +104,7 @@ Inside a nest: the document tree, plus **Board** (documents as cards by folder, 
 
 Point any agent at `<server>/llms.txt` — it is the complete manual (endpoints, MCP tools, selector grammar). The short version:
 
+- **Claude Code plugin** — `/plugin marketplace add promptowl/contextnest`, `/plugin install contextnest`, then `/contextnest:setup` walks you through connecting (browser sign-in, no key to paste).
 - **MCP** — `<server>/mcp` for everything the key can read, `<server>/nests/<id>/mcp` for one nest with the full toolset. Claude Code, Cursor and VS Code connect over HTTP with `Authorization: Bearer cnst_…`; Claude Desktop goes through `npx -y mcp-remote`.
 - **REST** — `POST /nests/<id>/context` with a selector (`#tag`, `[[Title]]`, `type:document`, combined with `+ | -`) returns assembled context plus a trace. Full reference: [API.md](./API.md).
 - **ctx CLI** — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
@@ -117,6 +119,8 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 - **Disk:** ~200 MB for the server, plus storage for your nests
 
 ## What you get
+
+The **Community Edition** column is the Free and Self-Hosted plans. Enterprise features turn on by themselves when an Enterprise licence key is installed — nothing to enable. See [LICENSING.md](./LICENSING.md#plans).
 
 | Feature | Community Edition | Enterprise |
 |---|:---:|:---:|
@@ -144,13 +148,17 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 | Comments on documents — anchored threads, resolve / reopen, same threads over MCP | ✅ | ✅ |
 | Table nodes — CSV facts with deterministic row queries (`POST /table-query`, `context_table_query`) | ✅ | ✅ |
 | Teams — share a nest with a group once; import rosters from PromptOwl | ✅ | ✅ |
-| Cross-nest inbox — My Work (reviews, handoffs) and My Drafts | ✅ | ✅ |
+| Cross-nest inbox — My Work (assigned tasks, reviews, handoffs) and My Drafts | ✅ | ✅ |
 | Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary | ✅ | ✅ |
 | Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
+| Document pins (experimental, superadmin switch `EXPERIMENTAL_DOC_PINS`) — stewards pin documents to the front of a nest for everyone; anyone pins for themselves | ✅ | ✅ |
 | Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
-| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
+| Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
+| Enterprise single sign-on (OIDC — Entra ID, Okta, Keycloak, any issuer) — licence feature `sso` | — | ✅ |
+| Own model keys or LLM gateway (BYOK) — licence feature `byok` | — | ✅ |
+| Custom assistant name and branding — licence feature `hootie_branding` | — | ✅ |
 | SAML / SCIM provisioning | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
@@ -163,7 +171,8 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 **Next release (unreleased)**
 
 - **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Settings → General, or set `HOOTIE_ENABLED=true`.
-- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without an Enterprise licence everyone sees Hootie, and the server refuses the settings.
+- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
+- **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`), own model keys or gateway (`byok`) and enterprise single sign-on (`sso`: Entra ID, Okta or any OIDC issuer; Google sign-in is on every plan) come with Enterprise and can also be granted to, or removed from, a single licence. Without `byok`, Hootie and agent runs use the PromptOwl model gateway on credits. The server picks up a change on its next licence check (about a minute).
 
 Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -173,6 +182,7 @@ Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - [Single sign-on admin guide](./CONFIGURATION.md#single-sign-on-oidc) — connect Microsoft Entra ID, Google, Okta, Keycloak or any OIDC provider; what happens to existing accounts, API keys and agents; every `sso_error` code with its fix
 - [API.md](./API.md) — complete REST reference with request and response bodies
 - [STEWARDSHIP.md](./STEWARDSHIP.md) — the governance model: modes, stewards, scopes, prime documents, teams, super-admins
+- [LICENSING.md](./LICENSING.md) — plans, seats, limits, model credits and BYOK, and how the license check behaves
 - `<server>/llms.txt` — the agent manual the running server publishes; rendered as **Docs** in the app
 - **How it works** inside the app — a page-by-page tour
 
@@ -220,7 +230,6 @@ The Software injects content into large language models. AI output may be inaccu
 
 ---
 
-**Copyright © 2026 Promptowl LLC.** All rights reserved.
-"ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
+**Copyright © 2026 Promptowl LLC.** All rights reserved. "ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
 
 Promptowl LLC · 3060 Mercer University Dr Ste 110 · Atlanta, GA 30341 · USA

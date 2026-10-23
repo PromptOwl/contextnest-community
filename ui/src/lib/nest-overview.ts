@@ -70,10 +70,26 @@ export function overviewFacts(input: {
   if (g) {
     // The green dot only on a real count — "0 AI ready" must not look healthy.
     facts.push({ key: "ai-ready", text: `${g.approved} AI ready`, ...(g.approved > 0 ? { tone: "ok" as const } : {}) });
-    if (g.pending > 0) facts.push({ key: "pending", text: `${g.pending} pending review`, tone: "warn" });
+    // Opens the queue too — a count you can't click reads as a dead end (CU-wdqcq04wnu).
+    if (g.pending > 0) facts.push({ key: "pending", text: `${g.pending} pending review`, tone: "warn", action: "review" });
     if (g.reviewable > 0) facts.push({ key: "review", text: `${g.reviewable} waiting on your review`, action: "review" });
   }
   return facts;
+}
+
+/**
+ * Why pending reviews aren't in the caller's queue, in plain words — the old
+ * "N outside your scope" told an author nothing (CU-wdqcq02t1r). `ownBlocked`
+ * is the caller's own submissions they may not approve (separation of duties).
+ */
+export function queueBreakdown(input: { pending: number; reviewable: number; ownBlocked: number }): string | null {
+  const others = Math.max(0, input.pending - input.reviewable - input.ownBlocked);
+  const parts: string[] = [];
+  if (input.ownBlocked > 0) {
+    parts.push(`${input.ownBlocked} you submitted — someone else must approve ${input.ownBlocked === 1 ? "it" : "them"}`);
+  }
+  if (others > 0) parts.push(`${others} assigned to other reviewers`);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 export type EmptyStateAction = "new" | "import" | "ai";

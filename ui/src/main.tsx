@@ -2,13 +2,23 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { Toaster } from "sonner";
 import App from "./App";
+import { SetupPage } from "./pages/setup/SetupPage";
 import { AuthProvider } from "./auth/AuthContext";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ReadCacheProvider } from "./lib/query-provider";
 import { BreadcrumbProvider } from "./lib/breadcrumb";
 import "./index.css";
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+
+// The public page `ctx setup` opens: no account, so none of the auth tree.
+if (window.location.pathname === "/setup") {
+  root.render(
+    <React.StrictMode>
+      <SetupPage />
+    </React.StrictMode>,
+  );
+} else root.render(
   <React.StrictMode>
     <ErrorBoundary>
       {/* Outside AuthProvider: its login/logout handlers call into the api

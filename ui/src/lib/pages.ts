@@ -33,6 +33,13 @@ export type PageGroupId = (typeof PAGE_GROUPS)[number]["id"];
 
 export interface PageCaps {
   isAdmin: boolean;
+  /** MCP agent sign-in (OAuth) is on for this server. */
+  mcpOauthEnabled?: boolean;
+  /** A signed-in server superadmin. Never true in open mode, where everyone
+   *  is "admin" — superadmin-only pages (the message log) stay hidden there. */
+  isSuperadmin?: boolean;
+  /** The experimental cross-nest document stream is on (/health). */
+  docStreamEnabled?: boolean;
 }
 
 export interface PageMeta {

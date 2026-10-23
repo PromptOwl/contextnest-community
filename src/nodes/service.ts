@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { assertFolderCreatable, assertFolderMovable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
   normalizeStatus,
@@ -14,12 +15,14 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  TITLE_MAX_LENGTH,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
+import { withIoStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -28,6 +31,7 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  ReviewRequiredError,
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
@@ -35,7 +39,11 @@ import { serializeClient, type ClientMetadata } from "../shared/client-metadata.
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
-import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
+import {
+  syncNodeTags,
+  syncNodeTagsMany,
+  removeNodeFromTagIndex,
+} from "../governance/tag-index-service.js";
 import {
   isStewardshipEnabled,
   resolveNestPath,
@@ -43,7 +51,11 @@ import {
   nestReviewsPrimeOnly,
   nestCreatorIsReviewer,
 } from "../nests/service.js";
-import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
+import {
+  isPrimeDocument,
+  documentPrimeFlag,
+  documentAlwaysIncludeFlag,
+} from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
 import {
@@ -56,6 +68,7 @@ import {
   resolveCallerEmail,
   filterAccessible,
   canReadNode,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import {
@@ -75,6 +88,33 @@ import {
   nodesWithSuggestions,
 } from "./node-index.js";
 import { config } from "../config.js";
+import { listNestPeople } from "../nests/people-service.js";
+import { nestDoneTags } from "../nests/service.js";
+import { notifyAssigned } from "../governance/assign-notify.js";
+import {
+  TASK_NODE_TYPE,
+  applyTaskFields,
+  hasTaskFieldsFilter,
+  hasTaskFieldsPatch,
+  matchesTaskFieldsFilter,
+  type TaskFieldsFilter,
+  taskFieldsOf,
+  type TaskFields,
+  type TaskFieldsPatch,
+} from "./task-fields.js";
+import { openBlockerCounts } from "./relations.js";
+import {
+  addComputedFields,
+  appliesTo,
+  applyFieldsPatch,
+  assertFilterKeys,
+  listFieldDefinitions,
+  matchesFieldFilter,
+  statusSince,
+  storedFieldsOf,
+  type FieldDefinition,
+  type FieldsPatch,
+} from "./custom-fields.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -126,13 +166,15 @@ type ImportOpResult = {
   published: { id: string; version: number }[];
   failed: { id?: string; title?: string; error: string }[];
   checkpoint: number | null;
+  warnings?: string[];
 };
 
 /** Max characters in a human-readable title. The id/slug bound (100 per
  *  segment, below) doesn't cover this: a title of emoji or non-latin text
  *  slugifies to almost nothing, so an unbounded title still lands in
- *  frontmatter and stretches every header that renders it. */
-const MAX_TITLE_LENGTH = 120;
+ *  frontmatter and stretches every header that renders it. The engine owns the
+ *  number, so a title a local vault accepts is never refused on push. */
+const MAX_TITLE_LENGTH = TITLE_MAX_LENGTH;
 
 /** Shared choke point for REST + MCP: both create and rename route here. */
 function assertTitleLength(title: string): void {
@@ -176,15 +218,19 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /**
- * The id `createNode` will derive for a title at the nest root, or null when
- * the title slugifies to nothing (createNode generates an id at write time,
- * so it cannot be known in advance). Preview-only — the confirm modal uses it
- * to label a staged document New vs Update.
+ * The id `createNode` will derive for a title in `folder` (the nest root by
+ * default), or null when the title slugifies to nothing (createNode generates
+ * an id at write time, so it cannot be known in advance). Preview-only — the
+ * confirm modal labels a staged document New vs Update with it, and the
+ * structure check names the file a title will be saved as.
  */
-export function derivedNodeId(title: string): string | null {
+export function derivedNodeId(title: string, folder = ""): string | null {
   const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
-  return slug ? `nodes/${slug}` : null;
+  return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
 }
+
+/** The first name a title with no a-z letters or digits gets (`document-N`, below). */
+export const FIRST_GENERATED_NAME = "document-1";
 
 /**
  * The id for a title that carries no ASCII at all: document-1, document-2, …,
@@ -264,7 +310,7 @@ export async function storagePrefix(nestId: string): Promise<string> {
  * defense (each segment slugified independently — "../" collapses to "-",
  * empty segments drop).
  */
-function folderToSegments(folder: string): string[] {
+export function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
   // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
@@ -333,6 +379,10 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
 // reach the API response OR the MCP result (both share this service).
 function toSafeError(err: unknown, context: string, message: string): AppError {
   if (err instanceof AppError) return err;
+  // A structure rule (or another engine validation) refusing the write: the
+  // caller can fix it, and "reload and try again" never would.
+  const refusal = ruleRefusal(err);
+  if (refusal) return refusal;
   // The engine refuses to write a document that would stay rejected. That is a
   // state the caller can act on, not an internal fault, so it keeps its meaning
   // instead of being flattened into a generic 500 the user cannot interpret.
@@ -354,6 +404,20 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
   return new AppError(500, message);
 }
 
+/** Reconstructed markdown split into its frontmatter and body. Unparseable →
+ *  the raw text as body and no frontmatter (fail closed on metadata). */
+export function parseVersionRaw(
+  nodeId: string,
+  raw: string,
+): { body: string; frontmatter: Record<string, unknown> } {
+  try {
+    const doc = parseDocument(`${nodeId}.md`, raw, nodeId);
+    return { body: doc.body ?? "", frontmatter: (doc.frontmatter ?? {}) as unknown as Record<string, unknown> };
+  } catch {
+    return { body: raw, frontmatter: {} };
+  }
+}
+
 /** Strip YAML frontmatter from reconstructed markdown; mirrors node.body shape. */
 export function bodyOnly(nodeId: string, raw: string): string {
   try {
@@ -363,7 +427,27 @@ export function bodyOnly(nodeId: string, raw: string): string {
   }
 }
 
-export interface NodeResponse {
+/**
+ * Custom field values stored in a reconstructed version's frontmatter. A read
+ * that serves an approved version takes its fields from HERE: the live file
+ * may hold an unapproved draft's values. Unparseable → no values (fail closed).
+ */
+export function fieldsOfRaw(nodeId: string, raw: string): Record<string, unknown> {
+  try {
+    return storedFieldsOf(parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.metadata);
+  } catch (err) {
+    console.error("[custom-fields] approved frontmatter unreadable", nodeId, err);
+    return {};
+  }
+}
+
+/** Replace a response's stored field values (computed ones are added later). */
+export function setStoredFields(r: { fields?: Record<string, unknown> }, fields: Record<string, unknown>): void {
+  if (Object.keys(fields).length > 0) r.fields = fields;
+  else delete r.fields;
+}
+
+export interface NodeResponse extends TaskFields {
   id: string;
   title: string;
   type: string;
@@ -384,19 +468,47 @@ export interface NodeResponse {
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
+  /** Model the runner should use for this runnable node (agent/skill) —
+   *  free-form model id, opaque to the server. */
+  model?: string;
   /** Document-scope prime flag, undefined when the doc inherits from tag/nest
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
+   *  doc inherits from the nest's `always_include_tags`. */
+  always_include?: boolean;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** Blocking relations from nodes that aren't done yet (src/nodes/
+   *  relations.ts). Absent when nothing open blocks this node. */
+  open_blockers?: number;
+  /** Custom field values (src/nodes/custom-fields.ts): the stored
+   *  `metadata.fields` map plus, on list/get responses, computed fields such
+   *  as time-in-status (whole seconds). Keys are the nest's field keys. */
+  fields?: Record<string, unknown>;
+  /** When the node entered its current board column — `moved_at`, else
+   *  `created_at`. What time-in-status counts from. Tasks only. */
+  status_since?: string;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
 export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
 export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
+}
+
+/** A runner model id goes to an external runner as-is, so allow only plain
+ *  id characters ("" means clear and is valid). */
+const MODEL_ID_RE = /^[A-Za-z0-9._:\/@-]{1,128}$/;
+function assertModelId(model: unknown): void {
+  if (model === undefined || model === "") return;
+  if (typeof model !== "string" || !MODEL_ID_RE.test(model)) {
+    throw new ValidationError(
+      "model must be a model id: 1-128 characters of letters, digits and . _ : / @ -"
+    );
+  }
 }
 
 /**
@@ -412,6 +524,13 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   "artifact",
   "table",
   "pdf",
+  // Board work item (see task-fields.ts). Only once the engine knows the type:
+  // the engine validates frontmatter.type against its own NODE_TYPES on every
+  // write, so offering it ahead of that engine would turn every task create
+  // into a 500. Board fields themselves work on any type regardless.
+  ...((NODE_TYPES as readonly string[]).includes(TASK_NODE_TYPE)
+    ? [TASK_NODE_TYPE]
+    : []),
 ]);
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
@@ -499,6 +618,12 @@ function assertUpdatableType(storedType: string | undefined): void {
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
+  const taskFields = taskFieldsOf(fm.metadata);
+  const fields = storedFieldsOf(fm.metadata);
+  const since = statusSince({
+    moved_at: taskFields.moved_at,
+    created_at: fm.created_at == null ? undefined : String(fm.created_at),
+  });
   // Coerce string-ish fields. YAML parses bare values by type, so a
   // frontmatter line like `title: 123` arrives as a number — clients then
   // call `.trim()`/`.toLowerCase()` on it and crash. Normalize at the API
@@ -538,9 +663,26 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       (fm.metadata as any)?.schedule != null
         ? String((fm.metadata as any).schedule)
         : undefined,
+    model:
+      (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...taskFields,
+    ...(Object.keys(fields).length > 0 ? { fields } : {}),
+    ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
   };
+}
+
+/**
+ * Responses with their computed field values filled in (time-in-status), for
+ * the read surfaces that serve single nodes outside listNodesForCaller.
+ */
+export async function withComputedFields<T extends NodeResponse>(
+  nestId: string,
+  nodes: T[],
+): Promise<T[]> {
+  return addComputedFields(nodes, await listFieldDefinitions(nestId));
 }
 
 export interface NodeAuthorship {
@@ -704,6 +846,20 @@ export interface ListNodesFilters {
    * to crawling the vault, which is the honest price.
    */
   withContent?: boolean;
+  /** Board-field filters (assignee / priority / due_before), applied before
+   *  the access gate and `limit` so a filtered page is a full page. */
+  task?: TaskFieldsFilter;
+  /**
+   * Custom-field filters, field key → wanted value (see matchesFieldFilter).
+   * Every entry must match. An unknown key is a 400.
+   */
+  fields?: Record<string, unknown>;
+  /**
+   * Take custom field values (and filter on them) from each node's APPROVED
+   * version, never the live file — for callers who may only see approved
+   * content (MCP under stewardship). Implied by approvedOnly / public readers.
+   */
+  approvedFields?: boolean;
 }
 
 /**
@@ -889,10 +1045,36 @@ export async function listNodesForCaller(
   // saving, since both cost per surviving document. Still applied even when
   // the engine already scoped the crawl: it is the correctness guarantee, and
   // on a scoped crawl there is nothing left for it to drop.
-  const scoped =
+  const folderDocs =
     filters.folder === undefined
       ? documents
       : documents.filter((d) => folderOfId(d.id) === filters.folder);
+  const folderScoped = hasTaskFieldsFilter(filters.task)
+    ? folderDocs.filter((d) => matchesTaskFieldsFilter(d.frontmatter.metadata, filters.task!))
+    : folderDocs;
+  // Custom-field definitions: one query, for the filters here and the
+  // computed values (time-in-status) added to every row at the end.
+  const fieldDefs = await listFieldDefinitions(nestId);
+  const fieldFilters = filters.fields ?? {};
+  const hasFieldFilters = Object.keys(fieldFilters).length > 0;
+  if (hasFieldFilters) assertFilterKeys(fieldFilters, fieldDefs);
+  const matchesFields = (type: string | undefined, stored: Record<string, unknown>) =>
+    Object.entries(fieldFilters).every(([key, wanted]) => {
+      const def = fieldDefs.find((f) => f.key === key)!;
+      // A field that doesn't apply to this node's type can't match.
+      if (!appliesTo(def, type)) return false;
+      return matchesFieldFilter(def, stored[key], wanted);
+    });
+  const publicReader = await isPublicReader(nestId, userId);
+  // Approved-only view: what a public nest shows a stranger.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // A caller limited to approved content filters on APPROVED values (after
+  // the access gate, below) — filtering on the live file here would let them
+  // probe an unapproved draft's values.
+  const approvedFields = approvedOnly || filters.approvedFields === true;
+  const scoped = !hasFieldFilters || approvedFields
+    ? folderScoped
+    : folderScoped.filter((d) => matchesFields(d.frontmatter.type, storedFieldsOf(d.frontmatter.metadata)));
   const nodes: ContextNode[] = scoped.map((d) => ({
     id: d.id,
     filePath: "",
@@ -902,12 +1084,10 @@ export async function listNodesForCaller(
     // approved-only branch below serves its own from the version store.
     body: d.body ?? "",
   }));
-  const publicReader = await isPublicReader(nestId, userId);
-  // Approved-only view: what a public nest shows a stranger. ONE scan of the
-  // nest, shared by the access filter (which decides what a public reader may
-  // see) and the enrichment below (which serves each body at its approved
-  // version) — those asked the same question separately.
-  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // ONE scan of the nest for the approved-only view, shared by the access
+  // filter (which decides what a public reader may see) and the enrichment
+  // below (which serves each body at its approved version) — those asked the
+  // same question separately.
   const approvedVersions = approvedOnly
     ? await versions.getApprovedVersions(nestId)
     : null;
@@ -935,6 +1115,36 @@ export async function listNodesForCaller(
   // any other caller asking for this view is narrowed here.
   if (approvedVersions && !publicReader) {
     accessible = accessible.filter((d) => approvedVersions.has(d.id));
+  }
+
+  // Approved versions, reconstructed at most once per node and shared by the
+  // approved field filter and the enrichment below. null = none / unreadable.
+  const approvedMap = approvedVersions ?? (approvedFields ? await versions.getApprovedVersions(nestId) : null);
+  const approvedRaw = new Map<string, Promise<{ raw: string; version: number } | null>>();
+  const loadApproved = (id: string) => {
+    let p = approvedRaw.get(id);
+    if (!p) {
+      const v = approvedMap?.get(id);
+      p = v == null
+        ? Promise.resolve(null)
+        : reconstructApproved(versionManager, nestId, id, v).catch((err) => {
+            console.error("reconstructVersion failed (list)", id, v, err);
+            return null;
+          });
+      approvedRaw.set(id, p);
+    }
+    return p;
+  };
+  if (approvedFields && hasFieldFilters) {
+    // ponytail: reconstructs every accessible node's approved version to
+    // filter — an approved-values index if governed nests grow large.
+    const keep = await Promise.all(
+      accessible.map(async (d) => {
+        const a = await loadApproved(d.id);
+        return !!a && matchesFields(d.frontmatter.type, fieldsOfRaw(d.id, a.raw));
+      }),
+    );
+    accessible = accessible.filter((_, i) => keep[i]);
   }
 
   // Trim to the requested count BEFORE the per-node work below. Enrichment
@@ -988,28 +1198,15 @@ export async function listNodesForCaller(
         (r as any).myGrant = grantRoleForNode(myGrants, doc.id);
       }
 
+      // Field values from the approved version, never the live draft.
+      const approved = approvedFields ? await loadApproved(doc.id) : null;
+      if (approvedFields) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
+
       if (approvedVersions) {
-        let approved = approvedVersions.get(doc.id);
-        if (approved != null) {
-          try {
-            let raw: string;
-            ({ raw, version: approved } = await reconstructApproved(
-              versionManager,
-              nestId,
-              doc.id,
-              approved
-            ));
-            r.content = bodyOnly(doc.id, raw);
-          } catch (err) {
-            console.error(
-              "reconstructVersion failed (list)",
-              doc.id,
-              approved,
-              err
-            );
-            r.content = "";
-          }
-          r.version = approved;
+        const wanted = approvedVersions.get(doc.id);
+        if (wanted != null) {
+          r.content = approved ? bodyOnly(doc.id, approved.raw) : "";
+          r.version = approved?.version ?? wanted;
           r.status = "published";
         }
         return r;
@@ -1035,7 +1232,20 @@ export async function listNodesForCaller(
     })
   );
 
-  return enriched;
+  // Task relations: stamp how many open blockers each listed node has, so the
+  // board can badge blocked cards. One edges query for the nest (none when the
+  // nest has no blocking relations at all).
+  if (enriched.length) {
+    const blockers = await openBlockerCounts(nestId, enriched.map((r) => r.id));
+    if (blockers.size) {
+      for (const r of enriched) {
+        const n = blockers.get(r.id);
+        if (n) r.open_blockers = n;
+      }
+    }
+  }
+
+  return addComputedFields(enriched, fieldDefs);
 }
 
 /** A folder of documents, with direct and subtree counts. */
@@ -1094,7 +1304,11 @@ export async function createEmptyFolder(
     .replace(/-/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
   const { storage } = await engineCache.get(nestId);
+  // Under enforced rules: a folder they allow, named as they say, created
+  // with its required subfolders and files.
+  const plan = await assertFolderCreatable(storage, path, vaultPath);
   await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  await scaffold(storage, plan);
   return path;
 }
 
@@ -1128,6 +1342,28 @@ async function vaultFolderPaths(
 }
 
 /**
+ * Direct document counts per folder over only the documents this caller can
+ * read — the narrowed counterpart of `indexedFolderCounts`. Same document set
+ * and exclusions as the census, so the two trees agree for every caller.
+ */
+async function readableFolderCounts(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+): Promise<Array<{ path: string; count: number }>> {
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
+  const visible = await filterAccessible(nestId, userId, userEmail, documents);
+  const direct = new Map<string, number>();
+  for (const d of visible) {
+    const folder = folderOfId(d.id);
+    if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
+  }
+  return [...direct].map(([path, count]) => ({ path, count }));
+}
+
+/**
  * The nest's folders, from the DB mirror plus the vault's directory shape.
  *
  * Document counts come from the mirror, which stores each document's folder as
@@ -1139,21 +1375,37 @@ async function vaultFolderPaths(
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
  *
- * No per-caller narrowing: this is a whole-nest view, and the nest middleware
- * already withholds those from a share grantee (same rule as /overview), so
- * everyone who reaches this handler may see the whole tree.
+ * Pass `caller` from any request path. A caller who reads every document gets
+ * the whole tree as above. A narrowed caller (a public reader of a governed
+ * nest, a tag- or document-scoped steward) gets only folders holding at least
+ * one document they can read, counted over those documents — the directory
+ * walk would otherwise name folders that hold nothing they may open, and the
+ * mirror's counts would include documents they cannot see.
  */
 export async function listNestFolders(
   nestId: string,
-  opts: { folder?: string; recursive?: boolean } = {},
+  opts: {
+    folder?: string;
+    recursive?: boolean;
+    caller?: { userId: string; userEmail: string };
+  } = {},
 ): Promise<FolderNode[]> {
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  const narrowed =
+    opts.caller !== undefined &&
+    !(await readsWholeNest(nestId, opts.caller.userId, opts.caller.userEmail));
+  const folderCounts = narrowed
+    ? await readableFolderCounts(nestId, opts.caller!.userId, opts.caller!.userEmail)
+    : await indexedFolderCounts(nestId);
   // Directories first, so a folder holding nothing is still a folder; the
-  // mirror's counts below win wherever it knows the folder.
-  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
-  for (const { path, count } of await indexedFolderCounts(nestId)) {
+  // mirror's counts below win wherever it knows the folder. Not for a narrowed
+  // caller: an empty or wholly-restricted folder says nothing they may read.
+  if (!narrowed) {
+    for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
+  }
+  for (const { path, count } of folderCounts) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
     // only holds subfolders still has to be expandable.
@@ -1249,12 +1501,16 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
-  // Folders holding no document — same vault walk listNestFolders merges, and
-  // like that endpoint the tree itself is the whole nest's shape: counts stay
-  // caller-scoped, but a folder is listed whether or not this caller can reach
-  // a document in it (the nest middleware already withholds both routes from a
-  // share grantee, so the audience is the same either way).
-  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  // Folders holding no document — same vault walk listNestFolders merges —
+  // only for a caller who reads every document. For anyone narrowed (a public
+  // reader, a scoped steward) the walk would name folders that hold only what
+  // they cannot open, so their tree is the folders of `visible` alone; same
+  // rule as listNestFolders, and the same readsWholeNest predicate, so a
+  // narrowed caller who happens to reach every existing document still gets the
+  // same tree here as from /folders.
+  if (await readsWholeNest(nestId, userId, userEmail)) {
+    for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  }
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(
@@ -1323,7 +1579,7 @@ export async function listNodesForCallerByEmail(
   });
 }
 
-export interface CreateNodeInput {
+export interface CreateNodeInput extends TaskFieldsPatch {
   title: string;
   content: string;
   type?: string;
@@ -1337,6 +1593,8 @@ export interface CreateNodeInput {
   /** Orchestrator schedule (cron/interval string, opaque to the server).
    *  Only valid for runnable types (agent/skill). */
   schedule?: string;
+  /** Runner model for this agent/skill (opaque id). Runnable types only. */
+  model?: string;
   /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
@@ -1345,6 +1603,9 @@ export interface CreateNodeInput {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Document-scope always-include flag — see `isAlwaysIncludeDocument`.
+   *  Owner/admin only, like `prime`. */
+  alwaysInclude?: boolean;
   /** Caller attribution recorded on the version this create seals (§9.4).
    *  Optional everywhere — an unattributed write is a valid write. */
   client?: ClientMetadata;
@@ -1352,19 +1613,29 @@ export interface CreateNodeInput {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** Custom field values, field key → value (see custom-fields.ts). Defaults
+   *  fill what's left out; required fields must end up set. */
+  fields?: FieldsPatch;
 }
 
-export interface UpdateNodePatch {
+export interface UpdateNodePatch extends TaskFieldsPatch {
   content?: string;
   append?: string;
   tags?: string[];
   title?: string;
+  /** Frontmatter one-line summary (the docs site's meta description). An
+   *  empty string removes it. */
+  description?: string;
   status?: string;
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
   schedule?: string;
+  /** Runner model — runnable types only; empty string clears it. */
+  model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Document-scope always-include flag. `null` clears it back to the tags. */
+  alwaysInclude?: boolean | null;
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1374,6 +1645,9 @@ export interface UpdateNodePatch {
    *  engine's `context_import_pdf` in place of `context_update`; governance
    *  (draft vs publish, version rows, review lock) is the same as any edit. */
   pdf?: PdfUpload;
+  /** Custom field values to set, field key → value; `null` clears one. Merged
+   *  into the stored map — keys left out are untouched. */
+  fields?: FieldsPatch;
 }
 
 /**
@@ -1403,6 +1677,33 @@ export interface WriteOptions {
    * uses it: its "nothing changed since" check has to hold at write time.
    */
   expectHead?: number;
+  /**
+   * Never publish this write, whatever the nest's posture (ungoverned,
+   * prime-only, self-approve, creator-reviews): it lands as a draft for a
+   * reviewer. A metacognition agent's proposals use it — an agent's change is
+   * a proposal by definition, so no bypass that exists for people applies.
+   */
+  alwaysDraft?: boolean;
+  /**
+   * The opposite guarantee: this write must publish, or not happen at all.
+   * When the nest's rules would land it as a draft for a reviewer (a prime
+   * document, a governed document without a self-approve bypass, or the
+   * author's own open review), it is refused with ReviewRequiredError BEFORE
+   * anything is written. Bulk board edits use it, so one confirmation can't
+   * quietly turn into a pile of drafts — those documents are reported and
+   * left for someone to change one at a time, through the review they need.
+   * Decided inside the node's write lock, by the same autoPublishReason the
+   * write itself uses, so it can't disagree with what would have happened.
+   */
+  publishOnly?: boolean;
+  /**
+   * A reviewer's edit to someone else's pending submission, made on the way
+   * to approving it (POST …/approve-with-edits, CU-wdqcq04wnw). Lifts the
+   * pending-review lock exactly as an author's own edit does: drafts a new
+   * version and repoints the open review, whose submitter stays the author.
+   * The caller has already checked edit + approve rights.
+   */
+  reviewerEdit?: boolean;
 }
 
 /** Refuse the write if the node's head moved past what the caller saw.
@@ -1446,12 +1747,13 @@ async function actorAutoPublishes(
  */
 async function assertMayFlagPrime(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  what = "prime flag",
 ): Promise<void> {
   const roles = await resolveUserRoles(nestId, userEmail);
   if (!roles.includes("owner") && !roles.includes("admin")) {
     throw new ForbiddenError(
-      "Only the nest owner or an admin can change a document's prime flag."
+      `Only the nest owner or an admin can change a document's ${what}.`
     );
   }
 }
@@ -1474,7 +1776,7 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  doc: { tags?: readonly unknown[]; metadata?: unknown; type?: string },
   opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
@@ -1482,6 +1784,10 @@ async function autoPublishReason(
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
   if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Board work moves column many times a day; gating every drag behind a
+  // reviewer would make a project board unusable. Prime still wins (above):
+  // a steward who flags a task prime has asked for review on purpose.
+  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
@@ -1494,6 +1800,36 @@ async function autoPublishReason(
   return (await actorAutoPublishes(nestId, userEmail))
     ? "owner/admin self-approve"
     : null;
+}
+
+/** Roster / parent lookups applyTaskFields needs, bound to one nest. */
+function taskFieldsContext(
+  nestId: string,
+  storage: NestStorage,
+  nodeId: string | null,
+) {
+  return {
+    nodeId,
+    now: new Date().toISOString(),
+    roster: async () =>
+      new Set((await listNestPeople(nestId)).map((p) => p.email.toLowerCase())),
+    nodeExists: async (id: string) => {
+      try {
+        await storage.readDocument(id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    parentOf: async (id: string) => {
+      try {
+        const n = await storage.readDocument(id);
+        return taskFieldsOf(n.frontmatter.metadata).parent ?? null;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /**
@@ -1518,7 +1854,9 @@ export async function createNode(
       return await createNodeOnce(nestId, input, userEmail, opts);
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
-        throw err;
+        // A rule refusing the document is the caller's to fix — kept as a 400
+        // naming the rule, also where only an AppError's message is shown (a push).
+        throw ruleRefusal(err) ?? err;
       }
     }
   }
@@ -1577,12 +1915,15 @@ async function createNodeOnce(
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
 
-  if (input.schedule !== undefined && !isRunnableType(input.type)) {
-    throw new ValidationError(
-      `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
-        ", "
-      )})`
-    );
+  assertModelId(input.model);
+  for (const field of ["schedule", "model"] as const) {
+    if (input[field] !== undefined && !isRunnableType(input.type)) {
+      throw new ValidationError(
+        `${field} is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
+          ", "
+        )})`
+      );
+    }
   }
 
   // Check-then-write must be atomic per node id, or two concurrent creates
@@ -1635,12 +1976,55 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
-    const metadata = {
+    // Always-include pushes this document to every agent entering the nest,
+    // so flagging it is a governance act too (CU-wdqcq05rn0).
+    if (input.alwaysInclude !== undefined) {
+      if (typeof input.alwaysInclude !== "boolean") {
+        throw new ValidationError("always_include must be true or false");
+      }
+      await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+    }
+    const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
+      ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
     };
+    if (input.type === TASK_NODE_TYPE) {
+      const done = new Set(await nestDoneTags(nestId));
+      if (tags.some((t) => done.has(String(t).toLowerCase().replace(/^#/, "")))) {
+        metadata.completed_at = new Date().toISOString();
+      }
+    }
+    if (hasTaskFieldsPatch(input)) {
+      const { metadata: withFields } = await applyTaskFields(
+        metadata,
+        input,
+        taskFieldsContext(nestId, storage, null),
+      );
+      // Nulls on a create mean "not set" — nothing to clear yet.
+      Object.assign(metadata, withFields);
+    }
+    // Custom fields: validated against the nest's definitions, defaults
+    // filled, required enforced. Stored in frontmatter so the values are
+    // part of v1's hash. Skipped entirely (no definition read) only when the
+    // nest has none and the caller sent none.
+    {
+      const defs = await listFieldDefinitions(nestId);
+      if (defs.length > 0 || input.fields !== undefined) {
+        const { fields } = await applyFieldsPatch({
+          defs,
+          nodeType: input.type || "document",
+          current: {},
+          patch: input.fields,
+          isCreate: true,
+          roster: taskFieldsContext(nestId, storage, null).roster,
+        });
+        if (Object.keys(fields).length > 0) metadata.fields = fields;
+      }
+    }
     // Creator-reviews: steward the author BEFORE deciding to publish, since v1
     // publishes on the strength of that row. A failure here fails the create
     // with nothing written — never a document published on a false premise.
@@ -1662,12 +2046,14 @@ async function createNodeOnce(
     let published = false;
     let publishNote: string | undefined;
     try {
-      const publishReason = await autoPublishReason(
-        nestId,
-        userEmail,
-        { tags, metadata },
-        { creatorReviews: creatorSteward?.canApprove === true, governed },
-      );
+      const publishReason = opts.alwaysDraft
+        ? null
+        : await autoPublishReason(
+            nestId,
+            userEmail,
+            { tags, metadata, type: input.type },
+            { creatorReviews: creatorSteward?.canApprove === true, governed },
+          );
       // Same note in the engine history and the governance row: the version
       // history an admin reads in the UI comes from node_versions, so leaving
       // the reason only in history.yaml hides it from the audit that matters.
@@ -1797,6 +2183,17 @@ async function createNodeOnce(
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
+    const createdAssignee = taskFieldsOf(node.frontmatter.metadata).assignee;
+    // A draft's assignment isn't real until a reviewer approves it.
+    if (createdAssignee && published) {
+      await notifyAssigned({
+        nestId,
+        nodeId: id,
+        title: input.title,
+        assignee: createdAssignee,
+        actorEmail: userEmail,
+      });
+    }
     // Everything a new document mentions is new.
     if (opts.notifyMentions !== false) {
       await notifyMentions({
@@ -1841,23 +2238,39 @@ export async function stageImportedFiles(
   nestId: string,
   files: Array<{ path: string; content: string }>,
   userEmail: string
-): Promise<{ written: number; rejected: string[] }> {
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
+  return withIoStats(nestId, "stage", () => stageImportedFilesInner(nestId, files, userEmail));
+}
+
+async function stageImportedFilesInner(
+  nestId: string,
+  files: Array<{ path: string; content: string }>,
+  userEmail: string
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   // `_suggestions` is a vault's OWN staged-suggestion store — derived
   // governance state, not content. Carried in, another vault's copy surfaces as
   // phantom external edits against doc ids that don't resolve here. Dropped
   // server-side, not in the browser: the endpoint can't trust its caller.
+  // `.context/` is the source vault's own settings, which the engine refuses
+  // to import; dropped too, so an exported nest doesn't report it as a failure.
   // Everything else travels verbatim, `.versions/` history included.
-  const carried = files.filter(
-    (f) => !String(f?.path || "").split(/[\\/]/).includes("_suggestions")
-  );
-  if (!carried.length) return { written: 0, rejected: [] };
+  const carried = files.filter((f) => {
+    const segs = String(f?.path || "").split(/[\\/]/);
+    return !segs.includes("_suggestions") && !segs.includes(".context");
+  });
+  if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
+  const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
     failed: Array<{ id?: string; error: string }>;
+    warnings?: string[];
   }>(
     "context_import",
     { files: carried, publish: false },
     await opContext(nestId, userEmail)
+  );
+  console.log(
+    `[import] staged: nest=${nestId} files=${carried.length} written=${result.written ?? 0} ms=${Date.now() - startedAt}`
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
@@ -1868,7 +2281,11 @@ export async function stageImportedFiles(
       (result.failed ?? []).map((f) => `${f.id}: ${f.error}`).join(", ")
     );
   }
-  return { written: result.written ?? 0, rejected };
+  // The reason travels too, as a readable `path: reason` line for the user.
+  const problems = (result.failed ?? []).map((f) =>
+    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+  );
+  return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
 /**
@@ -1928,13 +2345,25 @@ export async function alignOnDiskStatus(
   }
 }
 
+/** What registration reports: documents recorded, readable `path: reason`
+ *  lines for any that were not (or only as drafts), and the engine's repairs. */
+export type ImportRegistration = { documents: number; problems: string[]; warnings: string[] };
+
 export async function registerImportedDocuments(
   nestId: string,
   userEmail: string,
   /** Caller attribution for the import (§9.4) — recorded on every version row
    *  this registration seeds, so a folder an agent imported says so. */
   client?: ClientMetadata,
-): Promise<number> {
+): Promise<ImportRegistration> {
+  return withIoStats(nestId, "register", () => registerImportedDocumentsInner(nestId, userEmail, client));
+}
+
+async function registerImportedDocumentsInner(
+  nestId: string,
+  userEmail: string,
+  client?: ClientMetadata,
+): Promise<ImportRegistration> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
   // Registration reconciles the governance DB against what is on disk, and the
@@ -1955,9 +2384,7 @@ export async function registerImportedDocuments(
     // swallowing: this used to return 0, which reported a broken vault as a
     // successful import of an empty folder with the cause only in the log.
     console.error("[import] register failed", nestId, err);
-    throw new Error(
-      `Failed to import documents: ${(err as Error)?.message ?? String(err)}`
-    );
+    throw err;
   }
 
   const docs = result.documents ?? [];
@@ -1967,36 +2394,70 @@ export async function registerImportedDocuments(
   // A document the engine could not publish (an imported version chain that no
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
-  for (const d of docs) {
-    const tags = d.tags.map((t) => storedTag(String(t)));
-    await versions.createVersion({
+  // Batched: one multi-row statement per table, not a few queries per document.
+  // One transaction: a retry skips docs that already have a version row, so a
+  // half-written batch would leave them unapproved for good.
+  const tagged = docs.map((d) => ({ d, tags: d.tags.map((t) => storedTag(String(t))) }));
+  const record = (rows: typeof tagged) => getDb().transaction(async (tx) => {
+    await versions.createVersions(
+      rows.map(({ d, tags }) => ({
+        nestId,
+        nodeId: d.id,
+        version: d.version,
+        content: d.content,
+        author: userEmail,
+        status: d.status,
+        changeNote:
+          d.status === "published"
+            ? "Imported from existing folder"
+            : "Imported from existing folder — could not be published, kept as a draft",
+        tags,
+        client,
+      })),
+      tx
+    );
+    await versions.setApprovedVersions(
       nestId,
-      nodeId: d.id,
-      version: d.version,
-      content: d.content,
-      author: userEmail,
-      status: d.status,
-      changeNote:
-        d.status === "published"
-          ? "Imported from existing folder"
-          : "Imported from existing folder — could not be published, kept as a draft",
-      tags,
-      client,
-    });
-    if (d.status === "published") {
-      await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
-    } else {
-      await alignOnDiskStatus(nestId, d.id, d.status);
+      rows.filter(({ d }) => d.status === "published").map(({ d }) => ({ nodeId: d.id, version: d.version })),
+      userEmail,
+      tx
+    );
+    await syncNodeTagsMany(nestId, rows.map(({ d, tags }) => ({ nodeId: d.id, tags })), tx);
+  });
+  // One bad row must not sink the batch: on failure, record one document at a
+  // time so the rest land and each refused one is named with its reason.
+  const problems: string[] = [];
+  let recorded = tagged;
+  try {
+    await record(tagged);
+  } catch (err) {
+    console.warn("[import] batch record failed, isolating documents", nestId, err);
+    recorded = [];
+    for (const row of tagged) {
+      try {
+        await record([row]);
+        recorded.push(row);
+      } catch (e) {
+        problems.push(`${row.d.id}: not imported — ${(e as Error)?.message ?? String(e)}`);
+      }
     }
-    await syncNodeTags(nestId, d.id, tags);
   }
+  // Only a failed publish can leave `published` on disk; the engine already
+  // stamped every held document, so checking those too cost a read each.
+  const failedIds = new Set(result.failed.map((f) => f.id));
+  const kept = recorded.map(({ d }) => d);
+  await Promise.all(
+    kept
+      .filter((d) => d.status !== "published" && failedIds.has(d.id))
+      .map((d) => alignOnDiskStatus(nestId, d.id, d.status))
+  );
 
-  const published = docs.filter((d) => d.status === "published").length;
+  const published = kept.filter((d) => d.status === "published").length;
   // Phase split — a slow import is almost always one phase, and the total alone
   // doesn't say which.
   console.log(
-    `[import] register done: registered=${docs.length} published=${published} kept=${
-      docs.length - published
+    `[import] register done: registered=${kept.length} published=${published} kept=${
+      kept.length - published
     } failed=${result.failed.length} alreadyTracked=${tracked.size}` +
       ` engineMs=${engineMs} dbMs=${Date.now() - dbStartedAt}`
   );
@@ -2006,8 +2467,12 @@ export async function registerImportedDocuments(
       result.failed.map((f) => `${f.id}: ${f.error}`).join(", ")
     );
   }
-  await trackEvent("nest.import.documents", { nestId, registered: docs.length });
-  return docs.length;
+  await trackEvent("nest.import.documents", { nestId, registered: kept.length });
+  const recordedIds = new Set(kept.map((d) => d.id));
+  for (const f of result.failed) {
+    if (f.id && recordedIds.has(f.id)) problems.push(`${f.id}: kept as a draft — ${f.error}`);
+  }
+  return { documents: kept.length, problems, warnings: result.warnings ?? [] };
 }
 
 /**
@@ -2074,6 +2539,20 @@ async function stagePdfImport(
   } catch (err) {
     throw pdfEngineError(err);
   }
+}
+
+/** Longest frontmatter description accepted — a summary, not a second body. */
+export const MAX_DESCRIPTION_LENGTH = 500;
+
+/** A trimmed, single-line description, or a ValidationError saying why not. */
+function normalizeDescription(value: unknown): string {
+  if (typeof value !== "string") throw new ValidationError("description must be a string");
+  const description = value.trim();
+  if (/[\r\n]/.test(description)) throw new ValidationError("description must be a single line");
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new ValidationError(`description must be at most ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
+  return description;
 }
 
 export async function updateNode(
@@ -2147,6 +2626,9 @@ export async function updateNode(
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
+      // For the board's moved_at stamp: a tag change is a column change.
+      const priorTags = [...((node.frontmatter.tags || []) as string[])];
+      const priorAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -2209,6 +2691,17 @@ export async function updateNode(
         };
         opInput.title = patch.title;
       }
+      if (patch.description !== undefined) {
+        const description = normalizeDescription(patch.description);
+        if (description !== (node.frontmatter.description ?? "")) {
+          const frontmatter: Record<string, unknown> = { ...node.frontmatter };
+          if (description) frontmatter.description = description;
+          else delete frontmatter.description;
+          node = { ...node, frontmatter: frontmatter as any };
+          // The engine stores it; an empty string removes the key.
+          opInput.description = description;
+        }
+      }
       // Re-type BEFORE the schedule gate below, so "turn this document into
       // an agent and schedule it" is one call — the gate reads the type the
       // node is becoming, as create does.
@@ -2225,8 +2718,9 @@ export async function updateNode(
         if (isRunnableType(node.frontmatter.type) && !isRunnableType(patch.type)) {
           const metadata = { ...(node.frontmatter.metadata as any) };
           delete metadata.schedule;
+          delete metadata.model;
           node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
-          opInput.metadata = { ...(opInput.metadata as object), schedule: null };
+          opInput.metadata = { ...(opInput.metadata as object), schedule: null, model: null };
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
@@ -2250,6 +2744,22 @@ export async function updateNode(
           schedule: patch.schedule === "" ? null : patch.schedule,
         };
       }
+      if (patch.model !== undefined) {
+        assertModelId(patch.model);
+        if (!isRunnableType(node.frontmatter.type)) {
+          throw new ValidationError(
+            `model is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(", ")})`
+          );
+        }
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.model === "") delete metadata.model;
+        else metadata.model = patch.model;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          model: patch.model === "" ? null : patch.model,
+        };
+      }
       if (patch.prime !== undefined) {
         await assertMayFlagPrime(nestId, userEmail);
         const metadata = { ...(node.frontmatter.metadata as any) };
@@ -2258,15 +2768,104 @@ export async function updateNode(
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
       }
+      if (patch.alwaysInclude !== undefined) {
+        if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {
+          throw new ValidationError("always_include must be true, false or null");
+        }
+        await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.alwaysInclude === null) delete metadata.always_include;
+        else metadata.always_include = patch.alwaysInclude;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          always_include: patch.alwaysInclude,
+        };
+      }
+      if (hasTaskFieldsPatch(patch)) {
+        const { metadata, opMetadata } = await applyTaskFields(
+          { ...((node.frontmatter.metadata as Record<string, unknown>) ?? {}) },
+          patch,
+          taskFieldsContext(nestId, storage, nodeId),
+        );
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: metadata as any } };
+        opInput.metadata = { ...(opInput.metadata as object), ...opMetadata };
+      }
+      // Custom fields — after the re-type above, so they validate against
+      // the type the node is becoming. The whole next map is handed to the
+      // engine (its metadata merge is shallow), or null when it empties.
+      let fieldDefs: FieldDefinition[] | null = null;
+      if (patch.fields !== undefined) {
+        fieldDefs = await listFieldDefinitions(nestId);
+        const current = storedFieldsOf(node.frontmatter.metadata);
+        const { fields, changed } = await applyFieldsPatch({
+          defs: fieldDefs,
+          nodeType: node.frontmatter.type || "document",
+          current,
+          patch: patch.fields,
+          isCreate: false,
+          roster: taskFieldsContext(nestId, storage, nodeId).roster,
+        });
+        if (changed) {
+          const empty = Object.keys(fields).length === 0;
+          const metadata = { ...(node.frontmatter.metadata as any) };
+          if (empty) delete metadata.fields;
+          else metadata.fields = fields;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), fields: empty ? null : fields };
+        }
+      }
+      // A time-in-status field can apply to any type, not just tasks; a node
+      // it covers gets the same moved_at stamp a task does.
+      const tracksMoves =
+        node.frontmatter.type === TASK_NODE_TYPE ||
+        (!!patch.tags &&
+          (fieldDefs ??= await listFieldDefinitions(nestId)).some(
+            (d) => d.type === "time_in_status" && appliesTo(d, node.frontmatter.type),
+          ));
+      // A task whose tag set changed moved column on a board. Compared as
+      // sets: the editor resends the same tags on every save, which isn't a
+      // move.
+      if (patch.tags && tracksMoves) {
+        const norm = (t: unknown) => String(t).toLowerCase().replace(/^#/, "");
+        const before = new Set(priorTags.map(norm));
+        const after = ((node.frontmatter.tags || []) as string[]).map(norm);
+        if (before.size !== after.length || after.some((t) => !before.has(t))) {
+          const movedAt = new Date().toISOString();
+          // Entering a "done" column completes the task; leaving one reopens it.
+          const done = new Set(await nestDoneTags(nestId));
+          const wasDone = [...before].some((t) => done.has(t));
+          const isDone = after.some((t) => done.has(t));
+          const stamps: Record<string, unknown> = { moved_at: movedAt };
+          if (isDone && !wasDone) stamps.completed_at = movedAt;
+          if (!isDone && wasDone) stamps.completed_at = null;
+          const metadata = { ...(node.frontmatter.metadata as any), ...stamps };
+          if (stamps.completed_at === null) delete metadata.completed_at;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), ...stamps };
+        }
+      }
+
+      // A fields-only PATCH that changes nothing (a client echoing values
+      // back) is not an edit: no version, no review, no hash move.
+      const onlyFields = Object.entries(patch).every(
+        ([k, v]) => v === undefined || k === "fields" || k === "client" || k === "changeNote",
+      );
+      if (patch.fields !== undefined && onlyFields && Object.keys(opInput).length === 0) {
+        return { node, version: Number(node.frontmatter.version) || 1 };
+      }
 
       const hasStewards = await isStewardshipEnabled(nestId);
       const currentTags = (node.frontmatter.tags || []) as string[];
       // Resolved from the POST-patch tags and metadata — so an edit that adds
       // a prime tag gates itself, and one that clears the doc flag can't
       // un-gate a prime-tagged doc.
-      const publishReason = await autoPublishReason(nestId, userEmail, {
+      const publishReason = opts.alwaysDraft ? null : await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
+        // A task only if it is one before AND after this edit: converting a
+        // document into a task, or a task into anything else, is reviewed.
+        type: patch.type === undefined || patch.type === storedType ? storedType : undefined,
       });
 
       // Stewardship lock: a node with an open review request is frozen for
@@ -2279,12 +2878,27 @@ export async function updateNode(
       const pendingReview = hasStewards
         ? await getPendingReview(nestId, nodeId)
         : null;
+      // A reviewer's approve-with-edits revises the submission the same way.
       const isAuthorEditingOwnReview =
         !!pendingReview &&
-        pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase();
+        (pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase() ||
+          !!opts.reviewerEdit);
+      // The review resolved between the caller's check and this write: the
+      // reviewer's edit must not land as an ordinary draft or publish.
+      if (opts.reviewerEdit && !pendingReview) {
+        throw new ConflictError("The review was resolved before your edit landed — nothing was saved. Reload the document.");
+      }
       if (pendingReview && !isAuthorEditingOwnReview) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."
+        );
+      }
+
+      if (opts.publishOnly && (publishReason === null || isAuthorEditingOwnReview)) {
+        throw new ReviewRequiredError(
+          isAuthorEditingOwnReview
+            ? "This document has your own review open — the change would be a new draft for that review."
+            : "This document goes through review — the change would be saved as a draft for a reviewer.",
         );
       }
 
@@ -2351,6 +2965,10 @@ export async function updateNode(
         if (isAuthorEditingOwnReview) {
           await repointPendingReview({ nestId, nodeId, newVersion });
         }
+        // The working file keeps the last published frontmatter status; the
+        // version row just written is what GET reports, so say "draft" here too
+        // (the reply used to claim "published" for an edit awaiting review).
+        node = { ...node, frontmatter: { ...node.frontmatter, status: "draft" } };
         responseVersion = newVersion;
       } else {
         // Publish through the engine FIRST; only mirror into the DB once it
@@ -2409,6 +3027,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
+      // Only a published edit notifies: a drafted assignment may be rejected.
+      // Approving that draft later doesn't notify either (known gap).
+      const savedAsDraft = publishReason === null || isAuthorEditingOwnReview;
+      if (nextAssignee && nextAssignee !== priorAssignee && !savedAsDraft) {
+        await notifyAssigned({
+          nestId,
+          nodeId,
+          title: String(node.frontmatter.title || nodeId),
+          assignee: nextAssignee,
+          actorEmail: userEmail,
+        });
+      }
       // Awaited, like the other inbox fan-outs: it swallows its own failures,
       // and a local insert is cheaper than a save that returns before it lands.
       if (opts.notifyMentions !== false) {
@@ -2497,6 +3128,15 @@ export const NODE_KEYED_TABLES = [
   // document at the same id never inherits someone else's reads. The
   // deletion tombstone and whole-nest export rows (node_id NULL) survive.
   ["node_access_events", "node_id"],
+  // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
+  // a delete must stop it and a move must take it along.
+  ["metacognition_agents", "node_id"],
+  // Agent/person interactions logged on a task (migration 064).
+  ["task_activity", "node_id"],
+  // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
+  // delete takes them with it (no pin on a document that is gone, or on the
+  // next one to take its id); a move carries them along.
+  ["node_pins", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
@@ -2524,6 +3164,20 @@ async function purgeNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
     [nestId, nodeId],
   );
+  // A request for access to this document asks about something that no longer
+  // exists; a later document at the same id must not inherit it.
+  await tx.run(
+    `DELETE FROM access_requests
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
+    [nestId, nodeId],
+  );
+  // Public docs-site URLs (CU-wdqcq05jhm) outlive the document on purpose: its
+  // old addresses answer 410 Gone, which tells search engines to drop them.
+  // The row is detached from the id, so a later document there inherits none.
+  await tx.run(
+    `UPDATE site_paths SET node_id = '', kind = 'history' WHERE nest_id = ? AND node_id = ?`,
+    [nestId, nodeId],
+  );
 }
 
 /** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
@@ -2533,6 +3187,12 @@ async function rewriteNodeKeyedRows(
   oldId: string,
   newId: string,
 ): Promise<void> {
+  // Pins are the one node-keyed table with a uniqueness rule on the id
+  // (migration 071's partial unique indexes). The destination is not a live
+  // document, so any pin row already on it is stale (its document vanished
+  // outside the app) — clear it, or the repoint trips the index and the move
+  // fails.
+  await tx.run("DELETE FROM node_pins WHERE nest_id = ? AND node_id = ?", [nestId, newId]);
   for (const [table, column] of NODE_KEYED_TABLES) {
     await tx.run(
       `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
@@ -2549,6 +3209,14 @@ async function rewriteNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
     [newId, nestId, oldId],
   );
+  await tx.run(
+    `UPDATE access_requests SET target_id = ?
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
+    [newId, nestId, oldId],
+  );
+  // The page's public URLs move with it: its custom URL stays its own, and
+  // every address it was served at 301s to wherever it lands now.
+  await tx.run(`UPDATE site_paths SET node_id = ? WHERE nest_id = ? AND node_id = ?`, [newId, nestId, oldId]);
 }
 
 export interface MoveNodeResult {
@@ -2627,6 +3295,9 @@ export async function moveNode(
         updated_at: new Date().toISOString(),
       },
     };
+    // Under enforced rules a move is judged as a delete there and a create
+    // here — before anything is written.
+    const plan = await assertMovable(storage, nodeId, newId, moved);
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
@@ -2652,6 +3323,7 @@ export async function moveNode(
     }
 
     await storage.deleteDocument(nodeId);
+    await scaffold(storage, plan);
 
     // Repoint every node-keyed table for the source doc and its derived
     // annotations node, plus the run traces delete keeps. One transaction: a
@@ -2914,8 +3586,9 @@ export async function deleteNode(
       { id: nodeId },
       await opContext(nestId, userEmail),
     );
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
+  } catch (err) {
+    // A structure rule refusing the delete (a required file) is not "missing".
+    throw ruleRefusal(err) ?? new NotFoundError(`Node not found: ${nodeId}`);
   }
 
   await removeNodeFromTagIndex(nestId, nodeId);
@@ -2982,7 +3655,13 @@ export async function deleteFolder(
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
-  const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
+  // A required folder is not deleted alone; the rest go deepest first, each
+  // folder's required files last (see folderDeleteOrder).
+  const targets = await folderDeleteOrder(
+    storage,
+    rel,
+    docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel)),
+  );
   if (targets.length === 0) {
     // A folder holding no document is still a directory in the vault (an
     // explicitly created one, or the remains of a folder whose documents have
@@ -3014,6 +3693,72 @@ export async function deleteFolder(
   // in the tree after the user deleted it.
   await removeVaultFolder(nestId, rel);
   return deleted;
+}
+
+/**
+ * Rename or move a folder: everything under `folder` (sub-folders included,
+ * empty ones too) lands under `newFolder`. A rename is a move to a path with
+ * the same parent, so there is one operation. Each document goes through
+ * moveNode, which keeps ids' history, review state and links, enforces the
+ * structure rules, and refuses a document under open review. Returns the old
+ * and new id of every document moved.
+ */
+export async function moveFolder(
+  nestId: string,
+  folder: string,
+  newFolder: string,
+  userEmail: string,
+): Promise<{ folder: string; moved: Array<{ id: string; previousId: string }> }> {
+  const from = folderToSegments(folder).join("/");
+  const to = folderToSegments(newFolder).join("/");
+  if (!from || !to) throw new ValidationError("folder and new folder are required");
+  if (from === to) return { folder: to, moved: [] };
+  if (to.startsWith(`${from}/`)) {
+    throw new ValidationError("A folder can't be moved into itself.");
+  }
+
+  const { storage } = await engineCache.get(nestId);
+  const all = (await storage.discoverDocuments()).map((d) => d.id);
+  const inside = all.filter((id) => isIdUnderFolder(id, from) && !isDerivedAnnotationsNode(id));
+  const subfolders = [
+    from,
+    ...(await vaultFolderPaths(nestId, { folder: from })).filter((p) => p.startsWith(`${from}/`)),
+  ];
+  if (inside.length === 0 && !(await vaultFolderExists(nestId, from))) {
+    throw new NotFoundError(`No folder found: ${folder}`);
+  }
+  if (await vaultFolderExists(nestId, to)) {
+    // Merging into a folder that is there would be a silent, partial overwrite
+    // of its INDEX and rules; say so instead.
+    throw new ConflictError(`A folder already exists at "${to}"`);
+  }
+  const targets = await assertFolderMovable(storage, from, to, inside);
+
+  const destOf = (id: string) => `${to}${folderOfId(id).slice(from.length)}`;
+  const taken = new Set(all);
+  const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
+  if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+
+  // Sequential, like deleteFolder: a failure names how far it got, and what
+  // moved stays coherent (each move is atomic).
+  const moved: Array<{ id: string; previousId: string }> = [];
+  for (const id of targets) {
+    try {
+      const r = await moveNode(nestId, id, destOf(id), userEmail);
+      moved.push({ id: r.node.id, previousId: r.previousId });
+    } catch (err) {
+      const detail = moved.length > 0 ? ` (${moved.length} of ${targets.length} already moved)` : "";
+      throw new Error(`Failed to move "${id}"${detail}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // Folders that held no document have nothing to carry them: recreate each at
+  // the new path, then drop the old directory tree.
+  for (const sub of subfolders) {
+    await createEmptyFolder(nestId, `${to}${sub.slice(from.length)}`);
+  }
+  await removeVaultFolder(nestId, from);
+  await trackEvent("folder.move", { nestId, from, to });
+  return { folder: to, moved };
 }
 
 /**

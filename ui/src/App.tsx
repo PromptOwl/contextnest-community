@@ -1,5 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { lazyChunk } from "./lib/lazy-chunk";
+import { isOAuthPath } from "./lib/oauth-return";
 import type React from "react";
 import { Login } from "./components/Login";
 // Page-sized components load on first use — one chunk each — so the shell
@@ -14,9 +15,12 @@ import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { shouldReturnToNestOnSave } from "./lib/document-save-nav";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
+import { LicenseBanner } from "./components/LicenseNotice";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { RequestAccessHost } from "./components/RequestAccessDialog";
+import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
@@ -25,6 +29,7 @@ import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
+import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
@@ -99,6 +104,9 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Open the nest settings dialog on arrival (a document's "turn on
+       *  self-approve" link). Not mirrored to the URL. */
+      openSettings?: boolean;
       /** Public Docs Reader Mode is on for this nest AND the caller is
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
@@ -124,6 +132,9 @@ type View =
       /** Open with this comment thread focused (activity-feed deep link;
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
+      /** The review queue this doc was opened from. Back, approve and reject
+       *  return there, so a reviewer goes straight to the next item. */
+      returnTo?: View;
     }
   | { page: "docs" }
   | {
@@ -142,6 +153,18 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
+    }
+  | {
+      page: "structure";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      /** Open at the rule governing this folder (?folder=), or start one for it. */
+      folder?: string;
       readerMode?: boolean;
       /** Nest is archived — opened from the Archived section, read-only. */
       isArchived?: boolean;
@@ -184,28 +207,7 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-/** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
- *  gated inside NestView, which falls back to overview when one isn't shown. */
-/** Breadcrumb labels for those tabs. */
-const NEST_TAB_LABELS: Record<string, string> = {
-  overview: "Overview",
-  documents: "Documents",
-  review: "Review queue",
-  "external-edits": "External edits",
-  stewards: "Stewards",
-  collaborators: "Collaborators",
-};
-
-const NEST_TABS = [
-  "overview",
-  "documents",
-  "review",
-  "external-edits",
-  "stewards",
-  "collaborators",
-];
-
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -238,10 +240,14 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
+    mcpOauthEnabled,
+    docStreamEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // What gates an app page (meta.visible). Superadmin is never open mode.
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -256,6 +262,9 @@ export default function App() {
     (next: View) => navigateGuarded(() => setViewNow(next)),
     [],
   );
+  // The view a queue page sits on, for a document opened from it to return to.
+  const viewRef = useRef(view);
+  viewRef.current = view;
   // The node key last written to history (see `nodeKey` below) — null both
   // before the URL-sync effect has run at all and whenever the current view
   // isn't looking at a node, so in either case the next node it lands on
@@ -289,6 +298,8 @@ export default function App() {
     null,
   );
   const [licenseLoading, setLicenseLoading] = useState(true);
+  // An admin replacing a lapsed key from the license banner.
+  const [installingKey, setInstallingKey] = useState(false);
   // Logout flow: confirm dialog → call logout() → sonner success toast.
   // The Toaster portal lives at the root of the tree (rendered below)
   // so the toast survives the view swap that logout triggers (Login
@@ -400,6 +411,14 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setShowQuickOpen((v) => !v);
+        return;
+      }
+      // "/" opens search too, unless the user is typing somewhere.
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const t = e.target as HTMLElement | null;
+        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+        e.preventDefault();
+        setShowQuickOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -563,7 +582,8 @@ export default function App() {
             isOwner,
             isAnonOwned: false,
             readerMode,
-          });
+            ...(subPage === "structure" && params.get("folder") ? { folder: params.get("folder")! } : {}),
+          } as View);
           return;
         }
         setView({
@@ -576,9 +596,7 @@ export default function App() {
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
-          tab: NEST_TABS.includes(params.get("tab") ?? "")
-            ? params.get("tab")!
-            : undefined,
+          tab: nestTabFromParam(params.get("tab")),
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
@@ -597,6 +615,9 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // The OAuth authorize page shows the login form at its own URL; rewriting
+    // it would drop the params the reload after sign-in needs.
+    if (isOAuthPath(window.location.pathname)) return;
     // An unresolved ?nest is dropped from the address bar as soon as its error
     // screen goes up (CU-wdqcq01e70): leaving it there made every refresh — and
     // any link copied off that screen — land back on the same dead end. The id
@@ -617,6 +638,7 @@ export default function App() {
       else params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     } else if (view.page === "nest") {
       pathNestId = view.nestId;
       if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
@@ -627,26 +649,34 @@ export default function App() {
       // link keeps working and doesn't grow a redundant &tab=overview.
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
+      // ?review= (the change open in the review pane) only means something
+      // on the Review tab; NestView writes it, App drops it everywhere else.
+      if (view.tab !== "review") params.delete("review");
     } else if (
       // Nest views ride in the path (/nest/<id>/<segment>) — the registry
       // page owns its segment; trace is the one non-registry sub-page.
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
+      view.page === "structure" ||
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
       pathView = view.page === "nest-trace" ? "trace" : nestPageForView(view.page)?.path ?? null;
+      if (view.page === "structure" && view.folder) params.set("folder", view.folder);
+      else params.delete("folder");
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
       params.delete("view");
+      params.delete("review");
     } else {
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     }
     const qs = params.toString();
     const path =
@@ -783,7 +813,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = visibleAppPage(view.tab, { isAdmin });
+      const page = visibleAppPage(view.tab, pageCaps);
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -811,7 +841,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -819,8 +849,17 @@ export default function App() {
     () => ({
       openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
-      openReview: (nestId, nestName, nodeId) =>
-        setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
+      openReview: (nestId, nestName, nodeId, opts) =>
+        setView({
+          page: "document",
+          nestId,
+          nestName,
+          nodeId,
+          isOwner: true,
+          isAnonOwned: true,
+          initialThreadId: opts?.thread,
+          returnTo: viewRef.current,
+        }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
     [setView],
@@ -966,10 +1005,28 @@ export default function App() {
     );
   }
 
-  // Setup gate: no valid license = force operator through install
-  // before anything else loads.
-  if (licenseStatus && !licenseStatus.valid) {
+  // Setup gate: a server that has never been licensed goes through install
+  // before anything else loads. A workspace whose license LAPSED does not —
+  // it stays open read-only, admins get the specifics in the license banner
+  // (with "Install a new key" → the screen below), everyone else a neutral
+  // line. setup_required is absent only on a pre-v2 server: keep the old gate.
+  if (
+    licenseStatus &&
+    !licenseStatus.valid &&
+    licenseStatus.setup_required !== false
+  ) {
     return <LicenseSetupPage onActivated={refreshLicense} />;
+  }
+  if (installingKey) {
+    return (
+      <LicenseSetupPage
+        onActivated={() => {
+          setInstallingKey(false);
+          refreshLicense();
+        }}
+        onCancel={() => setInstallingKey(false)}
+      />
+    );
   }
 
   // Logout chrome (confirm dialog + success toast) lives at the top of
@@ -1064,6 +1121,10 @@ export default function App() {
       {showShortcuts && (
         <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
       )}
+      {/* A refused write anywhere offers "Request access?" (CU-wdqcq041jn). */}
+      <RequestAccessHost />
+      {/* A role change that raises someone's billed class asks first (CU-wdqcq04t06). */}
+      <BillingConfirmHost />
     </>
   );
 
@@ -1172,7 +1233,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, pageCaps).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1344,13 +1405,15 @@ export default function App() {
                     ? "Search nests and documents (⌘K)"
                     : "Search this nest (⌘K)"
                 }
-                className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                className="flex items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                 aria-label="Search"
                 data-testid="global-search-trigger"
               >
-                <Search className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Search</span>
-                <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                <Search className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline flex-1 text-left truncate">
+                  {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
+                </span>
+                <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
               </button>
@@ -1479,6 +1542,16 @@ export default function App() {
       <main
         className={`${shellWidth} min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
       >
+        {/* License specifics for admins; a neutral read-only line for
+            everyone else, and only once the workspace is read-only. */}
+        <LicenseBanner
+          isAdmin={isAdmin}
+          status={licenseStatus}
+          onInstallKey={() => setInstallingKey(true)}
+          // With the sidebar <main> has no padding of its own (pages add it),
+          // so the card needs its own gap from the header and the edges.
+          className={withSidebar ? "mx-4 mt-4 md:mx-6" : "mb-4"}
+        />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
             no way to tell "deleted" from "no access" from "bad link"
@@ -1522,7 +1595,7 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
+          const Page = visibleAppPage(view.tab, pageCaps).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -1542,6 +1615,7 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialSettings={view.openSettings}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
@@ -1557,6 +1631,7 @@ export default function App() {
                 isAnonOwned: view.isAnonOwned,
                 initialFolder: opts?.folder,
                 initialThreadId: opts?.thread,
+                returnTo: view.tab === "review" ? view : undefined,
               })
             }
             onOpenTrace={() =>
@@ -1566,6 +1641,16 @@ export default function App() {
                 nestName: view.nestName,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
+              })
+            }
+            onOpenStructure={(folder) =>
+              setView({
+                page: "structure",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                ...(folder ? { folder } : {}),
               })
             }
           />
@@ -1601,6 +1686,7 @@ export default function App() {
             initialTags?: string[];
             initialFolder?: string;
             tab?: string;
+            openSettings?: boolean;
           }) =>
             setView({
               page: "nest",
@@ -1643,6 +1729,10 @@ export default function App() {
                   openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
                   return;
                 }
+                if (doc.returnTo) {
+                  setView(doc.returnTo);
+                  return;
+                }
                 // Documents tab, not the nest's default Overview — every
                 // caller of this is a "back to documents" affordance.
                 openNest({ tab: "documents" });
@@ -1654,6 +1744,8 @@ export default function App() {
                 if (!entry) return;
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
+              onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
+              onOpenNestSettings={() => openNest({ openSettings: true })}
               onSaved={() => {
                 // A fresh "new" doc has nowhere to stay open on, so land back
                 // on the nest; saving an EXISTING document must leave the
@@ -1748,6 +1840,9 @@ export default function App() {
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
+            openFolder: (folder: string) =>
+              setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialFolder: folder, tab: "documents" }),
+            folder: v.page === "structure" ? v.folder : undefined,
           };
           return (
             <NestPageProvider value={ctx}>

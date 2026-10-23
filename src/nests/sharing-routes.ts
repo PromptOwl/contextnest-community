@@ -1,4 +1,8 @@
+import { invalidateSiteNests } from "../site/invalidate.js";
+import { claimSiteKeyIfLive } from "../site/settings.js";
 import { Hono } from "hono";
+import { dropPersonalPinsIfGone } from "../nodes/doc-pins.js";
+import { isSystemUser } from "../auth/systems.js";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import {
@@ -12,7 +16,8 @@ import {
 } from "../governance/stewardship-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
-import { listNestPeople, withDirectory } from "./people-service.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
+import { canSeeRoster, listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import { isNestHeadless } from "../auth/headless.js";
 import {
@@ -31,7 +36,10 @@ sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
   const nestId = c.req.param("nestId")!;
   const collabs = (await db.all(
-    `SELECT nc.*, u.email FROM nest_collaborators nc
+    `SELECT nc.*, u.email,
+            CASE WHEN EXISTS (SELECT 1 FROM system_accounts sa WHERE sa.user_id = nc.user_id)
+                 THEN 'system' ELSE 'human' END AS principal_kind
+       FROM nest_collaborators nc
        LEFT JOIN users u ON nc.user_id = u.id
        WHERE nc.nest_id = ?
        ORDER BY nc.granted_at`,
@@ -93,6 +101,15 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   }
 
   const db = getDb();
+  const row = (await db.get(
+    "SELECT user_id FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+    [c.req.param("collabId")!, c.req.param("nestId")!],
+  )) as { user_id: string } | undefined;
+  // A system stays a viewer or editor — never a nest admin (CU-wdqcq0538g).
+  if (row && body.permission === "admin" && (await isSystemUser(row.user_id))) {
+    throw new ValidationError("A system can be a viewer or an editor, never a nest admin.");
+  }
+  if (row) await assertCanGrant([{ userId: row.user_id, next: permissionClass(body.permission) }]);
   // Scope to the nest in the URL — the guard authorised the caller against
   // THIS nest, so the row we touch must belong to it (a bare `id =` match
   // would let an admin of nest A mutate a collaborator row from nest B).
@@ -112,15 +129,25 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
 // Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
+  const nestId = c.req.param("nestId")!;
+  // Whose row it is, so their personal document pins here can go with it.
+  const target = (await db.get(
+    "SELECT user_id FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+    [c.req.param("collabId")!, nestId],
+  )) as { user_id: string } | undefined;
   // Scope to the nest in the URL (see PATCH above) — never delete a row that
   // belongs to a different nest just because the UUID matches.
   const info = await db.run(
     "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
-    [c.req.param("collabId")!, c.req.param("nestId")!],
+    [c.req.param("collabId")!, nestId],
   );
   if (info.changes === 0) {
     throw new NotFoundError("Collaborator not found");
   }
+  // Removed from the nest → their personal document pins in it go too
+  // (CU-wdqcq02crw) — unless they still reach it another way. Same rule as
+  // leaving it themselves (dropPersonalPinsIfGone).
+  if (target?.user_id) await dropPersonalPinsIfGone(nestId, target.user_id);
   return c.json({ removed: true });
 });
 
@@ -137,23 +164,22 @@ sharingRoutes.get("/mentionable", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const people = await listNestPeople(nestId);
-  const callerEmail = (await resolveCallerEmail(userId)).toLowerCase();
-  const onRoster = people.some((p) => p.email.toLowerCase() === callerEmail);
-  if (!onRoster) {
-    // A server admin (and any write-tier caller, who can read the fuller
-    // roster anyway) is not necessarily a listed person — don't lock them out
-    // of their own nest's picker.
-    const access = await resolveNestAccess(nestId, userId);
-    if (permissionLevel(access.permission) < permissionLevel("write")) {
-      throw new ForbiddenError("Only people on this nest can see its roster");
-    }
+  // A server admin (and any write-tier caller) is not necessarily a listed
+  // person — canSeeRoster doesn't lock them out of their own nest's picker.
+  if (!(await canSeeRoster(nestId, userId, await resolveCallerEmail(userId), people))) {
+    throw new ForbiddenError("Only people on this nest can see its roster");
   }
   // Name + email only: the picker shows a person and inserts their address.
   // `source` (owner/collaborator/team/steward/grant) stays out — how someone
   // got access is not the mention picker's business. Gate above is on the
   // roster; the directory widening applies only after it.
   return c.json({
-    people: (await withDirectory(people)).map((p) => ({ email: p.email, name: p.name })),
+    // `member`: on the nest, not a directory suggestion — only they can be assigned.
+    people: (await withDirectory(people)).map((p) => ({
+      email: p.email,
+      name: p.name,
+      member: p.source !== "directory",
+    })),
   });
 });
 
@@ -226,6 +252,8 @@ sharingRoutes.patch("/visibility", async (c) => {
       : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
     [body.visibility, nestId],
   );
+  invalidateSiteNests();
+  if (result.changes > 0) await claimSiteKeyIfLive(nestId);
   if (result.changes === 0 && body.visibility !== "private" && (await isNestHeadless(nestId))) {
     return c.json(
       { error: "This nest is published API-only (headless), so it stays private." },

@@ -1,3 +1,5 @@
+import { parseServerDate } from "./dates";
+
 /**
  * What an API key can reach, in words — and the request that mints one.
  *
@@ -33,13 +35,34 @@ export function keyScope(
   };
 }
 
+export type KeyCapability = "read" | "write";
+
+/** Read-only or read-write, in words. A missing value is a write key — the
+ *  server's default (src/auth/keys.ts normalizeCapability). */
+export function keyCapability(key: { capability?: string | null }): {
+  kind: KeyCapability;
+  label: string;
+} {
+  return key.capability === "read"
+    ? { kind: "read", label: "Read-only" }
+    : { kind: "write", label: "Read-write" };
+}
+
+/** Mirrors the server's 400: a read-only key must name one nest. */
+export const READ_ONLY_NEEDS_NEST =
+  "A read-only key must be scoped to one nest — pick a nest.";
+
 /** Body for POST /auth/keys. `scope` is ALL_NESTS or a nest id. */
 export function createKeyRequest(
   label: string,
   scope: string,
-): { label: string; nest_id?: string } {
+  capability: KeyCapability = "write",
+): { label: string; nest_id?: string; capability?: KeyCapability } {
   const trimmed = label.trim();
-  return scope === ALL_NESTS ? { label: trimmed } : { label: trimmed, nest_id: scope };
+  const body: { label: string; nest_id?: string; capability?: KeyCapability } =
+    scope === ALL_NESTS ? { label: trimmed } : { label: trimmed, nest_id: scope };
+  if (capability === "read") body.capability = "read";
+  return body;
 }
 
 /** A default name for a key minted from a nest's Connect dialog, unique among
@@ -55,4 +78,30 @@ export function nestOnlyKeyLabel(
     const candidate = `${base}${suffix}`;
     if (!used.has(candidate.toLowerCase())) return candidate;
   }
+}
+
+export type KeyScopeFilter = "any" | "all" | "nest";
+export type KeySort = "newest" | "name" | "last_used";
+
+/** The API keys page's list controls: text search over name, prefix and
+ *  scope label, a scope filter, then a sort. Never mutates `keys`. */
+export function filterSortKeys<
+  K extends { label: string | null; key_prefix: string; nest_id: string | null; created_at: string; last_used_at: string | null },
+>(
+  keys: ReadonlyArray<K>,
+  nests: ReadonlyArray<{ id: string; name?: string | null }> | undefined,
+  opts: { query: string; scope: KeyScopeFilter; sort: KeySort },
+): K[] {
+  const q = opts.query.trim().toLowerCase();
+  const out = keys.filter((k) => {
+    const reach = keyScope(k, nests);
+    if (opts.scope !== "any" && reach.kind !== opts.scope) return false;
+    return !q || [k.label ?? "", k.key_prefix, reach.label].some((s) => s.toLowerCase().includes(q));
+  });
+  // Timestamps come as ISO or SQL-style, so compare parsed; never-used sorts last.
+  const ms = (v: string | null) => parseServerDate(v)?.getTime() ?? 0;
+  if (opts.sort === "name") out.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
+  else if (opts.sort === "last_used") out.sort((a, b) => ms(b.last_used_at) - ms(a.last_used_at));
+  else out.sort((a, b) => ms(b.created_at) - ms(a.created_at));
+  return out;
 }

@@ -13,7 +13,15 @@
  */
 
 import { clearDraft } from "./draft";
+import { streamQueryString, type StreamQuery } from "./doc-stream";
+import {
+  ACCESS_OFFER_EVENT,
+  accessOfferFromError,
+  type AccessRequest,
+  type AccessTarget,
+} from "./access-requests";
 import type { NestBranding } from "./branding";
+import type { InstructionsRevision } from "./instructions";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -72,6 +80,19 @@ async function request<T = any>(
   }
 
   if (!res.ok) {
+    // A role change that raises someone's billed class: one listener
+    // (BillingConfirmHost) asks, and a yes resends with the confirm header.
+    if (res.status === 409 && data.code === "billing_confirm" && !headers["X-Confirm-Billing"] && typeof window !== "undefined") {
+      const ok = await new Promise<boolean>((resolve) => {
+        const ev = new CustomEvent<BillingConfirmRequest>(BILLING_CONFIRM_EVENT, {
+          detail: { changes: data.changes ?? [], resolve },
+          cancelable: true,
+        });
+        if (window.dispatchEvent(ev)) resolve(false); // no host mounted
+      });
+      if (ok) return request<T>(path, { ...options, headers: { ...headers, "X-Confirm-Billing": "true" } });
+      data.error = "Cancelled. Nothing was saved and no one's billing changed.";
+    }
     // 401 = the server says we're not logged in. Drop any legacy
     // localStorage entry and signal the auth context to reset UI state
     // (re-render to logged-out without a manual page refresh).
@@ -87,6 +108,22 @@ async function request<T = any>(
     const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
     err.status = res.status;
     err.body = data;
+    // A role grant past the pricing plan: the dialog shows the message; the
+    // license banner offers admins the way to change plans (one listener).
+    if (res.status === 402 && data.code === "plan_limit" && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("license:plan-limit", { detail: data }));
+    }
+    // A write refused for someone who could ask for the access instead
+    // (CU-wdqcq041jn): one listener (RequestAccessHost) offers the request over
+    // whatever they were doing. The caller still gets the error, so its own
+    // state — an unsaved edit above all — stays as it was.
+    const offer =
+      (options.method ?? "GET").toUpperCase() !== "GET"
+        ? accessOfferFromError(path, res.status, data)
+        : null;
+    if (offer && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(ACCESS_OFFER_EVENT, { detail: offer }));
+    }
     throw err;
   }
   // Every successful mutation invalidates the cached reads its result affects.
@@ -133,6 +170,19 @@ export function invalidateNestReads(nestId?: string): void {
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
+/** A role change the server says raises someone's billed class (409 billing_confirm). */
+export interface BillingChange {
+  userId: string | null;
+  email: string | null;
+  from: "viewer" | "subscriber" | "user";
+  to: "viewer" | "subscriber" | "user";
+}
+export interface BillingConfirmRequest {
+  changes: BillingChange[];
+  resolve: (confirmed: boolean) => void;
+}
+export const BILLING_CONFIRM_EVENT = "billing:confirm";
+
 export interface ApiError extends Error {
   status?: number;
   body?: { error?: string; fieldErrors?: Record<string, string>; [k: string]: unknown };
@@ -174,9 +224,11 @@ export async function startDeviceAuth() {
 }
 
 export async function pollDeviceAuth(code: string, clientSecret: string) {
-  return request<{ status: string; token?: string }>(
-    `/auth/device/poll?code=${encodeURIComponent(code)}&client_secret=${encodeURIComponent(clientSecret)}`,
-  );
+  // Secret in the body, not the URL, so access logs never record it.
+  return request<{ status: string; token?: string }>("/auth/device/poll", {
+    method: "POST",
+    body: JSON.stringify({ code, client_secret: clientSecret }),
+  });
 }
 
 export type ClaimBlocked =
@@ -200,6 +252,8 @@ export async function getHealth() {
     status: string;
     version?: string;
     auth_mode: string;
+    /** The server runs an OAuth authorization server for MCP clients. */
+    mcp_oauth_enabled?: boolean;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     manual_sign_in?: "open" | "invite-only" | "disabled";
@@ -207,6 +261,8 @@ export async function getHealth() {
     oidc_enabled?: boolean;
     /** Present when oidc_enabled — lets the login page label the button by IdP. */
     oidc_issuer?: string;
+    /** Present when PromptOwl SSO tickets are accepted — the Google button target. */
+    promptowl_google_url?: string;
     workflow_plane_enabled?: boolean;
     /** Import teams from PromptOwl (default OFF). Off → the panel is hidden. */
     promptowl_teams_enabled?: boolean;
@@ -215,6 +271,7 @@ export async function getHealth() {
     type_artifact_enabled?: boolean;
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
+    type_task_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -222,11 +279,24 @@ export async function getHealth() {
     /** Hootie in the nest (default OFF — admins opt in). Off → the launcher
      *  is hidden and POST /nests/:id/chat 404s. */
     hootie_enabled?: boolean;
+    /** Metacognition agents: server-run, persona-attributed, proposals only.
+     *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
+    metacognition_enabled?: boolean;
+    /** Experimental features, one key each (default off; superadmin switches
+     *  under Settings → Features). Off → the routes 404 and the UI hides it. */
+    experimental?: {
+      /** Document pins: editorial + personal (CU-wdqcq02crw). */
+      doc_pins?: boolean;
+      /** Cross-nest document stream (GET /me/stream, the Stream page). */
+      doc_stream?: boolean;
+    };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
     /** Whether custom assistant identity is allowed (enterprise licence). */
     hootie_branding_available?: boolean;
+    /** Own model key / gateway allowed (licence feature byok, Enterprise). */
+    byok_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -261,12 +331,20 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  /** Password self-registration is open while SSO is live (warned about). */
+  manual_sign_in_open_with_sso?: boolean;
+  community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;
   /** PostHog project key ("" = analytics off) and ingestion host. */
   posthog_key: string;
   posthog_host: string;
   public_base_url: string;
+  /**
+   * Serve OAuth discovery and challenge MCP clients, so an agent signs its
+   * user in instead of carrying a shared API key. Requires public_base_url.
+   */
+  mcp_oauth_enabled: boolean;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
@@ -276,6 +354,8 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** The server accepts `task` nodes (its engine knows the type). */
+  type_task_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -285,16 +365,27 @@ export interface AdminSettings {
   hootie_accent_color: string;
   hootie_greeting: string;
   hootie_branding_available: boolean;
-  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+  /** Own key + gateway fields are in effect and editable only with byok. */
+  byok_available?: boolean;
+  /** Model Hootie answers with (default claude-sonnet-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
-  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
-   *  "" = Anthropic directly. */
-  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
+  metacognition_enabled: boolean;
+  /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
+  experimental_doc_stream_enabled: boolean;
+  /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
+  experimental_doc_pins: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** File operations one folder import keeps in flight (1–256; engine default 32). */
+  import_io_concurrency: number;
+  /** Superadmin message log: retention in days (0 = forever) and whether redacted bodies are kept. */
+  message_log_retention_days: number;
+  message_log_store_bodies: boolean;
+  /** Agent-run retention (runs + steps); 0 keeps every run. */
+  run_retention_days: number;
   /** OIDC SSO. The client secret is write-only — only its presence comes back. */
   oidc_enabled: boolean;
   oidc_issuer: string;
@@ -304,6 +395,8 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Enterprise identity providers allowed (licence feature sso). Google is on every plan. */
+  sso_available?: boolean;
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
@@ -328,7 +421,6 @@ export interface AdminSettings {
   ms_tenant_id: string;
   google_token_exchange_enabled: boolean;
   google_client_id: string;
-  anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
   email_provider: "smtp" | "ses";
@@ -341,7 +433,19 @@ export interface AdminSettings {
   ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
-  anthropic_api_key?: string | null
+  /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
+  own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** The server's own model gateway (byok): LiteLLM / Bedrock / Azure / Ollama
+   *  speaking /v1/messages. "" = off (PromptOwl's gateway). */
+  anthropic_base_url?: string;
+  /** Masked tail of the gateway's key; never the value. */
+  anthropic_api_key_masked?: string | null;
+  /** Write-only: the gateway's key to set, or null to clear. */
+  anthropic_api_key?: string | null;
+  /** Which key Hootie's calls use: own (the server's gateway) or promptowl (credits). */
+  model_source?: "own" | "promptowl" | null;
+  /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
+  provider_keys?: Record<string, string | null>;
 }
 
 export async function getAdminSettings() {
@@ -350,9 +454,7 @@ export async function getAdminSettings() {
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
-  patch: Partial<AdminSettings> & {
-    anthropic_api_key?: string | null;
-  },
+  patch: Partial<AdminSettings>,
 ) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
@@ -369,7 +471,116 @@ export async function sendTestNotification(channel: "slack" | "teams") {
   });
 }
 
+// ─── Network & status (admin) ──────────────────────────────────────────
+// Mirrors src/ops/status.ts and src/ops/egress.ts.
+
+export type CheckState = "green" | "amber" | "red" | "off";
+
+export interface StatusCheck {
+  id: string;
+  group: "data" | "license" | "network" | "services" | "runtime";
+  label: string;
+  state: CheckState;
+  detail: string;
+  fix?: string;
+}
+
+export interface EgressTarget {
+  id: string;
+  purpose: string;
+  host: string;
+  port: number;
+  protocol: "https" | "smtp" | "postgres";
+  configuredBy: string;
+  required: boolean;
+}
+
+export interface StatusReport {
+  generatedAt: string;
+  version: string;
+  build: string | null;
+  listenPort: number;
+  checks: StatusCheck[];
+  address: {
+    effectiveBaseUrl: string;
+    pinned: boolean;
+    requestOrigin: string;
+    forwarded: { proto: string | null; host: string | null; for: string | null };
+    privateHost: boolean;
+  };
+  egress: EgressTarget[];
+}
+
+export interface ProbeStage {
+  stage: "dns" | "tcp" | "tls" | "http" | "smtp";
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
+export interface EgressReport {
+  ranAt: string;
+  proxy: string | null;
+  proxyProblem: string | null;
+  results: { id: string; purpose: string; host: string; port: number; ok: boolean; stages: ProbeStage[]; hint?: string }[];
+  clockSkewSeconds: number | null;
+}
+
+export interface InboundReport {
+  ranAt: string;
+  url: string | null;
+  ok: boolean;
+  stages: ProbeStage[];
+  privateAddresses: boolean;
+  note: string;
+  hint?: string;
+}
+
+export interface DiscoveryReport {
+  ranAt: string;
+  issuer: string | null;
+  ok: boolean;
+  ms: number;
+  detail: string;
+  endpointHosts: string[];
+  hint?: string;
+}
+
+export async function getServerStatus() {
+  return request<StatusReport>("/admin/status");
+}
+
+export async function runEgressCheck() {
+  return request<EgressReport>("/admin/status/egress", { method: "POST", body: "{}" });
+}
+
+export async function runInboundCheck() {
+  return request<InboundReport>("/admin/status/inbound", { method: "POST", body: "{}" });
+}
+
+export async function runOidcDiscoveryCheck() {
+  return request<DiscoveryReport>("/admin/status/oidc-discovery", { method: "POST", body: "{}" });
+}
+
 // ─── License ───────────────────────────────────────────────────────────
+
+export interface LicenseContact {
+  url: string;
+  email: string;
+}
+
+/** Trial / expiry / refusal fields shared by the public and admin views. */
+export interface LicenseTerms {
+  trial?: boolean;
+  expires_at?: string | null;
+  /** Whole days until expires_at (negative once past); null = no end date. */
+  days_left?: number | null;
+  /** not_found | deactivated | suspended | expired — or expired_grace (past
+   *  the end date, still fully working until grace_ends_at). */
+  reason?: string | null;
+  grace_ends_at?: string | null;
+  contact?: LicenseContact;
+}
 
 export interface LicenseStatus {
   valid: boolean;
@@ -379,10 +590,52 @@ export interface LicenseStatus {
   suspended: boolean;
   suspended_reason: string | null;
   limits: { maxNests: number; maxUsers: number } | null;
+  /** Never licensed: show activation. False for a lapsed license. */
+  setup_required?: boolean;
 }
 
 export async function getLicenseStatus() {
   return request<LicenseStatus>("/license/status");
+}
+
+/** Admin-only license detail (Settings → License, the admin banner). */
+export interface AdminLicense extends LicenseTerms {
+  valid: boolean;
+  tier: string;
+  org: string | null;
+  owner_email: string | null;
+  suspended: boolean;
+  suspended_reason: string | null;
+  seats: {
+    licensed: number | null;
+    used: number;
+    over_limit: boolean;
+    at_limit: boolean;
+  };
+  pending_rejections: number;
+  /** Last good check, set once PromptOwl has been unreachable for over 24h: read-only until it answers. */
+  offline_since?: string | null;
+  last_checked_at: string | null;
+  /** Own model keys / LLM gateway (licence feature byok) is on for this licence. */
+  byok?: boolean;
+  /** free | trial | self_hosted | enterprise. */
+  plan?: string;
+  /** Editors in use and the cap (null = unlimited, 0 = needs a paid plan). */
+  subscribers?: { licensed: number | null; used: number };
+  max_account_owners?: number | null;
+  /** PromptOwl's page for this key: plan and Upgrade. */
+  manage_url?: string | null;
+}
+
+export async function getAdminLicense() {
+  return request<AdminLicense>("/admin/license");
+}
+
+/** Models this server's credential can reach (admin), and the one Hootie uses now. */
+export async function getAdminModels() {
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
+    "/admin/models",
+  );
 }
 
 export async function installLicense(key: string) {
@@ -396,7 +649,7 @@ export async function installLicense(key: string) {
     // restart); `warning` carries the operator-facing explanation.
     persisted?: boolean;
     warning?: string;
-  }>("/license/install", {
+  } & LicenseTerms>("/license/install", {
     method: "POST",
     body: JSON.stringify({ key }),
   });
@@ -560,6 +813,89 @@ export async function getAdminTrace(params: {
   }>(`/admin/trace${suffix}`);
 }
 
+// ─── Superadmin message log ────────────────────────────────────────────────
+
+export type MessageChannel = "email" | "slack" | "msteams" | "webhook" | "inbox" | "comment";
+export type MessageSenderKind = "human" | "persona" | "system";
+export type MessageStatus = "sent" | "failed" | "skipped";
+
+export interface OutboundMessageRow {
+  id: string;
+  channel: MessageChannel;
+  sender_kind: MessageSenderKind;
+  sender: string | null;
+  recipients: string[];
+  subject: string | null;
+  status: MessageStatus;
+  provider_id: string | null;
+  error: string | null;
+  nest_id: string | null;
+  nest_name: string | null;
+  node_id: string | null;
+  run_id: string | null;
+  /** Left through the egress proxy (HTTPS_PROXY); null when not applicable. */
+  via_proxy: boolean | null;
+  created_at: string;
+  has_body?: boolean;
+  /** Detail view only: the redacted body (null when bodies aren't stored). */
+  body?: string | null;
+}
+
+export interface MessageLogFilters {
+  channel?: MessageChannel;
+  sender_kind?: MessageSenderKind;
+  status?: MessageStatus;
+  sender?: string;
+  nest?: string;
+  run?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// Superadmin only — the server refuses everyone else, including open mode.
+// Every call is recorded in the access log.
+export async function getMessageLog(params: MessageLogFilters = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "") qs.set(k, String(v));
+  }
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    total: number;
+    limit: number;
+    offset: number;
+    retention_days: number;
+    store_bodies: boolean;
+    messages: OutboundMessageRow[];
+  }>(`/admin/messages${suffix}`);
+}
+
+export async function getMessageLogEntry(id: string) {
+  return request<{ message: OutboundMessageRow }>(`/admin/messages/${encodeURIComponent(id)}`);
+}
+
+export interface MessageLogView {
+  id: string;
+  viewer: string | null;
+  action: "list" | "detail" | "views";
+  filters: Record<string, string> | null;
+  message_id: string | null;
+  at: string;
+}
+
+export async function getMessageLogViews(params: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{ total: number; limit: number; offset: number; views: MessageLogView[] }>(
+    `/admin/messages/views${suffix}`,
+  );
+}
+
 // Per-nest activity trace — same rows/shape as getAdminTrace but always
 // scoped server-side to one nest. Owner / nest-admin only.
 export async function getNestTrace(
@@ -618,6 +954,8 @@ export interface ApiKeyMeta {
   key_prefix: string;
   nest_id: string | null;
   label: string | null;
+  /** "read" keys can't write; anything else is read-write. */
+  capability?: string | null;
   created_at: string;
   last_used_at: string | null;
 }
@@ -637,7 +975,12 @@ export interface ApiKeyMinted {
 
 /** Mint another external-client API key. 409s at the per-user ceiling or on a
  *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
-export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
+export async function createApiKey(opts?: {
+  label?: string;
+  nest_id?: string;
+  /** "read" requires nest_id — the server 400s otherwise. */
+  capability?: "read" | "write";
+}) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),
@@ -664,6 +1007,27 @@ export async function deleteApiKey(keyId: string) {
   });
 }
 
+// ─── Connected apps (MCP OAuth grants) ─────────────────────────────────
+
+export interface ConnectedApp {
+  clientId: string;
+  clientName: string;
+  scopes: string[];
+  redirectOrigin: string | null;
+  connectedAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function listConnectedApps() {
+  return request<{ apps: ConnectedApp[] }>("/oauth/connected");
+}
+
+export async function disconnectApp(clientId: string) {
+  return request<{ revoked: boolean }>(`/oauth/connected/${encodeURIComponent(clientId)}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export interface NestSettings {
@@ -673,10 +1037,80 @@ export interface NestSettings {
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** Tags that mark a document always-include: its approved text is pushed
+   *  to every agent and model entering the nest. Default ["always-include"]. */
+  always_include_tags?: string[];
   /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Review SLA in hours; null = off. Overdue reviews escalate one rung. */
+  review_sla_hours?: number | null;
+  /** Reads, pulls and exports are recorded in the activity log (default on).
+   *  Only the owner or server admin may turn it off. */
+  access_log_enabled?: boolean;
+  /** "drafts": anyone in the organization may suggest documents and edits on
+   *  this org nest, as drafts for review (CU-wdqcq05rz6). */
+  org_contributions?: "off" | "drafts";
+  /** Email domains that count as the organization — required on a shared
+   *  deployment. Bare domains, matched exactly. */
+  org_domains?: string[];
+}
+
+// ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
+
+/** An always-include document as the instructions page reports it. */
+export interface StandingRef {
+  id: string;
+  title: string;
+  version: number;
+}
+
+export async function getInstructions(nestId: string) {
+  return request<{
+    content: string;
+    revision: InstructionsRevision | null;
+    /** The always-include documents agents receive with these instructions
+     *  (those this reader can read); `overflow` is past the size budget. */
+    always_included?: { documents: StandingRef[]; overflow: StandingRef[] };
+  }>(`/nests/${nestId}/instructions`);
+}
+
+/** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
+ *  a 409 means someone saved since. */
+export async function saveInstructions(
+  nestId: string,
+  data: { content: string; note?: string; baseRevision: number },
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions`,
+    { method: "PUT", body: JSON.stringify(data) },
+  );
+}
+
+export async function listInstructionsRevisions(nestId: string) {
+  return request<{ revisions: InstructionsRevision[] }>(
+    `/nests/${nestId}/instructions/revisions`,
+  );
+}
+
+export async function getInstructionsRevision(nestId: string, seq: number) {
+  return request<{
+    revision: InstructionsRevision;
+    content: string;
+    previousContent: string | null;
+  }>(`/nests/${nestId}/instructions/revisions/${seq}`);
+}
+
+export async function restoreInstructionsRevision(
+  nestId: string,
+  seq: number,
+  baseRevision: number,
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions/revisions/${seq}/restore`,
+    { method: "POST", body: JSON.stringify({ baseRevision }) },
+  );
 }
 
 export async function getNestSettings(nestId: string) {
@@ -690,9 +1124,15 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    always_include_tags?: string[];
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
+    /** Owner / server admin only to turn OFF; any nest admin may turn on. */
+    access_log_enabled?: boolean;
+    org_contributions?: "off" | "drafts";
+    org_domains?: string[];
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -712,6 +1152,8 @@ export interface PushManifestEntry {
   title: string;
   type: string;
   tags: string[];
+  /** Single-push GET only: the document body. */
+  content?: string;
 }
 
 export interface PendingPush {
@@ -728,6 +1170,8 @@ export interface PendingPush {
   decided_by?: string;
   decided_at?: string;
   applied_node_count?: number;
+  /** Single-push GET only: the context.md the push would write. */
+  context_md?: string | null;
 }
 
 export interface PushAllowlistEntry {
@@ -800,15 +1244,32 @@ export async function removeFromAllowlist(
 /**
  * Does this document need steward approval regardless of who edits it?
  * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
- * the badge is advisory, the server gate is authoritative.
+ * the badge is advisory, the server gate is authoritative. An always-include
+ * document is prime whatever its own prime flag says.
  */
 export function isPrimeNode(
-  node: { tags?: string[]; prime?: boolean },
+  node: { tags?: string[]; prime?: boolean; always_include?: boolean },
   primeTags: string[],
+  alwaysIncludeTags: string[] = [],
 ): boolean {
+  if (isAlwaysIncludeNode(node, alwaysIncludeTags)) return true;
   if (typeof node.prime === "boolean") return node.prime;
   if (!primeTags.length) return false;
   const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
+  );
+}
+
+/** Same resolution as the server's `isAlwaysIncludeDocument`: the document
+ *  flag, else the nest's always-include tags. */
+export function isAlwaysIncludeNode(
+  node: { tags?: string[]; always_include?: boolean },
+  alwaysIncludeTags: string[],
+): boolean {
+  if (typeof node.always_include === "boolean") return node.always_include;
+  if (!alwaysIncludeTags.length) return false;
+  const wanted = new Set(alwaysIncludeTags);
   return (node.tags || []).some((t) =>
     wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
@@ -853,6 +1314,46 @@ export async function restoreNest(nestId: string) {
 export async function setNestPinned(nestId: string, pinned: boolean) {
   return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
     method: pinned ? "POST" : "DELETE",
+  });
+}
+
+// ─── Document pins (experimental, CU-wdqcq02crw) ──────────────────────────
+export type DocPinScope = "nest" | "user";
+export interface DocPin {
+  node_id: string;
+  scope: DocPinScope;
+  title: string;
+  type: string;
+  status: string;
+  position: number;
+  pinned_by: string | null;
+  pinned_at: string;
+}
+export interface DocPins {
+  /** Pinned for everyone, in the steward's order. */
+  editorial: DocPin[];
+  /** The caller's own bookmarks. */
+  personal: DocPin[];
+  /** The caller may pin for everyone and reorder. */
+  can_pin_editorial: boolean;
+}
+export async function getDocPins(nestId: string) {
+  return request<DocPins>(`/nests/${nestId}/pins`);
+}
+export async function pinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  return request<{ pin: DocPin; created: boolean }>(`/nests/${nestId}/pins`, {
+    method: "POST",
+    body: JSON.stringify({ node_id: nodeId, scope }),
+  });
+}
+export async function unpinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  const q = new URLSearchParams({ node_id: nodeId, scope });
+  return request<{ unpinned: boolean }>(`/nests/${nestId}/pins?${q}`, { method: "DELETE" });
+}
+export async function reorderDocPins(nestId: string, nodeIds: string[]) {
+  return request<DocPins>(`/nests/${nestId}/pins/order`, {
+    method: "PUT",
+    body: JSON.stringify({ node_ids: nodeIds }),
   });
 }
 
@@ -1092,6 +1593,59 @@ export async function setNestBranding(nestId: string, branding: NestBranding | n
   });
 }
 
+// Public docs site (CU-wdqcq05jhm) — owner / nest admin / server admin.
+export interface SiteSettings {
+  title?: string;
+  description?: string;
+  public_url?: string;
+  og_image_url?: string;
+  organization_name?: string;
+  organization_url?: string;
+  organization_logo_url?: string;
+  same_as?: string[];
+  twitter_site?: string;
+  google_site_verification?: string;
+  bing_site_verification?: string;
+  language?: string;
+  noindex?: boolean;
+  ai_training?: boolean;
+  ai_actions?: boolean;
+  indexnow?: boolean;
+  redirects?: Array<{ from: string; to: string }>;
+}
+export interface SiteInfo {
+  live: boolean;
+  reason: string | null;
+  url: string | null;
+  domain: string | null;
+  domain_verified: boolean;
+  domain_verified_at: string | null;
+  serving_domain: string | null;
+  dns: { txt: { name: string; value: string } | null; cname: string | null } | null;
+  public_url_verified: boolean;
+  public_url_dns: { name: string; value: string } | null;
+  settings: SiteSettings;
+  pages: Array<{ node_id: string; title: string; path: string; custom: boolean }>;
+}
+export async function getNestSite(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site`);
+}
+export async function updateNestSite(nestId: string, body: { domain?: string | null; settings?: SiteSettings }) {
+  return request<SiteInfo>(`/nests/${nestId}/site`, { method: "PATCH", body: JSON.stringify(body) });
+}
+export async function verifyNestSiteDomain(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-domain`, { method: "POST", body: "{}" });
+}
+export async function verifyNestSitePublicUrl(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-public-url`, { method: "POST", body: "{}" });
+}
+export async function setNestSitePageUrl(nestId: string, nodeId: string, path: string | null) {
+  return request<SiteInfo>(`/nests/${nestId}/site/pages`, {
+    method: "PUT",
+    body: JSON.stringify({ node_id: nodeId, path }),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {
@@ -1155,6 +1709,114 @@ export async function deleteDefinition(nestId: string, id: string) {
     `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
     { method: "DELETE" },
   );
+}
+
+// ─── Structure rules ───────────────────────────────────────────────────
+// One nest's folder layout, naming and template rules, kept in that nest's
+// own vault. The server (the engine) judges everything: this module only
+// carries rules and verdicts.
+
+/** One folder rule as written in the nest's config (its key is the pattern). */
+export interface StructureFolderConfig {
+  description?: string;
+  types?: string[];
+  folder_name?: string;
+  file_name?: string;
+  template?: string;
+  required?: boolean;
+  files?: Record<string, { template?: string; type?: string } | null>;
+}
+
+export interface StructureTemplateConfig {
+  body?: string;
+  required_sections?: string[];
+}
+
+/** The three config blocks a nest's rules live in. */
+export interface StructureRules {
+  structure?: { enforce?: boolean; closed?: boolean };
+  folders?: Record<string, StructureFolderConfig | null>;
+  templates?: Record<string, StructureTemplateConfig | null>;
+}
+
+export interface StructureViolation {
+  code: string;
+  /** Content-relative path (no `nodes/`) of the folder or document at fault. */
+  path: string;
+  rule?: string;
+  message: string;
+}
+
+export interface StructureFolderRule extends StructureFolderConfig {
+  pattern: string;
+  required: boolean;
+  files: Record<string, { template?: string; type?: string }>;
+}
+
+export interface StructureResponse {
+  enforce: boolean;
+  closed: boolean;
+  folders: StructureFolderRule[];
+  templates: Record<string, { body: string; required_sections: string[] }>;
+  warnings?: string[];
+  /** The saved rules do not compile (hand-edited config): why. */
+  error?: string;
+  /** With `folder`: the rule that governs it, or null. */
+  resolved?: (StructureFolderRule & { template_body?: string; required_sections?: string[] }) | null;
+  /** With `report`: existing content that breaks the rules. */
+  violations?: StructureViolation[];
+  /** The saved blocks as written — what the editor starts from. */
+  rules: StructureRules;
+  yaml: string;
+  /** Node types this server accepts. */
+  types: string[];
+}
+
+export interface StructureCheckResult {
+  fieldErrors: Record<string, string>;
+  error?: string;
+  warnings: string[];
+  /** `generated`: the title has no a-z letters or digits, so the name is generated (document-1, …). */
+  results: Array<{ ok: boolean; slug: string; generated?: boolean; violations: StructureViolation[] }>;
+  folders: Array<{
+    folder: string;
+    violations: StructureViolation[];
+    creates: { folders: string[]; files: Array<{ path: string }> };
+  }>;
+  report?: { violations: StructureViolation[] };
+}
+
+export async function getStructure(nestId: string, opts: { folder?: string; report?: boolean } = {}) {
+  const q = new URLSearchParams();
+  if (opts.folder !== undefined) q.set("folder", opts.folder);
+  if (opts.report) q.set("report", "1");
+  const qs = q.toString();
+  return request<StructureResponse>(`/nests/${nestId}/structure${qs ? `?${qs}` : ""}`);
+}
+
+/** Owner/admin. A 400 carries `fieldErrors` keyed like `folders.<pattern>.file_name`. */
+export async function saveStructure(nestId: string, rules: StructureRules) {
+  return request<Omit<StructureResponse, "rules" | "yaml" | "types" | "violations"> & { violations: number | null }>(
+    `/nests/${nestId}/structure`,
+    { method: "PUT", body: JSON.stringify(rules) },
+  );
+}
+
+/** Judge titles and folders against the saved rules, or (owner/admin) a draft. */
+export async function checkStructure(
+  nestId: string,
+  body: {
+    rules?: StructureRules;
+    report?: boolean;
+    /** With `file_name` / `folder_name`, the name is tried against that format alone. */
+    tests?: Array<{ folder?: string; title?: string; name?: string; type?: string; body?: string; file_name?: string; folder_name?: string }>;
+    folders?: string[];
+  },
+) {
+  return request<StructureCheckResult>(`/nests/${nestId}/structure/check`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 // ─── Nodes ──────────────────────────────────────────────────────────────
@@ -1269,12 +1931,71 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Push this document to every agent entering the nest (it becomes
+     *  prime too). Owner/admin only. */
+    always_include?: boolean;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
+    /** Custom field values, key → value (see lib/custom-fields.ts). */
+    fields?: Record<string, unknown>;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+// ── Org contributions (CU-wdqcq05rz6) ─────────────────────────────────────
+
+/** A review request as an org contribution returns it. */
+export interface ContributionReview {
+  id: string;
+  status: string;
+  version: number;
+}
+
+/** Suggest a new document as an org contributor: it is saved as a draft and
+ *  sent to review — never published by this call. */
+export async function suggestDocument(
+  nestId: string,
+  data: { title: string; content: string; folder?: string; tags?: string[] },
+) {
+  return request<{ node: any; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Propose an edit as an org contributor: a draft version for review; the
+ *  published text is unchanged until a reviewer approves it. */
+export async function suggestEdit(
+  nestId: string,
+  nodeId: string,
+  data: { content?: string; title?: string; changeNote?: string },
+) {
+  return request<{ node: any; version: number; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes/${nodeId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
+  );
+}
+
+export interface MyContribution {
+  node_id: string;
+  title: string | null;
+  version: number;
+  status: "draft" | "pending_review" | "rejected" | string;
+  created_at: string;
+  review_id: string | null;
+  content: string;
+}
+
+/** The caller's own unpublished contributions in this nest. */
+export async function listMyContributions(nestId: string) {
+  return request<{ contributions: MyContribution[] }>(`/nests/${nestId}/contributions/mine`);
 }
 
 /** The `pdf:` block a pdf node carries (engine §1.11). */
@@ -1347,8 +2068,17 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Owner/admin only; `null` clears it back to the always-include tags. */
+    always_include?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
+    /** Custom field values to set; `null` clears one, omitted keys stay. */
+    fields?: Record<string, unknown>;
   },
   baseVersion?: number,
 ) {
@@ -1488,7 +2218,7 @@ export async function listTags(nestId: string): Promise<string[]> {
 // ─── Governance ─────────────────────────────────────────────────────────
 
 export async function listStewards(nestId: string) {
-  return request<{ stewards: any[] }>(`/nests/${nestId}/stewards`);
+  return request<{ stewards: any[]; ownerEmail: string | null }>(`/nests/${nestId}/stewards`);
 }
 
 export async function syncStewards(nestId: string) {
@@ -1533,6 +2263,17 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
   );
 }
 
+/** Who besides the caller could approve the caller's submission of this node. */
+export async function getNodeApprovers(nestId: string, nodeId: string) {
+  return request<{
+    approvers: Array<{ email: string; name: string | null }>;
+    /** The roster passed the server's cap — an empty list proves nothing. */
+    truncated?: boolean;
+  }>(
+    `/nests/${nestId}/nodes/${nodeId}/approvers`,
+  );
+}
+
 // ── Deletion requests ─────────────────────────────────────────────────────
 // Flagging is open to anyone who can read the node; resolving needs the same
 // write permission a direct delete does (server-enforced).
@@ -1570,6 +2311,14 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
+/** Rename or move a folder (`to` is its new full path) with everything in it. Owner/admin only. */
+export async function moveFolder(nestId: string, folder: string, to: string) {
+  return request<{ folder: string; moved: Array<{ id: string; previousId: string }> }>(
+    `/nests/${nestId}/folders/move`,
+    { method: "POST", body: JSON.stringify({ folder, to }) },
+  );
+}
+
 /** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
  *  for the nest to be archived rather than destroyed — same queue, same
  *  reviewers, different outcome when it is honoured. */
@@ -1592,6 +2341,50 @@ export async function requestTargetDeletion(
 export async function getDeletionRequests(nestId: string, status = "pending") {
   return request<{ requests: DeletionRequest[]; total: number }>(
     `/nests/${nestId}/deletion-requests?status=${encodeURIComponent(status)}`,
+  );
+}
+
+// ─── Access requests (CU-wdqcq041jn) ─────────────────────────────────────
+
+/** Ask for write access to a document, folder or the nest. 201 = filed,
+ *  200 = the pending one already there (`created: false`). */
+export async function requestAccess(
+  nestId: string,
+  target: AccessTarget,
+  note?: string,
+) {
+  return request<{ request: AccessRequest; created: boolean }>(
+    `/nests/${nestId}/access-requests`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        target_type: target.type,
+        target_id: target.id,
+        level: "write",
+        ...(note ? { note } : {}),
+      }),
+    },
+  );
+}
+
+/** The caller's latest request for one target, whatever its state. */
+export async function getMyAccessRequest(nestId: string, target: AccessTarget) {
+  return request<{ request: AccessRequest | null }>(
+    `/nests/${nestId}/access-requests/mine?target_type=${encodeURIComponent(target.type)}&target_id=${encodeURIComponent(target.id)}`,
+  );
+}
+
+export async function approveAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/approve`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
+  );
+}
+
+export async function denyAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/deny`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
   );
 }
 
@@ -1661,6 +2454,8 @@ export interface FeedChangeItem {
   status: string;
   priority: string;
   canReview: boolean;
+  /** Requester reaches the nest only as an org contributor (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
   createdAt: string;
 }
 
@@ -1811,7 +2606,7 @@ export type ActivityLogScope =
 export async function getActivityLog(
   nestId: string,
   scope: ActivityLogScope,
-  opts: { types?: ActivityLogType[]; actor?: string; limit?: number; offset?: number } = {},
+  opts: { types?: ActivityLogType[]; actor?: string; agent?: string; limit?: number; offset?: number } = {},
 ) {
   const params = new URLSearchParams({
     limit: String(opts.limit ?? 50),
@@ -1821,6 +2616,7 @@ export async function getActivityLog(
   if (scope.kind === "folder") params.set("folder", scope.folder);
   if (opts.types?.length) params.set("type", opts.types.join(","));
   if (opts.actor) params.set("actor", opts.actor);
+  if (opts.agent) params.set("agent", opts.agent);
   return request<{ items: ActivityLogItem[]; limit: number; offset: number; hasMore: boolean }>(
     `/nests/${encodeURIComponent(nestId)}/activity-log?${params.toString()}`,
   );
@@ -1846,6 +2642,18 @@ export async function approveNode(
   return request(`/nests/${nestId}/nodes/${nodeId}/approve`, {
     method: "POST",
     body: JSON.stringify({ note }),
+  });
+}
+
+/** Reviewer edits someone's pending submission and approves it in one step. */
+export async function approveWithEdits(
+  nestId: string,
+  nodeId: string,
+  edit: { title?: string; content?: string; tags?: string[]; note?: string; baseVersion?: number },
+) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve-with-edits`, {
+    method: "POST",
+    body: JSON.stringify(edit),
   });
 }
 
@@ -1945,6 +2753,8 @@ export interface AnnotationComment {
   author: string;
   body: string;
   createdAt: string;
+  /** Set when an agent run posted it: links to its trace. */
+  runId?: string;
 }
 
 export interface AnnotationThread {
@@ -1973,8 +2783,13 @@ export function hostedArtifactUrl(
   nodeId: string,
   version?: number | null,
   cacheBust?: number | string | null,
+  opts?: { embed?: boolean },
 ): string {
   const params = new URLSearchParams();
+  // embed=1: the in-app viewer's iframe, which gets the place/highlight
+  // bridge appended (src/shared/artifact-bridge.ts). Open in new tab and the
+  // text fetch never ask for it.
+  if (opts?.embed) params.set("embed", "1");
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
@@ -2098,7 +2913,8 @@ export type ActivityType =
   | "edit"
   | "edit_proposed"
   | "review_requested"
-  | "review_resolved";
+  | "review_resolved"
+  | "task_activity";
 
 export interface ActivityEntry {
   type: ActivityType;
@@ -2107,6 +2923,14 @@ export interface ActivityEntry {
   at: string;
   detail?: string;
   refId?: string;
+  /** task_activity only: working | done | blocked. */
+  status?: string;
+  /** task_activity only: the agent the caller reported (§9.4 client.agent). */
+  agent?: string;
+  /** task_activity only: the API key the call came in on. */
+  key?: { label?: string; prefix?: string; scoped: boolean };
+  /** task_activity only: the server's one-line description. */
+  summary?: string;
 }
 
 export async function getNodeComments(
@@ -2335,7 +3159,7 @@ export async function listCollaborators(nestId: string) {
  *  so a read-only reviewer's comment box can offer the roster too — unlike
  *  listCollaborators, which needs write. */
 export async function listMentionablePeople(nestId: string) {
-  return request<{ people: Array<{ email: string; name: string | null }> }>(
+  return request<{ people: Array<{ email: string; name: string | null; member?: boolean }> }>(
     `/nests/${nestId}/mentionable`,
   );
 }
@@ -2659,8 +3483,9 @@ export async function getNestGraph(nestId: string) {
 
 export interface WorkItem {
   /** "deletion" = someone asked for the document to be deleted; only nest
-   *  owners/admins get those in the waiting-on-me bucket. */
-  type: "review" | "deletion";
+   *  owners/admins get those in the waiting-on-me bucket. "access" = someone
+   *  who can only read asked to edit (CU-wdqcq041jn) — same owners/admins. */
+  type: "review" | "deletion" | "access";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -2674,7 +3499,11 @@ export interface WorkItem {
   /** Deletion items only. For "folder"/"nest"/"nest_archive", node_id is a
    *  folder path or the nest id — NOT a document id, so don't open the editor
    *  on it. "nest_archive" is the reversible ask: honouring it archives. */
-  target_type?: "document" | "folder" | "nest" | "nest_archive";
+  target_type?: "document" | "folder" | "nest" | "nest_archive" | "node";
+  /** Access items only: the level asked for. */
+  level?: "read" | "write";
+  /** Review and access items: the agent run that filed it, if one did. */
+  run_id?: string | null;
 }
 
 export interface WatcherNotification {
@@ -2698,6 +3527,20 @@ export interface WorkPagination {
   has_more: boolean;
 }
 
+/** A board card assigned to the caller (open ones only), from /me/work. */
+export interface AssignedItem {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  type: string;
+  due: string | null;
+  priority: string | null;
+  assigned_at: string | null;
+  /** Open blockers (task relations); absent when nothing open blocks it. */
+  open_blockers?: number;
+}
+
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
@@ -2707,6 +3550,7 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
+    assigned?: AssignedItem[];
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -2741,6 +3585,56 @@ export async function getMyDrafts(opts?: {
   return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
     `/me/drafts${qs ? `?${qs}` : ""}`,
   );
+}
+
+// ── Experimental: cross-nest document stream (GET /me/stream) ──────────────
+
+export type StreamKind = "created" | "updated" | "published" | "approved" | "rejected";
+
+export interface StreamItem {
+  /** Stable key: `${nestId}:${nodeId}@${version}`. */
+  id: string;
+  nestId: string;
+  nestName: string;
+  nodeId: string;
+  title: string;
+  type: string;
+  tags: string[];
+  version: number;
+  status: string;
+  /** null where the caller reads the nest only publicly. */
+  author: string | null;
+  at: string;
+  summary: string;
+  /** Comments on the document's open threads; null where the caller reads
+   *  the nest only publicly (no comment UI on those cards). */
+  commentCount: number | null;
+  kind: StreamKind;
+}
+
+export interface StreamFacet {
+  value: string;
+  count: number;
+}
+
+export interface StreamPage {
+  items: StreamItem[];
+  total: number;
+  /** Per-facet totals over the caller's whole stream (filters not applied).
+   *  Sent with the first page only (offset 0); null on later pages. */
+  counts: null | {
+    nest: Array<{ id: string; name: string; count: number }>;
+    tag: StreamFacet[];
+    type: StreamFacet[];
+    author: StreamFacet[];
+  };
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export async function getDocStream(opts: StreamQuery = {}, pinnedNest?: string) {
+  return request<StreamPage>(`/me/stream${streamQueryString(opts, pinnedNest)}`);
 }
 
 /**
@@ -2933,6 +3827,56 @@ export async function updateSchedule(
 
 export async function deleteSchedule(nestId: string, id: string) {
   return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+// Task relations — blocks / blocked by / relates to / duplicates.
+export type RelationKind =
+  | "blocks"
+  | "blocked_by"
+  | "relates_to"
+  | "duplicates"
+  | "duplicated_by";
+
+export interface TaskRelation {
+  id: string;
+  type: RelationKind;
+  node: { id: string; title: string; type: string; done: boolean };
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskRelations {
+  node_id: string;
+  relations: TaskRelation[];
+  /** Related documents the caller can't read, per kind — never named. */
+  hidden: Partial<Record<RelationKind, number>>;
+  hidden_count: number;
+  open_blockers: number;
+  blocked: boolean;
+}
+
+export async function listRelations(nestId: string, nodeId: string) {
+  return request<TaskRelations>(`/nests/${nestId}/nodes/${nodeId}/relations`);
+}
+
+export async function addRelation(
+  nestId: string,
+  nodeId: string,
+  type: RelationKind,
+  node: string,
+) {
+  const r = await request<{ relation: TaskRelation; relations: TaskRelations }>(
+    `/nests/${nestId}/nodes/${nodeId}/relations`,
+    { method: "POST", body: JSON.stringify({ type, node }) },
+  );
+  return r.relations;
+}
+
+export async function removeRelation(nestId: string, nodeId: string, relationId: string) {
+  return request<TaskRelations>(
+    `/nests/${nestId}/nodes/${nodeId}/relations/${encodeURIComponent(relationId)}`,
+    { method: "DELETE" },
+  );
 }
 
 // Watchers — tag a person to a node (usually an agent) for HITL notifications.
@@ -3273,4 +4217,355 @@ export async function chatWithHootie(
     }
   }
   if (buffer.trim()) dispatch(buffer);
+}
+
+// ─── Boards (saved Board views) ─────────────────────────────────────────
+
+export interface SavedBoard {
+  id: string;
+  nest_id: string;
+  name: string;
+  private: boolean;
+  position: number;
+  created_by: string;
+  created_by_email: string | null;
+  /** BoardSettings plus filterTags and per-column ranks; see board-service.ts. */
+  config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listBoards(nestId: string) {
+  return request<{ boards: SavedBoard[] }>(`/nests/${nestId}/boards`);
+}
+
+export async function createBoard(
+  nestId: string,
+  data: { name: string; private?: boolean; config?: Record<string, any> },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateBoard(
+  nestId: string,
+  boardId: string,
+  data: { name?: string; private?: boolean; config?: Record<string, any>; position?: number },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Set one column's card order (merged server-side, per column). */
+export async function rankBoardColumn(
+  nestId: string,
+  boardId: string,
+  key: string,
+  order: string[],
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}/rank`, {
+    method: "POST",
+    body: JSON.stringify({ key, order }),
+  });
+}
+
+/** One change over many nodes (src/nodes/bulk-update.ts). Max 100 ids. */
+export interface BulkPatch {
+  board_id?: string;
+  column?: string;
+  add_tags?: string[];
+  remove_tags?: string[];
+  priority?: string | null;
+  assignee?: string | null;
+  due?: string | null;
+  change_note?: string;
+}
+
+export interface BulkRowResult {
+  id: string;
+  title?: string;
+  outcome: "updated" | "unchanged" | "skipped" | "failed";
+  code?: "needs_review" | "locked" | "forbidden" | "not_found" | "conflict" | "invalid" | "error";
+  reason?: string;
+  version?: number;
+  status?: string;
+  completed_at?: string | null;
+}
+
+export interface BulkUpdateResult {
+  requested: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: BulkRowResult[];
+}
+
+export const BULK_UPDATE_MAX = 100;
+
+export async function bulkUpdateNodes(
+  nestId: string,
+  ids: string[],
+  patch: BulkPatch,
+  opts: { allowDraft?: boolean } = {},
+) {
+  return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
+    method: "POST",
+    body: JSON.stringify({ ids, patch, ...(opts.allowDraft ? { allow_draft: true } : {}) }),
+  });
+}
+
+/** Move / delete over a selection (src/nodes/bulk-actions.ts). Per-document rows. */
+export interface BulkActionResult {
+  requested: number;
+  done: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: (BulkRowResult & { new_id?: string })[];
+}
+
+export async function bulkMoveNodes(nestId: string, ids: string[], folder: string) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-move`, {
+    method: "POST",
+    body: JSON.stringify({ ids, folder }),
+  });
+}
+
+export async function bulkDeleteNodes(nestId: string, ids: string[]) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-delete`, {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+}
+
+export async function deleteBoard(nestId: string, boardId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Custom fields ─────────────────────────────────────────────────────────
+
+export type FieldType =
+  | "text"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "date"
+  | "user"
+  | "url"
+  | "checkbox"
+  | "time_in_status";
+
+/** A nest's field definition (src/nodes/custom-fields.ts FieldDefinition). */
+export interface FieldDefinition {
+  id: string;
+  nest_id: string;
+  key: string;
+  label: string;
+  type: FieldType;
+  options: string[];
+  required: boolean;
+  default_value: unknown;
+  /** Node types it applies to; ["*"] = every type. */
+  applies_to: string[];
+  unit: string | null;
+  preset: "estimate" | "time_in_status" | null;
+  position: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FieldDefinitionInput {
+  key?: string;
+  label?: string;
+  type?: FieldType;
+  options?: string[];
+  required?: boolean;
+  default_value?: unknown;
+  applies_to?: string[];
+  unit?: string | null;
+  preset?: "estimate" | "time_in_status";
+  position?: number;
+}
+
+export async function listFields(nestId: string) {
+  return request<{ fields: FieldDefinition[]; can_manage: boolean }>(`/nests/${nestId}/fields`);
+}
+
+export async function createField(nestId: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition }>(`/nests/${nestId}/fields`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateField(nestId: string, key: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition; invalid_values?: number; invalid_nodes?: string[] }>(
+    `/nests/${nestId}/fields/${encodeURIComponent(key)}`,
+    {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  },
+  );
+}
+
+export async function deleteField(nestId: string, key: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/fields/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Metacognition agents (CU-wdqcq041jm) ─────────────────────────────────
+
+export interface MetacognitionAgentConfig {
+  persona: { name: string; avatar: string | null };
+  scope: { read: string[]; propose: string[] };
+  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number; max_comments?: number };
+  feeds: Array<{ name: string; url: string }>;
+  mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
+  model: string | null;
+  /** Who it may notify (CU-wdqcq05rkq). Empty recipients = off. */
+  notify?: MetacognitionNotifyConfig;
+}
+
+/** "owner" = the nest owner, "reviewers" = its reviewers, else a member's email. */
+export interface MetacognitionNotifyConfig {
+  recipients: string[];
+  channels: Array<"email" | "connectors">;
+  max_per_run: number;
+}
+
+export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
+  node_id: string;
+  enabled: boolean;
+  persona: { name: string; avatar: string | null; email: string };
+  configured_by: string;
+  updated_at: string;
+}
+
+/** What a metacognition run records on its trace (write tier). */
+export interface MetacognitionTrace {
+  persona?: { name: string; avatar: string | null };
+  model?: string;
+  billing?: "promptowl_credits" | "own_key";
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+  est_cost_usd?: number | null;
+  proposals?: number;
+  notifications?: number;
+  stopped_by?: string;
+  summary?: string;
+  skipped?: string;
+  error?: string;
+}
+
+export async function listMetacognitionAgents(nestId: string) {
+  const r = await request<{ agents: MetacognitionAgent[] }>(`/nests/${nestId}/metacognition`);
+  return r.agents;
+}
+
+export async function saveMetacognitionAgent(
+  nestId: string,
+  nodeId: string,
+  body: MetacognitionAgentConfig & { enabled: boolean },
+) {
+  const r = await request<{ agent: MetacognitionAgent }>(`/nests/${nestId}/metacognition/${nodeId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+  return r.agent;
+}
+
+/** GET /nests/:id/metacognition/:node/suggest — a starting config read off
+ *  the agent document (never saved), each field with a plain-words `why`. */
+export interface MetacognitionSuggestion {
+  config: MetacognitionAgentConfig;
+  why: Record<string, string>;
+  /** MCP links in the instructions; a person names their tools before saving. */
+  mcp_candidates: Array<{ name: string; url: string }>;
+  /** "none" when the document has no approved instructions yet. */
+  instructions: "approved" | "none";
+}
+
+export async function suggestMetacognitionConfig(nestId: string, nodeId: string) {
+  const r = await request<{ suggestion: MetacognitionSuggestion }>(`/nests/${nestId}/metacognition/${nodeId}/suggest`);
+  return r.suggestion;
+}
+
+/** GET /nests/:id/folders — every folder path in the nest (no documents). */
+export async function listNestFolderPaths(nestId: string) {
+  const r = await request<{ folders: Array<{ path: string; count: number; total: number }> }>(`/nests/${nestId}/folders`);
+  return r.folders.map((f) => f.path);
+}
+
+export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
+}
+
+export type AgentRunOutcome = "running" | "succeeded" | "failed" | "timeout" | "skipped" | "cancelled";
+
+export interface AgentRunSummary {
+  id: string;
+  outcome: AgentRunOutcome;
+  triggered_by: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tokens: number;
+  est_cost_usd: number | null;
+  proposals: number;
+  approved: number;
+  rejected: number;
+  comments: number;
+  notifications?: number;
+  error: string | null;
+}
+
+/** GET /nests/:id/metacognition/:node/stats — what one agent did over a window. */
+export interface AgentStats {
+  node_id: string;
+  window_days: number;
+  runs: { total: number } & Record<AgentRunOutcome, number>;
+  tokens: number;
+  est_cost_usd: number;
+  proposals: {
+    made: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+    withdrawn: number;
+    approval_rate: number | null;
+  };
+  comments: number;
+  notifications?: number;
+  access_requests: number;
+  blocked_by_scope: number;
+  last_run_at: string | null;
+  last_error: { run_id: string; at: string; message: string } | null;
+  history: AgentRunSummary[];
+}
+
+export async function getMetacognitionStats(nestId: string, nodeId: string, days = 30, limit = 25) {
+  const r = await request<{ stats: AgentStats }>(
+    `/nests/${nestId}/metacognition/${nodeId}/stats?days=${days}&limit=${limit}`,
+  );
+  return r.stats;
+}
+
+export async function runMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ run_id: string; executes: "server" }>(`/nests/${nestId}/metacognition/${nodeId}/run`, {
+    method: "POST",
+    body: "{}",
+  });
 }

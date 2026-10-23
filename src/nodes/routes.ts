@@ -1,15 +1,18 @@
 import { recordNodeAccess } from "../governance/access-log.js";
+import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
+import { bulkUpdateNodes } from "./bulk-update.js";
+import { bulkMoveNodes, bulkDeleteNodes } from "./bulk-actions.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 // SECURITY: `:nodeId` params on these routes become filesystem paths in the
 // engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -21,6 +24,14 @@ import {
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import {
   holdWriteIfGated,
   heldWriteResponse,
@@ -57,7 +68,37 @@ import {
   resolveAuthorship,
   toNodeResponse,
   bodyOnly,
+  withComputedFields,
+  fieldsOfRaw,
+  setStoredFields,
 } from "./service.js";
+import {
+  addRelation,
+  listRelations,
+  openBlockerCounts,
+  removeRelation,
+} from "./relations.js";
+
+/** Custom field values off a body: absent stays absent; anything that isn't
+ *  an object is refused here rather than half-applied. Values themselves are
+ *  validated against the nest's definitions in the service. */
+function customFieldsFromBody(body: Record<string, unknown>): { fields?: Record<string, unknown> } {
+  const v = body.fields;
+  if (v === undefined) return {};
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new ValidationError("fields must be an object of field key → value");
+  }
+  return { fields: v as Record<string, unknown> };
+}
+
+/** `?field.<key>=<value>` query params → the list's field filters. */
+function fieldFiltersFromQuery(q: Record<string, string>): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(q)) {
+    if (k.startsWith("field.") && k.length > "field.".length) out[k.slice("field.".length)] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
@@ -132,11 +173,71 @@ nodeRoutes.get("/", async (c) => {
     // holds metadata only. Opt back in and the listing crawls the vault for
     // them; kept for any client that was reading `content` off this route.
     ...(q.content === "1" || q.content === "true" ? { withContent: true } : {}),
+    // Board-field filters — same parser MCP's context_list uses.
+    task: parseTaskFieldsFilter({
+      assignee: q.assignee,
+      priority: q.priority,
+      due_before: q.due_before,
+    }),
+    // Custom fields: ?field.<key>=<value>, every one must match.
+    ...(fieldFiltersFromQuery(q) ? { fields: fieldFiltersFromQuery(q) } : {}),
   });
   // The nest-wide shape is NOT bundled here: it describes the whole nest
   // whatever level was asked for, so bundling recomputed it on every folder
   // expand. It has its own endpoint and its own cache entry.
   return c.json({ count: nodes.length, nodes });
+});
+
+// POST /nests/:nestId/nodes/bulk-update — one patch over many nodes (the
+// board List view's bulk actions; MCP context_bulk_update). Write-tier at the
+// nest middleware like every POST; each node is then permission-checked and
+// governed on its own (src/nodes/bulk-update.ts). Registered before the
+// /:nodeId{.+} routes so "bulk-update" is never read as a node id.
+nodeRoutes.post("/bulk-update", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  const result = await bulkUpdateNodes(
+    c.req.param("nestId")!,
+    { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+    { ids: body.ids, selector: body.selector, patch: body.patch },
+    { client: attributeRequest(c, body.client), allowDraft: body.allow_draft === true },
+  );
+  return c.json(result);
+});
+
+// POST /nests/:nestId/nodes/bulk-move { ids, folder } and /bulk-delete { ids } —
+// the Documents list's multi-select actions (MCP context_move / context_delete
+// with `ids`). Each document is moved or deleted on its own, with the same
+// permission and review rules as one by one (src/nodes/bulk-actions.ts).
+nodeRoutes.post("/bulk-move", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  return c.json(
+    await bulkMoveNodes(
+      c.req.param("nestId")!,
+      { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+      { ids: body.ids, folder: body.folder },
+    ),
+  );
+});
+
+nodeRoutes.post("/bulk-delete", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  return c.json(
+    await bulkDeleteNodes(
+      c.req.param("nestId")!,
+      { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+      { ids: body.ids },
+      { client: attributeRequest(c, body.client) },
+    ),
+  );
 });
 
 // POST /nests/:nestId/nodes
@@ -149,9 +250,16 @@ nodeRoutes.post("/", async (c) => {
     scope?: string;
     status?: string;
     schedule?: string;
+    model?: string;
     folder?: string;
     prime?: boolean;
+    always_include?: boolean;
     client?: unknown;
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
+    fields?: Record<string, unknown>;
   }>();
 
   if (!body.title || !body.content) {
@@ -163,6 +271,39 @@ nodeRoutes.post("/", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const authorEmail = await getUserEmail(c);
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier by the access gate
+  // for exactly this route. Their document is a draft sent to review, never
+  // published, whatever the nest's self-publish postures.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorCreate(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const { node, review } = await contributeDocument(
+      nestId,
+      {
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        folder: body.folder,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json(
+      {
+        node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+        review,
+        org_contribution: true,
+      },
+      201,
+    );
+  }
 
   // Agent-write gate. Only an API-key caller is held: a person creating a
   // document in the web UI authenticates with a session cookie and is exactly
@@ -185,8 +326,11 @@ nodeRoutes.post("/", async (c) => {
             scope: body.scope,
             status: body.status,
             schedule: body.schedule,
+            model: body.model,
             folder: body.folder,
             prime: body.prime,
+            alwaysInclude: body.always_include,
+            ...customFieldsFromBody(body),
           },
         ],
       },
@@ -204,9 +348,13 @@ nodeRoutes.post("/", async (c) => {
       scope: body.scope,
       status: body.status,
       schedule: body.schedule,
+      model: body.model,
       folder: body.folder,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
+      ...taskFieldsFromInput(body),
+      ...customFieldsFromBody(body),
     },
     authorEmail,
   );
@@ -215,7 +363,7 @@ nodeRoutes.post("/", async (c) => {
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
 
   return c.json({
-    node: toNodeResponse(node),
+    node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -230,29 +378,10 @@ nodeRoutes.post("/", async (c) => {
 // These must be registered BEFORE the /:nodeId{.+} catch-all.
 // Import governance services inline to avoid circular deps.
 
-// GET /nests/:nestId/nodes/:nodeId/stewards
-nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
-  const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
-
-  const { resolveStewardsWithFallback } = await import("../governance/stewardship-service.js");
-  const { stewards, fallbackToOwner, ownerEmail } = await resolveStewardsWithFallback(
-    nestId,
-    nodeId,
-  );
-  return c.json({
-    nodeId,
-    stewards: stewards.map((r: any) => ({
-      email: r.steward.userEmail,
-      role: r.steward.role,
-      scope: r.steward.scope,
-      source: r.source,
-      priority: r.priority,
-    })),
-    fallbackToOwner,
-    ownerEmail,
-  });
-});
+// NOTE: no `/:nodeId{.+}/stewards` handler here, for the same reason as
+// /versions below: governanceNodeRoutes serves that path first. The copy that
+// used to sit here was unreachable and ungated — a second, looser door onto
+// the same data if the mount order ever changed. The gated one lives there.
 
 // NOTE: no `/:nodeId{.+}/versions` handler here. governanceNodeRoutes is
 // mounted ahead of nodeRoutes (see app.ts) and registers the same path, so a
@@ -388,6 +517,41 @@ nodeRoutes.delete("/:nodeId{.+}/watchers", async (c) => {
   return c.json({ watchers: await listWatchers(nestId, nodeId) });
 });
 
+// Relations — blocks / blocked_by / relates_to / duplicates (src/nodes/
+// relations.ts). Not behind FEATURE_WORKFLOW_PLANE: relations are core task
+// UX. Reads are read-tier; POST/DELETE are write-tier via the nest
+// middleware, the same tier as editing the task.
+
+// GET /nests/:nestId/nodes/:nodeId/relations
+nodeRoutes.get("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(await listRelations(caller, c.req.param("nodeId")!));
+});
+
+// POST /nests/:nestId/nodes/:nodeId/relations { type, node }
+nodeRoutes.post("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  const out = await addRelation(caller, c.req.param("nodeId")!, body.type, body.node);
+  return c.json(out, 201);
+});
+
+// DELETE /nests/:nestId/nodes/:nodeId/relations/:relationId
+nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(
+    await removeRelation(caller, c.req.param("nodeId")!, c.req.param("relationId")),
+  );
+});
+
 // GET /nests/:nestId/nodes/:nodeId — the greedy catch-all. Safe ONLY because
 // createApp pins LinearRouter: it matches in registration order with
 // per-route backtracking, so the suffix action routes above (and the
@@ -438,7 +602,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       console.error("[external-edit] reconstruct-latest failed:", err);
     }
   }
-  const response = toNodeResponse(node);
+  const [response] = await withComputedFields(nestId, [toNodeResponse(node)]);
+  // Open blockers (task relations) — the "Blocked" badge's source.
+  const blockers = (await openBlockerCounts(nestId, [node.id])).get(node.id);
+  if (blockers) response.open_blockers = blockers;
   // The read got past every gate — record it for the admin activity log
   // (fire-and-forget, throttled; never slows or fails the read).
   recordNodeAccess({
@@ -448,7 +615,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
+    // The version in the response is the one served (the live draft, or the
+    // reconstructed latest approved version when there is pending drift).
+    versions: { [node.id]: response.version },
   });
   const publicReader = await isPublicReader(nestId, userId);
 
@@ -486,6 +656,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
       // snapshot's stored frontmatter, never the live working copy's.
       let approvedRaw = "";
+      // Field values are the approved version's too, never the live draft's.
+      setStoredFields(response, {});
       try {
         ({ raw: approvedRaw, version: approved } = await reconstructApproved(
           versionManager,
@@ -494,6 +666,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           approved,
         ));
         response.content = bodyOnly(nodeId, approvedRaw);
+        setStoredFields(response, fieldsOfRaw(nodeId, approvedRaw));
+        await withComputedFields(nestId, [response]);
         // A pdf node's `pdf:` block must describe the same version as the
         // body — the approved one, whose binary is what /pdf serves here —
         // not the live draft's.
@@ -575,14 +749,61 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     tags?: string[];
     status?: string;
     title?: string;
+    description?: string;
     changeNote?: string;
     schedule?: string;
+    model?: string;
     prime?: boolean | null;
+    always_include?: boolean | null;
     client?: unknown;
     type?: string;
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
+    fields?: Record<string, unknown>;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
+  }
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier for this route
+  // only. The edit is proposed as a draft for review; the published text
+  // stays exactly as it is until a reviewer approves. Ahead of the
+  // X-Base-Version check on purpose: that 409 names who last changed the
+  // document and echoes the working version, which for a contributor could
+  // be someone else's unapproved draft. proposeEdit's own checks decide.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorPatch(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const authorEmail = await getUserEmail(c);
+    const { node, version, review } = await proposeEdit(
+      nestId,
+      nodeId,
+      c.get("userId"),
+      {
+        content: body.content,
+        append: body.append,
+        title: body.title,
+        description: body.description,
+        tags: body.tags,
+        changeNote: body.changeNote,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json({
+      node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+      version,
+      review,
+      org_contribution: true,
+    });
   }
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -606,6 +827,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   }
 
   const authorEmail = await getUserEmail(c);
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -614,17 +836,25 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       append: body.append,
       tags: body.tags,
       title: body.title,
+      description: body.description,
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
+      model: body.model,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       type: body.type,
+      ...taskFieldsFromInput(body),
+      ...customFieldsFromBody(body),
     },
     authorEmail,
   );
 
-  return c.json({ node: toNodeResponse(node), version: responseVersion });
+  return c.json({
+    node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    version: responseVersion,
+  });
 });
 
 // DELETE /nests/:nestId/nodes/:nodeId — greedy catch-all; see the

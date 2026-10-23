@@ -1,6 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // UI component tests import through the UI's own "@/…" alias (ui/vite.config.ts).
+  // The server never uses "@/", so it can't clash.
+  resolve: { alias: { "@": fileURLToPath(new URL("./ui/src", import.meta.url)) } },
+  esbuild: { jsx: "automatic" },
   test: {
     globals: true,
     environment: "node",

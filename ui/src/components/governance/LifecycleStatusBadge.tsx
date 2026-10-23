@@ -4,6 +4,7 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { lifecycleStatusHint } from "@/lib/lifecycle-status";
 import { FileEdit, Clock, CheckCircle2, XCircle, FileWarning } from "lucide-react";
 
 export type DocumentLifecycleStatus =
@@ -21,6 +22,9 @@ interface LifecycleStatusBadgeProps {
   showIcon?: boolean;
   size?: "sm" | "default";
   className?: string;
+  /** Tooltip; defaults to the generic meaning of the status. */
+  title?: string;
+  "data-testid"?: string;
 }
 
 const statusConfig: Record<
@@ -63,6 +67,10 @@ const statusConfig: Record<
   },
 };
 
+export function isDocumentLifecycleStatus(s: unknown): s is DocumentLifecycleStatus {
+  return typeof s === "string" && s in statusConfig;
+}
+
 export function LifecycleStatusBadge({
   status,
   approvedVersion,
@@ -70,6 +78,8 @@ export function LifecycleStatusBadge({
   showIcon = true,
   size = "default",
   className,
+  title,
+  "data-testid": testId,
 }: LifecycleStatusBadgeProps) {
   const config = statusConfig[status] || statusConfig.draft;
   const Icon = config.icon;
@@ -83,6 +93,8 @@ export function LifecycleStatusBadge({
   return (
     <Badge
       variant="outline"
+      title={title ?? lifecycleStatusHint(status)}
+      data-testid={testId}
       className={cn(
         "!rounded-sm",
         config.className,

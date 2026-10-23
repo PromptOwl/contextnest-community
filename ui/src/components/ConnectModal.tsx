@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { ReasonDialog } from "./governance";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Copy,
@@ -48,12 +49,14 @@ import {
   ChevronDown,
   Terminal,
   RefreshCw,
+  Eye,
+  Pencil,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useApiKeys } from "../lib/queries";
-import { nestOnlyKeyLabel } from "../lib/api-key-scope";
+import { keyCapability, nestOnlyKeyLabel } from "../lib/api-key-scope";
 import {
   nestChatPrompt,
   nestSetupPrompt,
@@ -64,6 +67,8 @@ import {
   mcpHttpConfig,
   slugify,
   KEY_PLACEHOLDER,
+  isPrivateHost,
+  serverMcpUrl,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -84,7 +89,7 @@ export function ConnectModal({
   nestName,
   onManageKeys,
 }: ConnectModalProps) {
-  const { authenticated, authMode } = useAuth();
+  const { authenticated, authMode, mcpOauthEnabled } = useAuth();
   const serverUrl =
     typeof window !== "undefined"
       ? window.location.origin
@@ -116,6 +121,8 @@ export function ConnectModal({
     kind: "generated" | "rotated";
   } | null>(null);
   const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
+  // Least privilege by default: a key handed to an agent starts read-only.
+  const [nestKeyReadOnly, setNestKeyReadOnly] = useState(true);
   // This nest already has a key → show it with Rotate instead of minting another.
   const existingNestKeys = (keyData?.keys ?? []).filter(
     (k) => k.nest_id === nestId,
@@ -132,7 +139,11 @@ export function ConnectModal({
           nestName,
           (keyData?.keys ?? []).map((k) => k.label),
         );
-        const minted = await api.createApiKey({ label, nest_id: nestId });
+        const minted = await api.createApiKey({
+          label,
+          nest_id: nestId,
+          capability: nestKeyReadOnly ? "read" : "write",
+        });
         setNestKey({ key: minted.api_key, kind: "generated" });
       }
     } catch (err: any) {
@@ -335,18 +346,37 @@ export function ConnectModal({
                 a key is shown only once, when it's created or rotated.
               </p>
               {existingNestKeys.length > 0 ? (
-                existingNestKeys.map((k) => (
+                existingNestKeys.map((k) => {
+                  const can = keyCapability(k);
+                  return (
                   <div
                     key={k.id}
                     className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
                   >
-                    <div className="min-w-0 text-xs">
-                      <span className="font-medium">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      <span className="truncate font-medium">
                         {k.label || "Untitled key"}
-                      </span>{" "}
+                      </span>
                       <code className="font-mono text-muted-foreground">
                         {k.key_prefix}…
                       </code>
+                      {/* Same badge as the API keys page. */}
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 gap-1"
+                        title={
+                          can.kind === "read"
+                            ? "This key can read but not change anything."
+                            : "This key can read and write."
+                        }
+                      >
+                        {can.kind === "read" ? (
+                          <Eye className="h-3 w-3" />
+                        ) : (
+                          <Pencil className="h-3 w-3" />
+                        )}
+                        {can.label}
+                      </Badge>
                     </div>
                     <Button
                       size="sm"
@@ -365,7 +395,8 @@ export function ConnectModal({
                       Rotate
                     </Button>
                   </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Button
@@ -382,6 +413,16 @@ export function ConnectModal({
                     )}
                     Create a key for this nest only
                   </Button>
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="nest-key-read-only"
+                      checked={nestKeyReadOnly}
+                      onCheckedChange={setNestKeyReadOnly}
+                    />
+                    <Label htmlFor="nest-key-read-only" className="text-xs font-normal">
+                      Read-only (can't change anything)
+                    </Label>
+                  </div>
                 </div>
               )}
               <Snippet label="This nest's MCP URL" value={mcpUrl} />
@@ -453,7 +494,89 @@ export function ConnectModal({
 
               {/* Claude */}
               <TabsContent value="claude" className="space-y-4 pt-4">
-                <div>
+                {/* Hosted connector (claude.ai, Claude Desktop/Cowork
+                    "Connectors"). Two facts people trip on: it connects from
+                    Anthropic's servers, so a VPN-only nest is unreachable; and
+                    it can't carry our API key, so it needs OAuth sign-in —
+                    which is also what makes it read as each person. */}
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    <strong>Claude connector</strong> (claude.ai, Claude Desktop
+                    or Cowork): <em>Settings → Connectors → Add custom
+                    connector</em>, and paste this URL.
+                  </p>
+                  <Snippet label="Connector URL" value={serverMcpUrl(serverUrl)} />
+                  {mcpOauthEnabled ? (
+                    <p className="text-xs text-muted-foreground">
+                      Claude sends you here to sign in, then reads as{" "}
+                      <strong>you</strong> — every nest you can see, this one
+                      included, with your permissions. No key to paste or
+                      share: everyone who adds it signs in as themselves.
+                    </p>
+                  ) : (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                      <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      <span>
+                        Connectors sign each person in, and that's off on this
+                        server. An admin turns it on in{" "}
+                        <strong>Server settings → Features → Agent OAuth</strong>.
+                        Until then, use Claude Code or the Desktop config below.
+                      </span>
+                    </div>
+                  )}
+                  <div
+                    className={
+                      isPrivateHost(serverUrl)
+                        ? "flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"
+                        : "flex items-start gap-2 text-xs text-muted-foreground"
+                    }
+                  >
+                    <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      {isPrivateHost(serverUrl) ? (
+                        <>
+                          <strong>This server is on a private network</strong>, so a
+                          connector can't reach it: connectors connect from
+                          Anthropic's servers, not your computer, and your VPN
+                          doesn't apply to them.{" "}
+                        </>
+                      ) : (
+                        <>
+                          Behind a VPN or firewall? A connector connects from
+                          Anthropic's servers, not your computer, so it can't
+                          reach a server only your VPN can.{" "}
+                        </>
+                      )}
+                      Use <strong>Claude Code</strong> or the{" "}
+                      <strong>Desktop config</strong> below — they run on your
+                      machine and go through your VPN — or ask your admin to
+                      allowlist{" "}
+                      <a
+                        href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        Anthropic's IP ranges
+                      </a>{" "}
+                      for this server's <code className="text-[10px]">/mcp</code>{" "}
+                      and sign-in endpoints.
+                    </span>
+                  </div>
+                </div>
+                <div className="border-t pt-3">
+                  <p className="text-sm mb-3">
+                    <strong>Claude Code plugin</strong> — the easiest way: install
+                    it, then let it walk you through setup. Nothing to copy, and
+                    connecting uploads nothing.
+                  </p>
+                  <Snippet
+                    label="Run inside Claude Code"
+                    value={"/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup"}
+                    multiline
+                  />
+                </div>
+                <div className="border-t pt-3">
                   <p className="text-sm mb-3">
                     <strong>Claude Code</strong> (the CLI) registers a server with
                     one command — it persists the config itself, no file to find

@@ -26,6 +26,13 @@ import { assertSafeNodeId } from "../shared/node-id.js";
 import { ForbiddenError, ValidationError, NotFoundError } from "../shared/errors.js";
 import type { McpToolContext } from "./tools.js";
 import {
+  NOT_ENABLED,
+  metacognitionEnabled,
+  assertCanManageMetacognition,
+  getAgentView,
+  agentStatsFor,
+} from "../metacognition/manage.js";
+import {
   triggerRun,
   appendRunStep,
   closeRun,
@@ -44,6 +51,8 @@ import {
   seedDefaultEdgeTypes,
   parseConditionSchema,
   edgeTypeToResponse,
+  assertNotRelationType,
+  NOT_RELATION_TYPE_SQL,
   type EdgeTypeRow,
 } from "../workflow/edge-type-routes.js";
 
@@ -110,13 +119,19 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
   {
     name: "workflow_runs_list",
     description:
-      "List runs in this nest, most recent first. Filter by agent node id and/or status (running|succeeded|failed|cancelled).",
+      "List runs in this nest, most recent first. Filter by agent node id and/or status (running|succeeded|failed|cancelled). " +
+      "With agent_stats: true and agent set to a metacognition agent, returns that agent's track record instead — run outcomes " +
+      "(succeeded/failed/timeout/skipped), tokens and estimated cost, how its proposals were judged (approval rate), comments, " +
+      "the last error, and its `limit` most recent runs — over the last `days` (default 30). Owner/admin only, like the agent's page. " +
+      "To list, set up, run or remove metacognition agents, use context_metacognition_list, context_metacognition_suggest, context_metacognition_configure, context_metacognition_run and context_metacognition_remove.",
     inputSchema: {
       type: "object",
       properties: {
         agent: { type: "string" },
         status: { type: "string" },
         limit: { type: "number" },
+        agent_stats: { type: "boolean", description: "Return the agent's activity stats (metacognition agents only)" },
+        days: { type: "number", description: "agent_stats window in days, 1-365 (default 30)" },
       },
       required: [],
     },
@@ -204,6 +219,30 @@ async function nestPermission(ctx: McpToolContext): Promise<NestPermission> {
   return resolveNestPermission(ctx.nestId, ctx.userId);
 }
 
+/**
+ * workflow_runs_list { agent_stats: true } — the MCP twin of
+ * GET /nests/:id/metacognition/:node/stats, behind the same gate: the
+ * metacognition flags (404 otherwise), owner/admin and no system key, and the
+ * node must be a configured metacognition agent.
+ */
+async function agentStatsForMcp(ctx: McpToolContext, perm: NestPermission, args: Record<string, any>) {
+  if (!metacognitionEnabled()) throw new NotFoundError(NOT_ENABLED);
+  await assertCanManageMetacognition(ctx.nestId, ctx.userId, perm);
+  if (typeof args.agent !== "string" || !args.agent.trim()) {
+    throw new ValidationError("agent_stats needs agent: the metacognition agent's node id");
+  }
+  const nodeId = args.agent.trim();
+  const whole = (k: string) => {
+    const v = args[k];
+    if (v === undefined || v === null) return undefined;
+    if (!Number.isInteger(v) || v < 1) throw new ValidationError(`${k} must be a positive whole number`);
+    return v as number;
+  };
+  // Existence first, as before: an unknown agent is "not found" before a bad window.
+  await getAgentView(ctx.nestId, nodeId);
+  return { stats: await agentStatsFor(ctx.nestId, nodeId, { days: whole("days"), limit: whole("limit") }) };
+}
+
 function requireTier(perm: NestPermission, tier: "read" | "write"): void {
   if (permissionLevel(perm) < permissionLevel(tier)) {
     throw new ForbiddenError(
@@ -250,6 +289,7 @@ export async function runWorkflowTool(
         triggeredBy,
         storage: ctx.storage,
         parentRunId: args.parent_run_id,
+        userId: ctx.userId,
       });
       return json(bundle);
     }
@@ -280,6 +320,7 @@ export async function runWorkflowTool(
       return json(await getRunTrace(run, { canSeeDetail }));
     }
     case "workflow_runs_list": {
+      if (args.agent_stats === true) return json(await agentStatsForMcp(ctx, perm, args));
       requireTier(perm, "read");
       const canSeeDetail = permissionLevel(perm) >= permissionLevel("write");
       return json(
@@ -318,7 +359,7 @@ export async function runWorkflowTool(
       requireTier(perm, "read");
       await seedDefaultEdgeTypes(ctx.nestId);
       const rows = (await getDb().all(
-        "SELECT * FROM edge_types WHERE nest_id = ? ORDER BY LOWER(name)",
+        `SELECT * FROM edge_types WHERE nest_id = ? AND ${NOT_RELATION_TYPE_SQL} ORDER BY LOWER(name)`,
         [ctx.nestId],
       )) as EdgeTypeRow[];
       return json({ count: rows.length, edge_types: rows.map(edgeTypeToResponse) });
@@ -393,6 +434,7 @@ async function createEdge(ctx: McpToolContext, args: Record<string, any>) {
       `unknown edge type "${typeRef}" — create it first with workflow_edge_type_upsert`,
     );
   }
+  assertNotRelationType(type);
 
   for (const nodeId of [fromNode, toNode]) {
     try {
@@ -493,11 +535,12 @@ async function upsertEdgeType(ctx: McpToolContext, args: Record<string, any>) {
 
 async function deleteEdgeType(nestId: string, id: string) {
   await getDb().transaction(async (tx) => {
-    const row = await tx.get(
-      "SELECT id FROM edge_types WHERE id = ? AND nest_id = ?",
+    const row = (await tx.get(
+      "SELECT id, name FROM edge_types WHERE id = ? AND nest_id = ?",
       [id, nestId],
-    );
+    )) as { id: string; name: string } | undefined;
     if (!row) throw new NotFoundError("Edge type not found");
+    assertNotRelationType(row);
     const inUse = (await tx.get(
       "SELECT COUNT(*) as c FROM edges WHERE type_id = ?",
       [id],

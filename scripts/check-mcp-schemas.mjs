@@ -20,65 +20,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
 const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 
-// Current count of inline `inputSchema: {` literals across src/mcp/.
-// Lower this as schemas migrate to `@promptowl/contextnest-engine/api`.
+// Count of inline `inputSchema: {` literals in src/mcp/. Lower as schemas move to
+// `@promptowl/contextnest-engine/api`. Raising is forbidden except for tools with no engine
+// descriptor to import — each raise below names the tools and why. Tools mirror REST 1:1;
+// server-level /mcp variants derive from per-nest definitions (no new literal).
 //
-// Raising it is normally forbidden — new inline schemas are the divergence this guard
-// prevents. Raised 40 -> 41 in 1.10.0 for `context_table_query` as a deliberate exception:
-// `@promptowl/contextnest-engine/api` has not shipped yet (engine 1.2.1 exports `index`
-// only), so inline remains the only way to declare a tool schema here. The new tool follows
-// the same pattern as the other 40 rather than introducing drift. Migrate all 41 to the
-// engine module once it lands, then ratchet this back down.
-//
-// Raised 41 -> 42 for `context_delete`, same deliberate exception: engine 1.2.1 DOES define
-// context_delete in its operation catalog (dist/api/ — core namespace, alias
-// delete_document), but the engine's package.json `exports` map lists only ".", so
-// `@promptowl/contextnest-engine/api` is unimportable. The inline schema mirrors that
-// descriptor. Unblocking it is a one-line exports-map addition upstream in
-// PromptOwl/ContextNest — do that, then migrate all 42 at once.
-//
-// Raised 42 -> 43 for `context_move`. Different reason: move is NOT in the engine catalog
-// at all (the id rewrite spans governance tables the engine doesn't own), so there is no
-// upstream descriptor to import. The tool mirrors the existing REST POST /nodes/:id/move.
-// If move is ever promoted to a core engine operation, adopt its descriptor here.
-//
-// Raised 43 -> 46 for the deletion-request trio (`context_request_deletion`,
-// `context_deletion_queue`, `context_resolve_deletion`). Same reason as move: deletion
-// REQUESTS are not in the engine catalog at all — they live in this repo's governance
-// tables (a flag is not a document operation), so there is no upstream descriptor to
-// import. They mirror the REST surface 1:1. Mirror the names upstream if the operation is
-// ever promoted, then adopt its descriptor here.
-// Raised 46 -> 47 for `context_my_drafts`. Same reason as move and the deletion trio: it is
-// not an engine operation at all. "Drafts I never submitted" is derived from this repo's
-// governance tables (node_versions cross-checked against review_requests) — the engine has
-// no notion of a review request, so there is no upstream descriptor to import. It mirrors
-// the REST GET /me/drafts 1:1, nest-scoped. Promote it upstream only if review workflow ever
-// moves into the engine catalog.
-//
-// Raised 47 -> 49 in 1.12.0 for the server-level `nest_create` / `context_create` bootstrap
-// writes — same exception as `context_table_query`: no importable engine module yet, and the
-// tools follow the existing pattern rather than introducing drift.
-//
-// Raised 49 -> 52 for the comment write tools (`context_comment`,
-// `context_resolve_comment`) and the server-level `context_comments` mirror
-// (CU-wdqcq01uqn). Same reason as move, the deletion trio and my_drafts: comments are NOT an
-// engine operation and are not meant to be — they are deliberately outside the engine's
-// version/hash chain (see the header of src/governance/comment-service.ts), which makes them
-// a community-edition governance concern like context_approve and context_stewards. The
-// upstream catalog was checked and carries no comment/annotation operation to import. They
-// mirror the REST annotation routes 1:1.
-//
-// Raised 52 -> 56 for server-level write tools (`context_update`, `context_delete`,
-// `context_move`, `context_submit_review`) on the /mcp endpoint (CU-wdqcq02cxu). These are
-// nest-parameterized mirrors of the existing per-nest tools — same schemas with an added
-// `nest` argument. This is community-edition MCP wiring, not new engine operations. The
-// per-nest tools already exist inline (same baseline exception), and these server-level
-// variants enable cross-nest workflows without multiple MCP connections. Authorization is
-// handled per-call by the same handleToolCall gates the per-nest endpoint uses.
-//
-// Lowered 56 -> 45: the server-level /mcp tools now derive from the per-nest
-// definitions (plus a `nest` arg) instead of keeping hand-written copies.
-const BASELINE = 45;
+// Engine module not importable yet (adopt descriptors once it is):
+//   40->41 context_table_query; 41->42 context_delete; 47->49 nest_create/context_create bootstrap.
+// Repo governance tables, not engine ops (promote upstream, then adopt + lower):
+//   42->43 context_move; 43->46 deletion-request trio; 46->47 context_my_drafts;
+//   49->52 comment tools (CU-wdqcq01uqn); 45->48 access-request trio (CU-wdqcq041jn, ContextNest#167);
+//   48->51 task-relation trio (edges table); 51->55 custom-field defs (ContextNest#178);
+//   55->58 boards + bulk update; 58->59 context_task_log; 59->61 headless + systems (CU-wdqcq0538g);
+//   61->63 instructions history/update (CU-wdqcq05mty; instructions_revisions table);
+//   63->68 metacognition list/suggest/configure/run/remove (CU-wdqcq05rqq; metacognition_agents table).
+// 52->56 server-level write tools (CU-wdqcq02cxu), then 56->45 once they derived from per-nest.
+const BASELINE = 68;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -14,13 +14,13 @@
  *   1. pending review_requests, newest first, LIMIT offset+limit
  *   2. distinct commented node ids (small), access-filtered in memory
  *   3. comment rows JOIN threads over the accessible ids, LIMIT offset+limit
- * plus one title map per nest and one canUserApprove per distinct pending
- * node — then a merge-sort in memory and a slice for the page.
+ * plus one title map per nest and one batched canUserApproveMany over the pending
+ * nodes — then a merge-sort in memory and a slice for the page.
  */
 
 import { getDb } from "../db/client.js";
 import { filterAccessible } from "./access-guard.js";
-import { canUserApprove } from "./stewardship-service.js";
+import { canUserApproveMany } from "./stewardship-service.js";
 import { buildTitleMap } from "./title-resolver.js";
 import {
   expirePendingPushes,
@@ -28,6 +28,8 @@ import {
 } from "../nests/push-confirmation-service.js";
 import type { PushManifestEntry } from "../nodes/publish-apply.js";
 import type { ReviewRequest } from "./types.js";
+import { isPublicReader } from "../shared/access.js";
+import { orgContributorRequesters } from "./org-contribution.js";
 
 export type FeedFilter = "all" | "changes" | "comments";
 
@@ -37,6 +39,9 @@ export interface ChangeFeedItem extends ReviewRequest {
   type: "change";
   /** Authoritative "can this caller approve/reject" (same check the queue stamps). */
   canReview: boolean;
+  /** The requester reaches this nest only as an org contributor
+   *  (CU-wdqcq05rz6) — not someone the reviewer added. */
+  requestedByOrgContributor: boolean;
   /** Merge key — mirrors requestedAt so all feed items sort on one field. */
   createdAt: string;
 }
@@ -104,6 +109,10 @@ export async function getNestFeed(params: {
   filter?: FeedFilter;
   limit?: number;
   offset?: number;
+  /** Include activity on RESOLVED threads. Off by default: a resolved thread
+   *  is done, and the feed reads as an inbox — resolving is how a comment
+   *  leaves it. Item shape is unchanged either way (`resolved` stays). */
+  includeResolved?: boolean;
 }): Promise<NestFeed> {
   const db = getDb();
   const filter = params.filter ?? "all";
@@ -125,41 +134,44 @@ export async function getNestFeed(params: {
   let changes: ChangeFeedItem[] = [];
   let changesTotal = 0;
   {
+    // A visibility-only reader (an org contributor among them) sees only
+    // their OWN requests: a request names an unapproved draft. Same rule as
+    // GET /review-queue (CU-wdqcq05rz6).
+    const ownOnly = await isPublicReader(params.nestId, params.userId);
+    const mine = ownOnly ? " AND LOWER(requested_by) = ?" : "";
+    const mineArgs = ownOnly ? [params.userEmail.toLowerCase()] : [];
     // Number(): Postgres returns COUNT(*) as a bigint, which `pg` hands back
     // as a string — the totals below are summed, and "12" + "3" is "123".
     changesTotal = Number(
       (
         (await db.get(
-          "SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'",
-          [params.nestId],
+          `SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'${mine}`,
+          [params.nestId, ...mineArgs],
         )) as { c: number | string }
       ).c,
     );
     if (filter !== "comments" && changesTotal > 0) {
       const rows = (await db.all(
         `SELECT * FROM review_requests
-          WHERE nest_id = ? AND status = 'pending'
+          WHERE nest_id = ? AND status = 'pending'${mine}
           ORDER BY requested_at DESC, id DESC
           LIMIT ?`,
-        [params.nestId, fetchWindow],
+        [params.nestId, ...mineArgs, fetchWindow],
       )) as any[];
+      const contributors = await orgContributorRequesters(
+        params.nestId,
+        rows.map((r) => String(r.requested_by)),
+      );
 
-      // One authoritative approve-check per distinct node (mirrors the
-      // queue route), not per row — resolved in parallel across nodes.
-      const distinctNodeIds = [
-        ...new Set(rows.map((r) => r.node_id as string)),
-      ];
+      // The authoritative approve-check for every node at once (mirrors the
+      // queue route), not one per node.
+      const verdicts = await canUserApproveMany(
+        params.nestId,
+        rows.map((r) => r.node_id as string),
+        params.userEmail,
+      );
       const canReviewByNode = new Map<string, boolean>(
-        await Promise.all(
-          distinctNodeIds.map(
-            async (nodeId): Promise<[string, boolean]> => [
-              nodeId,
-              (
-                await canUserApprove(params.nestId, nodeId, params.userEmail)
-              ).allowed,
-            ],
-          ),
-        ),
+        [...verdicts].map(([nodeId, v]) => [nodeId, v.allowed]),
       );
 
       changes = rows.map((row) => ({
@@ -177,7 +189,10 @@ export async function getNestFeed(params: {
         resolvedAt: row.resolved_at || undefined,
         resolutionNote: row.resolution_note || undefined,
         priority: row.priority,
+        escalationLevel: Number(row.escalation_level ?? 0),
+        escalatedAt: row.escalated_at || undefined,
         canReview: canReviewByNode.get(row.node_id) ?? false,
+        requestedByOrgContributor: contributors.has(String(row.requested_by).toLowerCase()),
         createdAt: row.requested_at,
       }));
     }
@@ -203,13 +218,14 @@ export async function getNestFeed(params: {
     if (accessible.length > 0) {
       const placeholders = accessible.map(() => "?").join(",");
       const ids = accessible.map((n) => n.id);
+      const statusClause = params.includeResolved ? "" : " AND t.status = 'open'";
       commentsTotal = Number(
         (
           (await db.get(
             `SELECT COUNT(*) AS c
                FROM annotation_comments c
                JOIN annotation_threads t ON t.id = c.thread_id
-              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})`,
+              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}`,
             [params.nestId, ...ids],
           )) as { c: number | string }
         ).c,
@@ -226,7 +242,7 @@ export async function getNestFeed(params: {
                   ) THEN 0 ELSE 1 END AS is_reply
              FROM annotation_comments c
              JOIN annotation_threads t ON t.id = c.thread_id
-            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})
+            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT ?`,
           [params.nestId, ...ids, fetchWindow],

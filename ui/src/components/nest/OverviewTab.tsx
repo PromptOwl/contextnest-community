@@ -154,20 +154,22 @@ export function OverviewTab({
               </h2>
               {description && <p className="mt-3 max-sm:mt-0 max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
               <p className={"mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? "" : " max-sm:mt-0")} data-testid="nest-overview-facts">
-                {facts.map((f) =>
-                  f.action === "review" && onOpenReview ? (
-                    <button key={f.key} type="button" onClick={onOpenReview} className={"rounded-sm text-primary underline-offset-2 hover:underline " + FOCUS}>
+                {facts.map((f) => {
+                  const dot = f.tone && (
+                    <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />
+                  );
+                  return f.action === "review" && onOpenReview ? (
+                    <button key={f.key} type="button" onClick={onOpenReview} className={"inline-flex items-center gap-1.5 rounded-sm text-primary underline-offset-2 hover:underline " + FOCUS}>
+                      {dot}
                       {f.text}
                     </button>
                   ) : (
                     <span key={f.key} className="inline-flex items-center gap-1.5">
-                      {f.tone && (
-                        <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />
-                      )}
+                      {dot}
                       {f.text}
                     </span>
-                  ),
-                )}
+                  );
+                })}
               </p>
             </header>
 

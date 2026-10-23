@@ -15,34 +15,13 @@ In this community repo, only build community-edition concerns on top of the engi
 
 ## Engine & CLI Sync Discipline
 
-The `Engine Logic Boundary` above says *where* engine logic lives. This section is the
-standing rule for *staying in sync* with it. The API convergence effort
-([docs/prds/api-convergence.md](docs/prds/api-convergence.md)) is moving the CLI, MCP, and
-REST surfaces onto one canonical operation catalog sourced from the engine — follow these
-rules so this repo never drifts from that contract:
+The `Engine Logic Boundary` above says *where* engine logic lives. This section is the standing rule for *staying in sync* with it. The API convergence effort ([docs/prds/api-convergence.md](docs/prds/api-convergence.md)) is moving the CLI, MCP, and REST surfaces onto one canonical operation catalog sourced from the engine — follow these rules so this repo never drifts from that contract:
 
-1. **ALWAYS check upstream first.** Before starting *any* engine-adjacent work — MCP tool
-   definitions or schemas, CLI-facing operations, versioning/hashing/prompt-compilation,
-   governance vocabulary, selector grammar, or wire shapes — check the upstream repo
-   [PromptOwl/ContextNest](https://github.com/PromptOwl/ContextNest) for the latest
-   `@promptowl/contextnest-engine` and `ctx` CLI (`@promptowl/contextnest-cli`) setup, and
-   confirm this repo consumes the latest published engine
-   (`npm view @promptowl/contextnest-engine version`).
-2. **Track latest.** Keep the engine pin in `package.json` within one release of the latest
-   engine. Bump promptly when a new engine ships (the community lockfile should track latest
-   within one release).
-3. **Push divergence upstream — never fork.** If a change here would risk diverging from the
-   engine/CLI contract (tool names, JSON schemas, governance vocabulary, selector grammar,
-   wire shapes), do NOT implement it in this repo. Implement and **commit it back upstream** in
-   `PromptOwl/ContextNest`, then consume it here as a dependency. Open a PR against the engine
-   repo for that work.
-4. **Canonical vocabulary.** MCP naming is `context_*`. Governance is
-   `context_submit_review` / `context_approve` / `context_reject` (drift suggestions are a
-   `drift` origin of the same ops, not a separate vocabulary). Do not introduce parallel names.
-5. **No new inline schemas.** MCP tool schemas will import from
-   `@promptowl/contextnest-engine/api` once that module ships. Do not add new inline
-   `inputSchema` object literals in `src/mcp/` — this is enforced by `npm run lint:mcp-schemas`
-   (see the divergence guard in `scripts/check-mcp-schemas.mjs`).
+1. **ALWAYS check upstream first.** Before starting *any* engine-adjacent work — MCP tool definitions or schemas, CLI-facing operations, versioning/hashing/prompt-compilation, governance vocabulary, selector grammar, or wire shapes — check the upstream repo [PromptOwl/ContextNest](https://github.com/PromptOwl/ContextNest) for the latest `@promptowl/contextnest-engine` and `ctx` CLI (`@promptowl/contextnest-cli`) setup, and confirm this repo consumes the latest published engine (`npm view @promptowl/contextnest-engine version`).
+2. **Track latest.** Keep the engine pin in `package.json` within one release of the latest engine. Bump promptly when a new engine ships (the community lockfile should track latest within one release).
+3. **Push divergence upstream — never fork.** If a change here would risk diverging from the engine/CLI contract (tool names, JSON schemas, governance vocabulary, selector grammar, wire shapes), do NOT implement it in this repo. Implement and **commit it back upstream** in `PromptOwl/ContextNest`, then consume it here as a dependency. Open a PR against the engine repo for that work.
+4. **Canonical vocabulary.** MCP naming is `context_*`. Governance is `context_submit_review` / `context_approve` / `context_reject` (drift suggestions are a `drift` origin of the same ops, not a separate vocabulary). Do not introduce parallel names.
+5. **No new inline schemas.** MCP tool schemas will import from `@promptowl/contextnest-engine/api` once that module ships. Do not add new inline `inputSchema` object literals in `src/mcp/` — this is enforced by `npm run lint:mcp-schemas` (see the divergence guard in `scripts/check-mcp-schemas.mjs`).
 
 ## Key Patterns
 
@@ -77,6 +56,13 @@ One folder per page under `ui/src/pages/app/<slug>/`: `meta.ts` (path, label, ic
 
 Scope resolution: document → tag → nest → owner
 
+## Pull requests
+
+Every PR — human- or AI-authored — must have both of these, or the Claude review marks it 🔴 blocking (full rules in `REVIEW.md`):
+
+1. **ClickUp ticket** referenced in the title, body or branch name (`CU-<id>`, `[CU-<id>]`, `#<id>`, or an `app.clickup.com/t/<id>` link). If you don't know the ticket, ask — don't open the PR without it.
+2. **Steps to test** section in the body: numbered steps a tester can follow from the user's perspective — where to go or what to run, what to do, what they should see. "Unit tests pass" is not test steps. Use `N/A — no user-facing change` plus a reason only for docs/CI/chore PRs.
+
 ## Configuration
 
 See `CONFIGURATION.md` for the full environment variable reference (PORT, DATA_ROOT, AUTH_MODE, PROMPTOWL_KEY, …).
@@ -87,5 +73,6 @@ See `CONFIGURATION.md` for the full environment variable reference (PORT, DATA_R
 - `CONFIGURATION.md` - Full env var reference
 - `API.md` - Complete endpoint reference
 - `STEWARDSHIP.md` - Governance model
+- `LICENSING.md` - Plans, seats, model credits, license checks
 - `CHANGELOG.md` - Release history
 - `docs/prds/api-convergence.md` - PRD: one CLI / one MCP across OSS and Community (drives the Engine & CLI Sync Discipline)

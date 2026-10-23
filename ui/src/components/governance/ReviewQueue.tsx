@@ -2,6 +2,7 @@
  * ReviewQueue — ported from packages/ui-components/src/stewardship/ReviewQueue.tsx
  * Adapted: uses `requests` prop + `onSelect` callback instead of server-action import.
  */
+import { RunLink } from "../RunLink";
 import React from "react";
 import {
   FileText,
@@ -27,11 +28,14 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { parseServerDate } from "@/lib/dates";
+import { showPriorityBadge } from "../../lib/review-pane";
+import { displayNameFor } from "../../lib/person-name";
 
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
 export interface ReviewRequest {
   id: string;
+  nestId?: string;
   nodeId: string;
   title?: string;
   version: number;
@@ -43,6 +47,11 @@ export interface ReviewRequest {
   // (mirrors approve/reject's canUserApprove). The UI gates affordances off
   // this instead of re-deriving steward scope client-side.
   canReview?: boolean;
+  /** Set when an agent run filed this proposal: links to its trace. */
+  runId?: string;
+  /** The requester reaches this nest only through its org-contributions
+   *  setting — not someone the reviewer added (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
 }
 
 /** A comment event from the nest activity feed (new thread or reply) —
@@ -78,6 +87,10 @@ interface ReviewQueueProps {
    *  anyway, and offering them would promise an action that fails. */
   selectedNodeIds?: Set<string>;
   onToggleSelect?: (nodeId: string) => void;
+  /** The change open in the review pane, highlighted in the list. */
+  activeNodeId?: string | null;
+  /** Nest roster, so comment rows show a name instead of the email. */
+  people?: Array<{ email: string; name: string | null }>;
 }
 
 const priorityConfig: Record<
@@ -116,6 +129,8 @@ export function ReviewQueue({
   onSelectComment,
   selectedNodeIds,
   onToggleSelect,
+  activeNodeId,
+  people,
 }: ReviewQueueProps) {
   // Feed mode (comments provided, even if empty): interleave change rows and
   // comment rows newest-first. Legacy mode keeps the server's priority order
@@ -265,13 +280,13 @@ export function ReviewQueue({
                         )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1" title={c.author}>
                           <Avatar className="h-4 w-4">
                             <AvatarFallback className="text-[8px]">
-                              {c.author[0]?.toUpperCase() || "?"}
+                              {displayNameFor(c.author, people)[0]?.toUpperCase() || "?"}
                             </AvatarFallback>
                           </Avatar>
-                          <span>{c.author}</span>
+                          <span>{displayNameFor(c.author, people)}</span>
                         </div>
                         <span>•</span>
                         <Clock className="h-3 w-3" />
@@ -295,7 +310,11 @@ export function ReviewQueue({
               return (
                 <div
                   key={request.id}
-                  className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors group"
+                  className={cn(
+                    "flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors group",
+                    activeNodeId === request.nodeId && "border-primary bg-muted/60",
+                  )}
+                  aria-current={activeNodeId === request.nodeId ? "true" : undefined}
                   onClick={() => onSelect?.(request)}
                   data-testid="review-queue-row"
                 >
@@ -313,13 +332,17 @@ export function ReviewQueue({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-medium truncate">{request.title || request.nodeId}</span>
-                      <Badge
-                        variant="secondary"
-                        className={cn("text-[10px] px-1.5 py-0", priorityCfg.className)}
-                      >
-                        {PriorityIcon && <PriorityIcon className="h-3 w-3 mr-1" />}
-                        {priorityCfg.label}
-                      </Badge>
+                      {/* Only priorities that change what the reviewer does
+                          next get a pill — a column of "Normal" is noise. */}
+                      {showPriorityBadge(request.priority) && (
+                        <Badge
+                          variant="secondary"
+                          className={cn("text-[10px] px-1.5 py-0", priorityCfg.className)}
+                        >
+                          {PriorityIcon && <PriorityIcon className="h-3 w-3 mr-1" />}
+                          {priorityCfg.label}
+                        </Badge>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                       <span>v{request.version}</span>
@@ -331,7 +354,23 @@ export function ReviewQueue({
                           </AvatarFallback>
                         </Avatar>
                         <span>{request.requestedBy}</span>
+                        {request.requestedByOrgContributor && (
+                          <Badge
+                            variant="outline"
+                            className="ml-1 h-4 px-1 text-[10px] font-normal"
+                            title="Suggested through this nest's org-contributions setting. This person wasn't added to the nest."
+                            data-testid="review-org-contributor"
+                          >
+                            org contributor (not a collaborator)
+                          </Badge>
+                        )}
                       </div>
+                      {request.runId && (
+                        <>
+                          <span>•</span>
+                          <RunLink nestId={request.nestId} runId={request.runId} />
+                        </>
+                      )}
                       <span>•</span>
                       <Clock className="h-3 w-3" />
                       <span>{formatDate(request.requestedAt)}</span>

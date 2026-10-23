@@ -1,31 +1,55 @@
 import { Hono } from "hono";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
-import { TOOL_DEFINITIONS, handleToolCall, toCallToolResult } from "./tools.js";
+import {
+  TOOL_DEFINITIONS,
+  MCP_READ_TOOLS,
+  MCP_ADMIN_TOOLS,
+  arrayToolField,
+  handleToolCall,
+  toCallToolResult,
+} from "./tools.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
+import { metacognitionEnabled } from "../metacognition/manage.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
   clientToolField,
   connectionClient,
 } from "../shared/client-metadata.js";
+import { confirmBillingToolField } from "../auth/seats.js";
 import { config } from "../config.js";
 import { z } from "zod";
+import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
 
-async function getCaller(userId: string): Promise<{ email: string; headless: boolean }> {
+async function getCaller(
+  userId: string,
+): Promise<{ email: string; headless: boolean; person: boolean }> {
   const db = getDb();
-  const user = await db
-    .get("SELECT email, is_service FROM users WHERE id = ?", [userId]) as
-    | { email: string; is_service: number | null }
+  const user = await db.get(
+    `SELECT u.email, u.is_service,
+            (SELECT 1 FROM system_accounts sa WHERE sa.user_id = u.id) AS is_system
+       FROM users u WHERE u.id = ?`,
+    [userId],
+  ) as
+    | { email: string; is_service: number | null; is_system: number | null }
     | undefined;
-  return { email: user?.email || "anonymous@localhost", headless: !!user?.is_service };
+  return {
+    email: user?.email || "anonymous@localhost",
+    // A named system (CU-wdqcq0538g) is a service identity but not a headless
+    // reader — it gets its collaborator-row access, not the reader clamp.
+    headless: !!user?.is_service && !user?.is_system,
+    person: !user?.is_service,
+  };
 }
 
 function createMcpServerForNest(
@@ -37,18 +61,31 @@ function createMcpServerForNest(
   apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
+  capability: "read" | "write" = "write",
+  /** A person holding a full credential who administers this nest — gates
+   *  MCP_ADMIN_TOOLS (each call is re-checked in the service layer). */
+  isNestAdmin = false,
+  /** Returned in the `initialize` result — CONTEXT.md plus the nest's
+   *  always-include documents (connect-instructions.ts). */
+  instructions?: string,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
   // Advertise the workflow-plane tools only when the flag is on — the same
   // gate the REST requireWorkflowPlane middleware applies. config is read per
   // request (the server is rebuilt per call), so toggling the flag at runtime
   // takes effect immediately.
+  // Metacognition tools need FEATURE_METACOGNITION as well (the REST
+  // requireMetacognition gate), and are admin tools on top.
   const allDefs = config.FEATURE_WORKFLOW_PLANE
-    ? [...TOOL_DEFINITIONS, ...WORKFLOW_TOOL_DEFINITIONS]
+    ? [
+        ...TOOL_DEFINITIONS,
+        ...WORKFLOW_TOOL_DEFINITIONS,
+        ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
+      ]
     : TOOL_DEFINITIONS;
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
@@ -57,6 +94,12 @@ function createMcpServerForNest(
     : allDefs;
 
   for (const tool of toolDefs) {
+    // A read-only key is only ADVERTISED the read tools, so tools/list tells
+    // the agent the truth. runTool still refuses a write tool on its own
+    // (the SDK answers an unregistered name with an error before that).
+    if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    // Admin tools are only advertised to the people who may use them.
+    if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};
@@ -67,7 +110,7 @@ function createMcpServerForNest(
       let field: z.ZodTypeAny;
       if (def.type === "string") field = z.string();
       else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
+      else if (def.type === "array") field = arrayToolField(def);
       else field = z.any();
 
       if (!required.includes(key)) field = field.optional();
@@ -77,7 +120,7 @@ function createMcpServerForNest(
     // rather than in each tool's inputSchema, so no tool can be added without
     // it and the divergence guard sees no new inline schema. Validated against
     // the engine's own schema inside handleToolCall.
-    Object.assign(shape, clientToolField);
+    Object.assign(shape, clientToolField, confirmBillingToolField);
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
@@ -103,6 +146,8 @@ function createMcpServerForNest(
         apiKeyId,
         apiKeyLabel,
         client,
+        capability,
+        contributorCredential: credentialMayContribute(c),
       });
       return toCallToolResult(out);
     });
@@ -116,6 +161,15 @@ mcpRoutes.all("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const caller = await getCaller(userId);
+  // The connect message carries the nest's rules (CU-wdqcq05rn0). Resolved
+  // only for the initialize request — every tool call rebuilds this server.
+  const instructions = (await isInitializeRequest(c.req.raw))
+    ? await nestConnectInstructions(
+        nestId,
+        { userId, userEmail: caller.email },
+        { headless: caller.headless },
+      )
+    : undefined;
   // Create a fresh server per request (stateless) with the current user's identity
   const server = createMcpServerForNest(
     nestId,
@@ -126,6 +180,11 @@ mcpRoutes.all("/", async (c) => {
     c.get("apiKeyLabel") ?? null,
     c,
     caller.headless,
+    c.get("keyCapability") ?? "write",
+    caller.person &&
+      (c.get("keyCapability") ?? "write") === "write" &&
+      (c.get("nestPermission") === "owner" || c.get("nestPermission") === "admin"),
+    instructions,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

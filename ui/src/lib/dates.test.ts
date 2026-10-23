@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseServerDate, formatServerDate, relTime } from "./dates";
+import { parseServerDate, formatServerDate, relTime, untilTime } from "./dates";
 
 // A SQL-default timestamp ("2026-08-04 05:02:32") is UTC with nothing saying
 // so, and new Date() reads it as LOCAL time — a request raised a minute ago
@@ -51,5 +51,22 @@ describe("relTime", () => {
   it("is empty for missing input rather than 'Invalid Date'", () => {
     expect(relTime(null)).toBe("");
     expect(formatServerDate(null)).toBe("");
+  });
+});
+
+describe("untilTime", () => {
+  const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+  it("counts down to a future instant", () => {
+    expect(untilTime(isoIn(30 * 60_000 + 5_000))).toBe("in 30m");
+    expect(untilTime(isoIn(5 * 3_600_000 + 5_000))).toBe("in 5h");
+    expect(untilTime(isoIn(7 * 86_400_000 + 5_000))).toBe("in 7d");
+  });
+
+  it("reads a past instant as expired, missing input as empty", () => {
+    expect(untilTime(isoIn(-60_000))).toBe("expired");
+    // Still live in its last minute.
+    expect(untilTime(isoIn(20_000))).toBe("in 1m");
+    expect(untilTime(null)).toBe("");
   });
 });

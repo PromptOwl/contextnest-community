@@ -29,7 +29,7 @@ const NOW = "to_char((now() AT TIME ZONE 'utc'), 'YYYY-MM-DD HH24:MI:SS')";
 // Historical SQLite migration ids — seeded as already-applied so any FUTURE
 // incremental Postgres migration can reuse the same hasMigration/recordMigration
 // gating without re-running schema that's already baked into the DDL below.
-const HISTORICAL_MIGRATIONS = [
+export const HISTORICAL_MIGRATIONS = [
   "002_steward_parity",
   "003_sessions_and_single_api_key",
   "004_license_cache_owner_email",
@@ -40,11 +40,6 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
-  // 012 merges case-colliding SQLite user rows. Postgres can never have them:
-  // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
-  // creation, so duplicates are rejected on insert and there's nothing to merge.
-  // Seed the id so bookkeeping matches SQLite and future incremental Postgres
-  // migrations gate correctly.
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
   "014_api_events",
@@ -81,6 +76,29 @@ const HISTORICAL_MIGRATIONS = [
   "045_headless_publish",
   "046_deletion_client_attribution",
   "047_node_access_events",
+  "048_license_cache_features",
+  "049_license_cache_gateway",
+  "050_agent_read_log",
+  "051_boards",
+  "052_nest_done_tags",
+  "053_license_cache_own_gateway",
+  "054_metacognition_agents",
+  "055_access_requests",
+  "056_mcp_oauth",
+  "057_review_sla_escalation",
+  "060_run_links",
+  "061_outbound_messages",
+  "062_field_definitions",
+  "064_task_activity",
+  "065_api_key_capability",
+  "066_api_key_origin",
+  "067_system_accounts",
+  "068_nest_sites",
+  "069_site_public_url_host",
+  "070_instructions_revisions",
+  "071_node_pins",
+  "073_nest_always_include_tags",
+  "074_org_contributions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -116,6 +134,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_only_review INTEGER NOT NULL DEFAULT 0,
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
+      review_sla_hours INTEGER,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
       require_push_confirmation INTEGER NOT NULL DEFAULT 0,
@@ -140,6 +159,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       key_prefix TEXT NOT NULL,
       nest_id TEXT REFERENCES nests(id) ON DELETE CASCADE,
       label TEXT,
+      capability TEXT NOT NULL DEFAULT 'write',
+      origin TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT ${NOW},
       last_used_at TEXT
     );
@@ -148,6 +169,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- Migration 003 capped this at one row per user; 035 lifted it so a user
     -- can hold one key per place they connect from and rotate them singly.
     DROP INDEX IF EXISTS idx_api_keys_user_unique;
+    -- 065: per-key capability ('write' = full/historic, 'read' = read-only).
+    -- DEFAULT 'write' keeps every existing key behaving exactly as before.
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capability TEXT NOT NULL DEFAULT 'write';
+    -- 066: per-key origin ('manual' | 'exchange'), for the exchange's per-nest cap.
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'manual';
 
     CREATE TABLE IF NOT EXISTS nest_collaborators (
       id TEXT PRIMARY KEY,
@@ -191,8 +217,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       org TEXT,
       limits_json TEXT,
       owner_email TEXT,
+      gateway_json TEXT,           -- license's LiteLLM key, encrypted (migration 049)
       validated_at TEXT NOT NULL DEFAULT ${NOW}
     );
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS features_json TEXT;
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS gateway_json TEXT;
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS own_gateway_json TEXT; -- own-provider key (migration 053)
 
     CREATE TABLE IF NOT EXISTS telemetry_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -252,7 +282,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       resolution_note TEXT,
       is_override INTEGER NOT NULL DEFAULT 0,
       priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(priority IN ('low', 'normal', 'high', 'urgent'))
+        CHECK(priority IN ('low', 'normal', 'high', 'urgent')),
+      escalation_level INTEGER NOT NULL DEFAULT 0,
+      escalated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_nest ON review_requests(nest_id);
     CREATE INDEX IF NOT EXISTS idx_reviews_node ON review_requests(nest_id, node_id);
@@ -674,6 +706,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
+    -- migration 050: the version the read was served, and the agent that
+    -- made it (client.agent split out so per-agent queries are indexed).
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS version INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS agent TEXT;
+    CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -705,6 +742,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+    -- migration 025 parity: runs tables created before the claim columns.
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_at TEXT;
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 
     -- server_settings (migration 020): durable store for runtime-mutable server
@@ -906,6 +946,335 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL DEFAULT ${NOW}
     );
     CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+  `);
+
+  // Migration 050 parity: read logging is on for every nest unless an owner
+  // turns it off.
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS access_log_enabled INTEGER NOT NULL DEFAULT 1;
+  `);
+
+  // Migration 051 parity: saved Board views.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS boards (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      private INTEGER NOT NULL DEFAULT 0,
+      position INTEGER NOT NULL DEFAULT 0,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
+  `);
+
+  // Migration 052 parity: which column tags mean "completed".
+  await db.exec(
+    "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
+  );
+
+  // Migration 055 parity: access requests (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS access_requests (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      requested_by TEXT NOT NULL,
+      target_type TEXT NOT NULL CHECK(target_type IN ('node', 'folder', 'nest')),
+      target_id TEXT NOT NULL,
+      level TEXT NOT NULL DEFAULT 'write' CHECK(level IN ('read', 'write')),
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'approved', 'denied')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      resolved_by TEXT,
+      resolved_at TEXT,
+      resolution_note TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+      ON access_requests(nest_id, requester_id, target_type, target_id)
+      WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_access_requests_nest
+      ON access_requests(nest_id, status);
+  `);
+
+  // Migration 061 parity: superadmin message log (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS outbound_messages (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      sender_kind TEXT NOT NULL DEFAULT 'system'
+        CHECK(sender_kind IN ('human', 'persona', 'system')),
+      sender_id TEXT,
+      recipients_json TEXT NOT NULL DEFAULT '[]',
+      subject TEXT,
+      body_redacted TEXT,
+      status TEXT NOT NULL DEFAULT 'sent'
+        CHECK(status IN ('sent', 'failed', 'skipped')),
+      provider_id TEXT,
+      error TEXT,
+      nest_id TEXT,
+      node_id TEXT,
+      run_id TEXT,
+      via_proxy INTEGER,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+    CREATE TABLE IF NOT EXISTS message_log_views (
+      id TEXT PRIMARY KEY,
+      viewer_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      filters_json TEXT,
+      message_id TEXT,
+      at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
+  `);
+
+  // Migration 054 parity: metacognition agents.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metacognition_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      persona_user_id TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id)
+    );
+    -- One running server-executed run per agent, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+  `);
+
+  // Migration 062 parity: nest-level custom field definitions (see
+  // migrations.ts). Values live on the nodes, not here.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS field_definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      type TEXT NOT NULL,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      required INTEGER NOT NULL DEFAULT 0,
+      default_json TEXT,
+      applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+      unit TEXT,
+      preset TEXT,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+      ON field_definitions(nest_id, field_key);
+    -- One time-in-status field per nest, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+      ON field_definitions(nest_id) WHERE type = 'time_in_status';
+    -- Audit trail of definition changes (who, what, before → after).
+    CREATE TABLE IF NOT EXISTS field_definition_events (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+      actor_id TEXT,
+      before_json TEXT,
+      after_json TEXT,
+      at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+      ON field_definition_events(nest_id, at);
+  `);
+
+  // Migration 056 parity: MCP OAuth (CU-wdqcq02p06). Kept in lockstep with
+  // migrations.ts — same columns, same constraints. Created unconditionally
+  // so turning MCP_OAUTH_ENABLED on needs no migration, inert while it is off.
+  // Every credential is stored as a SHA-256 hash, never in the clear.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id TEXT PRIMARY KEY,
+      client_name TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('dcr', 'cimd')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      last_seen_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      redirect_uri TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      code_challenge TEXT NOT NULL,
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+      ON oauth_codes(expires_at);
+
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL,
+      client_name TEXT NOT NULL,
+      access_token_hash TEXT NOT NULL UNIQUE,
+      refresh_token_hash TEXT UNIQUE,
+      scope TEXT NOT NULL,
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      refresh_expires_at TEXT,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user
+      ON oauth_tokens(user_id);
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access
+      ON oauth_tokens(access_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
+      ON oauth_tokens(refresh_token_hash);
+  `);
+
+  // Migration 057 parity: review SLA escalation. Declared inline above for a
+  // fresh database; the ALTERs reach one created before it shipped.
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS review_sla_hours INTEGER;
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalation_level INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalated_at TEXT;
+  `);
+
+  // Migration 060 parity: run back-links (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
+  `);
+
+  // Migration 064 parity: task activity log (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS task_activity (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      user_id TEXT,
+      status TEXT CHECK(status IS NULL OR status IN ('working', 'done', 'blocked')),
+      note TEXT NOT NULL,
+      surface TEXT NOT NULL,
+      api_key_id TEXT,
+      api_key_label TEXT,
+      api_key_prefix TEXT,
+      key_scoped INTEGER NOT NULL DEFAULT 0,
+      client_json TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_activity_node
+      ON task_activity(nest_id, node_id, created_at);
+  `);
+
+  // Migration 067 parity: named systems (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS system_accounts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+      created_by TEXT,
+      created_by_email TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+  `);
+
+  // Migration 068 parity: public docs sites (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_sites (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      domain TEXT,
+      site_key TEXT UNIQUE,
+      domain_token TEXT NOT NULL,
+      domain_verified_at TEXT,
+      settings TEXT NOT NULL DEFAULT '{}',
+      indexnow_key TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE TABLE IF NOT EXISTS site_paths (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+  `);
+
+  // Migration 069 parity: the proven host of a site's public_url.
+  await db.exec("ALTER TABLE nest_sites ADD COLUMN IF NOT EXISTS public_url_host TEXT");
+
+  // Migration 070 parity: CONTEXT.md revisions (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS instructions_revisions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      author_email TEXT,
+      note TEXT,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      UNIQUE(nest_id, seq)
+    );
+  `);
+
+  // Migration 071 parity: document pins (see migrations.ts). Editorial
+  // (scope 'nest', user_id NULL, ordered) and personal (scope 'user') pins;
+  // per-scope uniqueness as two partial unique indexes.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS node_pins (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('nest', 'user')),
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL DEFAULT 0,
+      pinned_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      CHECK ((scope = 'nest' AND user_id IS NULL) OR (scope = 'user' AND user_id IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+      ON node_pins(nest_id, node_id) WHERE scope = 'nest';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+      ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
+    CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
+  `);
+
+  // Migration 073 parity: which tags mark a document always-include.
+  await db.exec(
+    "ALTER TABLE nests ADD COLUMN IF NOT EXISTS always_include_tags TEXT NOT NULL DEFAULT 'always-include'",
+  );
+
+  // Migration 074 parity: org contributors (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_contributions TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_domains TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TEXT;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

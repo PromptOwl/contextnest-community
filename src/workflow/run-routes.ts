@@ -19,13 +19,17 @@ import { engineCache } from "../nodes/engine.js";
 import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { standingBlockFor, standingRefs } from "../governance/always-include-service.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
-import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
+import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
-import { cancelDescendants } from "./run-service.js";
+import { cancelDescendants, announceRunFailed } from "./run-service.js";
 import { envValues } from "./env-routes.js";
-import { dispatchEvent } from "../notify/dispatch.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
+import { requireMetacognitionAdmin } from "../metacognition/manage.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -35,6 +39,7 @@ interface RunRow {
   agent_node: string;
   triggered_by: string;
   status: string;
+  claimed_by?: string | null;
   inputs: string | null;
   trace: string | null;
   started_at: string;
@@ -132,7 +137,12 @@ async function referencedDefinitions(
  * run) and GET /runs/:id/bundle (which re-hands the bundle for a run created
  * server-side, e.g. by the interval scheduler).
  */
-async function buildRunBundle(nestId: string, agentNode: string) {
+async function buildRunBundle(
+  nestId: string,
+  agentNode: string,
+  /** Who receives the bundle — the standing instructions are what THEY may read. */
+  caller: { userId: string; userEmail: string },
+) {
   const { storage } = await engineCache.get(nestId);
   let doc;
   try {
@@ -174,10 +184,13 @@ async function buildRunBundle(nestId: string, agentNode: string) {
     }
   }
   // Env store values ride along for the tools AND the runner's own LLM key
-  // (ANTHROPIC_API_KEY set from the UI). The bundle requires write
+  // (a nest's own key with byok, else PromptOwl's gateway). The bundle requires write
   // permission to obtain, and this is the ONLY surface that returns full
   // values (the /env routes mask them).
   const env = await envValues(nestId);
+  // The nest's always-include documents (CU-wdqcq05rn0): the runner puts
+  // `text` in its model's system prompt, as Hootie and metacognition do.
+  const standing = await standingBlockFor(nestId, caller);
 
   return {
     agent: {
@@ -185,6 +198,11 @@ async function buildRunBundle(nestId: string, agentNode: string) {
       title: String(doc.frontmatter.title ?? agentNode),
       type: nodeType,
       schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      // The runner model this agent asked for; null → the runner's default.
+      model:
+        (doc.frontmatter.metadata as any)?.model != null
+          ? String((doc.frontmatter.metadata as any).model)
+          : null,
       content: doc.body || "",
     },
     edges,
@@ -192,6 +210,7 @@ async function buildRunBundle(nestId: string, agentNode: string) {
     tools,
     env,
     definitions,
+    standing_instructions: { text: standing.text, ...standingRefs(standing.set) },
   };
 }
 
@@ -288,6 +307,28 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     .json<{ inputs?: unknown; parent_run_id?: unknown }>()
     .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
 
+  // A metacognition agent runs in this server, not in an external runner:
+  // the trigger starts it here and hands out no bundle (no env values, no
+  // instructions) — there is nothing for a caller to execute.
+  if (config.FEATURE_METACOGNITION) {
+    const meta = await getAgent(nestId, agentNode);
+    if (meta?.enabled) {
+      // Metacognition is owner/admin only, however the run is started.
+      requireMetacognitionAdmin(c.get("nestPermission"));
+      if (body.parent_run_id !== undefined && body.parent_run_id !== null) {
+        throw new ValidationError("A metacognition agent can't run as a sub-agent");
+      }
+      const { startMetacognitionRun } = await import("../metacognition/service.js");
+      const runId = await startMetacognitionRun({
+        nestId,
+        nodeId: agentNode,
+        triggeredBy: await resolveCallerEmail(c.get("userId")),
+        inputs: body.inputs,
+      });
+      return c.json({ run_id: runId, executes: "server" }, 202);
+    }
+  }
+
   // Sub-agent (nested) run? Validate the parent chain before creating anything.
   let parentRunId: string | null = null;
   let depth = 0;
@@ -316,12 +357,15 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     }
   }
 
-  const bundle = await buildRunBundle(nestId, agentNode);
   // Derived from auth, never client-supplied — this is the accountability
   // field ("who triggered this run"), so it must be trustworthy. A scheduler
   // or external runner authenticates with its own key; that identity is the
   // honest answer.
   const triggeredBy = await resolveCallerEmail(c.get("userId"));
+  const bundle = await buildRunBundle(nestId, agentNode, {
+    userId: c.get("userId"),
+    userEmail: triggeredBy,
+  });
 
   const id = `run_${uuid()}`;
   await getDb().run(
@@ -421,17 +465,19 @@ async function loadRunWithPermission(
     // Mirror the nest gate's message so scoped keys fail the same way everywhere.
     throw new ForbiddenError("API key not authorized for this nest");
   }
-  if (required === "write") {
+  // Same rule as every other write path: writesAllowed (license or Free tier).
+  if (required === "write" && !(await writesAllowed())) {
+    if (!(await canSeeLicenseDetail(c.get("userId")))) {
+      throw new ForbiddenError(NEUTRAL_READ_ONLY);
+    }
     if (isSuspended()) {
       throw new ForbiddenError(
         `Server suspended by PromptOwl: ${getSuspensionReason()}`,
       );
     }
-    if (!getCurrentLicense()?.valid) {
-      throw new ForbiddenError(
-        "A valid PromptOwl license is required to write runs.",
-      );
-    }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) throw new ForbiddenError(offlineLockMessage(offlineSince));
+    throw new ForbiddenError(FREE_TIER_EXCEEDED_MESSAGE);
   }
 
   const perm =
@@ -452,6 +498,11 @@ runDetailRoutes.post("/:id/steps", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
   if (run.status !== "running") {
     throw new ConflictError(`Run is ${run.status} — steps can't be appended`);
+  }
+  // A metacognition run is executed by this server, which writes its own
+  // trace. Nobody else may add to it — the trace is the agent's audit.
+  if (run.claimed_by === SERVER_CLAIM) {
+    throw new ConflictError("This run is executed by the server; its steps are recorded by the server");
   }
   const body = await c.req.json<Record<string, unknown>>();
   if (typeof body.action !== "string" || !body.action.trim()) {
@@ -506,6 +557,11 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   ) {
     throw new ValidationError("status must be running | succeeded | failed | cancelled");
   }
+  // Only stopping a server-executed run is a person's call; its outcome is
+  // the server's to record.
+  if (run.claimed_by === SERVER_CLAIM && status !== "cancelled") {
+    throw new ConflictError("This run is executed by the server — it can be cancelled, not closed");
+  }
   const terminal = status !== "running";
   // Compare-and-swap on the status, same as closeRun: the check above read the
   // row before this write, so a runner reporting success through MCP in that
@@ -532,19 +588,7 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   // Only once the swap above won, or a lost race would cancel the descendants
   // of a run that actually succeeded.
   if (status === "cancelled") await cancelDescendants(run.id);
-  if (status === "failed") {
-    const err =
-      body.trace && typeof body.trace === "object"
-        ? String((body.trace as any).error ?? "").slice(0, 200)
-        : "";
-    void dispatchEvent({
-      kind: "run_failed",
-      nestId: run.nest_id,
-      subjectId: run.id,
-      actor: run.triggered_by,
-      message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
-    });
-  }
+  if (status === "failed") announceRunFailed(run, body.trace);
   return c.json({ ok: true, status });
 });
 
@@ -569,7 +613,10 @@ runDetailRoutes.get("/:id/bundle", requireWorkflowPlane, async (c) => {
   if (!res.changes) {
     throw new ConflictError("Run already claimed by another runner");
   }
-  const bundle = await buildRunBundle(run.nest_id, run.agent_node);
+  const bundle = await buildRunBundle(run.nest_id, run.agent_node, {
+    userId: c.get("userId"),
+    userEmail: claimer,
+  });
   return c.json({
     run_id: run.id,
     parent_run_id: run.parent_run_id,

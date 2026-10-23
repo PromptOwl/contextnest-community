@@ -1,5 +1,398 @@
 # @promptowl/contextnest-community
 
+## 2.2.1
+
+### Patch Changes
+
+- a82aec2: Device login: `POST /auth/device/poll` now accepts `code` and `client_secret` in a JSON body, so the secret no longer has to appear in a URL where server and proxy logs can record it. The web app's PromptOwl sign-in now polls this way. `GET /auth/device/poll` with query parameters still works for older CLIs but is deprecated.
+- b0c4090: Public docs site rendering fixes (CU-wdqcq05raw). Bare filenames such as `CONTEXT.md` are no longer turned into `http://CONTEXT.md` links, and only URLs with a scheme are autolinked. Aliased wikilinks (`[[page|label]]`) now work inside table cells. HTML comments are removed from the HTML pages, the Markdown twins and `llms-full.txt`, but kept inside code. Tag hub pages get a readable title that keeps acronyms upper-case (`mcp` → "MCP") and a description that names the topic and counts its pages. A node's frontmatter `description` can now be set or cleared through REST `PATCH /nodes/:id` and MCP `context_update`. The anonymous `/nest/<id>` → `/d/<key>/` redirect now answers every anonymous GET and HEAD with a 301, including requests with no Accept header or `*/*` (plain curl, link checkers, AI fetchers), which used to get a 404. Signed-in users, `Authorization` callers, `?app=1`, and non-crawler clients whose Accept names JSON but not `text/html` still reach the app. Any other anonymous client, including one sending `*/*` or no Accept, is redirected.
+- 467fc72: Public docs site: the reader-mode home node now resolves on the static site (`/d/<key>/`) exactly as it does in the reader — by full node id or bare slug (`welcome` finds `nodes/docs/welcome`), case-insensitively. Before, the site matched the exact id only, so a slug or different-case `home_node` was ignored and the site could open on a different page than the reader. When several pages share the slug, both now pick the lowest node id.
+- 4548bdb: Document titles: the server now accepts titles up to 200 characters, the same limit as a local vault, so pushing a document with a 121–200 character title no longer fails. The API reference now documents `PATCH /nests/:nestId` for renaming a nest and changing or clearing its description.
+
+## 2.2.0
+
+### Minor Changes
+
+- 0fdd672: Tag boards: the add-column box is now a real autocomplete — the nest's tags with card counts, minus the ones already on the board — and a column can be a pattern like `status*`, which adds one column per matching tag and picks up new matching tags by itself. The board list over REST/MCP sections pattern boards the same way.
+- ef4fe34: Experimental document pins, behind their own superadmin switch (`EXPERIMENTAL_DOC_PINS`, Settings → Features → "Document pins (experimental)", off by default). Stewards pin documents to the front of a nest for everyone, in an order they choose; anyone who can read a document can pin it for themselves. Pins show as a strip above the nest's document list, with a pin control on each document's header and on its row in the document list. New `/nests/:id/pins` endpoints; `/health` reports `experimental.doc_pins`. May change or disappear.
+- 3494501: Experimental: a cross-nest document stream. With `EXPERIMENTAL_DOC_STREAM` on (or a superadmin's new "Document stream (experimental)" switch under Settings → Features), a Stream page and a Stream tab on each nest show every document version across the nests a person can read, newest first, filterable by nest, topic, type and author, with the document's open comment threads and a composer inline. New endpoint `GET /me/stream`; `/health` reports the switch as `experimental.doc_stream`. Off by default; may change or disappear.
+- 9dc0159: Instructions: a new nest tab shows the nest's CONTEXT.md, the operating instructions every agent reads first through `context_init`. Owners and nest admins can edit it, and each change is recorded with who made it, when and why, whether it came from this page, `ctx push` or an agent over MCP. History shows what each revision changed, and any revision can be restored. A save made against an out-of-date copy is refused rather than overwriting someone else's change. MCP parity: `context_instructions_history` (read) and `context_instructions_update` (owner/admin, held for confirmation on nests that hold agent writes).
+- 59bdaf3: Public docs sites: a nest that is public with Reader Mode on is now also published as a static, search-engine- and AI-ready docs site — complete HTML per page (no JavaScript needed), clean URLs, titles, descriptions, canonicals, structured data, a sitemap with real lastmod, robots.txt that welcomes AI search crawlers, llms.txt, Markdown copies of every page, IndexNow pings, and "Copy page / Open in ChatGPT / Claude" actions. Pages link to each other semantically: backlinks, related pages ranked by shared topics and links, topic hub pages for tags, and a glossary whose terms are linked where they're mentioned. Owners configure it from **Reader mode → Public site**: a custom domain (verified by DNS), custom page URLs with automatic redirects from old ones (and 410 for deleted pages), manual redirects, SEO and AI-crawler settings. Anonymous visitors to the nest's app URL are redirected to the page. Built from approved content only. Before this, every public docs URL returned the same empty app page to crawlers.
+- 873c5b0: Review queue: clicking a change now opens it in a pane beside the queue instead of a read-only popup. You can switch between Preview, Changes (a diff against the published version) and the published version. The author's note shows in full. Approve & publish takes one click, and Request changes takes its reason inline. Edit draft opens the edit-and-approve flow for reviewers who can edit. Each review has its own link (`?review=`), and after a decision the next change opens.
+
+### Patch Changes
+
+- 4e2da9e: Role changes that raise what someone is billed now ask first. Making a viewer an editor, or an editor an owner, admin or reviewer, shows a confirmation naming the person and their old and new role, and saves only after you confirm. This covers nest sharing, stewards, document and folder shares, teams, access request approvals and superadmins. Apps and scripts confirm with the `X-Confirm-Billing: true` header; MCP agents get a `BILLING_CONFIRMATION_REQUIRED` error and confirm by calling the tool again with `confirm_billing: true`. Creating your own nest still only checks the plan limit.
+- b872287: Board: the filter box now filters by title as you type, in both Board and List layouts. Typing part of a title used to do nothing because the box only took tags. Pressing Enter still adds the text as a tag filter, and text starting with `#` is treated as a tag.
+- ddb2ab4: Connect: the nest keys listed in the Connect dialog now show Read-only / Read-write as a badge with an icon, the same as on the API keys page, instead of plain text.
+- 0356be4: Connect dialog, Claude tab: the Claude Code plugin is listed first as the easiest way in — install it, then `/contextnest:setup` walks the user through connecting. README "Connect an agent" lists it too.
+- faaf9a4: Dashboard: opens on All nests and remembers whichever scope you last picked. Every card says whose it is: your own nests show "Yours", shared nests show "Shared by …", and nests you can read only because they are org or public show a dashed border with "Org-visible" or "Public". Clear filters goes back to All. The same marks carry into the nest: in the sidebar, nests shared with you get a people icon and org/public ones you weren't invited to are dimmed (hover names the owner and your role), and the nest page shows a banner with who shared it and your role.
+- 272c2ba: Board: a board made with "+ New board" is discarded if you press Escape or click away without naming it. It used to stay behind as "Untitled board" and had to be deleted from its menu. Duplicated boards keep their "… copy" name as before.
+- 3c41116: Board due dates: typing a year into the due-date picker no longer saves a half-typed year such as 0020 after the first two digits. The server now refuses due dates before 1900 or days that don't exist, and an existing bad date displays as its real year instead of 1920.
+- 90927ba: Hootie now defaults to an efficient model (`claude-sonnet-5`) when no model is picked, instead of whatever default the PromptOwl gateway sends, so PromptOwl credits go further. A model picked in Settings → Hootie, and your own keys or model gateway, work as before. This also fixes picking `claude-sonnet-5` explicitly, which used to fall back to the gateway's default.
+- 1bd0d9d: My Work: tasks assigned to you now count as waiting on you. The My Work badge includes your open assigned tasks, not only reviews and requests. "You're all caught up" no longer shows while a task is waiting for you. A task whose assignee email was stored with different capitals (for example from a file sync or import) now shows up for that person too.
+- ea7032b: Public docs site fixes:
+
+  - Verifying a custom domain or public URL no longer hangs on a slow DNS server. The lookup gives up after about 5 seconds and says it timed out, and the daily re-check does the same without un-verifying the domain.
+  - Large docs sites use much less server memory. Each page now carries one copy of the page list instead of two (it still shows as a sidebar on desktop and a "Contents" dropdown on phones), and the server keeps at most about 256 MB of built sites in memory, dropping the least recently used first.
+  - Two nests with the same name turning on their public site at the same moment no longer fail with a server error; the second one gets its own id as its URL. A nest can no longer take another nest's id as its URL by being named after it.
+  - API.md now states that glossary definitions on the public docs site are not approval-gated: an editor's definition is public as soon as it is saved, as it already is in the public reader.
+  - The Markdown copy of each page (`.md` and `llms-full.txt`) no longer shows the path of a linked draft or missing document. Links are handled as on the HTML page: a link to a published page points at its URL, and any other link keeps only its label. Code samples are left as written.
+  - A custom docs domain sent with a trailing dot (`docs.example.com.`) is served, not answered with "not found". A `.md` request that follows a redirect now gets a valid URL when the target has a `#section` or query. The server warns at startup when `DOCS_SITES` is set without `PUBLIC_BASE_URL`, because it can't then tell whether an entry is the server's own host.
+
+- db01535: HTML documents sent with `ctx push` now render as pages. A pushed body starts with the blank line under its frontmatter, and the viewer's HTML check didn't allow for leading whitespace, so those pages showed a blank gap followed by broken text. The viewer now allows leading whitespace, and the server drops leading blank lines from pushed bodies (the indentation on the first real line is kept).
+- 89544b4: Task relations: the document picker for "Related to" and "Duplicate of" no longer shows the blocking hint ("Done blockers don't count…"). Each gets its own line; Blocks / Blocked by keep the blocking hint.
+- 8b82ab2: Nest settings: an invalid Review SLA now shows its error right under the field. It used to appear in the banner at the top of the scrolled modal, off-screen, so Save looked like it did nothing.
+
+## 2.1.0
+
+### Minor Changes
+
+- c7fcaad: Documents can be selected in the Documents list and moved, tagged or deleted together. Adds `POST /nests/:nestId/nodes/bulk-move` and `/bulk-delete`, and an `ids` list on MCP `context_move` and `context_delete` (tags: `context_bulk_update`). Each document is its own governed write, so ones under review or that the caller can't change are skipped and reported per document while the rest go through.
+- 6c44fa3: Folders can now be renamed and moved. Owners and admins get a rename/move action on each folder in the Documents tree, `POST /nests/:nestId/folders/move`, and `context_move` with `from_folder` over MCP. Everything under the folder (sub-folders, empty ones too) follows: ids change, version history, review state and links are kept, and the nest's structure rules are enforced.
+- v2.1.0 — bulk document actions, folder rename/move, table grid editing, read-only and system API keys, faster large imports, and a 24h offline licence limit.
+
+### Patch Changes
+
+- bd435e0: **Engine bumped to `@promptowl/contextnest-engine` 3.2.0** to pick up the latest engine changes.
+- 5a2bf17: **Import concurrency is editable from Server settings.** Settings → Basic → Import concurrency sets `IMPORT_IO_CONCURRENCY` (1–256, default 32) without a redeploy: the value is stored with the other server settings and applies to the next import. Raise it on network storage (Cloud Storage) to speed up large folder imports.
+- 7e288b4: **Importing an exported nest no longer reports a false failure.** A nest export includes the source vault's `.context/config.yaml`, which the engine never imports (it holds that vault's own settings), so every import of one ended with "Imported, but 1 file could not be read or was too large: .context/config.yaml". Import now drops `.context/` before staging, the same way it drops `_suggestions/`, so a clean import reads as clean.
+- 291fe52: **Folder imports say what happened.** `POST /nests/import` responses now carry `problems` (each refused file, document kept as a draft, or document not imported, as a readable `path: reason` line) and `warnings` (repairs made on the way in, such as a whole-number version or a derived title), alongside the unchanged `documents` and `rejected`. One document whose records fail no longer fails the whole import: the rest are imported and that one is named. A step that fails outright reports "Import stopped while uploading files: …" or "… while publishing documents: …" instead of "Something went wrong"; a vault-lock timeout stays a retryable `503` and an engine validation refusal stays a `400`.
+- 4e4b54c: **New `IMPORT_IO_CONCURRENCY` setting for large imports.** It sets how many file operations one folder import keeps in flight (publishing runs half as many documents at once). Unset keeps the engine default of 32. On a network-backed `DATA_ROOT` such as Cloud Storage via gcsfuse, where every file operation is a round trip, raising it (for example to `64`) shortens large imports; each in-flight file is held in memory, so peak memory grows with it.
+- e8df9ca: **Folder imports log where their time goes.** Each import call (every uploaded chunk, and the final registration) now logs one `[import] io` line listing how many times each storage operation and database index hook ran and how long they took, slowest first. On a network-backed `DATA_ROOT` this shows which operation dominates a slow import. Logging only; import behavior is unchanged.
+- c711891: MCP OAuth: the `/mcp` sign-in challenge now asks for `nests:read nests:write offline_access`. Clients request the scopes it names, so a connected agent could previously only read (writes were refused for scope with no way to step up) and was signed out when its one-hour token expired. One consent now covers reading, writing and a refresh token. Existing read-only grants get write by reconnecting once.
+- 8088ecc: `context_update` now accepts an optional `type` over MCP (per-nest and server-level `/mcp`), so a node can be re-typed in place without delete + recreate. It uses the same gate as REST `PATCH` and the UI's "Turn into": unknown types are refused with a readable error, and version history and review state are kept.
+- ab67ce2: A server that can't reach PromptOwl now keeps its last good license for 24 hours, not indefinitely. Once 24 hours pass since the last successful license check, the server goes read-only: reading keeps working, nobody is signed out, and writing comes back on the next successful check. The clock is the saved check time, so a restart doesn't reset it. Server admins and the license owner see why in a banner, in Settings → License (`offline_since` on `GET /admin/license`), in the 503 a refused write returns, and on the status page; everyone else sees the usual neutral read-only line.
+- 9f2ade2: Tighten scoped read keys and the PromptOwl ticket exchange.
+
+  - **Read keys can't chat.** `POST /nests/:id/chat` can post a mention comment and spends model credits, so read-only keys now get 403 there. They still read, query, search and export.
+  - **`/auth/keys/exchange` is read-only and PromptOwl-only.** It accepts only `OFFICIAL_COMMUNITY_SSO_SECRET` tickets (not `MCP_SIGNING_SECRET`) and refuses `capability: "write"` (400).
+  - **Exchange is throttled.** Per-IP rate limit (429), and concurrent exchanges for the same user and nest are serialised so the 20-key cap holds.
+
+- 5cc5049: Read-only API keys can now be made from the dashboard. The API keys page has a Read-only / Read-write choice next to the scope picker. A read-only key must be scoped to one nest, so "All your nests" is unavailable while Read-only is picked, and the page explains why inline. Every listed key now shows whether it is Read-only or Read-write next to its nest badge. The Connect dialog's "Create a key for this nest only" starts out read-only, so a key handed to an agent is least-privilege by default.
+- 76ce05d: A document's status badge now explains itself. Hover it in the editor or the Documents list to see what the status means and what happens next — who submitted a pending review, that a steward approves or rejects it, and that readers and AI keep seeing the last approved version meanwhile. The editor and the Documents list now share one badge, so a status looks the same everywhere.
+- d9421ef: Table documents can now be edited as a grid. The preview next to the CSV source is editable: click a cell to change it, use Add row and Add column to grow the table, and the × on a row or column header to remove it. Changes write straight back to the CSV, so the source and the grid always match, and `#` comment lines are kept as they were.
+
+## 2.0.0
+
+### Major Changes
+
+- v2.0.0 — custom fields, MCP OAuth connectors, structure rules, superadmin message log, Free tier, and an Enterprise-only SSO split.
+
+  ### Breaking
+
+  - **Enterprise single sign-on needs the `sso` licence feature.** Switching SSO to Entra ID, Okta or a custom OIDC issuer, or turning one back on, now needs an Enterprise key; `PATCH /admin/settings` answers `403 { code: "sso_required" }`. Google sign-in stays on every plan, and servers already signing in through an enterprise provider keep working.
+  - **`MANUAL_SIGN_IN` defaults to `invite-only` when SSO is on.** Password self-registration is closed by default on SSO servers; set `MANUAL_SIGN_IN=open` explicitly to keep the old behaviour (the server then warns at startup and in Settings).
+
+  ### Structure
+
+  - **Structure rules** — per-nest folder and template rules with a Structure page (rules, templates, compliance report), enforced on writes (`src/structure/`). The compliance report is shown only to callers who can read the whole nest. See `docs/prds/structure-rules.md` and `STEWARDSHIP.md`.
+
+### Minor Changes
+
+- 5253db6: Agents can name the model their runner should use.
+
+  - **`model` on agent and skill nodes.** Set it on create or update (REST), the same way as `schedule`: runnable types only, `""` clears it, and converting away from a runnable type drops it. It's stored in frontmatter `metadata.model` and echoed on node responses and `GET /runnables`.
+  - **`agent.model` in the run bundle.** `POST /run/:agent`, `GET /runs/:id/bundle` and MCP `workflow_run` return it (`null` when unset), so a runner can put each agent on its own model instead of one global default.
+
+- 53d29ff: A new comment now notifies the document's watchers and its reviewer stewards (a `comment` inbox row, plus an email when SMTP is configured) — never the comment's author, never anyone who can't open the document, and never twice: someone the comment @mentions, or a thread participant notified of a reply, hears once.
+- 7a76091: Reviewers can fix a submission and approve it in one step instead of sending it back. On a document waiting for review, someone who can both edit and approve it gets an **Edit** button next to Approve / Reject; editing switches Save to **Save & approve**, which publishes the reviewer's fix together with the author's change. The fix is its own version under the reviewer's name, the submission still belongs to the author (separation of duties is unchanged), and the author gets the usual approval notification with the note "Approved with reviewer edits". Not offered on prime documents.
+
+  New endpoint `POST /nests/:nestId/nodes/:nodeId/approve-with-edits` (see API.md). STEWARDSHIP.md no longer says the reviewer role can edit — it never could.
+
+- f57ca70: An unlicensed server now accepts writes while it has 10 or fewer users, matching the published Free tier ("free for up to 10 users, on our cloud or your servers"). A small internal deployment can be stood up and trialled without installing a PromptOwl key first. Users are counted exactly as a Free key counts them (nest owners, admins, reviewers, server admins). Viewers are free and never count, so sign-ups alone can never close the gate. Teammate invites and the teammates list follow the same rule.
+
+  Past 10 users with no valid license, the gate is unchanged: reads work and writes return 503. A server admin is told why: "This server has more than 10 users and no valid PromptOwl license, so writes are disabled. Install a license (POST /license/install) or bring the server back to 10 or fewer users." Everyone else still gets the neutral read-only line. A suspension by PromptOwl still blocks writes regardless of user count.
+
+  One helper, `writesAllowed()` in `src/auth/free-tier.ts`, decides this for every write path: REST nest routes (including the governance views behind the same gate), server-level and per-nest MCP, and workflow run writes.
+
+- 4487267: MCP clients can now sign a person in, instead of carrying a shared API key. Off by default (`MCP_OAUTH_ENABLED`, also a runtime toggle under Settings → Single sign-on → Agent OAuth). It requires `PUBLIC_BASE_URL`, and `/admin/settings` refuses to enable it without one. With the flag off, `/.well-known/*` and `/oauth/*` return 404 and `/mcp` answers unauthenticated callers as before.
+
+  The server has always decided what an MCP caller may read on a per-user basis — `buildNestIndex` gates every nest through `canRead(nestId, userId)`. What was missing was identity at the door. An API key pasted into Claude, ChatGPT or Cursor by four people resolves all four to the same user, so they all see whatever that key's owner can see. Turning this on means each person arrives as themselves and sees their own nests.
+
+  The flow is the standard one. An unauthenticated `/mcp` request gets a `401` whose `WWW-Authenticate` header points at the discovery documents (`/.well-known/oauth-protected-resource/mcp`, RFC 9728, and `/.well-known/oauth-authorization-server`, RFC 8414). The client registers (`POST /oauth/register`, RFC 7591), sends the person to `/oauth/authorize`, and exchanges the resulting code at `/oauth/token` for an access token and, when `offline_access` was granted, a refresh token. A signed-out person sees the app's normal login page at the authorize URL — password, SSO and PromptOwl sign-in all work — and lands on the consent page once signed in. Tokens can be revoked at `/oauth/revoke`. Clients register through DCR; Client ID Metadata Documents are not advertised yet.
+
+  Security properties, each covered by a test:
+
+  - PKCE S256 is required, with RFC 7636 value shapes. Client, redirect and verifier are checked before a code is spent, so someone who only saw a code cannot burn it or revoke the grant.
+  - A code is single-use. One redeemed twice by a presenter holding the verifier revokes the whole grant, including tokens minted by a racing exchange. A rotated refresh token presented again also revokes the grant.
+  - The consent page shows where the approval goes, cannot be framed, and is not cached. Its CSRF token binds the client, redirect, scope, state, challenge and resource it showed, so an approval cannot differ from the page. Control and bidi characters are removed from client names.
+  - Scopes are a real boundary. `nests:read` is refused every write tool, `/index` and the read tools need read scope, and `nests:write` implies read and says so on the consent page. Read-only tools are an allow-list, so a new tool requires write by default.
+  - An expired or revoked token gets `401` with `error="invalid_token"`, so clients refresh or re-authorize. A password change, an admin password reset or removing the user revokes every grant.
+  - A **Connected apps** page (Workspace → Connected apps, shown while the flag is on) lists the agents you connected, with their scopes, destination and last use. **Disconnect** revokes that app's tokens at once (`GET /oauth/connected`, `DELETE /oauth/connected/:clientId`).
+  - Every credential is stored as a SHA-256 hash. Token responses carry `Cache-Control: no-store`. Registration, token and revocation are rate-limited per IP, and idle clients, expired codes and dead tokens are purged hourly.
+
+  Existing API keys and MCP tickets are untouched and keep working exactly as before; this only adds a way in. An OAuth grant is never narrowed to a single nest, so one connection reads across every nest that person can see.
+
+- 8e3643b: Activity tracking for metacognition agents. Workflows → Agents → Activity shows each agent's track record over 7/30/90 days: run outcomes (succeeded, failed, timed out, skipped), tokens and estimated cost, how reviewers judged its proposals (approval rate, pending), comments, the last error, and its recent runs with a link into each trace (`GET /nests/:id/metacognition/:node/stats`). A proposal, comment or access request an agent run produced now carries that run's id (migration 060) and shows "agent run <id>" in the review queue, comment threads and the inbox, opening the trace at `/nest/:id/workflows?run=<id>`. New `RUN_RETENTION_DAYS` (default 0 = keep every run; also in Server settings → Basic) prunes finished runs hourly.
+- 16bd129: Metacognition agents: tighter reach, honest failures, less noise.
+
+  - **Owner pinned (security).** An agent's owner (`configured_by`) is the person who first set it up and no longer moves to whoever saves the settings. Before, a server admin who changed a cap silently became the owner. The persona's reach is its own: its nest, its configured folders, and grants given to the persona itself. The owner's access is only a ceiling. Ownership moves only when the owner can no longer run the agent, and the save reports `owner_changed: true`.
+  - **Access requests from agents.** A new `request_access` tool lets a persona ask for read or propose access to a document or folder in its own nest, at most 3 per run. An admin decides it from the inbox. Approving grants the persona, never its owner, and takes no seat: service identities never count against the plan's seat limits, so a full plan doesn't block the approval. Personas can't ask for a whole nest, or in a nest they don't live in.
+  - **Failures alert.** A run cut off by its wall clock is now `failed` with `stopped_by: "timeout"` instead of `succeeded`. A run lost to a restart is `failed` with `stopped_by: "crashed"`. Every failed run fires `run_failed` to the nest's connectors, including server-executed runs and runs closed over MCP, which never alerted before.
+  - **Cost survives a crash.** Each model turn writes its usage and estimated cost as a `branch` step (`detail.kind: "turn"`), and a crashed run's trace is rebuilt from them.
+  - **Less noise.** An agent can't propose a change that is still waiting for review, or one rejected in the last 7 days. Comments get their own cap, `caps.max_comments` (default 5). A scheduled run with no feeds or MCP servers is skipped without calling the model when nothing changed since its last successful run. Its own proposals don't count as a change. Someone else's edit, a verdict, an access grant to the persona, or a settings save does.
+  - **Learns where it lands.** Its memory now carries its overall approval rate and per-folder verdicts.
+  - **SSRF fence.** Address literals are judged by range, including IPv4 carried in IPv6 (mapped, compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), plus `198.18.0.0/15`, multicast, reserved and Teredo. A name like `fd-feeds.com` is no longer mistaken for an IPv6 prefix.
+  - **Avatar is a glyph.** An emoji or up to 4 letters. URLs are refused, since a remote image would be fetched by every reviewer's browser.
+  - **Prompt caching** now also covers the run's memory message, not just the system prompt.
+
+- 2b93a70: Custom fields, administered per nest. A nest admin, the owner or a nest-wide reviewer steward defines fields once — text, number, select, multi-select, date, person, link or checkbox — for the nest's tasks (or every node type). Values are stored in each node's frontmatter, so every change is versioned and hash-chained with the document and goes through the usual review rules; one validator covers REST, MCP and the web UI.
+
+  Estimate (a number on a points or hours scale) and Time in status (computed from when a task entered its current column) are one-click presets. Boards group, lane and filter by select, person and checkbox fields; cards show field values and an open document gets a Fields panel. Agents get `context_fields` / `context_create_field` / `context_update_field` / `context_delete_field`, `fields` on `context_create` / `context_update`, a `fields` filter on `context_list`, and values on get / list / query. Migration 062 adds `field_definitions`.
+
+- 2f4c2dd: Run behind firewalls and proxies:
+
+  - **Corporate egress proxy.** `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` now route outbound HTTP(S) through the proxy. This covers licensing, PromptOwl sign-in, models, OIDC, webhooks and telemetry. The proxy needs Node's `NODE_USE_ENV_PROXY=1`, which the Docker image sets. Startup logs the proxy in use with credentials masked, or explains why a configured proxy isn't used (set only in `.env`, flag off, or Node too old). SMTP, PostgreSQL and SES connect directly. Metacognition feed/MCP fetches deliberately do too: they use their own agents so the connect-time SSRF check (resolve, refuse private, pin) still runs. Under a proxy, the proxy would resolve the host and skip that check.
+  - **`NODE_EXTRA_CA_CERTS`** for TLS-inspecting proxies is documented. Startup reports whether it's set and warns if the file is missing.
+  - **`HOST`** binds the listener, e.g. `127.0.0.1`. Unset still listens on every interface.
+  - **`TRUSTED_PROXIES`** (IPs, CIDRs, `loopback`, `private`) limits who can set `X-Forwarded-For`, `X-Real-IP` and `X-Forwarded-Proto`. The client IP is the nearest untrusted hop. Unset keeps the old trust-every-peer behaviour, with a startup warning except on Cloud Run. A malformed value refuses to boot.
+  - `CONFIGURATION.md` gains Reverse proxies (with an nginx/Caddy and port-forwarding guide) and Corporate egress proxy (outbound allowlist) sections, and no longer tells you to "bind to 127.0.0.1" without a way to do it.
+
+- ae24d67: New **Server settings → Network & status** tab for admins running a self-hosted server behind a firewall, VPN, proxy or tunnel:
+
+  - **Server status checklist**: database, migrations, disk, nest storage, license, public address, email, SSO, workflow scheduler and version. Every amber or red item says how to fix it. The migration check also warns when a newer version has already migrated the database (a rolled-back image).
+  - **Reachability**: checks the public address from this server, and tests every outbound host the server calls (DNS → TCP → TLS → HTTP) with a copyable allowlist. HTTPS goes through the egress proxy exactly when the server's own traffic does, honouring `NO_PROXY`. If a proxy is configured but Node isn't using it, the tab says why. Also checks OIDC discovery and clock skew.
+  - **Deployment guide** with copyable recipes for public HTTPS, reverse proxy, VPN-only, NAT, tunnels and corporate egress proxy, plus a Microsoft Entra ID sign-in walkthrough.
+  - The probes are admin-only and rate-limited. Their targets come only from server configuration, and no secret appears in any response.
+
+- 868548f: Bring back the server's own model gateway (Enterprise, licence feature `byok`). Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`, or use Settings → Hootie → Model gateway, to route Hootie and agent runs through your own LiteLLM in front of Bedrock, Azure, Ollama or any provider. Calls and nest content then stay on your network. This was retired by mistake along with the server Anthropic key.
+
+  The URL and key are used as a pair, ahead of PromptOwl's gateway and own-provider keys. The key is checked against the gateway on save and is never returned. A key paired with a gateway URL is never handed to PromptOwl at boot, and clearing the URL clears its key.
+
+- 29aab23: New nest setting "Review SLA (hours)" (`review_sla_hours`, off by default). In a governed nest, a review left pending past the SLA escalates one rung — tag reviewers, then nest reviewers, then the nest owner — with each rung notified once — and only people who can open the document — through the inbox, connectors (`review_escalated`) and email. The rung is recorded on the review (`escalationLevel`, `escalatedAt`) so restarts and concurrent instances never re-notify. Approval rights and separation of duties are unchanged.
+
+  Escalations post to Slack/Teams like review requests: the server-wide webhooks by default (digest), and per-nest connectors subscribed to `review_escalated` ("review overdue" in the connector event picker) or `"*"`. Approving (singly or in bulk), rejecting or withdrawing a review now marks its `review_requested` and `review_escalated` inbox rows read for every recipient.
+
+- b5b9d1a: Enterprise single sign-on is Enterprise only; Google sign-in stays on every plan.
+
+  - **New licence feature `sso`.** Included with Enterprise. Without it, Settings won't switch SSO to Entra ID, Okta or another custom OIDC issuer, or turn one on — `PATCH /admin/settings` answers `403 { code: "sso_required" }` and writes nothing. The Google preset works on every plan.
+  - **No lockouts.** A server already signing in through an enterprise provider keeps working; only changing it, or turning SSO back on after turning it off, needs Enterprise.
+  - **Settings → Single sign-on** splits into a **Google sign-in** card (every plan) and an **Enterprise single sign-on** card (Entra ID tenant or any issuer URL), locked as a whole without `sso`. `GET /admin/settings` returns `sso_available`.
+  - **Docs** (README, LICENSING, CONFIGURATION) list which features every plan gets and which need Enterprise; Enterprise features are on by default with an Enterprise key.
+
+- c9fa1bc: With single sign-on (OIDC) on and configured, `MANUAL_SIGN_IN` now defaults to `invite-only` instead of `open`. Everyone the identity provider vouches for already gets in through SSO, and an open password door let anyone create an account the IdP never sees and can't disable. An explicit `MANUAL_SIGN_IN=open` still works, but the server logs a startup warning, `/admin/settings` reports `manual_sign_in_open_with_sso: true`, and the Settings page shows a warning. While `OIDC_ALLOWED_DOMAINS` is set, password self-registration is limited to those domains as well. Servers without SSO are unchanged.
+- 872bc6f: Tasks over MCP: `context_create` / `context_update` set `assignee`, `due`, `priority` and `parent` with REST's validation; `context_get` / `context_list` / `context_query` return them; `context_list` and `GET /nodes` filter by `assignee`, `priority` and `due_before`. New `context_task_log` tool (and `POST/GET /nodes/:id/task-log`) registers an agent's interaction on a task, attributed to the user plus the API key and client agent, and shows it in the task's activity timeline. Migration `064_task_activity`.
+
+### Patch Changes
+
+- deda245: The Activity panel's rows are easier to scan: the document title leads in bold with the version as a badge, then who read or changed it with the agent as a small chip, then one muted line with the action ("Pulled into search"), where it came from and when. Long titles clamp to two lines and long names truncate, with the full text on hover.
+- 5134b1b: When a reviewer uses Edit & approve, the author's approval notification (and the Slack/Teams message) now says the document was "edited and approved" instead of just "approved", so the author knows changes were made during review.
+- 49cd814: Authors can fix their own drafts from every surface, including while their draft is awaiting review.
+
+  - **Documents list and artifact viewer.** The person who submitted a document for review now gets Edit there too. Both screens used to lock everyone out, while the server and the document editor already let the submitter revise (the open review moves to the new version). Everyone else is still locked until the review resolves.
+  - **Read your draft back over MCP.** `context_my_drafts` takes an optional `id`/`title` and returns _your_ unapproved working copy, so an agent fixing a draft can see what it is fixing. Only the author of the current draft (or whoever submitted its review) with edit rights gets it — owners and stewards are refused. `context_get`, search and query stay approved-only for everyone, the author included, so an agent running on the author's key keeps answering from approved text.
+
+- 54cc21a: Folders on the Board and in the sidebar now match. Adding a folder column on the folder Board creates a real, empty folder (the same write as New folder), so it appears in the sidebar tree straight away instead of existing only as a Board column until a card was dropped in. The folder Board also shows empty folders created anywhere else as columns. Hiding a column with × still only hides it.
+- 624ea67: Make someone a reviewer from the Collaborators tab. On a nest with stewardship on, owners and admins get a Reviewer switch on every person row, and an "Also make them a reviewer" checkbox when adding someone — so adding a user and letting them approve documents happens in one place instead of a trip to the Stewards tab. The switch manages a nest-wide reviewer steward; it is disabled (with a pointer to the Stewards tab) for someone who already holds a different nest-wide steward role, so it never silently replaces it. Tag- and document-scoped stewards are still managed on the Stewards tab.
+- 959de08: Update `hono` to 4.13.13 and `@hono/node-server` to 1.19.17 (upstream security fix), and move every `@tiptap/*` package to 3.31.4 together so the editor's peer dependencies stay in sync.
+- e1b140c: Update `@promptowl/contextnest-engine` to 3.0.0. Community picks up the engine's structure rules (enforced folder layout, naming and templates when a nest owner turns them on), stricter document ids (no new documents under a root `packs/` folder, no `\` or control characters, ids up to 1024 characters), safer imported forgets, vaults that keep working when one file is unreadable, and large documents that no longer stall the server on publish. The one breaking engine API (`applyImportedTombstones`) isn't used here, so no Community code changes were needed.
+- 2a534bf: Update `@promptowl/contextnest-engine` to 3.1.0. An imported document with a fractional `version` (e.g. `1.1`) no longer fails the whole import on Postgres; the engine repairs it to a whole number and reports a warning. Large imports and whole-vault scans keep all their I/O slots busy, which helps most on network-mounted storage. No Community code changes were needed.
+- d8b90fa: The New folder and Move dialogs preview a folder the way the tree names it. Typing `A` used to show "Will be created as `a`" — the lowercase storage path — while the folder appeared as "A" everywhere else. The preview now shows the display name ("Q3 Plans", "Gtm / Deals") and only appears when that name differs from what was typed beyond letter case.
+- 39ab419: Pending review counts open the Review Queue. On the nest Overview, "N pending review" is now a link like "N waiting on your review" next to it, and on the other nest tabs the Pending Approvals and Your Review Queue cards are clickable (mouse or keyboard). Both only act as links when the Review Queue tab is available to the viewer.
+- 5f10334: The nest Activity panel now shows which version an agent read for REST `/search`, `/query` and `/context` reads too (Claude Desktop, Hootie, "Connect all my nests"), not only for MCP reads and single-document fetches. A public reader's `/context` read records the approved version it was served.
+- 638ab20: Dropdown menus no longer stretch across the page when an option is long. The API key nest-scope picker (and every other dropdown) now caps its menu width and wraps long names such as nest titles.
+- e875046: Authors now learn why they can't approve their own submission, and who can.
+
+  - **Your own pending document.** The banner says "You can't approve your own changes. A steward or admin on this nest must approve." and names who can approve it. When nobody else can (the common single-user nest), it says so and points to adding a reviewer steward or turning on "Auto-publish owner & admin edits". A nest owner gets a link that opens Nest settings directly; it isn't offered on prime documents, where self-approve never applies.
+  - **Submitting with no approver.** Submit for review warns when nobody else can approve the document.
+  - **Review Queue card.** "(1 pending total, 1 outside your scope)" now reads "(1 you submitted — someone else must approve it)", and other reviewers' items read "N assigned to other reviewers".
+  - **New endpoint.** `GET /nests/:nestId/nodes/:nodeId/approvers` lists who besides the caller could approve the caller's submission, using the same check as approve. See API.md.
+
+- 9f7ea06: Superadmins can now see every message the server sends in one place: **Admin → Message log**.
+
+  - **What is logged.** Email (with the SMTP/SES message id, and failures recorded as `failed` instead of being swallowed), Slack, Teams and per-nest webhooks (with HTTP status and whether the request went through the egress proxy), in-app inbox notifications (review escalations included), and comments posted by agents.
+  - **Redacted before storage.** Temporary passwords, sign-in and credential links (query string, fragment, or HTML-escaped), JSON credential fields, Bearer/Basic credentials, `hk_`/`cnst_`/provider/GitHub/AWS keys, and webhook URLs (kept as host plus hash) never reach the table. Bodies are capped at 4 KB.
+  - **Superadmin only, and audited.** `GET /admin/messages`, `/:id` and `/views` refuse nest owners, nest admins, nest-scoped keys, and every caller in open mode. Each read writes an access-audit row first; if that write fails, the read fails.
+  - **Settings.** `MESSAGE_LOG_RETENTION_DAYS` (default 30, `0` keeps forever) and `MESSAGE_LOG_STORE_BODIES` (default on), both editable under Settings → Basic → Message log. Messages past retention are pruned whenever the log is read, so they never show after their window.
+  - Inbox notification emails are now stored lowercased on every path, so a mixed-case address no longer misses its notifications.
+
+## 1.29.1
+
+### Patch Changes
+
+- d7e4b68: Postgres servers whose `runs` table predates run claiming no longer crash at boot with `column "claimed_by" does not exist`; the migrations now add the missing claim columns.
+
+## 1.29.0
+
+### Minor Changes
+
+- 07b63ef: Agent read log: the activity log now answers "what did agent X read, and which version did it see".
+
+  - **Recorded where it wasn't.** An agent's MCP `context_search` — its most common read — was never recorded (the hits come back under `results`, which the recorder didn't look at). Now it is, along with `context_table_query`, REST `/table-query`, and historical version fetches (`GET …/nodes/:id/versions/:version`).
+  - **Which version.** Read and retrieval rows carry the version the caller was served. Under stewardship an agent is given the approved version, and that is what the row records; with the versioned history that rebuilds exactly what the agent saw. A new version is a new row (it's part of the throttle key).
+  - **Which agent.** REST reads now carry the agent the API key's label names (the same derivation writes already used), and Hootie's retrievals are attributed to `hootie`. `GET /nests/:id/activity-log?agent=<name>` filters to one agent; the Activity panel has an Agent filter.
+  - **On by default, owner-only off.** New nest setting `access_log_enabled` (default on). Any nest admin may turn it on; only the owner or server admin may turn it off. Shown in nest Settings.
+  - Recording stays fire-and-forget and never fails a read; the inserts are now one multi-row statement per call. Only ids and versions are stored — never content or what was searched.
+
+  Migration `050_agent_read_log`: `node_access_events.version` and `.agent` (indexed, backfilled from `client_json` on SQLite), `nests.access_log_enabled`.
+
+- 6679fd0: **Board: swimlanes, group by assignee or priority, done columns, and assigned-to-you in My Work.**
+
+  - **Columns by Assignee or Priority.** Dragging a card across reassigns it or changes its priority, the way Linear's group-by works. "Unassigned" and "No priority" are always there as drop targets. "+ Add task" in a column sets that column's value. On an assignee board you can add a column for someone on the nest who has nothing assigned yet.
+  - **Swimlanes** by assignee, priority or parent, on any grouping. Lanes collapse. Dragging into another lane updates that field in the same write as the column move. "+ Add task" inside a lane puts the new card in that lane.
+  - **Done columns.** A nest admin marks a tag column as "done" with the check on its header; `done` is marked by default. A task moved into a done column gets a `completed_at` timestamp, and one moved out is reopened. Done cards show a green check and "done 2h ago". Sub-item chips show progress ("2/5"). A **Completed** display option shows completed cards from the past week or month, all of them, or none.
+  - **Assigned to you in My Work**, across nests, soonest due first. When someone assigns you a card you get a notification, unless you assigned yourself.
+  - Setting a field inline on a governed document (priority, assignee, due) now asks first, the same as dragging one.
+
+- 5c67fc5: Licence features: enterprise capabilities are now unlocked by named features from PromptOwl, not by the licence tier.
+
+  PromptOwl's licence console sets a licence's tier and can grant or revoke individual features on it; the licence check now returns the effective list as `features`, and this server gates on it (`hasEntitlement("<feature>")`). The first feature is `hootie_branding` (custom assistant name and branding): an Enterprise licence gets it by default, and PromptOwl can also grant it to another licence or revoke it from an Enterprise one. The list is cached with the rest of the licence (new `license_cache.features_json` column, migration `048_license_cache_features`), so an outage keeps the same features. A PromptOwl that sends no `features` falls back to the tier defaults, so existing Enterprise licences behave exactly as before. A suspended, invalid or expired licence unlocks nothing.
+
+- 110496e: **Models run on PromptOwl credits unless the licence allows your own key.** Hootie and workflow agent runs now take their model credential from one place. With the `byok` licence feature (Enterprise), they use a nest's own `ANTHROPIC_API_KEY` first, then the server's, as before. A key and its `ANTHROPIC_BASE_URL` are always taken together from the same place, so a nest that sets only a base URL never receives the server's key. Without it, they use the PromptOwl model gateway that the licence check provides, metered in PromptOwl credits, and a stored own key is ignored (kept, not deleted). Saving an own key or gateway URL in Settings, or a model key in a nest's env, is refused without `byok` (`403`, Settings answers `code: "byok_required"`); clearing one is always allowed. Hootie's default model is now `claude-sonnet-5`, the efficient default the pricing spec calls for.
+- c8721dc: **The server now knows its pricing plan.** The license check reads the plan PromptOwl assigns to the key (Free, Trial, Self-Hosted or Enterprise) and its limits: billed users, Account Owners, and subscribers (editors). A missing field takes the plan's default, and a key with no plan, or no license at all, runs as Free (10 users, 1 Account Owner, no subscribers). The seat limits and model-key rules below are enforced from it.
+
+  **Model gateway key, cached encrypted.** When PromptOwl issues the license a LiteLLM key for running models on PromptOwl credits, the server keeps it encrypted in the license cache (new `license_cache.gateway_json` column, migration `049_license_cache_gateway`) and in memory. It is never part of any API response, and it is dropped as soon as the license stops being valid.
+
+- 4df2fae: **Seat limits follow the pricing plan.** Each person now bills once, at their highest role on any nest: nest owners, admins, reviewers and server admins (Account Owners) are users; editors are subscribers; everyone else is a free viewer. A role change that would take the server past its plan is refused with `402` and `{ code: "plan_limit", limit, max }` — making someone a nest owner, admin, reviewer or editor (collaborator, steward, grant, or a team shared onto a nest), and adding a superadmin past the plan's Account Owner count. A new superadmin is also a billed user, so the user cap applies to them too. Free allows 10 users, 1 Account Owner and no editors.
+
+  Nothing is taken away: signing up and inviting are never refused, viewers are always free, demotions always work, and a server already over its plan keeps everyone it has. A document's creator being made its reviewer does not count as a reviewer seat.
+
+  The license check now reports billed users and subscribers instead of every account, and `GET /admin/license` returns the plan, the subscriber count and cap, and the Account Owner cap alongside the user seats.
+
+- 6a277a4: **Plan limits and own model keys in the UI.** Settings → License shows the pricing plan, users and editors against the plan's caps, the Account Owner cap, and a **Manage plan** button that opens this key's page on PromptOwl (`GET /admin/license` now returns `manage_url`, which carries only the key's last four characters). When a role change is refused because of the plan (`402 plan_limit`), the dialog shows why and admins also get a prompt to manage their plan. Without the `byok` licence feature, Settings shows that models are supplied by PromptOwl on the plan's credits in place of the Anthropic key and gateway fields (a stored key can still be cleared), and the workflow run-key prompt no longer asks for a key the server would refuse. `/health` and `/admin/settings` report `byok_available`.
+- 4b98af9: **Licensing is now a private conversation with the admin, not something the whole team runs into.**
+
+  **Seats are reported to PromptOwl, never enforced.** Every license check (startup plus every 60s) now sends the server's user and nest counts, its version and `PUBLIC_BASE_URL` alongside the key. That is the head-count the license is billed on, and PromptOwl uses it to follow up about seats. It is part of validation, so it is sent even with `TELEMETRY_ENABLED=false`, and it never carries content. Going over the licensed seats blocks nobody. The admin sees a friendly note ("You have 34 people on a 30-seat license. Everyone can keep working…").
+
+  **A lapsed license makes the server read-only instead of locking everyone out.** Before, a revoked or deactivated key wiped every session, deleted the stored key, and sent everyone, admins included, to the activation screen. Now, when PromptOwl confirms a lapse (3 consecutive rejections, a confirmed suspension, or the end of the 14-day expiry grace), writes stop but reads keep working, nobody is signed out, and the key stays installed, so a renewal or reactivation on PromptOwl's side restores the server on the next check. The activation screen is only for a server that has never been licensed (`/license/status` → `setup_required`).
+
+  **Who hears what.** Server admins, and the key's owner even after it lapsed, get specifics: trial days left, when an expired license's grace period ends, seats in use, a key PromptOwl is refusing, each with a "Talk to PromptOwl" button and email. Everyone else never sees licensing vocabulary, and sees anything at all only once the workspace is actually read-only: "This workspace is read-only right now. Your administrator has been notified." The same split applies to the 503 bodies from the license gate, the server `/mcp` write tools and run writes.
+
+  - New **Settings → License** tab: plan, seats used/licensed, end date and grace, last check with PromptOwl, install a replacement key, and how to reach PromptOwl.
+  - New **admin license banner**, never red. Admins can hide it for a week, except within 3 days of anything changing.
+  - New `GET /admin/license` (server admin or key owner) with the full detail. `GET /license/status` stays public and carries none of it.
+  - `POST /license/install` is public only until the server has a license owner. After that, replacing the key takes the owner or a server admin, so a lapsed license can't be claimed by pasting another key.
+
+- e4ade05: **Metacognition agents: agents the nest runs itself, that only ever propose.** With `FEATURE_METACOGNITION=true` or the Settings → Features switch (and the workflow plane on), an owner or admin can turn an agent document into a metacognition agent from Workflows → Agents. It runs on the nest's model key under its own persona name, on a schedule or on demand: it reads the folders you give it, checks the feeds and MCP tools you allow, looks back at how its earlier proposals were judged, and files fixes and new documents as drafts for a reviewer. It never publishes. Every step, the tokens it used, an estimated cost and who pays (PromptOwl credits, or your own key) are on the run's trace, including runs a person cancels. Off by default.
+- 589fc10: **Several boards per nest, saved on the server, with drag-to-rank.**
+
+  - Boards appear as tabs above the board, the way Linear views and ClickUp's view bar work. **+ New board** starts a project board (Tasks only, columns todo / doing / done). Double-click a tab, or open its menu, to rename, duplicate, make private / share with the nest, or delete.
+  - Boards are shared with everyone who can see the nest. A **private** board is visible only to the person who made it. Readers see shared boards; writers create and edit them. Only the creator can make a board private, and the creator or a nest admin can delete it.
+  - **Stack rank**: drag a card up or down within a column to order it, on every grouping including status. The order is saved per board and per column, so reordering never creates a document version, and two boards can order the same tasks differently.
+  - **Tag filter** per board. New cards added on a filtered board get the filter tags, so they don't disappear.
+  - The first time a writer opens the Board, the layout their browser had saved becomes the nest's first board, named "Board".
+
+- c5cb674: **Own model keys (Enterprise, byok) for Anthropic, OpenAI, Google Gemini, xAI Grok and Groq, kept in PromptOwl's model gateway.**
+
+  - **Settings → Hootie → Model keys.** With byok, a server admin adds their own key per provider. Each key is checked with the provider on Save and kept by PromptOwl's model gateway (LiteLLM), never on this server; Settings shows only its last 4 characters (`own_providers` on `GET /admin/settings`, set via `provider_keys` on `PATCH /admin/settings`). With no own key, the card says Hootie and runs use PromptOwl's virtual key on your plan's credits. The License tab shows whether own model keys are on (`byok` on `GET /admin/license`).
+  - **The Hootie model's provider picks the key.** Any model from a provider with an own key (for example any OpenAI model, `gpt-4o` included) runs on that key; other models use PromptOwl credits. The Hootie model picker is searchable and grouped by provider (`providers` on `GET /admin/models`); a provider with an own key is marked "· your key".
+  - **The server-wide Anthropic key and "Model gateway URL" settings are gone.** A key already stored on the server is handed over to the gateway as the Anthropic key on the first boot with byok, then cleared. `anthropic_api_key`, `anthropic_api_key_masked` and `anthropic_base_url` are no longer accepted or returned by `/admin/settings`. A nest's own key in its Tool environment still works for agent runs; without one, agent runs use PromptOwl credits.
+  - PromptOwl's licence answer carries the licence's own-provider key and model list when byok is on. The server keeps it encrypted in the licence cache (migration 053) and drops it once PromptOwl stops sending it.
+  - **Hootie logs one request and one response line per question** (model, which key by its last 4 characters, token usage, timing). `HOOTIE_DEBUG_LOG=true` also logs the full prompt and answer (nest content) and warns at startup; keep it off in production.
+
+- f6bbf41: **Project boards: tasks, assignees, due dates, priorities, sub-items, and adding cards from the Board.**
+
+  - New `task` node type, which **skips review** so board work can move freely. Prime still wins, and turning a governed document into a task still goes through review. Available once the engine includes `task` (`/health` → `type_task_enabled`).
+  - Any node can carry board fields: `assignee` (someone on the nest's roster), `due`, `priority` (urgent/high/medium/low) and `parent` (sub-items). The server records `assigned_at` and `moved_at`.
+  - Board cards show priority, due date (red when overdue), sub-item count, last-updated time and the assignee, and you can set each one in place. **+ Add task** sits at the bottom of every column, and the board can be filtered by person ("Only my tasks", "Unassigned") or to tasks only.
+  - Dragging a governed document asks first ("this lands as a draft that needs review") instead of quietly creating a draft.
+
+- 58eb0f9: **A refused edit now offers to request access instead of stopping there.** When someone who can read a document or nest tries to change it, they're asked "Request edit access?" with room for a note, and anything they haven't saved stays where it is. The nest owner and admins get the request in My Work (plus email and nest channels) and approve or deny it in one click; approving gives the access through the normal sharing paths (a write share on the document or folder, or nest write), and the requester is told either way. Asking twice shows "Request pending" rather than a second request, and a denied request shows who said no and why, with the option to ask again. Viewers also get a **Request edit access** button on documents and on the nest page. Nests you can't see still answer "not found", with no offer.
+
+  Agents get the same flow over MCP: a refused `context_create` / `context_update` / `context_delete` / `context_move` names `context_request_access` and carries `can_request_access`, the target and the level in its structured result; `context_access_requests` and `context_resolve_access_request` let an owner or admin decide. Over REST the 403 body carries `can_request_access`, `target` and `level`, and `POST /nests/:id/access-requests` files the ask (see API.md).
+
+  Also fixed: a nest viewer who had been given a write share on a document still couldn't edit it — the share was ignored for anyone with nest read access. It now counts on that document's write routes, over REST and MCP.
+
+### Patch Changes
+
+- f0f8d17: **Switching views keeps your place, and comment highlights show in every view.** On a hosted artifact, flipping between Preview and Annotate used to reload the preview at the top and open the text at the top; both now land on the passage you were reading, the preview no longer reloads, and the commented passages are highlighted in both (click one to open its thread; click a thread's quote to go to it). On a document, switching between the editor, Comment mode and the markdown source keeps the same passage on screen, and comments are now highlighted in the editor and in the markdown source too, not only in Comment mode.
+- 3bfa3b2: **Approving a document no longer reads it back from storage after publishing.** To record the published version in its database, approval read the document file again right after the publish had written it — a round trip on Cloud Storage. The server's document cache already holds exactly what the publish wrote, so approval now takes it from there, and only reads the file if the cache has no copy.
+- f68f900: **An approval that cannot be published is no longer recorded as approved.** Approving a single document recorded the approval first and published afterwards, so when publishing failed the reviewer still saw a successful approval and the document was pinned as approved without being published — the failure only reached the server log. Approval now publishes first: if the document cannot be published, the reviewer gets an error explaining why and the review stays pending. Successful approvals are unchanged, and single and bulk approval now behave the same way.
+- 773fbea: **Approve, reject and withdraw make one fewer database query.** Each already loads the pending review before checking the caller's rights, and the rights check then looked up the same review again to find who submitted it. It now reuses the submitter it was handed.
+- 1861a2f: **The review queue and activity feed check approval rights in a handful of queries instead of several per document.** Showing whether you can review each pending document ran the full approval check — your nest roles, the self-approve setting, the document's stewards and who submitted it — once per document, one after another. The nest-wide part was identical for every row. It is now resolved once, and the per-document stewards and submitters are fetched for the whole page in one query each, so a 50-document queue makes about eight database queries instead of hundreds. The same check now also filters the queue by steward. The approval rules are unchanged: single and batched checks share one decision function, and a test compares them across every steward scope, ownership and self-approve case.
+- 9af4e71: **Bulk approval publishes the whole batch at once.** Approving several documents from the Review tab or My Work used to run a full publish for each one in turn — each sealing its own checkpoint and rebuilding the nest's index. The batch is now checked in a few queries, published in a single engine call (documents in parallel, one checkpoint, one index rebuild), and then recorded and notified per document exactly as a single approval is. A document that is not pending, not yours to approve, or that the engine refuses to publish is reported as failed and left pending, so it can be retried; previously a document whose publish failed could still be marked approved. The version-history note is the reviewer's note, or "Approved in bulk review" when none is given.
+- 278820a: Resolved comments now get out of the way. The comments rail lists open threads, with resolved ones folded under an expandable "Resolved (n)" section, and the header counts open threads only. Resolved threads no longer paint a highlight in the document, and the artifact viewer folds its resolved threads the same way. A new "Reply & resolve" button posts a reply and closes the thread in one step. Replying to a resolved thread reopens it, from the web UI or through MCP. The Review tab no longer lists comments from resolved threads. People already in a thread are notified when someone replies. When a thread's quoted text is no longer in the document, the thread shows a "text changed" label instead of pointing nowhere.
+- 4cc320b: Bump `@promptowl/contextnest-engine` to ^2.10.0. The engine catalog now declares `count` on `context_search`, so the MCP search response conforms to it without an exception.
+- 825ef3c: **Faster publishing and approval from engine 2.10.** Updates `@promptowl/contextnest-engine` to 2.10, which cuts repeated storage reads from every publish and approval: each document's version history is read once instead of several times, the vault is listed once per publish, past versions are rebuilt with their files read together, only the changed folder's index is rewritten, and directories are no longer re-created before every write. On Cloud Storage this removes many round trips from each approval. Search over MCP also now reports the total number of matches.
+- 981587e: Bump `@promptowl/contextnest-engine` to ^2.11.0. The engine now knows the `task` node type, so project-board tasks turn on: "+ Add task" creates tasks that skip review, "Task" appears in the editor's type picker, and `/health` reports `type_task_enabled: true`.
+- 642e572: **Approving or rejecting a document returns sooner.** Verdict notifications now run after the document's write lock is released, so an author saving the document no longer waits behind them, and the document title is looked up once per verdict instead of three times. In the nest view the reviewed document leaves the review queue as soon as the verdict lands, without waiting for the queue to reload.
+- d854ec3: **Folder import records its documents in a few queries instead of a few per document.** Finalizing an import used to write each document's version row, approval and tag index one document at a time, which on a hosted database is a round trip per statement. These are now multi-row writes for the whole batch. The on-disk status repair now runs only for documents whose publish actually failed, rather than reading every held draft back from storage; a held document that states its own status (such as `pending_review`) keeps it on disk instead of being flattened to `draft`. Each staged upload chunk now logs its duration (`[import] staged: … ms=`) next to the existing register timings, so a slow import shows which phase the time went to.
+- bde46d9: **License notice no longer sits flush against the header.** In the sidebar layout the admin license banner now has the same gap and side margins as the page content below it.
+- 861f702: **Own model keys are a licence feature.** Whether the server may run on its own provider keys or LiteLLM gateway is now the `byok` licence feature — included with Enterprise, and grantable or revocable per licence by PromptOwl — instead of a field in the plan limits. With an older PromptOwl that sends no feature list, an Enterprise licence still gets it by default.
+- 2a9d1b9: **Hootie asks the PromptOwl gateway for a model it actually serves.** On the PromptOwl model gateway, models have PromptOwl's team names (e.g. `default-claude/claude-sonnet-5`), so asking for `claude-sonnet-5` failed with "no healthy deployments". Models are now picked and stored by plain name (`claude-sonnet-5`); on the PromptOwl gateway the server adds PromptOwl's instance prefix when it calls, so a name set through the API without it still works. With no model picked, Hootie uses the gateway's default; on your own key, `claude-sonnet-5`. Settings → Hootie → Model is a dropdown of every model this server's key can reach (new `GET /admin/models`, server admins only); if the list can't be loaded, a name can be typed. A model the gateway doesn't serve now reads "No model named … is available on this key" instead of a generic error.
+- 86ef697: **Settings → License explains how seats are counted.** The Users and Editors rows each have an (i) with a tooltip: the current count against the plan, that each person counts once at their highest role on any nest, which roles make someone a user (license admin, superadmins, nest owners, admins, reviewers) or an editor, and that invited people with no role and viewers are free.
+- f260845: **A suspension takes effect on the next license check, and a restart can't hide it.** A suspended license used to be confirmed only by a check at least an hour after the first suspended answer, and that hour was tracked in memory — so any restart (a redeploy, a Cloud Run instance, `tsx watch` in dev) started it over and the server never went read-only. Now two suspended answers within an hour confirm it (spec §9.4), which with the 60-second check is about a minute; one stray answer still can't. The server also checks with PromptOwl when it starts instead of trusting the 24-hour cache, falling back to the cache only when PromptOwl can't be reached.
+
+  **Nest-level writes are refused on a read-only server too.** Creating, renaming and deleting a nest (and syncing or deleting an unsynced folder) skipped the read-only check, so they still worked while the server was suspended or unlicensed. They now get the same 503 as every other write — the reason for admins, the neutral line for everyone else.
+
+- f0af1a5: Fix Overview and Review Queue not switching the main content when picked from the sidebar, breadcrumb, or browser back/forward.
+- 5868288: **Nests page: filters always shown, folders only under their filter, and a better first view.** The filter, scope and sort controls (and the archived list's filter) now show however many nests there are. Unsynced folders no longer appear in the nest list; they show only under "Unsynced folders only". When "My nests" is empty but other nests are reachable (shared, organization, public), the list opens on "All nests" once per visit so they're visible.
+- d6739c2: **Saving, publishing and approving no longer read each document back from storage.** After every document write, the server read the file back to refresh its document cache and search index — one extra round trip per save on Cloud Storage. It now uses the text it just wrote, which is exactly what the read would have returned, and a successful delete is recorded without a read. A write that fails part-way is still checked against storage as before.
+- 6f1ce7d: **Plan-limit messages are worded for who is asking.** When a role change is refused because the plan is full (`402 plan_limit`), the message now says what is full ("This server's plan includes 5 users (nest owners, admins and reviewers), and all are in use.") and then, for a server admin, "Upgrade the plan from Settings → License to add more." — or, for everyone else, who can't change the plan, "Ask your server admin to add seats."
+
+  **Access keys never take a seat.** Seat counting now skips access-key service identities, whatever role they hold on a nest.
+
+- 0ab3949: **Revoking an API-only access key now confirms it.** After you revoke a key under Collaborators → API-only access, a message says the key was revoked and that anything using it has stopped working. Before, the key just disappeared from the list with no confirmation.
+- 38b570b: **Saving a new document as a draft no longer drops you on an empty New document page.** After Save draft succeeded, the app briefly opened the nest and then bounced back to a fresh, empty New document form, which made it look like the content was lost. It now stays on the nest Overview, where the new draft is listed.
+- 4a3b7e8: Editor says what saving does: "Publish" when the edit goes live, "Save draft" when it needs review (prime documents, governed nests). Submit for review now saves unsaved edits first ("Saved and submitted for review."), and edits to your own pending submission auto-save to it. Submit and Discard appear right after a save turns a published document into a draft, without a reload.
+- 7deb105: Startup banner shows the real package version instead of a hard-coded "v0.1.0".
+- ac9a354: **Submitting a document for review reads its version history once.** Submitting seals the draft into the document's history. It already read that history to check whether the version was sealed, and the seal then read it again; it now reuses the first read.
+- 6f9a6dc: Held pushes from a shared PromptOwl agent now name the person who drove the chat ("hiren@... via owner@...'s agent") instead of only the agent owner. Reads an optional act claim on the PromptOwl MCP ticket; access is unchanged and stays the owner's.
+
+## 1.28.0
+
+### Minor Changes
+
+- b303dd3: Agent activity with undo. The Review tab has a new Agent activity view listing every change an agent made to the nest: creates, edits, restores and deletions. Each row shows which agent made the change, under which account, and when. The view can be filtered to one agent or widened to everyone's changes. Each change can be undone in one click. Undo writes the previous version back as a new version, discards an unreviewed draft, or removes a document the agent created. It is refused when the document changed since, when the change is awaiting review, or for deletions, and the reason is shown next to the button. Owners, admins and reviewers only. New endpoints: `GET /nests/:id/agent-activity` and `POST /nests/:id/agent-activity/undo`. Deletions now record which agent made them (migration 046).
+- 943056b: Publish a nest API-only (headless). An owner or nest admin can turn on API-only access for a private nest (Collaborators tab, or `PUT /nests/:id/headless`) and create one read-only access key per buyer or integration, each labeled and revocable. A key works with `ctx` and any MCP client to list, get, query and search the nest's approved documents, and nothing else: no browsing, no sign-in, no drafts or version history, no comments, no export, no writes. Everything else answers 403 `headless_reader`. Each key is its own service identity, never shown as a person in people search, the teammates list or user counts. Turning API-only access off pauses every key, and deleting a key revokes it. While a nest is headless it stays private.
+- 10df909: Hootie in the nest is now a side panel instead of a chat bubble, off by default, and Enterprise licences can rename and brand it.
+
+  This reverses the 1.27.0 choice of a corner chat window over a full-height slide-over. The assistant opens from a slim tab on the right edge and slides in beside the page. On screens 1280px and wider it pushes the page over rather than covering it; on narrower screens it overlays. Drag its left edge (or use the arrow keys on the handle) to resize it between 340px and 720px; the width is remembered per browser, and a double-click resets it. Closing it keeps the conversation, as before.
+
+  **Behaviour change:** `HOOTIE_ENABLED` now defaults to off. A server that had Hootie on only because it was the default will find it off after upgrading. Turn it on under Settings → General or with `HOOTIE_ENABLED=true`. A server that set `HOOTIE_ENABLED=true` in its deploy environment, or turned it off in Settings, keeps that choice. Both states are now written explicitly from Settings, so a UI choice beats the deploy env either way. The startup banner prints whether Hootie is on.
+
+  **Custom identity (Enterprise):** admins set the assistant's name, logo (an https image link), accent colour (hex) and greeting under Settings → General, or with `HOOTIE_NAME`, `HOOTIE_LOGO_URL`, `HOOTIE_ACCENT_COLOR` and `HOOTIE_GREETING`. The identity shows on the edge tab, the panel header, next to each answer and in the greeting, and the name also goes into the assistant's system prompt and the comments it posts for @mentions. `/health` reports the identity to show as `hootie_brand`, decided on the server. Without an Enterprise licence (tier `enterprise`, valid and not suspended), `/admin/settings` refuses a request that would change any branding field with `403 enterprise_required` and writes nothing from it (sending back the stored values unchanged is allowed), and every surface shows the default Hootie. A licence that lapses reverts to Hootie on the next request without deleting the stored values.
+
+- fdeb253: Push Confirmation Gate — hold agent writes for review on a gated nest.
+
+  A superadmin can require confirmation for agent writes to a nest (`require_push_confirmation`, superadmin-only to set via `PATCH /nests/:id/settings` — a per-field `403` for anyone else). On a gated nest, a document created by an agent or script is **held** as a pending record (`202 pending_confirmation` with a `poll_url`/`confirm_url`) instead of applying; it lands only after a reviewer confirms it in the web UI, through the exact same apply path an immediate write uses — same engine create, same version rows, same skip-don't-overwrite semantics, attributed to the submitter. With the gate off, behaviour is unchanged.
+
+  The gate covers the three ways an agent CREATES a document: the MCP `context_create` tool (always, whatever credential it arrived on — it answers a `PENDING_CONFIRMATION` tool error, since nothing was created), `POST /nests/:id/nodes` on an API key, and the bulk `POST /nests/:id/publish`. A person working in the web UI (session cookie) is never held, and edits to existing documents keep going through stewardship review, which is built for them.
+
+  - New `pending_pushes` table (carries the full staged payload so a confirm applies it byte-for-byte) and a **per-API-key** `push_allowlist` (`key_id` `''`/null = all of that user's keys; never keyed on nest alone). Idempotent SQLite + Postgres migrations (`040_push_confirmation`).
+  - New endpoints under `/nests/:id`: `GET pending-pushes`, `GET pending-pushes/:pid` (readable by the **submitter or a reviewer** — the CLI polls with the pushing key), `POST …/:pid/confirm { always_allow? }`, `POST …/:pid/reject`, `GET/DELETE push-allowlist`. **Confirming is reviewer/owner/admin only — never the submitter**, or the gate would be one extra call away from being cleared by the key it is holding; a submitter may reject (withdraw) its own write. Confirm/reject on a no-longer-pending record → `409`, and a confirm whose apply throws returns the record to `pending` instead of stranding it as applied-with-nothing-written. Doc/folder grantees are denied `/publish`.
+  - The allowlist is governance-licensed (`503` without a license); the `/pending-pushes` routes deliberately are **not** — the write endpoints are unlicensed, so licensing the release path would let a lapsed license hold every write with nothing able to confirm it, and the nest would stop accepting writes with no in-product way back.
+  - Held payloads are bounded by `MAX_PENDING_PUSH_BYTES` (default 5 MB) and expire after `PENDING_PUSH_TTL_MS` (default 7 days), reported lazily as `expired`.
+  - Web UI: a loud confirm modal (which nest — name + id verbatim, how many documents + a title·type·tags manifest with new-vs-update badges, who wrote them, and an "Always allow automated writes" checkbox that whitelists that exact key), a held-write banner + count badge in the nest view, and — in nest settings — the superadmin-gated `require_push_confirmation` switch plus the list of whitelisted keys with a Revoke action, so "Always allow" is not a one-way door. Reviewers are notified when a write is held.
+  - The nest feed API also emits a `pending_push` item carrying the manifest and a per-caller `canConfirm`, for clients that want held writes inline with the rest of the activity. The nest view surfaces them through the banner instead, so nothing renders that item yet.
+  - A held write's manifest entry carries the id the title will publish to, or `null` when the title has no ASCII slug and the id can only be generated at apply time. It is a preview for the new-vs-update badge, not a promise: an id that is occupied by the time a reviewer confirms is skipped, never overwritten.
+
+  Shares one wire contract with the paired `ctx push` change in `PromptOwl/ContextNest` (the CLI polls the gate and prints the confirm URL) — the CLI pushes through `POST /nests/:id/publish`, one of the gated surfaces.
+
+- Sign in with Google through PromptOwl. When this server accepts PromptOwl SSO tickets, the login page shows a Sign in with Google button that signs in through PromptOwl's community SSO (a first-time Google user gets a PromptOwl account there and a ContextNest account here). `GET /health` reports the URL as `promptowl_google_url`. The button follows the same gate as Sign in with PromptOwl, and an OIDC provider whose issuer is Google no longer shows a second Google button.
+
+  Sharing a document or folder with someone outside the nest now emails them, naming the document or folder, the nest, the permission and who shared it, with a link to open it. Role changes on an existing share and shares to nest members send nothing. A failed email is logged and never fails the share.
+
+  A document opened from the review queue now returns to the queue on Back, approve or reject, so a reviewer goes straight to the next item. Document histories are cached per document and invalidated when the document changes, including writes from another server instance, so reopening a document's history no longer rebuilds it each time.
+
+  Engine dependency bumped to `@promptowl/contextnest-engine` ^2.9.1.
+
+- b6d91b0: Activity log for a document, a folder, or the nest, for admins. Owners and nest admins get an Activity entry in a document's ⋯ menu (document page and card view), on a folder's row, and in the nest's ⋯ menu. It opens a log of who created, edited, restored, reviewed, commented on, deleted, read, pulled into a search or answer, or exported that document or anything under the folder, newest first, with the agent and whether it came through the web/API or MCP. The log can be filtered to changes, reviews, comments, or reads & pulls, and to one person. Reads, retrievals and exports are now recorded per document (migration 047) — how a document was pulled, never what was searched for or asked, throttled to one row per person, document and action per 10 minutes and pruned on the activity-trace retention window. New endpoint: `GET /nests/:id/activity-log`.
+- 1b10bf2: Server settings are regrouped into tabs: **Basic** (community name, public base URL, logo, sign-in methods, product analytics, upload size, trace retention), **Features** (every on/off switch — workflow plane, sub-agents, PromptOwl teams import, content types, usage telemetry, single sign-on, agent SSO, nest creation, people directory) and **Hootie** (the chatbot with its model key). Single sign-on and agent SSO are switched on in Features; their configuration moves to a **Single sign-on** tab that appears only while one of them is on. New `community_name` setting (`COMMUNITY_NAME`), editable under Basic.
+
+### Patch Changes
+
+- ec72345: Copying a new API key in a nest's API-only access panel now confirms with a "Key copied to clipboard" toast, and falls back to the legacy copy path (with an error toast) when the clipboard API is unavailable.
+- 6a5c3a4: Revoking an API key in a nest's API-only access panel now asks for confirmation in the app's own dialog instead of the browser's native confirm popup.
+- aa26f0e: The API keys page now has list controls: a search box matching a key's name, prefix or nest, a filter for all-nests keys versus one-nest keys, and a sort by newest first, name, or most recently used.
+- 172f0b1: An editable document now opens as a clean reading page. The formatting toolbar, the Type control and the Prime box appear once you click or tab into the page, and go away when you click outside it. Menus and dialogs opened from the page keep them visible. New documents still show the controls from the start.
+- 99c846e: Fix the "Unsaved changes" dialog appearing right after saving a document.
+
+  Saving navigates back to the nest, and that navigation is checked by the unsaved-edits guard. The save had already cleared the dirty flag, but React had not re-rendered yet, so the guard still saw the document as dirty and opened the leave dialog — asking the user to save the edits it had just written, with the save button reading "Saved" behind it.
+
+  A save is the answer to that question, so every save path now runs its follow-on navigation past the guard. Discard and "Save & leave" already did; the plain Save button was the one path that did not.
+
+- 99c846e: Fix nest activity-feed totals on Postgres.
+
+  `COUNT(*)` comes back from Postgres as a bigint, which `pg` hands to the app as a string, so the feed's totals concatenated instead of adding: a nest with 12 pending changes and 3 held writes reported 123 items. SQLite was unaffected (it returns a number), so this only ever showed on a Postgres-backed server.
+
+  Each count is coerced with `Number()` before the arithmetic. The per-type `counts` object was already correct — only the summed `total` was wrong.
+
+- c02f9a2: Held pushes now show when they expire. The pending list in a nest shows a countdown on each entry (for example "Expires in 6d"), and the review dialog shows the exact expiry time and explains that a push not confirmed by then is dropped.
+- 32bd441: Reviewers can now read a held push before confirming it. In the review dialog, clicking a document shows its full content, a staged context.md can be expanded, and a summary counts how many documents are new and how many are updates. `GET /nests/:id/pending-pushes/:pid` now returns each manifest row's `content` and the push's `context_md`. The list endpoint is unchanged.
+- 2f836fb: Fix "Always allow" doing nothing for pushes from PromptOwl. PromptOwl writes to a nest over MCP with a signed service ticket rather than an API key, so the held push carried no key to whitelist and every later push was held again. Confirming such a push with "Always allow" now whitelists that user's keyless agent writes (PromptOwl and signed-in MCP) on that nest, shown in the nest settings as "PromptOwl / signed-in session". The user's API keys are not affected and still need their own approval.
+
 ## 1.27.0
 
 ### Minor Changes
@@ -36,112 +429,47 @@
 - c8d328e: The Nests page shows a Pending invites card for nests shared with you that you haven't acted on yet. Accept opens the nest; Decline removes your own access to it. New endpoint `POST /me/nests/:nestId/leave` drops the caller's own collaborator row and settles the invite (`left: false` when the access came through a team or ownership).
 - e214fe8: Per-nest branding for public reader sites.
 
-  A nest owner or admin can now brand what readers see — the reader-mode docs site
-  and the nest's `/p` published links: a **logo**, a **banner** (image and/or
-  headline + subtext, shown on the home page), an **accent color** (links, the
-  current page, buttons), a **header background color**, an optional **page tint**,
-  a **site title**, **footer text + link**, and an optional **favicon**. Open it
-  from the nest's **Reader** button → **Branding → Customize**; the dialog has a
-  live preview.
+  A nest owner or admin can now brand what readers see — the reader-mode docs site and the nest's `/p` published links: a **logo**, a **banner** (image and/or headline + subtext, shown on the home page), an **accent color** (links, the current page, buttons), a **header background color**, an optional **page tint**, a **site title**, **footer text + link**, and an optional **favicon**. Open it from the nest's **Reader** button → **Branding → Customize**; the dialog has a live preview.
 
-  Colors are strict `#rgb` / `#rrggbb` and applied as CSS custom properties. Text
-  on any color is picked automatically (black or white, whichever meets WCAG AA
-  4.5:1), and the accent used as link text is deepened until it reads at 4.5:1 on
-  the page. Images are uploaded nest assets (PNG/JPG/GIF/WebP — SVG stays
-  excluded) or `https://` image links.
+  Colors are strict `#rgb` / `#rrggbb` and applied as CSS custom properties. Text on any color is picked automatically (black or white, whichever meets WCAG AA 4.5:1), and the accent used as link text is deepened until it reads at 4.5:1 on the page. Images are uploaded nest assets (PNG/JPG/GIF/WebP — SVG stays excluded) or `https://` image links.
 
-  On `/p` the CSP is unchanged: uploaded images are inlined as `data:` images
-  (already allowed); external https images are not shown there. HTML/artifact
-  publishes are the author's own page and are not wrapped.
+  On `/p` the CSP is unchanged: uploaded images are inlined as `data:` images (already allowed); external https images are not shown there. HTML/artifact publishes are the author's own page and are not wrapped.
 
-  `PATCH /nests/:id/branding` (owner / nest admin / server admin) replaces the
-  branding; `null` or `{}` resets it. Hiding "Powered by ContextNest" / "Secured by
-  PromptOwl" is server-admin only. `GET /nests/:id` returns the parsed
-  `nest.branding` (null when unbranded). Nests with no branding render exactly as
-  before; the server-wide `LOGO_URL` still brands the app shell and is the logo
-  fallback for a branded reader.
+  `PATCH /nests/:id/branding` (owner / nest admin / server admin) replaces the branding; `null` or `{}` resets it. Hiding "Powered by ContextNest" / "Secured by PromptOwl" is server-admin only. `GET /nests/:id` returns the parsed `nest.branding` (null when unbranded). Nests with no branding render exactly as before; the server-wide `LOGO_URL` still brands the app shell and is the logo fallback for a branded reader.
 
 ### Patch Changes
 
-- ae96a3c: Ask for confirmation before rotating an API key. Rotate on the API keys page
-  and in the Connect dialog now opens a confirmation dialog that names the key
-  and warns that the current key
-  stops working immediately, instead of rotating on the first click.
-  Revoke on the API keys page uses the same in-app confirmation dialog instead
-  of the browser's native confirm popup.
-- 770c138: Fix Board's "Columns by: Folder" labeling nested folders with only their leaf
-  segment.
+- ae96a3c: Ask for confirmation before rotating an API key. Rotate on the API keys page and in the Connect dialog now opens a confirmation dialog that names the key and warns that the current key stops working immediately, instead of rotating on the first click. Revoke on the API keys page uses the same in-app confirmation dialog instead of the browser's native confirm popup.
+- 770c138: Fix Board's "Columns by: Folder" labeling nested folders with only their leaf segment.
 
-  A folder column's label shortened to its own name unless it collided with
-  another folder of the same leaf name — so `no/such/folder` showed as just
-  `folder`, dropping the hierarchy, and only actual leaf-name collisions ever
-  grew back a distinguishing prefix. Folder column labels now always show the
-  full folder path, matching the tooltip.
+  A folder column's label shortened to its own name unless it collided with another folder of the same leaf name — so `no/such/folder` showed as just `folder`, dropping the hierarchy, and only actual leaf-name collisions ever grew back a distinguishing prefix. Folder column labels now always show the full folder path, matching the tooltip.
 
 - 8fd23cf: Fix Board "Columns by: Folder" labels hiding the actual folder name for deeply nested paths.
 
-  Showing the folder column's full path (see previous fix) solved ambiguous
-  same-leaf-name folders, but for a path many subfolders deep the header's CSS
-  truncation elides from the end — hiding the leaf, the one segment that
-  actually names the folder, behind the ellipsis. Folder column labels now
-  shorten from the front instead: a long path shows `…/parent/folder` rather
-  than `folder-name-that-gets-cu…`, so the leaf stays visible while the
-  tooltip and drag/drop key still carry the untouched full path.
+  Showing the folder column's full path (see previous fix) solved ambiguous same-leaf-name folders, but for a path many subfolders deep the header's CSS truncation elides from the end — hiding the leaf, the one segment that actually names the folder, behind the ellipsis. Folder column labels now shorten from the front instead: a long path shows `…/parent/folder` rather than `folder-name-that-gets-cu…`, so the leaf stays visible while the tooltip and drag/drop key still carry the untouched full path.
 
-- 5e39dbf: Fix the header breadcrumb overflowing the page for a nest with a very long,
-  space-less name.
+- 5e39dbf: Fix the header breadcrumb overflowing the page for a nest with a very long, space-less name.
 
-  A crumb's label only truncates once it's allowed to shrink below its text's
-  own width — as a flex item it wasn't, so an unbreakable name rendered at
-  full width, pushing the page past the viewport and leaving a horizontal
-  scrollbar with blank space past the (now too-narrow) header divider. Crumb
-  labels now shrink and ellipsize instead.
+  A crumb's label only truncates once it's allowed to shrink below its text's own width — as a flex item it wasn't, so an unbreakable name rendered at full width, pushing the page past the viewport and leaving a horizontal scrollbar with blank space past the (now too-narrow) header divider. Crumb labels now shrink and ellipsize instead.
 
 - 98bfe37: Fix removing a collaborator showing a native browser confirmation popup instead of the app's styled dialog.
 
-  The native `window.confirm()` popup also displayed the deployment's internal
-  Cloud Run URL in its header. Removing a collaborator now opens the same
-  styled `AlertDialog` used elsewhere in the app; the remove action itself was
-  unaffected.
+  The native `window.confirm()` popup also displayed the deployment's internal Cloud Run URL in its header. Removing a collaborator now opens the same styled `AlertDialog` used elsewhere in the app; the remove action itself was unaffected.
 
-- f893b4e: Show a success toast after removing a collaborator's access, so the admin
-  gets confirmation the removal went through instead of the row just
-  disappearing silently.
-- 0553113: Warn about inbound links before deleting a document. Both delete
-  confirmations (the editor menu and the Documents tab) now say how many
-  documents link to this one, e.g. "1 document links to this — deleting it
-  will break that link."
-- d7298a9: Show the document creator's display name instead of their email in the
-  document metadata ("Created by"). The email moves to the hover tooltip and is
-  still shown when the person has no display name.
-- e4ef5fd: Show a success toast after saving edits to an existing document. The save
-  navigates back to the nest before the editor's "Saved" hint could be seen, so
-  there was no confirmation the changes were stored. A save with no changes
-  keeps its existing "no changes" message.
-- 2822fcf: Show the document's "Created by" and "Collaborators" metadata on separate
-  lines instead of one wrapping row joined by a dot.
-- 691db10: Fix saving an existing document navigating to the Nest Overview page while
-  the address bar kept the document's `?doc=<id>` URL.
+- f893b4e: Show a success toast after removing a collaborator's access, so the admin gets confirmation the removal went through instead of the row just disappearing silently.
+- 0553113: Warn about inbound links before deleting a document. Both delete confirmations (the editor menu and the Documents tab) now say how many documents link to this one, e.g. "1 document links to this — deleting it will break that link."
+- d7298a9: Show the document creator's display name instead of their email in the document metadata ("Created by"). The email moves to the hover tooltip and is still shown when the person has no display name.
+- e4ef5fd: Show a success toast after saving edits to an existing document. The save navigates back to the nest before the editor's "Saved" hint could be seen, so there was no confirmation the changes were stored. A save with no changes keeps its existing "no changes" message.
+- 2822fcf: Show the document's "Created by" and "Collaborators" metadata on separate lines instead of one wrapping row joined by a dot.
+- 691db10: Fix saving an existing document navigating to the Nest Overview page while the address bar kept the document's `?doc=<id>` URL.
 
-  Clicking **Save** on an existing document reused the same "go back to the
-  nest" continuation as creating a brand-new one, so every save moved the app
-  view to Overview without touching the URL — leaving the breadcrumb and page
-  out of sync with `?doc=<id>` until a reload reopened the editor. Saving an
-  existing document now leaves the editor open on that document; only creating
-  a new document still returns to the nest.
+  Clicking **Save** on an existing document reused the same "go back to the nest" continuation as creating a brand-new one, so every save moved the app view to Overview without touching the URL — leaving the breadcrumb and page out of sync with `?doc=<id>` until a reload reopened the editor. Saving an existing document now leaves the editor open on that document; only creating a new document still returns to the nest.
 
 - 2934ae3: Fix dragging an unsupported file (SVG, PDF, .txt, ...) into the document editor: the "Drop to add an image or video" overlay is now skipped when the browser's drag-over MIME type identifies the file as unsupported, and dropping one now shows a toast naming the file and the accepted types instead of silently doing nothing.
 
-  The drop overlay only checked whether the drag carried files at all, not
-  whether any of them were an accepted image/video type, and `handleDrop`
-  returned early for a rejected file without any feedback — worse, without
-  calling `preventDefault()`, letting the browser fall back to navigating the
-  tab to the dropped file.
+  The drop overlay only checked whether the drag carried files at all, not whether any of them were an accepted image/video type, and `handleDrop` returned early for a rejected file without any feedback — worse, without calling `preventDefault()`, letting the browser fall back to navigating the tab to the dropped file.
 
-- cef9513: Make deleting a folder clear, including empty ones. An empty folder now
-  shows its delete action without a hover, the confirmation and toast no longer
-  talk about deleting "0 documents", and an editor's deletion request on an
-  empty folder is accepted instead of failing with "Folder not found".
+- cef9513: Make deleting a folder clear, including empty ones. An empty folder now shows its delete action without a hover, the confirmation and toast no longer talk about deleting "0 documents", and an editor's deletion request on an empty folder is accepted instead of failing with "Folder not found".
 - 8d305f0: The Teammate added window now says when the temporary password was already emailed, instead of always asking the admin to pass it on by hand. When PromptOwl sign-in is open to everyone, both that window and the invite email mention Sign in with PromptOwl using a PromptOwl account under the same email. `POST /auth/invite` returns two new fields, `emailed` and `promptowl_sign_in`. The same window warns "This person has no nests yet. Share one?" with a nest picker, so a new teammate doesn't land on an empty server.
 - f472c4f: Invited users get a guided sign-in. Invite emails, and share emails to someone who hasn't signed in yet, link to the login page with `?invite=<email>`: the email is prefilled, a banner explains how to get in, the PromptOwl button reads "Continue with PromptOwl" and passes the invited email on to PromptOwl. Signing in with a PromptOwl account under a different email warns that nests shared with the invited address won't show. A failed password login explains the invite options instead of a bare "Invalid credentials", and the self-registration errors no longer point at a "Set your password" option that doesn't exist.
 - 245ca28: Anyone added on someone else's behalf now gets a way to sign in. Sharing a nest, a document or a folder with a new email, adding them to a team, or assigning them as a steward (in the app or over MCP) creates their account with a real temporary password and emails it to them with a sign-in link — the same email a Teammates invite sends. Previously only the Teammates invite did this; the other paths created an account nobody could sign in to until an admin reset its password.
@@ -153,114 +481,43 @@
 
 - 274bea0: Fix inline text in angle brackets (e.g. `Array<string>`) being silently dropped when switching to the Rich editor, and in the read-only Preview.
 
-  CommonMark treats any `<word>` as a raw HTML tag, not just real markup. Once
-  parsed that way, an unrecognized tag name like `string` has no separate text
-  of its own to fall back to, so the Rich editor's ProseMirror parser dropped
-  it entirely and the read-only Preview's HTML-stripping erased it outright —
-  in both cases permanently, since saving and reopening re-parsed the already
-  corrupted text. Both pipelines now only treat a small allow-list of real HTML
-  tags (the ones this app actually round-trips, like the color-mark `<span>`)
-  as markup; anything else renders as the literal text it is.
+  CommonMark treats any `<word>` as a raw HTML tag, not just real markup. Once parsed that way, an unrecognized tag name like `string` has no separate text of its own to fall back to, so the Rich editor's ProseMirror parser dropped it entirely and the read-only Preview's HTML-stripping erased it outright — in both cases permanently, since saving and reopening re-parsed the already corrupted text. Both pipelines now only treat a small allow-list of real HTML tags (the ones this app actually round-trips, like the color-mark `<span>`) as markup; anything else renders as the literal text it is.
 
-- 04957b4: Fix the My Work sidebar badge overcounting relative to what the My Work page
-  actually shows.
+- 04957b4: Fix the My Work sidebar badge overcounting relative to what the My Work page actually shows.
 
-  `GET /me/work`'s `pagination.total` was the raw `getReviewQueue` count: every
-  pending review in every nest the caller can _see_, regardless of who
-  requested it or whether the caller can approve it. But `items`/`waiting`
-  only ever surface a review that is the caller's own request or one they can
-  actually approve — a viewer/editor's nest with someone else's pending review
-  inflated `total` without that review ever appearing in either bucket. The
-  approve-capability check was also only resolved for nests appearing in the
-  current page of results instead of every nest the caller can see, so the
-  undercount/overcount shifted depending on pagination. `pagination.total`'s
-  review portion is now computed the same way `items`/`waiting` are: pending
-  reviews in nests the caller can approve, plus the caller's own pending
-  reviews elsewhere.
+  `GET /me/work`'s `pagination.total` was the raw `getReviewQueue` count: every pending review in every nest the caller can _see_, regardless of who requested it or whether the caller can approve it. But `items`/`waiting` only ever surface a review that is the caller's own request or one they can actually approve — a viewer/editor's nest with someone else's pending review inflated `total` without that review ever appearing in either bucket. The approve-capability check was also only resolved for nests appearing in the current page of results instead of every nest the caller can see, so the undercount/overcount shifted depending on pagination. `pagination.total`'s review portion is now computed the same way `items`/`waiting` are: pending reviews in nests the caller can approve, plus the caller's own pending reviews elsewhere.
 
-- ecaeb3f: Fix the My Work sidebar badge undercounting when a pending deletion or archive
-  request is waiting.
+- ecaeb3f: Fix the My Work sidebar badge undercounting when a pending deletion or archive request is waiting.
 
-  `GET /me/work`'s `pagination.total` came straight from the review queue's
-  count, which only tallies pending reviews. Deletion and archive requests ride
-  the same `items`/`waiting` buckets the My Work page renders, but were never
-  folded into `total` — so a pending deletion/archive flag made the sidebar
-  badge undercount by one per flag, and a hard refresh didn't fix it since the
-  server was returning the wrong number, not a stale one. `total` now includes
-  the deletion/archive rows actually shown.
+  `GET /me/work`'s `pagination.total` came straight from the review queue's count, which only tallies pending reviews. Deletion and archive requests ride the same `items`/`waiting` buckets the My Work page renders, but were never folded into `total` — so a pending deletion/archive flag made the sidebar badge undercount by one per flag, and a hard refresh didn't fix it since the server was returning the wrong number, not a stale one. `total` now includes the deletion/archive rows actually shown.
 
-- b254981: Separate archive and deletion requests from reviews in My Work. Reviews now
-  list first under the "Select all N reviews" bar; requests follow under their
-  own "N requests · approve or reject each one" header, since they are decided
-  one at a time and never join the bulk action.
+- b254981: Separate archive and deletion requests from reviews in My Work. Reviews now list first under the "Select all N reviews" bar; requests follow under their own "N requests · approve or reject each one" header, since they are decided one at a time and never join the bulk action.
 - 961cb06: Fix the nest header flashing the wrong Visibility and Reader Mode state on load.
 
-  Opening a nest previously showed the **Private**/**Reader: Off** defaults for
-  a moment before the real values arrived from the initial fetch, so a public
-  nest with Reader Mode on would briefly look private with reader mode off.
-  The visibility toggle/badge and the Reader Mode button in the nest header now
-  stay hidden until the nest's first fetch resolves, instead of rendering their
-  placeholder default state.
+  Opening a nest previously showed the **Private**/**Reader: Off** defaults for a moment before the real values arrived from the initial fetch, so a public nest with Reader Mode on would briefly look private with reader mode off. The visibility toggle/badge and the Reader Mode button in the nest header now stay hidden until the nest's first fetch resolves, instead of rendering their placeholder default state.
 
 - 284f300: The nest Overview now reads like the public docs reader: the folder index on the reader's card surface with nav-style rows, the nest's description as its lede, the document / folder / governance counts as one summary line instead of a grid of stat cards, and Recently edited in a side card. An empty nest gets a proper start page (New document, Import files, Add with AI). At phone width the nest name no longer truncates to a letter, the Overview's actions fit on screen, and the app header no longer scrolls sideways.
 - 0f57363: Hide "Move to folder" for PDF documents instead of offering an action the server always rejects.
 
-  A pdf node's binary is bound to its id, so `src/nodes/service.ts`'s
-  `moveNode` refuses every PDF move with "PDF documents can't be moved to
-  another folder yet." The UI didn't know that: both the document editor's
-  overflow menu and the documents-list row menu/drag-and-drop still offered
-  Move on a PDF, walking the user through a dialog that could never succeed.
-  Move is now withheld for PDF documents in both places (shared logic in
-  `nodeTypeSupportsMove`); every other action is unaffected.
+  A pdf node's binary is bound to its id, so `src/nodes/service.ts`'s `moveNode` refuses every PDF move with "PDF documents can't be moved to another folder yet." The UI didn't know that: both the document editor's overflow menu and the documents-list row menu/drag-and-drop still offered Move on a PDF, walking the user through a dialog that could never succeed. Move is now withheld for PDF documents in both places (shared logic in `nodeTypeSupportsMove`); every other action is unaffected.
 
-- 085d858: Fix the "Add a person" field's suggestion dropdown reopening with an empty
-  query (listing every server account) after adding a collaborator by pressing
-  Enter. The list now closes as soon as Enter submits the typed address,
-  instead of staying open and re-querying once the field cleared.
-- 4fed5f4: Fix the person picker opening its full suggestion list as soon as a dialog
-  opens. The Assign Steward dialog focuses its email field on open, and the list
-  opened on any focus, covering the Scope and Role fields. It now opens on
-  click, typing or ArrowDown. Applies to the collaborator and team pickers too.
-- 6235950: Fix folder names casing inconsistently between the authoring sidebar and
-  Reader navigation.
+- 085d858: Fix the "Add a person" field's suggestion dropdown reopening with an empty query (listing every server account) after adding a collaborator by pressing Enter. The list now closes as soon as Enter submits the typed address, instead of staying open and re-querying once the field cleared.
+- 4fed5f4: Fix the person picker opening its full suggestion list as soon as a dialog opens. The Assign Steward dialog focuses its email field on open, and the list opened on any focus, covering the Scope and Role fields. It now opens on click, typing or ArrowDown. Applies to the collaborator and team pickers too.
+- 6235950: Fix folder names casing inconsistently between the authoring sidebar and Reader navigation.
 
-  The authoring sidebar's `prettyFolder` title-cased every hyphen/underscore
-  word (`fold-er-tab` → `Fold Er Tab`), while Reader's `humanize` only
-  capitalized the first character of the whole slug (`Fold er tab`). Reader's
-  `humanize` — used for its folder section labels and breadcrumbs — now
-  title-cases each word the same way, so the same folder reads identically in
-  both surfaces.
+  The authoring sidebar's `prettyFolder` title-cased every hyphen/underscore word (`fold-er-tab` → `Fold Er Tab`), while Reader's `humanize` only capitalized the first character of the whole slug (`Fold er tab`). Reader's `humanize` — used for its folder section labels and breadcrumbs — now title-cases each word the same way, so the same folder reads identically in both surfaces.
 
 - 83b44b0: Re-inviting an existing email from Teammates no longer issues a new temporary password. `POST /auth/invite` now returns `409` for any existing user and leaves their credentials alone: "already a member" once they've signed in, or "already invited but hasn't signed in yet — use Reset password" otherwise. Previously a not-yet-signed-in user's first password was silently replaced.
-- 93655c9: Fix a rejected Server settings save (e.g. an invalid PostHog project key)
-  showing the same error twice, as a toast and in the inline banner. The error
-  now shows once, in the inline banner, which also switches to the tab holding
-  the rejected field.
+- 93655c9: Fix a rejected Server settings save (e.g. an invalid PostHog project key) showing the same error twice, as a toast and in the inline banner. The error now shows once, in the inline banner, which also switches to the tab holding the rejected field.
 - 1bacb00: Single sign-on is now fully documented. CONFIGURATION.md → Single sign-on (OIDC) is a complete admin guide: prerequisites, a settings reference (env var ↔ UI field ↔ default), step-by-step setup for Microsoft Entra ID, Google, Okta, Keycloak and any other OIDC provider, what happens to existing password accounts, invites, API keys, MCP clients and Agent SSO, offboarding, shared-deployment limits, and a troubleshooting table giving the cause and fix for every `sso_error` code. UI locations now match the Admin rail (Admin → Server settings → Single sign-on, Admin → Teammates). The in-app How it works page has a Single sign-on section for server admins.
-- 1bbc356: Fix the "Teammate added" confirmation modal overflowing horizontally — the
-  temporary password field and the "Pick a nest…" dropdown extended past the
-  modal's edge and were clipped.
+- 1bbc356: Fix the "Teammate added" confirmation modal overflowing horizontally — the temporary password field and the "Pick a nest…" dropdown extended past the modal's edge and were clipped.
 
-  The modal's content area is a CSS grid; the temporary-password `<code>`
-  element was a flex item without `min-w-0`, so it kept its full unbroken-text
-  width when computing the grid column's minimum size. That blew the shared
-  column out past the dialog's max width, dragging every other field in the
-  modal — including the nest picker — along with it. The `<code>` element now
-  allows shrinking, so `break-all` can wrap it within the dialog like intended.
+  The modal's content area is a CSS grid; the temporary-password `<code>` element was a flex item without `min-w-0`, so it kept its full unbroken-text width when computing the grid column's minimum size. That blew the shared column out past the dialog's max width, dragging every other field in the modal — including the nest picker — along with it. The `<code>` element now allows shrinking, so `break-all` can wrap it within the dialog like intended.
 
-- 4b80dbe: Fix the Teammates page "Last active" ignoring web-app activity. It only read
-  API-key usage, so someone working in the web app never moved it. It now takes
-  the latest of API-key use and web-session activity.
-- b29bd3c: Fix reloading (or directly opening) `/teams` showing the raw Teams API JSON
-  instead of the Teams page.
+- 4b80dbe: Fix the Teammates page "Last active" ignoring web-app activity. It only read API-key usage, so someone working in the web app never moved it. It now takes the latest of API-key use and web-session activity.
+- b29bd3c: Fix reloading (or directly opening) `/teams` showing the raw Teams API JSON instead of the Teams page.
 
-  The client's Teams page URL is `/teams`, which collides with the top-level
-  `GET /teams` API route — in-app navigation never re-requests it, but a hard
-  reload or a bookmarked link issues a real `GET /teams`, which the API route
-  answered first with `{"teams": [...]}` instead of the app shell. A guard ahead
-  of the `/teams` route now serves the SPA shell for a real browser navigation
-  (same document-navigation check the SPA catch-all already uses) and leaves
-  the app's own API fetches untouched.
+  The client's Teams page URL is `/teams`, which collides with the top-level `GET /teams` API route — in-app navigation never re-requests it, but a hard reload or a bookmarked link issues a real `GET /teams`, which the API route answered first with `{"teams": [...]}` instead of the app shell. A guard ahead of the `/teams` route now serves the SPA shell for a real browser navigation (same document-navigation check the SPA catch-all already uses) and leaves the app's own API fetches untouched.
 
 - 5e0cf09: `contextnest://` links are graph edges, and a selector's `hops` actually expands
 
@@ -270,47 +527,20 @@
 
 - 1d79e1e: Fix a YouTube/Vimeo (or uploaded video) URL placed right after an image losing its embedded player after save + reload.
 
-  The editor's image node is configured as a top-level block so `![alt](url)`
-  round-trips through markdown, but its serializer never closed its block —
-  so the paragraph written immediately after an image (a bare video URL) had
-  no blank line separating it from the image line. On reparse, CommonMark's
-  lazy-continuation rule folded the two into one paragraph, so the video URL
-  was no longer alone in its paragraph and Preview rendered it as a plain
-  link instead of an embedded player. The image serializer now closes its
-  block like every other block-level node does.
+  The editor's image node is configured as a top-level block so `![alt](url)` round-trips through markdown, but its serializer never closed its block — so the paragraph written immediately after an image (a bare video URL) had no blank line separating it from the image line. On reparse, CommonMark's lazy-continuation rule folded the two into one paragraph, so the video URL was no longer alone in its paragraph and Preview rendered it as a plain link instead of an embedded player. The image serializer now closes its block like every other block-level node does.
 
 - 5f10d90: Fix pressing Backspace at the start of the paragraph right after an embedded video merging that paragraph into the video's URL, corrupting the link and destroying the player.
 
-  The video player is a decoration over a plain paragraph whose text is the
-  bare URL, so a Backspace at the start of the following paragraph hit
-  ProseMirror's default `joinBackward` and appended the typed text straight
-  onto the URL. The editor now redirects the first Backspace into the video
-  paragraph instead of merging into it, leaving the video and its URL intact.
+  The video player is a decoration over a plain paragraph whose text is the bare URL, so a Backspace at the start of the following paragraph hit ProseMirror's default `joinBackward` and appended the typed text straight onto the URL. The editor now redirects the first Backspace into the video paragraph instead of merging into it, leaving the video and its URL intact.
 
-- 6c78c5b: Fix Backspace below an embedded video still corrupting its URL. The earlier
-  fix moved the caret into the video's hidden URL text, so the next keystroke
-  edited the URL and removed the player. Backspace at the start of the line
-  below a video now selects the whole video (outlined), like an image; a second
-  Backspace deletes it cleanly. An empty line below the video is removed first.
+- 6c78c5b: Fix Backspace below an embedded video still corrupting its URL. The earlier fix moved the caret into the video's hidden URL text, so the next keystroke edited the URL and removed the player. Backspace at the start of the line below a video now selects the whole video (outlined), like an image; a second Backspace deletes it cleanly. An empty line below the video is removed first.
 - 934caaa: Fix unresolved `[[…]]` links losing their broken-link styling in read-only views.
 
-  The editor already styles an unresolved `[[Title]]` link differently (purple,
-  dotted underline) from a resolved one (blue, solid), but the read-only
-  renderer used by the "Preview" toggle, Comment mode, and the nest View mode
-  rendered every link as resolved regardless of whether it actually pointed at
-  a document. Both now resolve the target the same way the hover preview does
-  and fall back to the broken-link style when it doesn't.
+  The editor already styles an unresolved `[[Title]]` link differently (purple, dotted underline) from a resolved one (blue, solid), but the read-only renderer used by the "Preview" toggle, Comment mode, and the nest View mode rendered every link as resolved regardless of whether it actually pointed at a document. Both now resolve the target the same way the hover preview does and fall back to the broken-link style when it doesn't.
 
-- 98a4b50: Fix the New Document form prefilling with the internal node id
-  (`nodes/<id>`) instead of the wiki-link's human-readable title when clicking
-  a broken `[[Title]]` link.
+- 98a4b50: Fix the New Document form prefilling with the internal node id (`nodes/<id>`) instead of the wiki-link's human-readable title when clicking a broken `[[Title]]` link.
 
-  Aliased wiki-links store `[[nodes/<id>|Title]]` — the internal node id as
-  the target, the readable title as the display alias. Once the target
-  document was deleted, the click handlers fell back to that raw target for
-  the create/blocked title instead of the alias, leaking the internal id into
-  the New Document form (and into the reviewer's "doesn't exist" message).
-  Broken links now prefill with the link's display text.
+  Aliased wiki-links store `[[nodes/<id>|Title]]` — the internal node id as the target, the readable title as the display alias. Once the target document was deleted, the click handlers fell back to that raw target for the create/blocked title instead of the alias, leaking the internal id into the New Document form (and into the reviewer's "doesn't exist" message). Broken links now prefill with the link's display text.
 
 ## 1.25.0
 
@@ -330,11 +560,7 @@
 
 - 4615fe8: `client` — caller attribution on every read and write.
 
-  Every node write and every MCP tool call now accepts an optional `client` object
-  naming the calling agent and its session, plus any custom scalar keys — create,
-  edit, submit for review, approve, reject, revert, import (`POST /nests/import`,
-  `POST /nests/unsynced/sync`) and bulk review on the REST side, every tool on the
-  MCP side:
+  Every node write and every MCP tool call now accepts an optional `client` object naming the calling agent and its session, plus any custom scalar keys — create, edit, submit for review, approve, reject, revert, import (`POST /nests/import`, `POST /nests/unsynced/sync`) and bulk review on the REST side, every tool on the MCP side:
 
   ```jsonc
   {
@@ -344,52 +570,17 @@
   }
   ```
 
-  Submitting for review seals it into the engine's own version chain, since that
-  is the entry a submission appends. Every other write that seals a version
-  records it on that version, so version history —
-  the REST list, `context_versions` (prose and structured payload alike), and the
-  history panel in the UI — answers "which agent wrote v7, in which session".
-  Every MCP tool call, and every REST call that accepts `client`, records it on the
-  activity trace — which is where a call that seals no version is attributed: a
-  read, and a rejection, which commits no content.
-  The admin Activity Trace shows it under the caller it belongs to. `editedBy` is
-  untouched and remains the authoritative authoring record.
+  Submitting for review seals it into the engine's own version chain, since that is the entry a submission appends. Every other write that seals a version records it on that version, so version history — the REST list, `context_versions` (prose and structured payload alike), and the history panel in the UI — answers "which agent wrote v7, in which session". Every MCP tool call, and every REST call that accepts `client`, records it on the activity trace — which is where a call that seals no version is attributed: a read, and a rejection, which commits no content. The admin Activity Trace shows it under the caller it belongs to. `editedBy` is untouched and remains the authoritative authoring record.
 
-  Everything about it is optional — the object and each field within it. No
-  endpoint requires it, an unattributed call is a valid call, and a call carrying
-  none stores nothing rather than an empty `{}`: "not attributed" and "attributed
-  to nobody" are different claims.
+  Everything about it is optional — the object and each field within it. No endpoint requires it, an unattributed call is a valid call, and a call carrying none stores nothing rather than an empty `{}`: "not attributed" and "attributed to nobody" are different claims.
 
-  The server fills what the transport already knows under anything the caller
-  sent, merged per key, so a caller that names its agent but no session keeps its
-  agent and still gains a session id: `agent` from the API key's label,
-  `session_id` from an `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` /
-  `CONTEXTNEST_SESSION_ID` override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives
-  nothing, which matters because what is derived lands in an append-only history —
-  consent has to be available before the first write, not after. Nothing is
-  synthesized where the transport knows nothing: a placeholder session id would be
-  indistinguishable from a real one.
+  The server fills what the transport already knows under anything the caller sent, merged per key, so a caller that names its agent but no session keeps its agent and still gains a session id: `agent` from the API key's label, `session_id` from an `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID` override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing, which matters because what is derived lands in an append-only history — consent has to be available before the first write, not after. Nothing is synthesized where the transport knows nothing: a placeholder session id would be indistinguishable from a real one.
 
-  The field itself is the engine's: `clientField`, `clientMetadataSchema` and its
-  bounds are imported from `@promptowl/contextnest-engine/api` and never restated
-  here, so the CLI, the upstream MCP server and this edition all accept exactly
-  the same `client`. This release therefore requires engine ≥2.6.0. Only the
-  binding lives in this repo: what this server's transport can report about its
-  caller, and how the block is stored on version rows and the activity trace.
+  The field itself is the engine's: `clientField`, `clientMetadataSchema` and its bounds are imported from `@promptowl/contextnest-engine/api` and never restated here, so the CLI, the upstream MCP server and this edition all accept exactly the same `client`. This release therefore requires engine ≥2.6.0. Only the binding lives in this repo: what this server's transport can report about its caller, and how the block is stored on version rows and the activity trace.
 
-  `client` is a label, not an identity claim: never authenticated, never used to
-  authorize, and deliberately not an input to any hash chain, so histories
-  recorded before the field existed keep verifying byte for byte. It is bounded
-  (scalar values ≤512 chars, ≤16 custom keys) because an untrusted caller writes
-  it into an append-only audit trail, and a near-miss on a reserved key
-  (`sessionId`, `Agent`) is rejected rather than filed as a custom key — which
-  would leave the write looking attributed while the slot readers check stays
-  empty. It is distinct from `metadata`, which is frontmatter and describes the
-  document rather than the call.
+  `client` is a label, not an identity claim: never authenticated, never used to authorize, and deliberately not an input to any hash chain, so histories recorded before the field existed keep verifying byte for byte. It is bounded (scalar values ≤512 chars, ≤16 custom keys) because an untrusted caller writes it into an append-only audit trail, and a near-miss on a reserved key (`sessionId`, `Agent`) is rejected rather than filed as a custom key — which would leave the write looking attributed while the slot readers check stays empty. It is distinct from `metadata`, which is frontmatter and describes the document rather than the call.
 
-  Specified in `CONTEXT_NEST_SPEC.md` §9.4 upstream (PromptOwl/ContextNest#107);
-  this is the Community Edition binding of it, over this server's own version
-  rows and activity trace.
+  Specified in `CONTEXT_NEST_SPEC.md` §9.4 upstream (PromptOwl/ContextNest#107); this is the Community Edition binding of it, over this server's own version rows and activity trace.
 
 - a344cc5: New nest setting "Creators review their own documents" (`creator_is_reviewer`, off by default). In a governed nest, whoever creates a document becomes its reviewer steward and the first version publishes immediately; every later change — a teammate's or the creator's own — goes through review as usual, with separation of duties unchanged. Prime documents still start as drafts. Future creates only; nothing is stewarded retroactively.
 - cd9b298: MCP writes behave the same on every nest, and match the engine catalog.
@@ -756,134 +947,47 @@
 
 - 1d65b12: Agent SSO: exchange an IdP ID token for a short-lived MCP bearer.
 
-  `POST /auth/token-exchange` (RFC 8693-shaped) lets an external agent, acting for
-  a user your IdP (Microsoft Entra / Google) has already authenticated, trade that
-  IdP's ID token for a scoped MCP bearer — no second login, no static API key.
-  **Off by default**, and it stays off until a superadmin enables it in
-  Settings → Single sign-on → Agent SSO (or sets the env vars).
+  `POST /auth/token-exchange` (RFC 8693-shaped) lets an external agent, acting for a user your IdP (Microsoft Entra / Google) has already authenticated, trade that IdP's ID token for a scoped MCP bearer — no second login, no static API key. **Off by default**, and it stays off until a superadmin enables it in Settings → Single sign-on → Agent SSO (or sets the env vars).
 
-  Because the endpoint trusts a token minted elsewhere and hands back access, the
-  verification is the feature. The inbound `subject_token` is checked for
-  signature (the provider's JWKS, `RS256` pinned), issuer (exact per provider —
-  the tenant-scoped Entra issuer or Google's), audience (your configured client
-  id, so a token minted for another application cannot be replayed here), and
-  expiry, then the same `email_verified` + domain-allowlist policy as browser
-  login before the user is resolved or JIT-provisioned.
+  Because the endpoint trusts a token minted elsewhere and hands back access, the verification is the feature. The inbound `subject_token` is checked for signature (the provider's JWKS, `RS256` pinned), issuer (exact per provider — the tenant-scoped Entra issuer or Google's), audience (your configured client id, so a token minted for another application cannot be replayed here), and expiry, then the same `email_verified` + domain-allowlist policy as browser login before the user is resolved or JIT-provisioned.
 
-  Provisioning **fails closed**: auto-provision with an empty
-  `OIDC_ALLOWED_DOMAINS` is refused at mint time (`no_account`) and refused at
-  save time by `/admin/settings`, because that combination would otherwise let
-  anyone with an account at a public IdP sign themselves up and walk away with a
-  bearer.
+  Provisioning **fails closed**: auto-provision with an empty `OIDC_ALLOWED_DOMAINS` is refused at mint time (`no_account`) and refused at save time by `/admin/settings`, because that combination would otherwise let anyone with an account at a public IdP sign themselves up and walk away with a bearer.
 
-  Minted bearers are signed with a dedicated `MCP_SIGNING_SECRET`, distinct from
-  the PromptOwl shared secret, so self-hosted deployments can issue their own; the
-  `/index` and `/mcp` acceptor verifies a ticket signed with either secret via
-  independent constant-time checks. Clearing that secret revokes every outstanding
-  bearer — turning the master flag off only stops minting.
+  Minted bearers are signed with a dedicated `MCP_SIGNING_SECRET`, distinct from the PromptOwl shared secret, so self-hosted deployments can issue their own; the `/index` and `/mcp` acceptor verifies a ticket signed with either secret via independent constant-time checks. Clearing that secret revokes every outstanding bearer — turning the master flag off only stops minting.
 
-  Unlike the browser flow there is no session to bind, so the OIDC `nonce` binding
-  is deliberately dropped; trust rests on signature + issuer + audience + expiry +
-  `email_verified`. `scope: "mcp"` is a route allowlist, not a reduced permission
-  set — the bearer carries the user's full stewardship rights, so keep
-  `MCP_TOKEN_TTL_SECONDS` short. Both tradeoffs are written up in
-  `CONFIGURATION.md → Agent SSO (token exchange)`.
+  Unlike the browser flow there is no session to bind, so the OIDC `nonce` binding is deliberately dropped; trust rests on signature + issuer + audience + expiry + `email_verified`. `scope: "mcp"` is a route allowlist, not a reduced permission set — the bearer carries the user's full stewardship rights, so keep `MCP_TOKEN_TTL_SECONDS` short. Both tradeoffs are written up in `CONFIGURATION.md → Agent SSO (token exchange)`.
 
-  Alongside it: the OIDC discovery cache holds one entry per issuer instead of one
-  entry total, so OIDC login and the two token-exchange providers no longer evict
-  each other and refetch JWKS on every alternating request.
+  Alongside it: the OIDC discovery cache holds one entry per issuer instead of one entry total, so OIDC login and the two token-exchange providers no longer evict each other and refetch JWKS on every alternating request.
 
 - 6f0be95: Public Docs Reader Mode, and an acknowledgement before a nest goes public.
 
-  **Reader Mode** is a superadmin switch (`PATCH /nests/:id/reader-mode`) that
-  changes how a nest reads for people who can only read it. With it on, a viewer
-  gets a clean three-pane docs reader — navigation, the document, and a persistent
-  home pane — instead of the authoring shell, and the board, ontology graph and
-  definitions tabs disappear. Owners, editors, reviewers and admins are unaffected
-  and keep the full tabbed UI, so the same nest is a docs site to its readers and a
-  workspace to its stewards. An optional home node names the landing document;
-  unset, it resolves by convention.
+  **Reader Mode** is a superadmin switch (`PATCH /nests/:id/reader-mode`) that changes how a nest reads for people who can only read it. With it on, a viewer gets a clean three-pane docs reader — navigation, the document, and a persistent home pane — instead of the authoring shell, and the board, ontology graph and definitions tabs disappear. Owners, editors, reviewers and admins are unaffected and keep the full tabbed UI, so the same nest is a docs site to its readers and a workspace to its stewards. An optional home node names the landing document; unset, it resolves by convention.
 
-  Reader Mode is presentation only. It hides authoring surfaces from people who
-  already could not use them — it grants nothing and gates nothing, and access
-  control is unchanged.
+  Reader Mode is presentation only. It hides authoring surfaces from people who already could not use them — it grants nothing and gates nothing, and access control is unchanged.
 
-  **Making a nest public now takes an explicit acknowledgement.**
-  `PATCH /nests/:id/visibility` with `visibility: "public"` returns `409
-requires_acknowledgement` unless the request also carries `acknowledge_public:
-true`; the UI asks first, in the same words the server answers with — the nest
-  becomes readable by anyone on the internet, outside your organization. Going back
-  to private is unguarded.
+  **Making a nest public now takes an explicit acknowledgement.** `PATCH /nests/:id/visibility` with `visibility: "public"` returns `409 requires_acknowledgement` unless the request also carries `acknowledge_public: true`; the UI asks first, in the same words the server answers with — the nest becomes readable by anyone on the internet, outside your organization. Going back to private is unguarded.
 
-  **Breaking, for API callers:** an existing integration that flips a nest to
-  public with `{ "visibility": "public" }` alone now gets a `409` and no change.
-  Add `"acknowledge_public": true` to that request. Reads, private-visibility
-  calls, and every other nest endpoint are untouched.
+  **Breaking, for API callers:** an existing integration that flips a nest to public with `{ "visibility": "public" }` alone now gets a `409` and no change. Add `"acknowledge_public": true` to that request. Reads, private-visibility calls, and every other nest endpoint are untouched.
 
 - 17627f5: Publish: host one document as a standalone page at a gated `/p/<slug>` link.
 
-  A **Publish** action on any document (owner/admin, from the document menu or the
-  editor) mints a stable, unguessable link that serves that document full-screen
-  to people with no account. Distinct from nest visibility, which opens a whole
-  nest, and from grants, which share with an authenticated user: a publish exposes
-  exactly one node and no other, and the public surface is mounted outside the
-  `/nests` auth chain so no node API is reachable from it.
+  A **Publish** action on any document (owner/admin, from the document menu or the editor) mints a stable, unguessable link that serves that document full-screen to people with no account. Distinct from nest visibility, which opens a whole nest, and from grants, which share with an authenticated user: a publish exposes exactly one node and no other, and the public surface is mounted outside the `/nests` auth chain so no node API is reachable from it.
 
-  Four gates. **Public** serves immediately. **Passcode** takes one shared code —
-  bcrypt-hashed, because a human-chosen secret gets the password treatment rather
-  than the fast hash reserved for high-entropy tokens — with a show/hide toggle on
-  the field, since a code read off a slide is easy to mistype. **Email** and
-  **invite** mail a one-time link; invite additionally holds an allow-list. Both
-  issue an `HttpOnly` session cookie scoped to `Path=/p/<slug>`, so clearing one
-  link's gate never opens another.
+  Four gates. **Public** serves immediately. **Passcode** takes one shared code — bcrypt-hashed, because a human-chosen secret gets the password treatment rather than the fast hash reserved for high-entropy tokens — with a show/hide toggle on the field, since a code read off a slide is easy to mistype. **Email** and **invite** mail a one-time link; invite additionally holds an allow-list. Both issue an `HttpOnly` session cookie scoped to `Path=/p/<slug>`, so clearing one link's gate never opens another.
 
-  **Only the approved version is ever served.** The page reads through the same
-  snapshot reader the hosted artifact viewer uses, so an in-progress edit does not
-  reach the open web the moment it is saved, and a document that has never been
-  approved 404s rather than exposing its draft. That is the point of publishing
-  from a governance product rather than a file host.
+  **Only the approved version is ever served.** The page reads through the same snapshot reader the hosted artifact viewer uses, so an in-progress edit does not reach the open web the moment it is saved, and a document that has never been approved 404s rather than exposing its draft. That is the point of publishing from a governance product rather than a file host.
 
-  Per-link overlays: **expiry** and **revoke** (both enforced on every route, so
-  revoking kills live sessions, not just new ones), **watermark**, which stamps
-  the viewer's email across the page, and **no-download**, which blocks copy,
-  cut, right-click, drag, printing and the save/print/copy/view-source shortcuts.
-  Those last two are deterrents and are labelled as such in the UI: the document
-  has already been delivered to the reader's machine, so screenshots, developer
-  tools and `curl` still return it. Watermarking is a no-op on the public and
-  passcode gates, which identify nobody — attribution is the lever that actually
-  deters, which is why it needs an identified viewer.
+  Per-link overlays: **expiry** and **revoke** (both enforced on every route, so revoking kills live sessions, not just new ones), **watermark**, which stamps the viewer's email across the page, and **no-download**, which blocks copy, cut, right-click, drag, printing and the save/print/copy/view-source shortcuts. Those last two are deterrents and are labelled as such in the UI: the document has already been delivered to the reader's machine, so screenshots, developer tools and `curl` still return it. Watermarking is a no-op on the public and passcode gates, which identify nobody — attribution is the lever that actually deters, which is why it needs an identified viewer.
 
-  **Comments**, per link. A reader opens a modal on the page itself and posts
-  without navigating away; the comment lands as an unanchored annotation thread on
-  the document, in the same list stewards already read, and never renders on the
-  published page. Every comment carries an identifying email — the gated viewer's
-  where one exists, otherwise one they supply, which is self-asserted on public and
-  passcode links. Because the document runs under the artifact sandbox, which
-  blocks forms and network calls and propagates those restrictions to any popup it
-  opens, the comment UI cannot live inside it: the page frames the document in a
-  same-origin iframe and keeps the controls on the outer shell, leaving the
-  document's sandbox intact.
+  **Comments**, per link. A reader opens a modal on the page itself and posts without navigating away; the comment lands as an unanchored annotation thread on the document, in the same list stewards already read, and never renders on the published page. Every comment carries an identifying email — the gated viewer's where one exists, otherwise one they supply, which is self-asserted on public and passcode links. Because the document runs under the artifact sandbox, which blocks forms and network calls and propagates those restrictions to any popup it opens, the comment UI cannot live inside it: the page frames the document in a same-origin iframe and keeps the controls on the outer shell, leaving the document's sandbox intact.
 
-  Markdown documents are rendered server-side, so a published note reads like the
-  editor instead of showing its own `##` and `**` source.
+  Markdown documents are rendered server-side, so a published note reads like the editor instead of showing its own `##` and `**` source.
 
-  On the security posture: slugs are 64 bits of randomness behind a unique index;
-  magic-link tokens are single-use, stored hashed, and re-checked against the
-  allow-list when redeemed rather than only when sent; the gate answers an invited
-  and an uninvited address with the same page _and_ the same database work, so it
-  cannot be timed into an allow-list oracle; the gate is rate limited per link per
-  IP; and a revoked, expired or unknown slug all produce one identical notice,
-  which never confirms that a given slug was real.
+  On the security posture: slugs are 64 bits of randomness behind a unique index; magic-link tokens are single-use, stored hashed, and re-checked against the allow-list when redeemed rather than only when sent; the gate answers an invited and an uninvited address with the same page _and_ the same database work, so it cannot be timed into an allow-list oracle; the gate is rate limited per link per IP; and a revoked, expired or unknown slug all produce one identical notice, which never confirms that a given slug was real.
 
-  Email and invite links are refused on a server with no mail transport
-  configured, and the dialog disables those two gates, because their only way in
-  is a link that could never be sent. **Set `PUBLIC_BASE_URL` on any deployment
-  using them** — unset, the mailed link is built from the request's `Host`, so a
-  proxy forwarding an attacker-supplied host would send the recipient a one-time
-  access token pointing somewhere else.
+  Email and invite links are refused on a server with no mail transport configured, and the dialog disables those two gates, because their only way in is a link that could never be sent. **Set `PUBLIC_BASE_URL` on any deployment using them** — unset, the mailed link is built from the request's `Host`, so a proxy forwarding an attacker-supplied host would send the recipient a one-time access token pointing somewhere else.
 
-  Every served view is logged with the viewer's email where the gate identifies
-  one, visible to the owner in the dialog's "who viewed" panel.
+  Every served view is logged with the viewer's email where the gate identifies one, visible to the owner in the dialog's "who viewed" panel.
 
 - Bulk approve/reject, in the review queue and in the cross-nest inbox.
 
@@ -1036,47 +1140,17 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - 3fc9c76: Pick up the engine's per-vault write lock, and retire the last legacy write path.
 
-  Engine 2.4.0 ships a cross-process write lock (PromptOwl/ContextNest#78): every
-  mutation through the operation catalog serializes on it, and a writer that cannot
-  acquire it within 20s fails with `VaultLockTimeoutError`. The engine pin moves to
-  `^2.4.0` to take it. Two things had to be true here before that upgrade was safe:
+  Engine 2.4.0 ships a cross-process write lock (PromptOwl/ContextNest#78): every mutation through the operation catalog serializes on it, and a writer that cannot acquire it within 20s fails with `VaultLockTimeoutError`. The engine pin moves to `^2.4.0` to take it. Two things had to be true here before that upgrade was safe:
 
-  **Every wire surface now maps the lock timeout to a retryable error.** REST
-  returns `503` with a `Retry-After` header (via a new `VaultBusyError`); MCP
-  returns an `isError` tool result whose `structuredContent` carries
-  `code: "VAULT_BUSY"` — never a generic 500. Detection matches the error by
-  `name`/`code` rather than `instanceof`, so it survives the package boundary —
-  and, because it keys on the error rather than the class, it was already correct
-  against the engine versions that predate the lock.
+  **Every wire surface now maps the lock timeout to a retryable error.** REST returns `503` with a `Retry-After` header (via a new `VaultBusyError`); MCP returns an `isError` tool result whose `structuredContent` carries `code: "VAULT_BUSY"` — never a generic 500. Detection matches the error by `name`/`code` rather than `instanceof`, so it survives the package boundary — and, because it keys on the error rather than the class, it was already correct against the engine versions that predate the lock.
 
-  **`POST /nests/:nestId/publish` no longer writes documents by hand.** It was the
-  last pre-catalog write path — hand-built frontmatter, its own slugify, direct
-  `writeDocument` — invisible to any engine-side locking. It now routes each
-  document through the same `createNode` path as every other create surface.
-  One behavior change: a document whose title slugs to an **existing id is skipped
-  and reported** in a new additive `skipped` response field, instead of silently
-  overwriting the existing document and restarting its version history.
+  **`POST /nests/:nestId/publish` no longer writes documents by hand.** It was the last pre-catalog write path — hand-built frontmatter, its own slugify, direct `writeDocument` — invisible to any engine-side locking. It now routes each document through the same `createNode` path as every other create surface. One behavior change: a document whose title slugs to an **existing id is skipped and reported** in a new additive `skipped` response field, instead of silently overwriting the existing document and restarting its version history.
 
-  Going through `createNode` also means a single document can now be refused on its
-  own merits — an unusable title, a type the engine does not know. The batch is not
-  a transaction, so a row that fails is reported in a new additive `failed` field
-  and the remaining documents still publish, rather than aborting the batch and
-  leaving the earlier writes on disk with nothing in the response naming them. The
-  one error that still stops the batch is the lock timeout itself: it answers `503`,
-  and retrying is safe because everything the first attempt created comes back under
-  `skipped`.
+  Going through `createNode` also means a single document can now be refused on its own merits — an unusable title, a type the engine does not know. The batch is not a transaction, so a row that fails is reported in a new additive `failed` field and the remaining documents still publish, rather than aborting the batch and leaving the earlier writes on disk with nothing in the response naming them. The one error that still stops the batch is the lock timeout itself: it answers `503`, and retrying is safe because everything the first attempt created comes back under `skipped`.
 
-  One gap stays open on purpose: the `context_md` half of that same endpoint has
-  no operation in the catalog to route through, so it remains a direct write and
-  will not be covered by the lock. It cannot answer a retryable `503` either —
-  there is no timeout to map. Closing that needs an engine-side op for
-  `CONTEXT.md`, which is Phase B work.
+  One gap stays open on purpose: the `context_md` half of that same endpoint has no operation in the catalog to route through, so it remains a direct write and will not be covered by the lock. It cannot answer a retryable `503` either — there is no timeout to map. Closing that needs an engine-side op for `CONTEXT.md`, which is Phase B work.
 
-  Also removed the dead `safePublishDocument` wrapper, and added the
-  concurrent-writes regression for the MCP surface (the REST surface already had
-  one): a burst of concurrent `context_update` calls must land as a contiguous,
-  duplicate-free, fully reconstructable version history with nothing staged by a
-  drift scan.
+  Also removed the dead `safePublishDocument` wrapper, and added the concurrent-writes regression for the MCP surface (the REST surface already had one): a burst of concurrent `context_update` calls must land as a contiguous, duplicate-free, fully reconstructable version history with nothing staged by a drift scan.
 
 ## 1.18.0
 
@@ -1084,94 +1158,52 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - Connect gives you a working setup, not a wall of client tabs.
 
-  Connecting an agent meant picking among five client tabs, copying a JSON block,
-  and guessing which fields your key went in. The new flow leads with a one-shot
-  setup prompt you paste into the assistant itself, plus a downloadable `.env`,
-  and pushes the per-client configs and the export/portability/nest-id details
-  behind an advanced toggle (`ui/src/components/ConnectModal.tsx`,
-  `ui/src/lib/connect.ts`).
+  Connecting an agent meant picking among five client tabs, copying a JSON block, and guessing which fields your key went in. The new flow leads with a one-shot setup prompt you paste into the assistant itself, plus a downloadable `.env`, and pushes the per-client configs and the export/portability/nest-id details behind an advanced toggle (`ui/src/components/ConnectModal.tsx`, `ui/src/lib/connect.ts`).
 
-  The prompts are aware of the server they were generated from: open-mode
-  instances don't advertise a key, the described write scope matches what the
-  credential actually permits, and the CLI snippet uses the flag the current `ctx`
-  release takes. An all-nests landing surface (`ui/src/components/AllNestsBar.tsx`)
-  carries the same quick-start inline, so the first connection doesn't require
-  opening a nest first.
+  The prompts are aware of the server they were generated from: open-mode instances don't advertise a key, the described write scope matches what the credential actually permits, and the CLI snippet uses the flag the current `ctx` release takes. An all-nests landing surface (`ui/src/components/AllNestsBar.tsx`) carries the same quick-start inline, so the first connection doesn't require opening a nest first.
 
 - Finding and moving documents without leaving the page you're on.
 
-  - **The nest grid filters, sorts, and pages** (`ui/src/components/Dashboard.tsx`).
-    Past a couple of dozen nests the dashboard was a scroll, and a truncated name
-    told you nothing — the full name and description now surface on hover.
-  - **Move a document to another folder from inside it**
-    (`ui/src/components/DocumentEditor.tsx`), and the Move dialog can create the
-    destination folder it needs instead of sending you off to make it first. Folder
-    paths are validated and previewed before creation.
-  - **Folder trees show levels that hold only folders** — a branch whose documents
-    all live one level down used to render as empty.
-  - **The board can add folder columns** (`ui/src/components/MaturityBoard.tsx`),
-    and run details open beside the selected run rather than at the bottom of the
-    list.
+  - **The nest grid filters, sorts, and pages** (`ui/src/components/Dashboard.tsx`). Past a couple of dozen nests the dashboard was a scroll, and a truncated name told you nothing — the full name and description now surface on hover.
+  - **Move a document to another folder from inside it** (`ui/src/components/DocumentEditor.tsx`), and the Move dialog can create the destination folder it needs instead of sending you off to make it first. Folder paths are validated and previewed before creation.
+  - **Folder trees show levels that hold only folders** — a branch whose documents all live one level down used to render as empty.
+  - **The board can add folder columns** (`ui/src/components/MaturityBoard.tsx`), and run details open beside the selected run rather than at the bottom of the list.
 
 - Large nests open from a DB node index instead of a vault walk.
 
-  Opening a nest used to read every document off disk to answer questions the
-  listing only needed metadata for — title, folder, tags, status. On a nest with a
-  few thousand documents that meant a full crawl per request, and the page either
-  crawled or timed out.
+  Opening a nest used to read every document off disk to answer questions the listing only needed metadata for — title, folder, tags, status. On a nest with a few thousand documents that meant a full crawl per request, and the page either crawled or timed out.
 
-  Now each nest keeps a `node_index` table (`src/nodes/node-index.ts`) holding one
-  row per document, kept current on write, move, and delete, with
-  `nests.index_synced_at` recording the last full sync. Listings, folder trees, and
-  cross-nest search read the index; the vault is only touched when a caller
-  actually wants a body. Folder deletes clean their index rows, moves regenerate
-  them, and the drift scanner no longer marks every nest stale on a cold start.
+  Now each nest keeps a `node_index` table (`src/nodes/node-index.ts`) holding one row per document, kept current on write, move, and delete, with `nests.index_synced_at` recording the last full sync. Listings, folder trees, and cross-nest search read the index; the vault is only touched when a caller actually wants a body. Folder deletes clean their index rows, moves regenerate them, and the drift scanner no longer marks every nest stale on a cold start.
 
-  The Postgres schema gets `nests.index_synced_at` through an explicit `ALTER`
-  rather than a table rebuild, so an existing deployment migrates in place.
+  The Postgres schema gets `nests.index_synced_at` through an explicit `ALTER` rather than a table rebuild, so an existing deployment migrates in place.
 
-- Several API keys per account, so a client can be rotated without cutting off the
-  rest.
+- Several API keys per account, so a client can be rotated without cutting off the rest.
 
-  One key per account meant one credential shared by every editor, agent, and CI
-  job — and rotating it because a laptop went missing revoked all of them at once.
+  One key per account meant one credential shared by every editor, agent, and CI job — and rotating it because a laptop went missing revoked all of them at once.
 
-  An account can now hold multiple named keys (`src/auth/keys.ts`,
-  `ui/src/components/ApiKeysPage.tsx`). Each name must be unique within the account
-  so a key is identifiable after the secret is hidden, and rotate is a true
-  replacement: it issues the new secret and retires the old one in a single
-  transaction, so two concurrent rotations can't leave the account with two live
-  keys or none.
+  An account can now hold multiple named keys (`src/auth/keys.ts`, `ui/src/components/ApiKeysPage.tsx`). Each name must be unique within the account so a key is identifiable after the secret is hidden, and rotate is a true replacement: it issues the new secret and retires the old one in a single transaction, so two concurrent rotations can't leave the account with two live keys or none.
 
 ### Patch Changes
 
-- v1.18.0 — nests that open at size, one credential per client, and a long sweep
-  through the editor and review surfaces.
+- v1.18.0 — nests that open at size, one credential per client, and a long sweep through the editor and review surfaces.
 
   ### Governance and review
 
-  - The review modal shows the document body again, and Approve/Reject are back for
-    reviewers who have the authority to use them.
-  - A reviewer's rejection reason appears in version history, and rejected external
-    edits are recorded there instead of vanishing.
+  - The review modal shows the document body again, and Approve/Reject are back for reviewers who have the authority to use them.
+  - A reviewer's rejection reason appears in version history, and rejected external edits are recorded there instead of vanishing.
   - Compare diffs against the selected version's real body, not a stale copy.
-  - Sharing refuses a grant to someone who already reaches the target by another
-    path, and says so when a document is already shared with that person.
-  - Steward pickers for documents and tags are searchable, scroll inside their
-    dialog, and stay pinned to the field width.
-  - Invite and connector emails use the user-facing role names rather than raw
-    permission strings.
+  - Sharing refuses a grant to someone who already reaches the target by another path, and says so when a document is already shared with that person.
+  - Steward pickers for documents and tags are searchable, scroll inside their dialog, and stay pinned to the field width.
+  - Invite and connector emails use the user-facing role names rather than raw permission strings.
 
   ### Editor
 
-  - Unsaved state is visible, and a save that would do nothing is no longer
-    offered.
+  - Unsaved state is visible, and a save that would do nothing is no longer offered.
   - Document tags have a length and character policy.
   - A missing document renders a not-found state instead of a blank editable page.
   - International document titles are supported.
   - Table and artifact drafts get live previews, with the tool source highlighted.
-  - Toasts and dialogs stay inside the window, and the viewport clamp no longer
-    stretches every dialog to full width.
+  - Toasts and dialogs stay inside the window, and the viewport clamp no longer stretches every dialog to full width.
 
   ### Workflows and definitions
 
@@ -1191,29 +1223,13 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - f2a1a78: Deletion requests are editor-only — viewers no longer see the action at all.
 
-  Flagging something for deletion used to be read-tier, on the reasoning that
-  whoever notices dead content usually can't delete it. In practice that handed
-  the action to everyone who could merely _see_ a document — read-only
-  collaborators, viewer stewards, and now anyone holding a read share grant — and
-  produced requests from people with no stake in the content. Someone who cannot
-  change a document has no standing to propose destroying it.
+  Flagging something for deletion used to be read-tier, on the reasoning that whoever notices dead content usually can't delete it. In practice that handed the action to everyone who could merely _see_ a document — read-only collaborators, viewer stewards, and now anyone holding a read share grant — and produced requests from people with no stake in the content. Someone who cannot change a document has no standing to propose destroying it.
 
-  Now: `POST /nests/:id/nodes/:nodeId/request-deletion` and
-  `POST /nests/:id/request-deletion` require **editor** authority, meaning any of
-  the three paths that already let someone change the target — nest-wide `write`,
-  an editor steward row covering it, or a `write` share grant on it. A folder or
-  nest flag additionally wants a **nest**-scope steward row: a row scoped to one
-  document is no mandate over everything around it. Below that the answer is
-  `403`, after the existing read check, so the gate never doubles as an existence
-  oracle. Deleting outright is unchanged (owner/admin, or the document's author).
+  Now: `POST /nests/:id/nodes/:nodeId/request-deletion` and `POST /nests/:id/request-deletion` require **editor** authority, meaning any of the three paths that already let someone change the target — nest-wide `write`, an editor steward row covering it, or a `write` share grant on it. A folder or nest flag additionally wants a **nest**-scope steward row: a row scoped to one document is no mandate over everything around it. Below that the answer is `403`, after the existing read check, so the gate never doubles as an existence oracle. Deleting outright is unchanged (owner/admin, or the document's author).
 
-  The rule lives in one predicate (`canRequestDeletion`) shared by the REST routes
-  and the `context_request_deletion` MCP tool, so the agent surface can't become
-  the way around it.
+  The rule lives in one predicate (`canRequestDeletion`) shared by the REST routes and the `context_request_deletion` MCP tool, so the agent surface can't become the way around it.
 
-  In the UI the action is withheld rather than offered and refused: no Delete
-  entry on a document's ⋯ menu or list row for a viewer, no request affordance on
-  a folder row, and no nest-level Delete for viewers or reviewer-only stewards.
+  In the UI the action is withheld rather than offered and refused: no Delete entry on a document's ⋯ menu or list row for a viewer, no request affordance on a folder row, and no nest-level Delete for viewers or reviewer-only stewards.
 
 - v1.17.0 — narrower sharing, a review queue that reads the same everywhere, and an editor that stops inventing versions.
 
@@ -1249,91 +1265,33 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - 45e11a6: Share a single document or folder from the UI — the human half of the grants model.
 
-  Grants (share one document, or everything under one folder, with one person)
-  already existed on the server and in MCP as `context_grant`, but the only way to
-  use them was an API call. Sharing something narrower than a whole nest meant
-  either handing over nest-wide collaborator access or writing a request by hand —
-  the wrong thing was the easy thing.
+  Grants (share one document, or everything under one folder, with one person) already existed on the server and in MCP as `context_grant`, but the only way to use them was an API call. Sharing something narrower than a whole nest meant either handing over nest-wide collaborator access or writing a request by hand — the wrong thing was the easy thing.
 
   Added:
 
-  - **Share this document** on a saved document's ⋯ menu, and a share icon on
-    every folder row in the nest view. Both open one dialog: add someone by
-    email, see who the target is already shared with, and revoke. Owner/admin
-    only, matching the `/nests/:id/grants` routes. Sharing from the UI is
-    **view-only** and has no role picker — the API and `context_grant` still
-    accept `write`, and a grant made that way is labelled as editable in the
-    roster, but nobody hands out edit rights by leaving a dropdown where it was.
-  - **The recipient can now find it.** A grantee holds no nest-wide permission,
-    so the nest was absent from their dashboard — being shared a document only
-    worked if someone also sent the direct link. The nest is now listed for them
-    as a viewer (`permission: "read"`, `roles: ["viewer"]`, `grant_only: true`),
-    with the card scoped to their slice: `document_count` counts only the
-    documents their grants cover, and the collaborator/steward roster comes back
-    empty, so a one-document share never reveals the nest's size or its people.
-    Grant-only nests stay out of the work inbox and `/stats` — those are
-    governance surfaces over documents the grantee cannot read.
-  - **Fixed: "Nest not found" when opening a shared nest.** Following the link
-    failed even with a valid grant — the middleware admitted the caller, then
-    `GET /nests/:id` rejected them for holding no nest-wide permission, and the
-    nest page's review-queue read surfaced the same 404 as an error toast. The
-    grant check now lives in the one permission helper every nest route shares,
-    so the nest resolves once for all of them instead of being patched per
-    handler, and the page skips the governance reads a grantee was never allowed
-    to make (seven wasted 404 round-trips per load). Authority is unchanged:
-    rename, delete, import and settings-write still demand `owner`/`admin`, the
-    governance paths still refuse a grantee, and `resolveNestPermission` — what
-    the per-node grant checks key off — still answers `none`.
-  - `/llms.txt` now names `context_grant` and its arguments, so an agent reading
-    the public manual can find the one-call path instead of inferring it.
-  - `API.md` documents `GET/POST/DELETE /nests/:nestId/grants` — resolution rules,
-    the bare-`nodes`-root rejection, and how grants behave on move/delete/export.
+  - **Share this document** on a saved document's ⋯ menu, and a share icon on every folder row in the nest view. Both open one dialog: add someone by email, see who the target is already shared with, and revoke. Owner/admin only, matching the `/nests/:id/grants` routes. Sharing from the UI is **view-only** and has no role picker — the API and `context_grant` still accept `write`, and a grant made that way is labelled as editable in the roster, but nobody hands out edit rights by leaving a dropdown where it was.
+  - **The recipient can now find it.** A grantee holds no nest-wide permission, so the nest was absent from their dashboard — being shared a document only worked if someone also sent the direct link. The nest is now listed for them as a viewer (`permission: "read"`, `roles: ["viewer"]`, `grant_only: true`), with the card scoped to their slice: `document_count` counts only the documents their grants cover, and the collaborator/steward roster comes back empty, so a one-document share never reveals the nest's size or its people. Grant-only nests stay out of the work inbox and `/stats` — those are governance surfaces over documents the grantee cannot read.
+  - **Fixed: "Nest not found" when opening a shared nest.** Following the link failed even with a valid grant — the middleware admitted the caller, then `GET /nests/:id` rejected them for holding no nest-wide permission, and the nest page's review-queue read surfaced the same 404 as an error toast. The grant check now lives in the one permission helper every nest route shares, so the nest resolves once for all of them instead of being patched per handler, and the page skips the governance reads a grantee was never allowed to make (seven wasted 404 round-trips per load). Authority is unchanged: rename, delete, import and settings-write still demand `owner`/`admin`, the governance paths still refuse a grantee, and `resolveNestPermission` — what the per-node grant checks key off — still answers `none`.
+  - `/llms.txt` now names `context_grant` and its arguments, so an agent reading the public manual can find the one-call path instead of inferring it.
+  - `API.md` documents `GET/POST/DELETE /nests/:nestId/grants` — resolution rules, the bare-`nodes`-root rejection, and how grants behave on move/delete/export.
 
-  Access is not stewardship: a grant lets someone reach exactly the granted
-  document (or folder subtree) and nothing else in the nest, and confers no
-  approval rights. Nothing was loosened — `resolveNestPermission` still returns
-  `none` for a grantee, and every read past the card runs through the same grant
-  checks as before.
+  Access is not stewardship: a grant lets someone reach exactly the granted document (or folder subtree) and nothing else in the nest, and confers no approval rights. Nothing was loosened — `resolveNestPermission` still returns `none` for a grantee, and every read past the card runs through the same grant checks as before.
 
 ### Patch Changes
 
 - a0eaebc: Hide the definitions editor from viewers instead of refusing them after the click.
 
-  The Definitions page rendered the full "Define term" form, plus per-row edit and
-  delete buttons, to everyone who could open the nest — including read-only
-  collaborators, public readers, and share grantees. Writes were already refused
-  server-side (`POST`/`DELETE /nests/:id/definitions` are write-tier), so a viewer
-  could fill in a term and a definition, press the button, and get a toast telling
-  them it wasn't theirs to do. The page even documented that as the design.
+  The Definitions page rendered the full "Define term" form, plus per-row edit and delete buttons, to everyone who could open the nest — including read-only collaborators, public readers, and share grantees. Writes were already refused server-side (`POST`/`DELETE /nests/:id/definitions` are write-tier), so a viewer could fill in a term and a definition, press the button, and get a toast telling them it wasn't theirs to do. The page even documented that as the design.
 
-  Viewers now get the glossary read-only: no form, no row actions, and an empty
-  state that doesn't invite them to write one. The gate is derived from
-  `deriveNestCaps` on the nest read every other nest screen already makes, and is
-  deliberately `canManage || collabCanWrite` rather than the looser `canEditDocs` —
-  the steward-editor bypass in the middleware covers `/nodes` routes only, so a
-  nest-scope editor steward without a write collaborator row is refused here by
-  the server too, and the UI now says so up front.
+  Viewers now get the glossary read-only: no form, no row actions, and an empty state that doesn't invite them to write one. The gate is derived from `deriveNestCaps` on the nest read every other nest screen already makes, and is deliberately `canManage || collabCanWrite` rather than the looser `canEditDocs` — the steward-editor bypass in the middleware covers `/nodes` routes only, so a nest-scope editor steward without a write collaborator row is refused here by the server too, and the UI now says so up front.
 
-  No server change: the existing read-tier denial is unchanged and still covered
-  by `test/definitions.test.ts`.
+  No server change: the existing read-tier denial is unchanged and still covered by `test/definitions.test.ts`.
 
 - 4be85f9: Resolve nest permissions in one query instead of six.
 
-  Every node read, every MCP tool call and every dashboard card resolves the
-  caller's permission, and `resolveNestPermission` did it a query at a time: the
-  nest row, the caller's email, the collaborator row, the steward row, the shared
-  teams, then one query **per team**. `isPublicReader` then asked the same
-  questions over again for its own answer. Three of those round trips were the
-  identical `SELECT email FROM users` — the license-admin check ran its own copy.
+  Every node read, every MCP tool call and every dashboard card resolves the caller's permission, and `resolveNestPermission` did it a query at a time: the nest row, the caller's email, the collaborator row, the steward row, the shared teams, then one query **per team**. `isPublicReader` then asked the same questions over again for its own answer. Three of those round trips were the identical `SELECT email FROM users` — the license-admin check ran its own copy.
 
-  Both now derive from `resolveNestAccess`, a single statement that left-joins the
-  caller, their collaborator row, and existence probes for a steward row and a
-  share grant onto the nest row. With the caller's email in hand, both admin
-  checks (`isLicenseAdminEmail`, `isSuperAdmin`) are pure functions over it and
-  cost nothing. Team membership can't be joined — it lives as JSON in
-  `teams.members` — but `shared_teams` rides along on the same row, and the
-  per-team loop became one `IN (…)` query, consulted only when the answer isn't
-  already settled at admin/owner.
+  Both now derive from `resolveNestAccess`, a single statement that left-joins the caller, their collaborator row, and existence probes for a steward row and a share grant onto the nest row. With the caller's email in hand, both admin checks (`isLicenseAdminEmail`, `isSuperAdmin`) are pure functions over it and cost nothing. Team membership can't be joined — it lives as JSON in `teams.members` — but `shared_teams` rides along on the same row, and the per-team loop became one `IN (…)` query, consulted only when the answer isn't already settled at admin/owner.
 
   Measured, collaborator on a private nest and steward on a public one:
 
@@ -1343,43 +1301,22 @@ true`; the UI asks first, in the same words the server answers with — the nest
   | `resolveNestPermission` (steward, public nest) | 6      | 1     |
   | `isPublicReader` (steward, public nest)        | 5      | 1     |
 
-  The middleware and the nest routes now read `hasGrant` off that same row rather
-  than issuing their own lookup, so `hasAnyGrant` is gone; `effectiveAccess`
-  returns the facts alongside the permission so the nest list and single-nest
-  handlers stop re-resolving to answer "is this caller grant-only?".
+  The middleware and the nest routes now read `hasGrant` off that same row rather than issuing their own lookup, so `hasAnyGrant` is gone; `effectiveAccess` returns the facts alongside the permission so the nest list and single-nest handlers stop re-resolving to answer "is this caller grant-only?".
 
-  No policy change: resolution order, the highest-wins merge across
-  collaborator/team/steward/public sources, the anon-commons rule and the `admin`
-  short-circuit all behave exactly as before, and `resolveNestPermission` /
-  `isPublicReader` keep their signatures for their ~40 call sites. A new
-  `test/nest-access-resolution.test.ts` pins the merge per caller shape — owner,
-  collaborator, steward, grantee, stranger, public reader, missing nest — and
-  asserts both wrappers still agree with the fetch they now share.
+  No policy change: resolution order, the highest-wins merge across collaborator/team/steward/public sources, the anon-commons rule and the `admin` short-circuit all behave exactly as before, and `resolveNestPermission` / `isPublicReader` keep their signatures for their ~40 call sites. A new `test/nest-access-resolution.test.ts` pins the merge per caller shape — owner, collaborator, steward, grantee, stranger, public reader, missing nest — and asserts both wrappers still agree with the fetch they now share.
 
 - 5d5de0d: Remove the duplicated CLI/plugin surface — it now lives in the ContextNest repo.
 
-  The `ctx` CLI and the agent plugins are consolidating upstream in
-  [PromptOwl/ContextNest](https://github.com/PromptOwl/ContextNest) (`packages/cli`,
-  `plugins/`, `.claude-plugin/`). The community server carried its own copy of that
-  contract — install commands, a `ctx push` snippet, and a CLI section in the public
-  agent manual — which is exactly the drift the Engine & CLI Sync Discipline in
-  `CLAUDE.md` exists to prevent. Every published `ctx` invocation was a second place
-  the CLI's flags and command surface had to stay correct.
+  The `ctx` CLI and the agent plugins are consolidating upstream in [PromptOwl/ContextNest](https://github.com/PromptOwl/ContextNest) (`packages/cli`, `plugins/`, `.claude-plugin/`). The community server carried its own copy of that contract — install commands, a `ctx push` snippet, and a CLI section in the public agent manual — which is exactly the drift the Engine & CLI Sync Discipline in `CLAUDE.md` exists to prevent. Every published `ctx` invocation was a second place the CLI's flags and command surface had to stay correct.
 
   Removed:
 
-  - The **CLI** tab in the nest Connect dialog (the `ctx push --server … --nest …`
-    snippet and the `npm i -g @promptowl/contextnest-cli` install line).
+  - The **CLI** tab in the nest Connect dialog (the `ctx push --server … --nest …` snippet and the `npm i -g @promptowl/contextnest-cli` install line).
   - The **CLI** client hint on the dashboard.
-  - The `CLI (ctx)` row in the Guide's surfaces table, which pointed at the
-    now-removed Connect tab.
-  - The `## ctx CLI` section and the CLI package entry in the `/llms.txt` agent
-    manual, plus the CLI scaffolding block in `README.md`.
+  - The `CLI (ctx)` row in the Guide's surfaces table, which pointed at the now-removed Connect tab.
+  - The `## ctx CLI` section and the CLI package entry in the `/llms.txt` agent manual, plus the CLI scaffolding block in `README.md`.
 
-  No server behavior changes. MCP and the REST API — the community server's own
-  surface — are untouched, and remain the documented way for an agent to read and
-  write a nest remotely. Anyone wanting the CLI installs it from upstream, where
-  its documentation is now the single source of truth.
+  No server behavior changes. MCP and the REST API — the community server's own surface — are untouched, and remain the documented way for an agent to read and write a nest remotely. Anyone wanting the CLI installs it from upstream, where its documentation is now the single source of truth.
 
 ## 1.16.1
 
@@ -1397,57 +1334,22 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - 10fc217: Hand folder import to the engine, and upload it in batches instead of a stream.
 
-  Importing a folder failed with a bare "Import failed" and no reason, and spent a
-  long time apparently doing nothing before it started. Three separate causes.
+  Importing a folder failed with a bare "Import failed" and no reason, and spent a long time apparently doing nothing before it started. Three separate causes.
 
-  **The failures had nowhere to surface.** Import streamed NDJSON progress over
-  `POST /nests/import?stream=1`, which commits HTTP 200 _before_ any of the work
-  runs. Every real failure therefore arrived as a successful response carrying an
-  error line the client often never reached, and a buffering proxy would swallow
-  the progress lines the stream existed to deliver in the first place. The
-  streaming endpoint is gone. The upload now goes up in ~4MB chunks as ordinary
-  JSON requests, each with a real status code and a real message — which also
-  keeps a large folder under the request-size limits a single body was hitting.
-  `registerImportedDocuments` used to `return 0` when the vault scan failed, which
-  reported a broken vault as a successful import of an empty folder; it now
-  throws.
+  **The failures had nowhere to surface.** Import streamed NDJSON progress over `POST /nests/import?stream=1`, which commits HTTP 200 _before_ any of the work runs. Every real failure therefore arrived as a successful response carrying an error line the client often never reached, and a buffering proxy would swallow the progress lines the stream existed to deliver in the first place. The streaming endpoint is gone. The upload now goes up in ~4MB chunks as ordinary JSON requests, each with a real status code and a real message — which also keeps a large folder under the request-size limits a single body was hitting. `registerImportedDocuments` used to `return 0` when the vault scan failed, which reported a broken vault as a successful import of an empty folder; it now throws.
 
-  **The server did the engine's job, twice.** Import scanned the vault itself, then
-  rewrote every document to stamp the importing user as `author`, and only then
-  asked the engine to publish — which rewrites each document again. On a
-  Cloud Storage mount that is two extra network round trips per document before
-  publishing has even started. The engine's `context_import` now owns the whole
-  flow: the community server writes nothing to the vault, it hands files to the
-  engine (`files[]`), stages each chunk without publishing, and makes one
-  `discover` call at the end that scans, stamps, publishes under a single
-  checkpoint and returns the per-document detail needed for governance rows.
+  **The server did the engine's job, twice.** Import scanned the vault itself, then rewrote every document to stamp the importing user as `author`, and only then asked the engine to publish — which rewrites each document again. On a Cloud Storage mount that is two extra network round trips per document before publishing has even started. The engine's `context_import` now owns the whole flow: the community server writes nothing to the vault, it hands files to the engine (`files[]`), stages each chunk without publishing, and makes one `discover` call at the end that scans, stamps, publishes under a single checkpoint and returns the per-document detail needed for governance rows.
 
-  **The browser read files one at a time.** Scanning a picked folder awaited each
-  `file.text()` in sequence, which is the delay users saw _before_ an import
-  appeared to begin. Reads are now batched, and sibling directories are walked in
-  parallel.
+  **The browser read files one at a time.** Scanning a picked folder awaited each `file.text()` in sequence, which is the delay users saw _before_ an import appeared to begin. Reads are now batched, and sibling directories are walked in parallel.
 
-  **Importing a folder no longer publishes documents that never asked to be
-  published.** Previously a file with no `status:` in its frontmatter — an
-  ordinary hand-authored note — was published on import and became AI-visible.
-  Now only files that explicitly say `published` or `approved` are published;
-  everything else is imported as a draft and waits for a human to approve it,
-  with `status: draft` written down rather than left implied. Importing a plain
-  Obsidian vault therefore yields drafts, not a published nest. Nests exported
-  from ContextNest are unaffected: their documents carry an explicit status, so a
-  round-trip still comes back published.
+  **Importing a folder no longer publishes documents that never asked to be published.** Previously a file with no `status:` in its frontmatter — an ordinary hand-authored note — was published on import and became AI-visible. Now only files that explicitly say `published` or `approved` are published; everything else is imported as a draft and waits for a human to approve it, with `status: draft` written down rather than left implied. Importing a plain Obsidian vault therefore yields drafts, not a published nest. Nests exported from ContextNest are unaffected: their documents carry an explicit status, so a round-trip still comes back published.
 
   Two further behaviours worth calling out:
 
-  - An imported vault's `.versions/` history is preserved. A document whose
-    version chain will not reconstruct now registers as a draft with its history
-    intact, instead of having that history deleted so it could be republished from
-    a fresh keyframe.
-  - A failed upload deletes the half-filled nest rather than leaving it on the
-    dashboard with silently missing documents.
+  - An imported vault's `.versions/` history is preserved. A document whose version chain will not reconstruct now registers as a draft with its history intact, instead of having that history deleted so it could be republished from a fresh keyframe.
+  - A failed upload deletes the half-filled nest rather than leaving it on the dashboard with silently missing documents.
 
-  Requires `@promptowl/contextnest-engine` 2.1.0 for the `files[]` / `publish` /
-  `discover` inputs on `context_import`.
+  Requires `@promptowl/contextnest-engine` 2.1.0 for the `files[]` / `publish` / `discover` inputs on `context_import`.
 
 - Converge the MCP and REST surfaces on the engine's operation catalog, cache the UI's reads, and make the board and dashboard usable at scale.
 
@@ -1500,65 +1402,26 @@ true`; the UI asks first, in the same words the server answers with — the nest
 
 - 1857c24: Record the verdict when an external edit is approved or rejected.
 
-  Rejecting a direct filesystem edit left no trace. The document's history showed
-  the approval of such an edit — the engine commits a version for it, and the
-  server mirrors that into `node_versions`, which is what the history panel reads —
-  but a rejection commits nothing, so the reviewer, the time and the reason were
-  unrecoverable from the audit trail.
+  Rejecting a direct filesystem edit left no trace. The document's history showed the approval of such an edit — the engine commits a version for it, and the server mirrors that into `node_versions`, which is what the history panel reads — but a rejection commits nothing, so the reviewer, the time and the reason were unrecoverable from the audit trail.
 
-  The record already existed and was being discarded. `approveSuggestion` and
-  `rejectSuggestion` each build a chain event carrying the acting reviewer, a
-  timestamp, and the rejection reason or approval comment, return it, and persist
-  nothing; this server read only the event id for its response. The verdict is now
-  appended to the engine's own append-only chain-event log, so it survives without
-  a new table, a migration, or a version number.
+  The record already existed and was being discarded. `approveSuggestion` and `rejectSuggestion` each build a chain event carrying the acting reviewer, a timestamp, and the rejection reason or approval comment, return it, and persist nothing; this server read only the event id for its response. The verdict is now appended to the engine's own append-only chain-event log, so it survives without a new table, a migration, or a version number.
 
-  A rejection still mints no version — it changes no content, and numbering one
-  would renumber the chain for an event that never touched the document.
+  A rejection still mints no version — it changes no content, and numbering one would renumber the chain for an event that never touched the document.
 
-  `GET /nests/:nestId/nodes/:nodeId/versions` gains `externalEditVerdicts`
-  alongside `versions`, and the version-history panel lists rejected external edits
-  above the versions. The approve and reject endpoints now return
-  `historyRecorded`, so a verdict that failed to reach the audit log is not
-  reported as a clean success.
+  `GET /nests/:nestId/nodes/:nodeId/versions` gains `externalEditVerdicts` alongside `versions`, and the version-history panel lists rejected external edits above the versions. The approve and reject endpoints now return `historyRecorded`, so a verdict that failed to reach the audit log is not reported as a clean success.
 
-  The rejected content itself is unchanged: the engine keeps it permanently under
-  `_archive/rejected/`. Surfacing that diff in the UI needs a read API the engine
-  does not expose yet.
+  The rejected content itself is unchanged: the engine keeps it permanently under `_archive/rejected/`. Surfacing that diff in the UI needs a read API the engine does not expose yet.
 
 ## 1.15.0
 
 ### Minor Changes
 
-- a6661ff: Native PromptOwl connection: accept the short-lived `scope: "mcp"` service
-  ticket on the per-nest `/nests/:id/mcp` transport (in addition to `/index`,
-  server-level `/mcp`, `POST /context`, and `GET /nodes`), so a PromptOwl block
-  granted read & write on one nest can reach that nest's write tools. Add two
-  server-level bootstrap writes — `nest_create` and `context_create` — to the
-  cross-nest `/mcp`, each gated by the same per-user write checks, suspend
-  kill-switch, and license gate the per-nest path enforces. The MCP ticket and
-  the one-click SSO login ticket are now mutually exclusive: `/auth/sso` refuses
-  an `mcp`-scoped ticket and the MCP middleware refuses a ticket carrying a
-  `jti`.
-- e675f73: Prime documents: a per-document and per-tag review gate, so a nest no longer
-  has to choose between reviewing everything and reviewing nothing. A **prime**
-  document always goes through draft → pending → approved — it is the one thing
-  `allow_self_approve` does not bypass, so even an owner's edit to the sales
-  playbook lands as a draft.
+- a6661ff: Native PromptOwl connection: accept the short-lived `scope: "mcp"` service ticket on the per-nest `/nests/:id/mcp` transport (in addition to `/index`, server-level `/mcp`, `POST /context`, and `GET /nodes`), so a PromptOwl block granted read & write on one nest can reach that nest's write tools. Add two server-level bootstrap writes — `nest_create` and `context_create` — to the cross-nest `/mcp`, each gated by the same per-user write checks, suspend kill-switch, and license gate the per-nest path enforces. The MCP ticket and the one-click SSO login ticket are now mutually exclusive: `/auth/sso` refuses an `mcp`-scoped ticket and the MCP middleware refuses a ticket carrying a `jti`.
+- e675f73: Prime documents: a per-document and per-tag review gate, so a nest no longer has to choose between reviewing everything and reviewing nothing. A **prime** document always goes through draft → pending → approved — it is the one thing `allow_self_approve` does not bypass, so even an owner's edit to the sales playbook lands as a draft.
 
-  Whether a document is prime resolves in the existing steward scope order,
-  **document → tag → nest**: a Prime switch in the document editor (owner/admin
-  only, where `false` exempts one doc from an otherwise-prime tag), then the
-  nest's configurable prime tags (`prime-document` by default), then not prime.
-  A new per-nest `prime_only_review` setting flips a governed nest's default to
-  self-publish so only prime documents queue for review; it is off by default, so
-  existing nests keep their current posture on upgrade. Prime documents carry a
-  badge in the nest's document list, and both settings are exposed on
-  `GET`/`PATCH /nests/:id/settings` alongside `prime` on node create/update.
+  Whether a document is prime resolves in the existing steward scope order, **document → tag → nest**: a Prime switch in the document editor (owner/admin only, where `false` exempts one doc from an otherwise-prime tag), then the nest's configurable prime tags (`prime-document` by default), then not prime. A new per-nest `prime_only_review` setting flips a governed nest's default to self-publish so only prime documents queue for review; it is off by default, so existing nests keep their current posture on upgrade. Prime documents carry a badge in the nest's document list, and both settings are exposed on `GET`/`PATCH /nests/:id/settings` alongside `prime` on node create/update.
 
-- Deletion requests as a first-class governance flow, a configurable maturity
-  board with a reworked nest workspace, and MCP delete/move tools backed by a
-  node-create path that no longer races itself.
+- Deletion requests as a first-class governance flow, a configurable maturity board with a reworked nest workspace, and MCP delete/move tools backed by a node-create path that no longer races itself.
 
   ### Deletion requests
 
@@ -1592,45 +1455,17 @@ true`; the UI asks first, in the same words the server answers with — the nest
   - Long board card titles wrap instead of overflowing their column (`ui/src/components/MaturityBoard.tsx`).
   - Entering a nest folder-scoped opens Documents rather than the last view (`ui/src/components/NestView.tsx`).
 
-- ba11aba: Per-version change logs instead of full-body copies. The version list
-  (`GET /nests/:id/nodes/:nodeId/versions`) now returns each version's stored
-  unified diff rather than reconstructing every body — opening the history panel
-  of a long-lived document no longer replays the whole chain once per row and
-  ships N full copies of the text. One body is fetched on demand from the new
-  `GET /nests/:id/nodes/:nodeId/versions/:version`, which answers `200` with
-  `content: null` when a version's chain can no longer be replayed, so one
-  unreadable row doesn't fail the panel.
+- ba11aba: Per-version change logs instead of full-body copies. The version list (`GET /nests/:id/nodes/:nodeId/versions`) now returns each version's stored unified diff rather than reconstructing every body — opening the history panel of a long-lived document no longer replays the whole chain once per row and ships N full copies of the text. One body is fetched on demand from the new `GET /nests/:id/nodes/:nodeId/versions/:version`, which answers `200` with `content: null` when a version's chain can no longer be replayed, so one unreadable row doesn't fail the panel.
 
-  Three fixes ride along. Draft saves now number through the engine's
-  `nextVersion()` instead of the SQLite row count, closing the case where a DB
-  lagging `history.yaml` grafted a second chain onto the first (duplicate
-  versions, overwritten keyframes, "(no content)" from the graft point on) — a
-  gated one-shot startup pass re-anchors documents already in that state and
-  moves inline patches out into standalone `v{N}.diff` files. A duplicate
-  `/versions` handler that shadowed the governance route is removed, so
-  `resolvedBy` reaches the UI. And the diff viewer's line numbers no longer skip
-  two, having learned to read the engine's `Index:` / `===` preamble as a header.
+  Three fixes ride along. Draft saves now number through the engine's `nextVersion()` instead of the SQLite row count, closing the case where a DB lagging `history.yaml` grafted a second chain onto the first (duplicate versions, overwritten keyframes, "(no content)" from the graft point on) — a gated one-shot startup pass re-anchors documents already in that state and moves inline patches out into standalone `v{N}.diff` files. A duplicate `/versions` handler that shadowed the governance route is removed, so `resolvedBy` reaches the UI. And the diff viewer's line numbers no longer skip two, having learned to read the engine's `Index:` / `===` preamble as a header.
 
-  Both version endpoints now take the same node-level read check as the document
-  itself (`403` when the caller can't read the node). The list handler never had
-  it, so on a public nest an anonymous reader could pull the change logs — and,
-  through the new per-version endpoint, the reconstructed body — of a document
-  that never cleared review, bypassing the approved-only rule public reads are
-  otherwise held to.
+  Both version endpoints now take the same node-level read check as the document itself (`403` when the caller can't read the node). The list handler never had it, so on a public nest an anonymous reader could pull the change logs — and, through the new per-version endpoint, the reconstructed body — of a document that never cleared review, bypassing the approved-only rule public reads are otherwise held to.
 
   Requires `@promptowl/contextnest-engine` 1.3.0.
 
 ### Patch Changes
 
-- 9447efe: Moving a document that isn't published no longer fails. A document stored with
-  an empty tag list reads back with an undefined `tags` value, which the YAML
-  serializer refuses to write — so every draft and pending-review move errored out
-  while published documents (already cleaned by the publish path) moved fine. The
-  same clean now runs on every write of a document that came from storage, which
-  also covers the two import paths that reset a broken version chain or persist
-  import metadata. The Documents list stops hiding "Move to folder" on a document
-  awaiting review: owners, admins, and reviewers assigned to it are the callers the
-  server already lets move one, and they now see the action.
+- 9447efe: Moving a document that isn't published no longer fails. A document stored with an empty tag list reads back with an undefined `tags` value, which the YAML serializer refuses to write — so every draft and pending-review move errored out while published documents (already cleaned by the publish path) moved fine. The same clean now runs on every write of a document that came from storage, which also covers the two import paths that reset a broken version chain or persist import metadata. The Documents list stops hiding "Move to folder" on a document awaiting review: owners, admins, and reviewers assigned to it are the callers the server already lets move one, and they now see the action.
 
 ## 1.14.0
 

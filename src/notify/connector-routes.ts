@@ -19,6 +19,10 @@ export const KNOWN_EVENTS = [
   "review_rejected",
   "run_failed",
   "mention",
+  "review_escalated",
+  // A metacognition agent's notify (CU-wdqcq05rkq). Per-nest rows only: the
+  // server-wide Slack/Teams webhooks never carry it.
+  "agent_notify",
 ] as const;
 
 const CHANNELS = ["slack", "teams", "webhook"] as const;

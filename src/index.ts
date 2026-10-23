@@ -1,5 +1,8 @@
 #!/usr/bin/env node
+// First: snapshot the env Node's networking reads at start, before config.ts loads .env.
+import "./shared/boot-env.js";
 import { serve } from "@hono/node-server";
+import { lowercaseHostServer } from "./shared/http-server.js";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { initDb } from "./db/client.js";
@@ -13,6 +16,7 @@ import {
   validateLicense,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
+import { moveStoredAnthropicKey } from "./shared/model-credential.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import {
   loadAccessConfig,
@@ -21,9 +25,19 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startRunRetention } from "./workflow/run-retention.js";
+import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
+import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
+import { bannerHeading } from "./shared/startup-banner.js";
+import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
+import { parseTrustedProxies } from "./shared/trusted-proxies.js";
+import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 
 async function main() {
+  // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
+  parseTrustedProxies(config.TRUSTED_PROXIES);
+
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
   const db = await initDb();
@@ -92,14 +106,19 @@ async function main() {
     console.error("[sso] failed to load community sites:", err);
   }
 
-  // Validate PromptOwl license key (non-blocking — server runs either way)
-  const license = await validateLicense();
+  // Validate PromptOwl license key (non-blocking — server runs either way).
+  // Ask PromptOwl at boot rather than trusting the 24h cache, so a restart
+  // can't hide a suspension; unreachable falls back to the cache as before.
+  const license = await validateLicense({ forceFresh: true });
+
+  await moveStoredAnthropicKey();
 
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  Server boots in SETUP MODE — writes return 503 and admin features
-  (stewards, teammates, governance) are locked until a key is installed.
+  Free tier: writes, governance and teammate management stay open while
+  the server has ${FREE_TIER_MAX_USERS} or fewer users (viewers are free and never count).
+  Past that, writes return 503 until a key is installed.
 
   To activate:
     1. Sign up at https://app.promptowl.ai
@@ -162,9 +181,9 @@ async function main() {
       : `sqlite (${config.DATABASE_PATH})`;
 
   console.log(`
-  ContextNest Community Server v0.1.0
+  ${bannerHeading()}
   ────────────────────────────────────
-  Port:      ${config.PORT}
+  Port:      ${config.PORT}${config.HOST ? ` (listening on ${config.HOST} only)` : ""}
   Data:      ${config.DATA_ROOT}
   Database:  ${dbDesc}
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
@@ -203,18 +222,74 @@ ${config.AUTH_MODE === "key" ? `
     console.warn(`
   ⚠️  Running in open mode — no authentication.
      Anyone who can reach this port has full read/write + admin access.
-     Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
+     Set HOST=127.0.0.1 to listen locally only, or switch to AUTH_MODE=key before exposing.
 `);
   }
 
-  serve({ fetch: app.fetch, port: config.PORT });
+  const net = networkStartupLines(currentEgressProxyStatus(), currentExtraCaStatus());
+  for (const line of net.info) console.log(line);
+  for (const line of net.warn) console.warn(line);
+  // Cloud Run (K_SERVICE) always fronts the server with Google's proxy, so the
+  // legacy trust-all default is right there; elsewhere, nudge once.
+  if (!config.TRUSTED_PROXIES && !process.env.K_SERVICE) {
+    console.warn(
+      "  ⚠️  X-Forwarded-For / X-Forwarded-Proto are trusted from any client. Behind a reverse proxy, set\n" +
+      "     TRUSTED_PROXIES (e.g. loopback or 10.0.0.0/8). If this server is exposed directly, set it to\n" +
+      "     loopback so clients can't spoof their IP or scheme. See CONFIGURATION.md → Reverse proxies.",
+    );
+  }
+
+  if (config.MANUAL_SIGN_IN_OPEN_WITH_SSO) {
+    console.warn(`
+      ⚠️  MANUAL_SIGN_IN=open while single sign-on (OIDC) is on.
+        Anyone who can reach this server can register a password account the
+        identity provider never sees and can't disable. Unset MANUAL_SIGN_IN (it
+        defaults to invite-only with SSO) or set it to invite-only or disabled.
+    `);
+  }
+  if (config.HOOTIE_DEBUG_LOG) {
+    console.warn(`
+      ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
+        nest documents behind it, is written to the logs. Testing only.
+    `);
+  }
+
+  // Parse DOCS_SITES now, so an entry for this server's own host warns at boot.
+  void config.DOCS_SITES;
+
+  serve({
+    fetch: app.fetch,
+    port: config.PORT,
+    ...(config.HOST ? { hostname: config.HOST } : {}),
+    createServer: lowercaseHostServer,
+  });
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+  startRunRetention();
+
+  // Review SLA escalation (per-nest review_sla_hours). Independent of the
+  // workflow plane — that loop above is a no-op unless its flag is on, and
+  // review governance isn't. Inert while no nest sets an SLA.
+  startReviewSlaLoop();
+
+  // Metacognition runs execute in this process; any still "running" from a
+  // previous process lost their loop. Close them so the agents aren't stuck.
+  if (config.FEATURE_METACOGNITION) {
+    void import("./metacognition/service.js")
+      .then((m) => m.recoverOrphanedRuns())
+      .then((n) => n && console.log(`[metacognition] closed ${n} run(s) left running by a previous process`))
+      .catch((err) => console.error("[metacognition] orphan sweep failed", err));
+  }
 
   // Rate-limit bucket GC — bounded keys can still accumulate across a long
   // uptime; sweep expired buckets every 10 minutes.
   setInterval(() => sweepStale(), 10 * 60_000).unref?.();
+
+  // MCP OAuth: drop codes and tokens that can never be used again.
+  setInterval(() => {
+    purgeExpiredOAuth().catch((err) => console.error("[oauth] purge failed", err));
+  }, 60 * 60_000).unref?.();
 }
 
 main().catch((err) => {

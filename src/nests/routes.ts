@@ -22,15 +22,27 @@ import {
   renameNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
+  nestAccessLogEnabled,
+  setAccessLogEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
   nestCreatorIsReviewer,
   setCreatorIsReviewer,
+  nestOrgContributions,
+  validateOrgContributionsPatch,
+  setOrgContributions,
+  nestReviewSlaHours,
+  setReviewSlaHours,
+  MAX_REVIEW_SLA_HOURS,
   setAllowSelfApprove,
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
   nestPrimeTags,
+  nestAlwaysIncludeTags,
+  setAlwaysIncludeTags,
   setPrimeTags,
+  nestDoneTags,
+  setDoneTags,
   nestRequiresPushConfirmation,
   setRequirePushConfirmation,
 } from "./service.js";
@@ -47,7 +59,8 @@ import {
 } from "./unsynced-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { grantCoversNode } from "../governance/grants-service.js";
-import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import { AppError, ValidationError, NotFoundError, ForbiddenError, isVaultLockTimeout } from "../shared/errors.js";
+import { ContextNestError } from "@promptowl/contextnest-engine";
 import {
   resolveUserRoles,
   getStewardsForUser,
@@ -60,6 +73,7 @@ import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { parseStoredBranding } from "../shared/branding.js";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -258,9 +272,10 @@ nestRoutes.get("/", async (c) => {
     deduped.push(n);
   }
   // Rows the caller reaches through visibility ALONE — no ownership, no
-  // collaborator/steward/team row. The dashboard's default "My nests" scope
-  // leaves these out, so it needs the fact stated rather than inferred from
-  // an empty roles list (a public nest you're also an editor of is yours).
+  // collaborator/steward/team row. The dashboard's "My nests" scope leaves
+  // these out and labels them on All, so it needs the fact stated rather
+  // than inferred from an empty roles list (a public nest you're also an
+  // editor of is yours).
   const memberIds = new Set([...owned, ...shared].map((n) => n.id));
   const out = (await Promise.all(deduped.map(annotate))).map((row) => ({
     ...row,
@@ -385,6 +400,22 @@ nestRoutes.post("/", async (c) => {
   return c.json({ nest: withParsedBranding(nest) }, 201);
 });
 
+/** Run one import step; anything unexpected surfaces naming the step, not as a
+ *  bare "Something went wrong". Errors the app already maps pass through with
+ *  their own status: AppErrors, a vault-lock timeout (retryable 503) and an
+ *  engine validation refusal (400 naming the rule). */
+async function importStep<T>(step: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const engineHandled =
+      isVaultLockTimeout(err) || (err instanceof ContextNestError && err.code === "VALIDATION_FAILED");
+    if (err instanceof AppError || engineHandled) throw err;
+    console.error(`[import] ${step} failed`, err);
+    throw new AppError(500, `Import stopped while ${step}: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
 // POST /nests/import — import a folder the user picked in their browser. The
 // browser uploads each file's relative path + content; the server writes them
 // into the nest's own storage under DATA_ROOT (it never browses its own disk),
@@ -433,11 +464,9 @@ nestRoutes.post("/:nestId", async (c) => {
     if (body.finalize) {
       return c.json({
         nest: withParsedBranding(nest),
-        documents: await registerImportedDocuments(
-          target,
-          email,
-          attributeRequest(c, body.client),
-        ),
+        ...(await importStep("publishing documents", () =>
+          registerImportedDocuments(target, email, attributeRequest(c, body.client)),
+        )),
       });
     }
     // Staging writes files straight into vault storage, skipping the node
@@ -458,7 +487,7 @@ nestRoutes.post("/:nestId", async (c) => {
     console.log(`[import] chunk: nest=${target} files=${files.length}`);
     // `rejected` travels back so the browser can tell the user which files were
     // skipped, rather than reporting a clean import that quietly dropped some.
-    return c.json(await stageImportedFiles(target, files, email));
+    return c.json(await importStep("uploading files", () => stageImportedFiles(target, files, email)));
   }
 
   if (!body.name) {
@@ -471,19 +500,28 @@ nestRoutes.post("/:nestId", async (c) => {
   const email = await resolveCallerEmail(userId);
   const nest = await importNest(userId, body.name);
   try {
-    const { rejected } = await stageImportedFiles(nest.id, files, email);
+    const { rejected, problems, warnings } = await importStep("uploading files", () =>
+      stageImportedFiles(nest.id, files, email),
+    );
     // More chunks are coming — registering now would publish a partial folder.
     if (body.partial) {
-      return c.json({ nest: withParsedBranding(nest), rejected }, 201);
+      return c.json({ nest: withParsedBranding(nest), rejected, problems, warnings }, 201);
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
-    const documents = await registerImportedDocuments(
-      nest.id,
-      email,
-      attributeRequest(c, body.client),
+    const reg = await importStep("publishing documents", () =>
+      registerImportedDocuments(nest.id, email, attributeRequest(c, body.client)),
     );
-    return c.json({ nest: withParsedBranding(nest), documents, rejected }, 201);
+    return c.json(
+      {
+        nest: withParsedBranding(nest),
+        ...reg,
+        rejected,
+        problems: [...problems, ...reg.problems],
+        warnings: [...warnings, ...reg.warnings],
+      },
+      201,
+    );
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
     // would otherwise leave an empty nest on the dashboard.
@@ -606,12 +644,20 @@ nestRoutes.get("/:nestId", async (c) => {
       grant_only: false,
     });
   }
+  // The org-contribution domain list is the nest's governance, not something
+  // every org reader needs (on a shared server org readers span customers).
+  const shown = withParsedBranding(nest) as Record<string, unknown> | null;
+  if (shown && permission !== "owner" && permission !== "admin") delete shown.org_domains;
   return c.json({
-    nest: withParsedBranding(nest),
+    nest: shown,
     permission,
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
     grant_only,
+    // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
+    // drafts for review — their permission stays 'read'.
+    org_contributor:
+      permission === "read" && access.orgContributor && credentialMayContribute(c),
   });
 });
 
@@ -740,10 +786,15 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    review_sla_hours: await nestReviewSlaHours(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
+    ...(await nestOrgContributions(nestId)),
   });
 });
 
@@ -773,9 +824,54 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    always_include_tags?: string[] | string;
+    done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
+    access_log_enabled?: boolean;
+    org_contributions?: unknown;
+    org_domains?: unknown;
   }>();
+
+  // Validated before anything is written, so a bad SLA can't leave the other
+  // fields in the same body half-applied.
+  if (
+    body.review_sla_hours !== undefined &&
+    body.review_sla_hours !== null &&
+    (typeof body.review_sla_hours !== "number" ||
+      !Number.isInteger(body.review_sla_hours) ||
+      body.review_sla_hours < 0 ||
+      body.review_sla_hours > MAX_REVIEW_SLA_HOURS)
+  ) {
+    throw new ValidationError(
+      `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
+    );
+  }
+
+  // Org contributions (CU-wdqcq05rz6), validated against the state they'd
+  // leave behind — before anything in the body is written.
+  const orgPatch = await validateOrgContributionsPatch(nestId, body);
+
+  // Read logging (the record of what each person and agent read) is an audit
+  // control. Any admin may turn it ON; turning it OFF stays with the owner or
+  // the server license-admin, like disabling stewardship — an admin
+  // collaborator must not be able to switch off the record of their own
+  // reads. Refused before anything in the body is applied.
+  if (
+    body.access_log_enabled === false &&
+    !isServerAdmin &&
+    permission !== "owner"
+  ) {
+    return c.json(
+      {
+        error:
+          "Only the nest owner or the server license-admin can turn off read logging.",
+        field: "access_log_enabled",
+      },
+      403,
+    );
+  }
 
   // Push Confirmation Gate is a SERVER-admin (superadmin) control, not a
   // per-nest owner setting — the whole point is that a nest admin cannot turn
@@ -837,19 +933,51 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Always-include tags change what agents are TOLD from the next connect
+  // on; only approved versions are ever injected, so this can't publish a draft.
+  if (body.always_include_tags !== undefined) {
+    await setAlwaysIncludeTags(
+      nestId,
+      Array.isArray(body.always_include_tags)
+        ? body.always_include_tags
+        : [body.always_include_tags],
+    );
+  }
+  // Done columns only change how FUTURE task moves are stamped.
+  if (body.done_tags !== undefined) {
+    await setDoneTags(
+      nestId,
+      Array.isArray(body.done_tags) ? body.done_tags : [body.done_tags],
+    );
+  }
   // Creator-reviews is likewise future-only: it stewards nobody retroactively
   // and turning it off leaves every steward row it created in place.
   if (typeof body.creator_is_reviewer === "boolean") {
     await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
   }
+  // Review SLA: null/0 turns it off. Future-facing like the rest — changing it
+  // never un-notifies a rung that already escalated.
+  if (body.review_sla_hours !== undefined) {
+    await setReviewSlaHours(nestId, body.review_sla_hours);
+  }
+  // Read logging: checked up front (see the guard after the body parse).
+  if (typeof body.access_log_enabled === "boolean") {
+    await setAccessLogEnabled(nestId, body.access_log_enabled);
+  }
+  if (orgPatch) await setOrgContributions(nestId, orgPatch);
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    review_sla_hours: await nestReviewSlaHours(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
+    ...(await nestOrgContributions(nestId)),
     wiped,
   });
 });

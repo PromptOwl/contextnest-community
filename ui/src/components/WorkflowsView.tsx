@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type React from "react";
+import { useQuery } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { formatServerDate } from "../lib/dates";
 import {
   ArrowLeft,
@@ -22,6 +24,7 @@ import {
   Wrench,
   Table2,
   X,
+  Globe,
 } from "lucide-react";
 import {
   listEdges,
@@ -81,6 +84,8 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
 import { NestPageHeader } from "./NestPageHeader";
+import { MetacognitionPanel, RunCost } from "./MetacognitionPanel";
+import { canManageMetacognition } from "../lib/metacognition-form";
 
 interface Props {
   nestId: string;
@@ -121,13 +126,31 @@ const stepIcon = (action: string) => {
   if (action === "branch") return <Zap className="h-3.5 w-3.5" />;
   if (action === "write") return <Pencil className="h-3.5 w-3.5" />;
   if (action === "notify") return <Bell className="h-3.5 w-3.5" />;
+  if (action === "external") return <Globe className="h-3.5 w-3.5" />;
   return <span className="h-3.5 w-3.5" />;
 };
 
 const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
+/** ?run=<id> — a link from a proposal, comment or the agent history (RunLink). */
+function runFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("run");
+}
+
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
-  const [tab, setTab] = useState("canvas");
+  const [focusRun, setFocusRun] = useState<string | null>(runFromUrl);
+  const [tab, setTab] = useState(() => (runFromUrl() ? "run" : "canvas"));
+  const openRun = (runId: string) => {
+    setFocusRun(runId);
+    setTab("run");
+  };
+  const { metacognitionEnabled } = useAuth();
+  // Metacognition agents are owner/admin only, for every action: a writer
+  // doesn't see the Agents tab at all.
+  const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
+  const permission = (nestMeta as { permission?: string } | undefined)?.permission;
+  const showAgents = canManageMetacognition(metacognitionEnabled, permission);
 
   return (
     <div>
@@ -147,6 +170,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <TabsTrigger value="table">Table</TabsTrigger>
           <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
+          {showAgents && (
+            <TabsTrigger value="agents" data-testid="workflows-agents-tab">
+              Agents
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="canvas" className="mt-4">
           <CanvasPanel nestId={nestId} />
@@ -155,8 +183,13 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <EdgesPanel nestId={nestId} />
         </TabsContent>
         <TabsContent value="run" className="mt-4">
-          <RunsPanel nestId={nestId} />
+          <RunsPanel nestId={nestId} focusRunId={focusRun} />
         </TabsContent>
+        {showAgents && (
+          <TabsContent value="agents" className="mt-4">
+            <MetacognitionPanel nestId={nestId} onOpenRun={openRun} />
+          </TabsContent>
+        )}
         <TabsContent value="activity" className="mt-4 space-y-6">
           <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
@@ -758,7 +791,7 @@ function ParentSelect({
   );
 }
 
-function RunsPanel({ nestId }: { nestId: string }) {
+function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string | null }) {
   const { subagentRunsEnabled, subagentMaxDepth, subagentMaxChildren } = useAuth();
   // Live server caps (fall back to defaults until /health resolves).
   const maxDepth = subagentMaxDepth || SUBAGENT_MAX_DEPTH_FALLBACK;
@@ -818,6 +851,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setError(err instanceof Error ? err.message : "Failed to load run");
     }
   };
+
+  // Arrived from a RunLink or the agent history: show that run's trace. A run
+  // pruned by the retention window (or out of reach) says so plainly.
+  useEffect(() => {
+    if (!focusRunId) return;
+    void getRun(focusRunId)
+      .then((r) => setSelected(r))
+      .catch(() =>
+        setError(
+          "That run's trace isn't available — it may be older than this server's run retention window, or outside what you can see.",
+        ),
+      );
+  }, [focusRunId]);
 
   // Cancel a queued/running run. The server rejects a PATCH once terminal, so
   // a stale row just surfaces that conflict instead of silently reopening.
@@ -1260,7 +1306,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
         className={`grid gap-4 items-start ${selected ? "lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]" : "grid-cols-1"
           }`}
       >
-        <div className="rounded-lg border divide-y min-w-0">
+        <div className={`rounded-lg border divide-y min-w-0 ${selected ? PANE_SCROLL : ""}`}>
           {loading ? (
             <div className="px-3 py-6 text-center text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin inline" />
@@ -1276,7 +1322,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
         {/* Trace / editor — right-hand pane, appears when a run is selected. */}
         {selected && (
-          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-20">
+          <div className={`rounded-lg border p-4 min-w-0 ${PANE_SCROLL}`}>
             <RunTrace
               run={selected}
               children={runs.filter((r) => r.parent_run_id === selected.id)}
@@ -1297,6 +1343,10 @@ function RunsPanel({ nestId }: { nestId: string }) {
     </div>
   );
 }
+
+/** Side by side, each pane scrolls on its own so a long run list never pushes
+ *  the trace off screen (and vice versa). Narrow screens keep page scroll. */
+const PANE_SCROLL = "lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto";
 
 function RunTrace({
   run,
@@ -1394,6 +1444,19 @@ function RunTrace({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {(run.trace?.persona || run.trace?.skipped) && (
+        <div className="mb-3 text-xs" data-testid="run-trace-metacognition">
+          {run.trace?.persona && (
+            <div className="mb-0.5">
+              Run by <span className="font-medium">{run.trace.persona.name}</span> (metacognition, executed by this
+              server)
+            </div>
+          )}
+          <RunCost trace={run.trace} />
+          {run.trace?.summary && <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{run.trace.summary}</div>}
         </div>
       )}
 
@@ -2906,6 +2969,9 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
       // Server-wide key (super-admin Settings) satisfies runners for every
       // nest — only prompt when NEITHER level has one.
       if (health?.runner_key_configured) return setHasKey(true);
+      // Without the byok licence feature runs use PromptOwl models, never a
+      // pasted key (the server would refuse it) — nothing to prompt for.
+      if (health?.byok_available === false) return setHasKey(true);
       if (!env) return setHasKey(null);
       setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
     });
@@ -2981,6 +3047,7 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
 
 const CONNECTOR_EVENTS = [
   ["review_requested", "review requested"],
+  ["review_escalated", "review overdue"],
   ["review_approved", "approved"],
   ["review_rejected", "rejected"],
   ["run_failed", "run failed"],

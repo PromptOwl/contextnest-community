@@ -15,6 +15,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { getAgent, SERVER_CLAIM } from "../metacognition/store.js";
 
 interface ScheduleRow {
   id: string;
@@ -72,15 +73,40 @@ export async function schedulerTick(now: number = Date.now()): Promise<string[]>
         continue;
       }
 
+      // A metacognition agent is executed by this server: its run is created
+      // already claimed (so no poll-mode runner takes it) and started below.
+      // One at a time per agent — a run still going skips this firing.
+      const serverRun =
+        config.FEATURE_METACOGNITION && !!(await getAgent(s.nest_id, s.agent_node))?.enabled;
+      if (serverRun) {
+        const busy = await db.get(
+          `SELECT id FROM runs WHERE nest_id = ? AND agent_node = ? AND status = 'running' AND claimed_by = ?`,
+          [s.nest_id, s.agent_node, SERVER_CLAIM],
+        );
+        if (busy) continue;
+      }
+
       const id = `run_${uuid()}`;
       const nowIso = new Date(now).toISOString();
       await db.run(
-        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
-         VALUES (?, ?, ?, ?, 'running', NULL, ?, NULL, 0)`,
+        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, claimed_by, claimed_at)
+         VALUES (?, ?, ?, ?, 'running', NULL, ?, NULL, 0, ?, ?)`,
         // triggered_by names the schedule's creator with a schedule: prefix —
         // honest provenance ("this fired on X's schedule, not X clicking").
-        [id, s.nest_id, s.agent_node, `schedule:${s.created_by}`, nowIso],
+        [
+          id,
+          s.nest_id,
+          s.agent_node,
+          `schedule:${s.created_by}`,
+          nowIso,
+          serverRun ? SERVER_CLAIM : null,
+          serverRun ? nowIso : null,
+        ],
       );
+      if (serverRun) {
+        const { launch } = await import("../metacognition/service.js");
+        launch(id);
+      }
       // Stop-after bound: this firing may be the last — auto-pause the row
       // when it hits max_runs so "run 10 times" completes instead of looping
       // forever. Deterministic v1 of a goal condition.
@@ -100,13 +126,28 @@ export async function schedulerTick(now: number = Date.now()): Promise<string[]>
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let lastTickAt: string | null = null;
+let lastTickError: string | null = null;
+
+/** Loop state for the admin Network & status page. */
+export function schedulerState(): { running: boolean; lastTickAt: string | null; lastTickError: string | null } {
+  return { running: timer !== null, lastTickAt, lastTickError };
+}
 
 /** Start the background loop. No-op unless the workflow plane is enabled. */
 export function startScheduler(): void {
   if (!config.FEATURE_WORKFLOW_PLANE || timer) return;
   timer = setInterval(() => {
-    void schedulerTick().catch((err) =>
-      console.error("[scheduler] tick failed", err),
+    void schedulerTick().then(
+      () => {
+        lastTickAt = new Date().toISOString();
+        lastTickError = null;
+      },
+      (err) => {
+        lastTickAt = new Date().toISOString();
+        lastTickError = err instanceof Error ? err.message : String(err);
+        console.error("[scheduler] tick failed", err);
+      },
     );
   }, 60_000);
   // Never hold the process open just for the scheduler (tests, ctrl-c).

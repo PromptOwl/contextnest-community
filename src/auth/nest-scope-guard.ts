@@ -5,6 +5,8 @@ import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
 import { HEADLESS_READER_CODE, headlessReaderVerdict } from "./headless.js";
 import type { AuthEnv } from "./middleware.js";
+import { config } from "../config.js";
+import { tryConsume, retryAfterSeconds } from "../shared/rate-limit.js";
 
 /**
  * Nest-scoped API keys are a boundary, not a speed bump.
@@ -94,38 +96,107 @@ export function nestKeyVerdict(
   return { allowed: false, reason: "outside_nest" };
 }
 
+export const SYSTEM_KEY_CODE = "system_key";
+
+/**
+ * Where a named SYSTEM's key (CU-wdqcq0538g) may go at all. A system works
+ * inside the nests it was granted (each gated by its collaborator row in the
+ * nests-app gate, which also keeps it off the nest's people/settings/key
+ * routes) and on the server-level /mcp, where nest_create is refused. It never
+ * reaches /auth/* (no key minting, no password, no sessions), /systems,
+ * /admin, /me, /teams, /search or /index, and never creates, edits or deletes
+ * a nest itself. Pure, like the other verdicts, so it reads in one place.
+ */
+export function systemKeyVerdict(method: string, rawPath: string): boolean {
+  const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, "") : rawPath;
+  const isGet = method === "GET" || method === "HEAD";
+  if (PUBLIC_PATHS.has(path)) return isGet;
+  if (path === "/mcp" || path.startsWith("/mcp/")) return true;
+  if (path === "/nests") return isGet;
+  const m = /^\/nests\/([^/]+)(\/.*)?$/.exec(path);
+  if (!m) return false;
+  // The nest itself (GET /nests/:id): read only — no PATCH/DELETE of the nest.
+  if (!m[2]) return isGet;
+  return true;
+}
+
+type KeyScope =
+  | { kind: "nest"; scope: string; headless: false; keyId: string }
+  | { kind: "headless"; scope: string; headless: true; keyId: string }
+  | { kind: "system"; keyId: string };
+
 /** Look up the nest a bearer key is scoped to, and whether it is a headless
  *  access key. null = no key, unknown key, or a user-level key — in every one
  *  of those cases the guard has nothing to say. */
 async function bearerKeyScope(
   authorization: string | undefined,
-): Promise<{ scope: string; headless: boolean } | null> {
+): Promise<KeyScope | null> {
   const key = parseBearerToken(authorization);
   if (!key) return null;
   const row = (await getDb().get(
-    `SELECT k.nest_id, u.is_service
+    `SELECT k.id, k.nest_id, u.is_service,
+            (SELECT 1 FROM system_accounts sa WHERE sa.user_id = k.user_id) AS is_system
        FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
       WHERE k.key_hash = ?`,
     [hashApiKey(key)],
-  )) as { nest_id: string | null; is_service: number | null } | undefined;
+  )) as
+    | { id: string; nest_id: string | null; is_service: number | null; is_system: number | null }
+    | undefined;
+  if (!row) return null;
+  // A named system (CU-wdqcq0538g) is a service identity too, but NOT a
+  // headless reader: it gets its own fence, never the headless allowlist.
+  if (row.is_system) return { kind: "system", keyId: row.id };
   // A service identity's key is ALWAYS a headless access key — even if its
   // nest scope were somehow lost, it must fail closed (empty scope matches no
   // nest), never fall back to acting as an ordinary user-level key.
-  if (row?.is_service) return { scope: row.nest_id ?? "", headless: true };
-  if (!row?.nest_id) return null;
-  return { scope: row.nest_id, headless: false };
+  if (row.is_service) {
+    return { kind: "headless", scope: row.nest_id ?? "", headless: true, keyId: row.id };
+  }
+  if (!row.nest_id) return null;
+  return { kind: "nest", scope: row.nest_id, headless: false, keyId: row.id };
 }
 
 export const nestScopedKeyGuard = createMiddleware<AuthEnv>(async (c, next) => {
   const found = await bearerKeyScope(c.req.header("Authorization"));
   if (!found) return next();
+
+  // A named system key: its own fence, and no session escape hatch either —
+  // a system can't sign in, so a cookie riding along must not widen it.
+  if (found.kind === "system") {
+    if (systemKeyVerdict(c.req.method, c.req.path)) return next();
+    return c.json(
+      {
+        error:
+          "A system key can only work inside the nests it was granted. It cannot sign in, mint keys, or manage the server.",
+        code: SYSTEM_KEY_CODE,
+      },
+      403,
+    );
+  }
   const { scope } = found;
 
   // A headless access key (CU-wdqcq0314u) gets the narrower read-only
   // allowlist, and no session escape hatch: its identity can't sign in, so a
   // cookie riding along belongs to someone else and must not widen the key.
   if (found.headless) {
-    if (headlessReaderVerdict(c.req.method, c.req.path, scope)) return next();
+    if (headlessReaderVerdict(c.req.method, c.req.path, scope)) {
+      // Per-key rate limit (CU-wdqcq0538g): access keys go to outside parties
+      // by design, so this keeps one from becoming an unmetered scraping
+      // endpoint. Counted only for requests the key may make at all.
+      const rl = { max: config.HEADLESS_KEY_RATE_LIMIT_PER_MIN, windowMs: 60_000 };
+      const bucket = `headless-key:${found.keyId}`;
+      if (!tryConsume(bucket, rl)) {
+        c.header("Retry-After", String(retryAfterSeconds(bucket, rl)));
+        return c.json(
+          {
+            error: "Rate limit exceeded for this access key. Retry later.",
+            code: "rate_limited",
+          },
+          429,
+        );
+      }
+      return next();
+    }
     return c.json(
       {
         error:

@@ -8,6 +8,9 @@ import {
   nestInScope,
   DEFAULT_NEST_SCOPE,
   restoredNestScope,
+  nestRelation,
+  nestRole,
+  nestRelationText,
   type NestScope,
 } from "./dashboard-scope";
 
@@ -17,24 +20,22 @@ const folders = [
 ];
 
 describe("visibleUnsynced", () => {
-  it("shows every folder in the unscoped, mine and unsynced-only views", () => {
-    expect(visibleUnsynced(folders, "all", "")).toHaveLength(2);
-    expect(visibleUnsynced(folders, "mine", "")).toHaveLength(2);
+  it("shows folders only in the unsynced-only view", () => {
     expect(visibleUnsynced(folders, "unsynced", "")).toHaveLength(2);
   });
 
-  it("hides folders under every access scope — they have no owner or visibility", () => {
-    for (const scope of ["owned", "shared", "public", "synced"] as NestScope[]) {
+  it("hides folders in the nest list — every other scope, the default included", () => {
+    for (const scope of ["all", "mine", "owned", "shared", "public", "synced"] as NestScope[]) {
       expect(visibleUnsynced(folders, scope, "")).toEqual([]);
     }
   });
 
   it("matches the query against both the label and the path", () => {
-    expect(visibleUnsynced(folders, "all", "BILL").map((f) => f.label)).toEqual([
+    expect(visibleUnsynced(folders, "unsynced", "BILL").map((f) => f.label)).toEqual([
       "billing",
     ]);
-    expect(visibleUnsynced(folders, "all", "test/arch")).toHaveLength(1);
-    expect(visibleUnsynced(folders, "all", "zzznomatch")).toEqual([]);
+    expect(visibleUnsynced(folders, "unsynced", "test/arch")).toHaveLength(1);
+    expect(visibleUnsynced(folders, "unsynced", "zzznomatch")).toEqual([]);
   });
 });
 
@@ -64,8 +65,8 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(keeps("mine")).toEqual(["mine", "sharedWithMe", "myPublic"]);
   });
 
-  it("'mine' is the default scope", () => {
-    expect(DEFAULT_NEST_SCOPE).toBe("mine");
+  it("'all' is the default scope — every card says whose it is instead (CU-wdqcq05m8z)", () => {
+    expect(DEFAULT_NEST_SCOPE).toBe("all");
   });
 
   it("'shared' = granted to me only; a discovered nest was never shared with me", () => {
@@ -79,31 +80,68 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(keeps("public")).toEqual(["publicDiscovered", "myPublic"]);
   });
 
-  it("unsynced folders stay visible under 'mine' — they are the operator's own disk, not a discovered nest", () => {
-    // Regression guard: 'mine' is the new DEFAULT, so hiding them here would
-    // hide every pending folder from every fresh dashboard, self-hosted
-    // included (review finding on PR #315).
-    expect(visibleUnsynced(folders, "mine", "")).toHaveLength(2);
-    expect(visibleUnsynced(folders, "mine", "bill").map((f) => f.label)).toEqual(["billing"]);
+  it("unsynced folders stay out of the default 'mine' list — only the unsynced filter shows them", () => {
+    // Reverses the PR #315 guard on purpose: folders aren't nests, so the nest
+    // list neither shows nor counts them; "Unsynced folders only" does.
+    expect(visibleUnsynced(folders, "mine", "")).toEqual([]);
+    expect(visibleUnsynced(folders, "mine", "bill")).toEqual([]);
     expect(scopeShowsNests("mine")).toBe(true);
   });
 });
 
 describe("restoredNestScope", () => {
-  it("keeps a remembered narrow scope", () => {
-    for (const s of ["mine", "owned", "shared", "synced", "unsynced"]) {
+  it("remembers every scope, broad ones included (CU-wdqcq05m8z)", () => {
+    for (const s of ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"]) {
       expect(restoredNestScope(s)).toBe(s);
     }
   });
 
-  it("opens broad scopes back on My nests", () => {
-    for (const s of ["all", "org", "public"]) {
-      expect(restoredNestScope(s)).toBe(DEFAULT_NEST_SCOPE);
-    }
+  it("falls back to All when nothing or junk is stored", () => {
+    expect(restoredNestScope(null)).toBe("all");
+    expect(restoredNestScope("bogus")).toBe("all");
+  });
+});
+
+describe("nestRelation — what a card says about whose nest it is", () => {
+  it("owned, shared with me, or only reachable through its visibility", () => {
+    expect(nestRelation({ is_owner: true, permission: "owner", visibility: "public" })).toBe("owned");
+    expect(nestRelation({ is_owner: false, permission: "write", visibility: "private" })).toBe("shared");
+    expect(nestRelation({ is_owner: false, permission: "read", visibility: "org", discovered: true })).toBe(
+      "discovered",
+    );
+    expect(
+      nestRelation({ is_owner: false, permission: "read", visibility: "public", discovered: true }),
+    ).toBe("discovered");
   });
 
-  it("falls back to the default when nothing or junk is stored", () => {
-    expect(restoredNestScope(null)).toBe(DEFAULT_NEST_SCOPE);
-    expect(restoredNestScope("bogus")).toBe(DEFAULT_NEST_SCOPE);
+  it("legacy rows without is_owner/permission read as owned, matching nestOwned", () => {
+    expect(nestRelation({})).toBe("owned");
+  });
+});
+
+describe("nestRole — the role a shared nest's badge and banner name", () => {
+  it("grant roles rank admin > editor > reviewer > viewer, over the permission", () => {
+    expect(nestRole({ roles: ["viewer", "reviewer"], permission: "read" })).toBe("reviewer");
+    expect(nestRole({ roles: ["editor", "admin"], permission: "write" })).toBe("admin");
+  });
+
+  it("falls back to the permission, and owners have no role", () => {
+    expect(nestRole({ permission: "write" })).toBe("editor");
+    expect(nestRole({ permission: "read" })).toBe("viewer");
+    expect(nestRole({ permission: "owner" })).toBeNull();
+    expect(nestRole({})).toBeNull();
+  });
+});
+
+describe("nestRelationText — sidebar tooltip and nest page banner", () => {
+  it("names owner and role for shared, tier for discovered, nothing for mine", () => {
+    expect(
+      nestRelationText({ is_owner: false, permission: "write", roles: ["editor"], owner_email: "a@x.com" }),
+    ).toBe("Shared by a@x.com · Editor");
+    expect(
+      nestRelationText({ is_owner: false, permission: "read", visibility: "org", discovered: true, owner_email: "a@x.com" }),
+    ).toBe("Org-visible · a@x.com");
+    expect(nestRelationText({ is_owner: false, visibility: "public", discovered: true })).toBe("Public");
+    expect(nestRelationText({ is_owner: true, permission: "owner" })).toBeNull();
   });
 });

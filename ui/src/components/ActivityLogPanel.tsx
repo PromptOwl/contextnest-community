@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/select";
 import * as api from "../lib/api";
 import { formatServerDate } from "../lib/dates";
-import { ACTIVITY_FILTERS, describeActivity, surfaceLabel } from "../lib/activity-log";
+import { ACTIVITY_FILTERS, activityAction, activityVersion, surfaceLabel } from "../lib/activity-log";
 
 const PAGE_SIZE = 50;
 
@@ -44,6 +44,9 @@ export function ActivityLogPanel({
   const [filter, setFilter] = useState("all");
   const [actor, setActor] = useState("");
   const [debouncedActor, setDebouncedActor] = useState("");
+  // "What did agent X read" — the caller's self-reported agent name.
+  const [agent, setAgent] = useState("");
+  const [debouncedAgent, setDebouncedAgent] = useState("");
   const reqSeq = useRef(0);
   const scopeKey = JSON.stringify(scope);
 
@@ -51,6 +54,11 @@ export function ActivityLogPanel({
     const t = setTimeout(() => setDebouncedActor(actor.trim()), 300);
     return () => clearTimeout(t);
   }, [actor]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedAgent(agent.trim()), 300);
+    return () => clearTimeout(t);
+  }, [agent]);
 
   const load = useCallback(
     async (offset: number) => {
@@ -62,6 +70,7 @@ export function ActivityLogPanel({
         const page = await api.getActivityLog(nestId, scope, {
           types,
           actor: debouncedActor || undefined,
+          agent: debouncedAgent || undefined,
           limit: PAGE_SIZE,
           offset,
         });
@@ -76,7 +85,7 @@ export function ActivityLogPanel({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nestId, scopeKey, filter, debouncedActor],
+    [nestId, scopeKey, filter, debouncedActor, debouncedAgent],
   );
 
   useEffect(() => {
@@ -137,6 +146,14 @@ export function ActivityLogPanel({
             data-testid="activity-log-actor"
           />
         </div>
+        <Input
+          className="h-8 w-28"
+          placeholder="Agent"
+          aria-label="Filter by agent"
+          value={agent}
+          onChange={(e) => setAgent(e.target.value)}
+          data-testid="activity-log-agent"
+        />
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-2">
@@ -151,27 +168,52 @@ export function ActivityLogPanel({
         <ul className="divide-y">
           {items.map((it) => {
             const surface = surfaceLabel(it.surface);
+            const action = activityAction(it);
+            const version = activityVersion(it);
+            const docTitle = showDoc && it.nodeId ? it.title || it.nodeId : null;
+            // Document first (or the action when there's no document), then who, then
+            // a muted meta line. Long values clamp/truncate with the full text on hover.
             return (
-              <li key={it.id} className="py-2 text-sm" data-testid="activity-log-row" data-type={it.type}>
-                <div className="break-words">{describeActivity(it)}</div>
-                {showDoc && it.nodeId && (
-                  <button
-                    type="button"
-                    className="mt-0.5 block max-w-full truncate text-left text-xs text-primary hover:underline"
-                    onClick={() => onOpenNode?.(it.nodeId!)}
-                    disabled={!onOpenNode}
-                  >
-                    {it.title || it.nodeId}
-                  </button>
-                )}
-                {it.detail && (
-                  <div className="mt-0.5 truncate text-xs text-muted-foreground" title={it.detail}>
-                    {it.detail}
-                  </div>
-                )}
-                <div className="mt-0.5 flex gap-2 text-xs text-muted-foreground">
+              <li key={it.id} className="py-2.5 text-sm" data-testid="activity-log-row" data-type={it.type}>
+                <div className="flex items-start gap-2">
+                  {docTitle ? (
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 text-left font-medium line-clamp-2 break-words hover:underline disabled:no-underline"
+                      title={docTitle}
+                      onClick={() => onOpenNode?.(it.nodeId!)}
+                      disabled={!onOpenNode}
+                    >
+                      {docTitle}
+                    </button>
+                  ) : (
+                    <div className="min-w-0 flex-1 font-medium line-clamp-2 break-words" title={action}>
+                      {action}
+                    </div>
+                  )}
+                  {version != null && (
+                    <span className="mt-0.5 shrink-0 rounded border px-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                      v{version}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
+                  <span className="min-w-0 truncate" title={it.actor}>{it.actor}</span>
+                  {it.agent && (
+                    <span
+                      className="max-w-[45%] shrink-0 truncate rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground"
+                      title={`Agent: ${it.agent}`}
+                    >
+                      {it.agent}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 flex flex-wrap gap-x-1.5 text-xs text-muted-foreground">
+                  {docTitle && (
+                    <span className="max-w-full truncate" title={action}>{action} ·</span>
+                  )}
+                  {surface && <span>{surface} ·</span>}
                   <span>{formatServerDate(it.at)}</span>
-                  {surface && <span>· {surface}</span>}
                 </div>
               </li>
             );

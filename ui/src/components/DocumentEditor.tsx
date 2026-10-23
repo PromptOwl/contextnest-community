@@ -10,9 +10,11 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
-import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
+import { saveOutcome } from "../lib/save-outcome";
+import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { nestPath } from "../lib/nest-url";
 import { useBreadcrumb } from "../lib/breadcrumb";
@@ -62,6 +64,7 @@ import {
   Zap,
   Wrench,
   Table2,
+  ListTodo,
   Pencil,
   Users,
   Share2,
@@ -75,6 +78,7 @@ import {
   Check,
   Copy,
   Star,
+  Megaphone,
   Undo2,
   PanelLeft,
   Globe,
@@ -94,6 +98,8 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
+import { TaskRelations } from "./board/TaskRelations";
+import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
@@ -103,6 +109,7 @@ import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
+import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -111,6 +118,9 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import { outdatedThreadIds, paintableThreads } from "../lib/comment-threads";
+import { sourceRangesForAnchors, useKeepPlace } from "../lib/view-place";
+import { HighlightedTextarea } from "./HighlightedTextarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -121,7 +131,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer, LifecycleStatusBadge, isDocumentLifecycleStatus } from "./governance";
+import { lifecycleStatusHint } from "@/lib/lifecycle-status";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -134,6 +145,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
@@ -143,6 +155,8 @@ import { resolveWikiTarget, previewSnippet, decideWikiLinkAction } from "../lib/
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { Fragment } from "react";
 
 /** HTML if it starts with a tag; else markdown. */
@@ -187,6 +201,9 @@ interface DocumentEditorProps {
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
+  /** After an approve or reject: leave for the queue the doc came from.
+   *  Absent = stay and reload the document. */
+  onReviewed?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -216,7 +233,16 @@ interface DocumentEditorProps {
   /** The page's index rail is hidden; the top bar offers to bring it back. */
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  /** Open the nest's settings dialog (the self-approve switch). */
+  onOpenNestSettings?: () => void;
 }
+
+/** Mirrors the engine's TITLE_MAX_LENGTH, which the server enforces. */
+const TITLE_MAX = 200;
+
+/** Shown when nobody but the submitter could approve (CU-wdqcq02t1r). */
+const NO_APPROVER_COPY =
+  "No one else can approve this. Add a reviewer steward, or turn on “Auto-publish owner & admin edits” in Nest settings.";
 
 export function DocumentEditor({
   nestId,
@@ -227,6 +253,7 @@ export function DocumentEditor({
   isOwner = false,
   onBack,
   onSaved,
+  onReviewed,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -237,11 +264,12 @@ export function DocumentEditor({
   onJumpBreadcrumb,
   sidebarCollapsed = false,
   onToggleSidebar,
+  onOpenNestSettings,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
   const typeRoving = useRovingFocus<HTMLDivElement>();
-  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -313,6 +341,13 @@ export function DocumentEditor({
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
   const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
+  // Document-scope always-include flag (CU-wdqcq05rn0): same shape as prime —
+  // null inherits from the nest's always-include tags. Owner/admin only.
+  const [alwaysInclude, setAlwaysInclude] = useState<boolean | null>(null);
+  const loadedAlwaysIncludeRef = useRef<boolean | null>(null);
+  const alwaysIncludeTags = ((nestSettings.data as any)?.always_include_tags ?? [
+    "always-include",
+  ]) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -334,6 +369,10 @@ export function DocumentEditor({
   const [diffRendered, setDiffRendered] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
+  // Custom field values + when the node entered its column (time in status).
+  // Saved by NodeFieldsPanel on their own, outside the body's Save.
+  const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
+  const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -355,6 +394,9 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // CU-wdqcq05rz6: may suggest edits here as drafts for review.
+  const isOrgContributor = !!(nestMeta.data as { org_contributor?: boolean } | undefined)?.org_contributor;
+  const [suggestOpen, setSuggestOpen] = useState(false);
   // Read straight off the same GET /nests/:id response `permission` above
   // comes from, rather than a prop threaded down through App.tsx's View
   // state — the document page is reachable via wiki-link nav, a board/graph
@@ -422,6 +464,8 @@ export function DocumentEditor({
       myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
+  // "Request edit access" for a viewer (CU-wdqcq041jn) — in place of Edit.
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   // Latest deletion flag on this doc. Pending hides the request button (a
   // second one would 409); declined stays visible with the note so the person
   // who asked sees the verdict instead of the flag just vanishing.
@@ -509,10 +553,33 @@ export function DocumentEditor({
   // Anchor snapshotted at mouseup (selection is live then); consumed on click.
   const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
+  // The rich editor's wrapper; its .ProseMirror is where highlights paint.
+  const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Editing controls (toolbar, Type, Prime) show only while the user works in
+  // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
+  // opened from the page count as inside, or opening one would hide the toolbar.
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const [pageActive, setPageActive] = useState(isNew);
+  useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!pageActive) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!t || pageRef.current?.contains(t)) return;
+      if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
+      setPageActive(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  // Threads whose quoted text isn't in the current document text — the rail
+  // labels them "text changed". Computed with the highlights, in the
+  // rendered view; kept from the last render while editing.
+  const [outdatedIds, setOutdatedIds] = useState<Set<string>>(() => new Set());
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
   // was a third of the width spent on nothing — and remembers the last
@@ -643,33 +710,73 @@ export function DocumentEditor({
     window.getSelection()?.removeAllRanges();
   }, []);
 
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
   // Rebuild the painted comment highlights whenever the doc text or the set
-  // of anchored threads changes (and only in the rendered, non-diff view).
+  // of anchored threads changes — in the rendered view and in the rich
+  // editor (the raw markdown paints its own, see HighlightedTextarea).
   useEffect(() => {
-    const container = docViewRef.current;
-    const inRenderedView =
+    const inRenderedView = (commentMode || mode === "view") && !rawMode;
+    const inEditor = !commentMode && mode === "edit" && !rawMode;
+    const paints =
       !isNew &&
-      (commentMode || mode === "view") &&
-      !rawMode &&
+      (inRenderedView || inEditor) &&
       compareVersion == null &&
       !looksLikeHtml(content);
-    if (!container || !inRenderedView) {
+    const findContainer = () =>
+      inRenderedView
+        ? docViewRef.current
+        : (editorSurfaceRef.current?.querySelector<HTMLElement>(".ProseMirror") ?? null);
+    if (!paints || (inRenderedView && !docViewRef.current)) {
       anchorRangesRef.current = [];
       clearHighlight("comment-anchor");
       clearHighlight("comment-anchor-active");
       return;
     }
-    // Defer one frame so react-markdown has committed its DOM.
-    const id = requestAnimationFrame(() => {
+    // Defer a frame so react-markdown has committed its DOM; TipTap mounts
+    // its .ProseMirror a few frames after the wrapper, so wait for it.
+    let tries = 0;
+    let id = 0;
+    let observer: MutationObserver | null = null;
+    let repaintTimer: ReturnType<typeof setTimeout> | undefined;
+    const paint = () => {
+      const container = findContainer();
+      if (!container) {
+        if (++tries < 60) id = requestAnimationFrame(paint);
+        return;
+      }
+      // The editor can rebuild its DOM without `content` changing (initial
+      // setContent, node views), which strands the ranges — repaint then.
+      // Debounced: while typing, every keystroke mutates the DOM, and a
+      // repaint per frame would rebuild the text index on each one.
+      if (inEditor && !observer) {
+        observer = new MutationObserver(() => {
+          clearTimeout(repaintTimer);
+          repaintTimer = setTimeout(() => {
+            cancelAnimationFrame(id);
+            id = requestAnimationFrame(paint);
+          }, 200);
+        });
+        observer.observe(container, { childList: true, subtree: true, characterData: true });
+      }
       const idx = buildTextIndex(container);
       const ranges: { id: string; range: Range }[] = [];
-      for (const t of anchoredThreads) {
-        if (!t.anchor?.quote) continue;
-        const r = rangeForAnchor(container, idx, t.anchor);
+      // Only open threads paint (and hit-test): a resolved thread is done,
+      // and its highlight staying put is what made resolving feel broken.
+      for (const t of paintableThreads(anchoredThreads)) {
+        const r = rangeForAnchor(container, idx, t.anchor!);
         if (r) ranges.push({ id: t.id, range: r });
       }
+      const outdated = outdatedThreadIds(anchoredThreads, idx.text);
+      setOutdatedIds((prev) =>
+        prev.size === outdated.size && [...outdated].every((id) => prev.has(id))
+          ? prev
+          : outdated,
+      );
       anchorRangesRef.current = ranges;
       setHighlight("comment-anchor", ranges.map((r) => r.range));
+      const active = ranges.find((r) => r.id === activeThreadIdRef.current);
+      setHighlight("comment-anchor-active", active ? [active.range] : []);
       // Deferred focus: a comment was clicked from edit mode; now that the
       // rendered view exists and ranges are built, scroll to + emphasize it.
       if (pendingFocusRef.current) {
@@ -683,8 +790,21 @@ export function DocumentEditor({
         }
         pendingFocusRef.current = null;
       }
-    });
-    return () => cancelAnimationFrame(id);
+    };
+    // In the editor `content` changes on every keystroke, re-running this
+    // effect; the delay (reset by each re-run) makes that a debounce.
+    if (inEditor) {
+      repaintTimer = setTimeout(() => {
+        id = requestAnimationFrame(paint);
+      }, 200);
+    } else {
+      id = requestAnimationFrame(paint);
+    }
+    return () => {
+      cancelAnimationFrame(id);
+      clearTimeout(repaintTimer);
+      observer?.disconnect();
+    };
   }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
 
   // Paint the active thread's range brighter (doc ⇄ rail emphasis).
@@ -700,12 +820,24 @@ export function DocumentEditor({
         (t) => t.anchor?.quote === anchor.quote && t.anchor?.before === anchor.before,
       );
       if (hit) setActiveThreadId(hit.id);
+      // A resolved thread has no painted range by design — selecting it in
+      // the rail is the whole action, not a "text isn't here" miss.
+      if (hit?.status === "resolved") return;
       const range = anchorRangesRef.current.find((r) => r.id === hit?.id)?.range;
       if (range) {
         range.startContainer.parentElement?.scrollIntoView({
           behavior: "smooth",
           block: "center",
         });
+        return;
+      }
+      // Raw markdown paints its spans as <mark>s in the textarea's mirror.
+      if (rawMode) {
+        const mark = hit
+          ? bodyRef.current?.querySelector(`mark[data-thread-id="${CSS.escape(hit.id)}"]`)
+          : null;
+        if (mark) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        else toast.message("That highlighted text isn't in the current version.");
         return;
       }
       // Not rendered yet (we're in the editor) — drop into comment mode and let
@@ -719,7 +851,7 @@ export function DocumentEditor({
       }
       toast.message("That highlighted text isn't in the current version.");
     },
-    [anchoredThreads, commentMode, mode, content],
+    [anchoredThreads, commentMode, mode, content, rawMode],
   );
 
   // Map a click inside the rendered doc onto an anchored thread (if the click
@@ -906,6 +1038,9 @@ export function DocumentEditor({
       ...(typeTableEnabled
         ? [{ value: "table", label: "Table", Icon: Table2, expects: "CSV — one header row, then data rows." }]
         : []),
+      ...(typeTaskEnabled
+        ? [{ value: "task", label: "Task", Icon: ListTodo, expects: "Markdown notes for a unit of work. Tasks skip review and carry an assignee, due date and priority on the board." }]
+        : []),
       ...(workflowPlaneEnabled
         ? [
           { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
@@ -915,7 +1050,7 @@ export function DocumentEditor({
         : []),
     ];
     return all.filter((o) => o.value !== (nodeType ?? "document"));
-  }, [typeArtifactEnabled, typeTableEnabled, workflowPlaneEnabled, nodeType]);
+  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, workflowPlaneEnabled, nodeType]);
   const handleTurnInto = async () => {
     if (!turnInto || isNew) return;
     setTurningInto(true);
@@ -1024,7 +1159,13 @@ export function DocumentEditor({
       const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
       setPrime(loadedPrime);
       loadedPrimeRef.current = loadedPrime;
+      const loadedAlwaysInclude =
+        typeof node?.always_include === "boolean" ? node.always_include : null;
+      setAlwaysInclude(loadedAlwaysInclude);
+      loadedAlwaysIncludeRef.current = loadedAlwaysInclude;
       setBaseVersion(node?.version);
+      setNodeFields((node as any)?.fields ?? undefined);
+      setStatusSince((node as any)?.status_since ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -1173,7 +1314,10 @@ export function DocumentEditor({
     !!pendingReviewBy &&
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
-  const isLocked = status === "pending_review" && !isOwnPendingReview;
+  // A reviewer who can also edit may unlock someone's pending submission to
+  // fix it and approve in one step (CU-wdqcq04wnw).
+  const [reviewerEditing, setReviewerEditing] = useState(false);
+  const isLocked = status === "pending_review" && !isOwnPendingReview && !reviewerEditing;
   // Existing document: the Type control is the Turn into entry point.
   const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
@@ -1181,6 +1325,36 @@ export function DocumentEditor({
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
   const fieldsDisabled = isLocked || mode !== "edit";
+
+  // Which surface shows the body. Each switch remounts it, so the place the
+  // reader was at is carried across (lib/view-place.ts).
+  const surfaceKey = loading
+    ? "loading"
+    : compareVersion != null
+      ? "diff"
+      : isSourceOnly && mode === "edit" && !commentMode
+        ? "source"
+        : rawMode
+          ? "raw"
+          : isArtifactDraft
+            ? "artifact-draft"
+            : (commentMode || mode === "view") && (isSourceOnly || !looksLikeHtml(content))
+              ? "view"
+              : "editor";
+  useKeepPlace({
+    surfaceKey,
+    resetKey: `${nestId}/${nodeId}`,
+    getSurface: () => {
+      const el = bodyRef.current?.querySelector<HTMLElement>("[data-place-surface]");
+      // The editor's toolbar is sticky at the top — read the text, not it.
+      return el?.querySelector<HTMLElement>(".ProseMirror") ?? el ?? null;
+    },
+  });
+  // Comment highlights in the raw markdown, mapped from rendered-text quotes.
+  const rawRanges = useMemo(
+    () => (rawMode ? sourceRangesForAnchors(content, paintableThreads(anchoredThreads)) : []),
+    [rawMode, content, anchoredThreads],
+  );
 
   // Declared before isDirty so the save gate below can read it.
   const hasSaveableFields = useMemo(
@@ -1200,8 +1374,9 @@ export function DocumentEditor({
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
     if (prime !== loadedPrimeRef.current) return true;
+    if (alwaysInclude !== loadedAlwaysIncludeRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule, prime]);
+  }, [touched, title, content, tags, schedule, prime, alwaysInclude]);
 
   // Save is a no-op on a clean document (it would only bump the version), so
   // the button says so by being disabled — the enabled/disabled pair IS the
@@ -1280,12 +1455,8 @@ export function DocumentEditor({
       window.removeEventListener("popstate", onPop);
       // Left by some other route (saved, discarded, navigated in-app): drop the
       // spare entries so Back still means Back.
-      if (
-        !leavingRef.current &&
-        parkedRef.current > 0 &&
-        (window.history.state as any)?.cnLeaveGuard
-      ) {
-        window.history.go(-parkedRef.current);
+      if (!leavingRef.current && parkedRef.current > 0) {
+        dropParkedEntries(parkedRef.current);
       }
     };
   }, [isDirty, isReviewerOnly]);
@@ -1391,12 +1562,17 @@ export function DocumentEditor({
         // Only sent when explicitly flagged — the server 403s a non-admin who
         // sends `prime` at all, so an inherited (null) flag stays off the wire.
         ...(prime === null ? {} : { prime }),
+        ...(alwaysInclude === null ? {} : { always_include: alwaysInclude }),
       });
       savedId = (res as any)?.node?.id;
       createdStatus = (res as any)?.node?.status;
     } else {
-      const primePatch =
-        prime === loadedPrimeRef.current ? {} : { prime };
+      const primePatch = {
+        ...(prime === loadedPrimeRef.current ? {} : { prime }),
+        ...(alwaysInclude === loadedAlwaysIncludeRef.current
+          ? {}
+          : { always_include: alwaysInclude }),
+      };
       const res = await api.updateNode(
         nestId,
         nodeId,
@@ -1407,10 +1583,15 @@ export function DocumentEditor({
         baseVersion,
       );
       loadedPrimeRef.current = prime;
+      loadedAlwaysIncludeRef.current = alwaysInclude;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
+      // A save can move the status (a published prime doc lands as a draft), and
+      // Submit/Discard key off it. Own-pending edits keep the open review's status.
+      const nextStatus = (res as any)?.node?.status;
+      if (outcome !== "pending" && typeof nextStatus === "string") setStatus(nextStatus);
       // The top bar's "Edited …" reads this; the save just moved it.
       setUpdatedAt((res as any)?.node?.updated_at ?? new Date().toISOString());
       savedId = nodeId;
@@ -1436,6 +1617,12 @@ export function DocumentEditor({
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
   const runSave = async (afterSave: (savedId: string) => void) => {
+    // A plain save of someone else's pending submission is refused (locked);
+    // the reviewer's edits only land through Save & approve.
+    if (reviewerEditing) {
+      setError("Use Save & approve to publish your edits, or Cancel to drop them.");
+      return;
+    }
     if (!canSave) {
       setError(
         isNew
@@ -1463,8 +1650,13 @@ export function DocumentEditor({
             ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
-      } else if (!isNew && !noop) {
-        toast.success(`"${title.trim() || "Untitled"}" saved.`);
+      } else if (!isNew && !noop && outcome !== "pending") {
+        // Pending edits auto-save; the action bar says so instead of a toast each time.
+        toast.success(
+          outcome === "publish"
+            ? `"${title.trim() || "Untitled"}" published — it's live now.`
+            : `"${title.trim() || "Untitled"}" saved as a draft — submit it for review when ready.`,
+        );
       }
       // The document is clean now, but React has not re-rendered yet: the
       // app-level nav guard registered by the effect below still closes over
@@ -1554,8 +1746,20 @@ export function DocumentEditor({
 
   const handleSubmitForReview = async (note: string, priority: string) => {
     if (isNew) return;
+    // Submit what's on screen, not the last save.
+    const saveFirst = isDirty;
+    if (saveFirst) await persistCurrent();
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
+    toast.success(saveFirst ? "Saved and submitted for review." : "Submitted for review.");
+    // Warn when the submission has nobody to go to — the single-user nest case.
+    if (!(isOwner && allowSelfApprove)) {
+      qc.fetchQuery({ ...reads.nodeApprovers(nestId, nodeId), staleTime: 0 })
+        .then(({ approvers: who, truncated }) => {
+          if (who.length === 0 && !truncated) toast.warning(NO_APPROVER_COPY);
+        })
+        .catch(() => {});
+    }
     // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
@@ -1564,12 +1768,47 @@ export function DocumentEditor({
   const handleApprove = async (note?: string) => {
     if (isNew) return;
     await api.approveNode(nestId, nodeId, note);
+    if (onReviewed) {
+      toast.success("Approved");
+      onReviewed();
+    } else await loadNode();
+  };
+  const handleEditAndApprove = async () => {
+    if (isNew) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.approveWithEdits(nestId, nodeId, {
+        title: title.trim(),
+        content,
+        tags,
+        ...(baseVersion !== undefined && baseVersion !== null ? { baseVersion } : {}),
+      });
+      clearDraft(nestId, nodeId);
+      setTouched(false);
+      setReviewerEditing(false);
+      toast.success("Edited and approved — the author is notified");
+      // The edits are on the server; leaving must not ask about them.
+      bypassNavGuard(() => (onReviewed ? onReviewed() : void loadNode()));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const cancelReviewerEdit = async () => {
+    clearDraft(nestId, nodeId);
+    setTouched(false);
+    setReviewerEditing(false);
     await loadNode();
   };
   const handleReject = async (note: string) => {
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
-    await loadNode();
+    if (onReviewed) {
+      toast.success("Rejected");
+      onReviewed();
+    } else await loadNode();
   };
   // Cancel your own pending review from the document itself — back to Draft,
   // rather than Delete being the only exit (CU-wdqcq007pe).
@@ -1618,7 +1857,13 @@ export function DocumentEditor({
   const primeByTag =
     primeTags.length > 0 &&
     tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
-  const effectivePrime = prime === null ? primeByTag : prime;
+  // Always-include mirrors the server the same way; an always-include
+  // document is prime whatever its own prime flag says.
+  const alwaysIncludeByTag =
+    alwaysIncludeTags.length > 0 &&
+    tags.some((t) => alwaysIncludeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectiveAlwaysInclude = alwaysInclude === null ? alwaysIncludeByTag : alwaysInclude;
+  const effectivePrime = effectiveAlwaysInclude || (prime === null ? primeByTag : prime);
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
@@ -1627,6 +1872,22 @@ export function DocumentEditor({
     status === "pending_review" &&
     canApproveCapability &&
     (!isOwnSubmission || (isOwner && allowSelfApprove));
+  // Edit & approve: someone else's submission, a caller who can both edit and
+  // approve, never on prime documents (server-enforced too).
+  const canEditAndApprove =
+    canReviewHere && !isOwnPendingReview && canEditContent && !isViewOnly && !isReviewerOnly && !effectivePrime;
+  // Your own pending submission that you can't approve: say why and who can
+  // (CU-wdqcq02t1r). The list is the server's approve gate, caller excluded.
+  const blockedOnOthers = isOwnPendingReview && !canReviewHere;
+  const approversData = useQuery({
+    ...reads.nodeApprovers(nestId, nodeId),
+    enabled: blockedOnOthers && !isNew,
+  }).data;
+  // A list cut at the server's cap can't prove that nobody can approve.
+  const approvers =
+    approversData && !(approversData.truncated && approversData.approvers.length === 0)
+      ? approversData.approvers
+      : undefined;
 
   // A pending-review doc opens read-only for a reviewer, and the comment box
   // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
@@ -1659,9 +1920,36 @@ export function DocumentEditor({
     if (isLocked && mode === "edit") setMode("view");
   }, [isLocked, mode]);
 
-  // Submit-for-Review only on existing drafts with stewardship enabled.
+  // What Save will do — publish, draft, or update the author's own open review.
+  const outcome = saveOutcome({
+    isNew,
+    isOwnPendingReview,
+    stewardshipEnabled,
+    prime: effectivePrime,
+    primeOnlyReview: !!nestSettings.data?.prime_only_review,
+    creatorIsReviewer: !!nestSettings.data?.creator_is_reviewer,
+    allowSelfApprove,
+    ownerOrAdmin: canFlagPrime,
+    // The stored type — mirrors the server, which gates on the type a node
+    // had before the edit, so turning a document into a task still reviews.
+    isTask: nodeType === "task",
+  });
+
+  // Submit saves unsaved edits first, so offer it only where that save drafts —
+  // a save that publishes would put the doc live before the submit ran.
   const canSubmitForReview =
-    !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
+    !isNew &&
+    stewardshipEnabled &&
+    !isReviewerOnly &&
+    (isDirty ? outcome === "draft" : status === "draft");
+
+  // Own pending submission: edits save themselves to it once typing pauses.
+  useEffect(() => {
+    if (outcome !== "pending" || mode !== "edit" || !canSave) return;
+    const t = setTimeout(() => void runSave(() => {}), 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outcome, mode, canSave, title, content, tags, schedule]);
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
     editorRef.current?.insertWikiLink(node.id, node.title);
@@ -1835,6 +2123,17 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {isOrgContributor && (
+        <SuggestDialog
+          nestId={nestId}
+          open={suggestOpen}
+          onOpenChange={setSuggestOpen}
+          edit={{ nodeId, title, content }}
+        />
+      )}
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {!isNew && (
         <ReasonDialog
           open={showDeletionModal}
@@ -2123,7 +2422,17 @@ export function DocumentEditor({
                 Title field sits directly below (an <h1> in view mode), so the
                 trail ended in the same string the next line already shows. The
                 crumbs answer "where am I", the field answers "what is this". */}
-            {!isNew && status && <StatusBadge status={status} />}
+            {!isNew && isDocumentLifecycleStatus(status) && (
+              <LifecycleStatusBadge
+                status={status}
+                className="shrink-0 whitespace-nowrap cursor-help"
+                title={lifecycleStatusHint(status, {
+                  submittedBy: pendingReviewBy,
+                  stewardship: stewardshipEnabled,
+                })}
+                data-testid={`document-status-${status}`}
+              />
+            )}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
                 that is very much alive, with no way to dismiss it. The verdict
@@ -2194,13 +2503,33 @@ export function DocumentEditor({
               hid Approve/Reject from every reviewer who was not also an editor,
               leaving the document page with no way to resolve a review.
               canReviewHere already carries the full approval check. */}
-          {canReviewHere && (
-            <ReviewActions
-              documentTitle={title}
-              version={baseVersion ?? 1}
-              onApprove={handleApprove}
-              onReject={handleReject}
-            />
+          {/* While a reviewer edits, Save & approve (bottom bar) is the way out —
+              a plain Approve here would publish without their edits. */}
+          {canReviewHere && !reviewerEditing && (
+            <>
+              {canEditAndApprove && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    setCommentMode(false);
+                    setReviewerEditing(true);
+                  }}
+                  title="Fix it yourself, then approve — instead of sending it back"
+                  data-testid="document-editor-review-edit"
+                >
+                  <Pencil className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">Edit</span>
+                </Button>
+              )}
+              <ReviewActions
+                documentTitle={title}
+                version={baseVersion ?? 1}
+                onApprove={handleApprove}
+                onReject={handleReject}
+              />
+            </>
           )}
           {visibilityControl}
           {canShare && !isArchived && (
@@ -2216,6 +2545,8 @@ export function DocumentEditor({
               <span className="hidden sm:inline">Share</span>
             </Button>
           )}
+          {/* Experimental document pins — nothing while the switch is off. */}
+          {!isNew && <DocPinControl nestId={nestId} nodeId={nodeId} />}
           {/* Comments — toggles the rail. The count is open threads. Closing
               also leaves comment mode, or the rail would reopen itself. */}
           {!isNew && (
@@ -2360,6 +2691,44 @@ export function DocumentEditor({
                   Edit
                 </Button>
               )}
+              {/* A viewer gets the way to ask instead of no Edit at all. Not on
+                  an archived nest (nobody edits it) or for a signed-out reader
+                  (nobody to grant it to). */}
+              {/* An org contributor (CU-wdqcq05rz6) can suggest the edit
+                  instead of asking for access — it goes to review. */}
+              {isViewOnly && isOrgContributor && !isArchived && !isNew && !isPdfNode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setSuggestOpen(true)}
+                  data-testid="document-editor-suggest-edit"
+                  title="Suggest a change. It goes to review; the document stays as it is until a reviewer approves it."
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Suggest an edit
+                </Button>
+              )}
+              {isViewOnly && !isOrgContributor && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() =>
+                    setAccessOffer({
+                      nestId,
+                      target: { type: "node", id: nodeId },
+                      level: "write",
+                      label: title.trim() || undefined,
+                    })
+                  }
+                  data-testid="document-editor-request-access"
+                  title="Ask the nest owner or an admin for edit access to this document"
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Request edit access
+                </Button>
+              )}
             </>
           )}
         </div>
@@ -2372,7 +2741,12 @@ export function DocumentEditor({
             window bottom on a short document too (mt-auto), and sticks there
             while a long one scrolls under it. 7rem = app header + top bar. */}
         <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
-          <div className="w-full px-5 py-6 sm:px-10 sm:py-8">
+          <div
+            ref={pageRef}
+            onFocusCapture={() => setPageActive(true)}
+            onPointerDownCapture={() => setPageActive(true)}
+            className="w-full px-5 py-6 sm:px-10 sm:py-8"
+          >
 
             {error && (
               <Alert variant="destructive" className="mb-4">
@@ -2444,14 +2818,59 @@ export function DocumentEditor({
                   </Alert>
                 )}
 
+                {reviewerEditing && (
+                  <Alert data-testid="document-editor-review-edit-banner">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      You're editing a submission that's waiting for review. Save &amp; approve
+                      publishes your edits with the author's; the history shows your edit and
+                      the author is notified. Cancel drops your edits.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
                 {isOwnPendingReview && (
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
                       <span className="flex-1 min-w-[16rem]">
+                        {blockedOnOthers && (
+                          <>
+                            <strong>You can't approve your own changes.</strong> A steward
+                            or admin on this nest must approve.{" "}
+                          </>
+                        )}
                         This is still under review. Your edits update the same pending
                         submission — no need to withdraw and resubmit — and the steward
                         reviews your latest version.
+                        {blockedOnOthers && approvers && (
+                          approvers.length > 0 ? (
+                            <span className="mt-1 block" data-testid="document-editor-approvers">
+                              Can approve:{" "}
+                              {approvers.slice(0, 5).map((a) => a.name || a.email).join(", ")}
+                              {approvers.length > 5 && ` and ${approvers.length - 5} more`}
+                            </span>
+                          ) : (
+                            <span
+                              className="mt-1 block font-medium text-amber-700 dark:text-amber-400"
+                              data-testid="document-editor-no-approver"
+                            >
+                              {NO_APPROVER_COPY}
+                            </span>
+                          )
+                        )}
+                        {/* Self-approve never applies to prime documents. */}
+                        {blockedOnOthers && isOwner && !allowSelfApprove && !effectivePrime && onOpenNestSettings && (
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto p-0"
+                            onClick={onOpenNestSettings}
+                            data-testid="document-editor-open-settings"
+                          >
+                            Open Nest settings
+                          </Button>
+                        )}
                       </span>
                       {/* Withdraw belongs with the sentence explaining the state, not
                     in the header's action row (CU-wdqcq007pe). */}
@@ -2509,11 +2928,10 @@ export function DocumentEditor({
                           }
                         }}
                         placeholder="Untitled"
-                        // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
-                        // stop here so the server's 400 is unreachable from the UI.
+                        // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
-                        maxLength={120}
+                        maxLength={TITLE_MAX}
                         disabled={fieldsDisabled}
                         required
                         aria-required="true"
@@ -2523,13 +2941,13 @@ export function DocumentEditor({
                         className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
                           }`}
                       />
-                      {((touched && !title.trim()) || title.length >= 90) && (
+                      {((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
                         <div className="mt-1 flex items-start justify-between gap-2 text-xs">
                           <span className="text-destructive">
                             {touched && !title.trim() ? "Title is required" : ""}
                           </span>
                           <span className="text-muted-foreground tabular-nums">
-                            {title.length >= 90 ? `${title.length}/120` : ""}
+                            {title.length >= TITLE_MAX - 30 ? `${title.length}/${TITLE_MAX}` : ""}
                           </span>
                         </div>
                       )}
@@ -2789,7 +3207,7 @@ export function DocumentEditor({
 
                 {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-                {stewardshipEnabled && canFlagPrime && (
+                {stewardshipEnabled && canFlagPrime && pageActive && (
                   <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
                     <div className="space-y-0.5">
                       <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -2801,9 +3219,14 @@ export function DocumentEditor({
                           ? "Inherited from a prime tag on this document — it always needs steward approval."
                           : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
                       </p>
-                      {primeByTag && prime === false && (
+                      {primeByTag && prime === false && !effectiveAlwaysInclude && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its prime tag.
+                        </p>
+                      )}
+                      {effectiveAlwaysInclude && (
+                        <p className="text-xs text-muted-foreground">
+                          Prime because it is always-included — turn that off first.
                         </p>
                       )}
                       {/* The one case people get wrong: an owner with auto-publish on
@@ -2817,7 +3240,7 @@ export function DocumentEditor({
                     </div>
                     <Switch
                       checked={effectivePrime}
-                      disabled={fieldsDisabled}
+                      disabled={fieldsDisabled || effectiveAlwaysInclude}
                       onCheckedChange={(next) => {
                         // Turning the switch back to whatever the tags already imply
                         // clears the override rather than pinning a redundant flag.
@@ -2826,6 +3249,42 @@ export function DocumentEditor({
                       }}
                       aria-label="Prime document"
                       data-testid="document-editor-prime"
+                    />
+                  </div>
+                )}
+
+                {/* Always include — any nest, owner/admin only. It reaches every
+              agent and model, governed or not; in a governed nest it also
+              makes the document prime. */}
+                {canFlagPrime && pageActive && (
+                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                    <div className="space-y-0.5">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Megaphone className="h-4 w-4" />
+                        Always include
+                      </span>
+                      <p className="text-xs text-muted-foreground">
+                        {alwaysIncludeByTag && alwaysInclude === null
+                          ? "Inherited from an always-include tag on this document."
+                          : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs."}
+                        {stewardshipEnabled &&
+                          " It is also prime: every change to it needs steward approval."}
+                      </p>
+                      {alwaysIncludeByTag && alwaysInclude === false && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Exempted from its always-include tag.
+                        </p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={effectiveAlwaysInclude}
+                      disabled={fieldsDisabled}
+                      onCheckedChange={(next) => {
+                        setAlwaysInclude(next === alwaysIncludeByTag ? null : next);
+                        setTouched(true);
+                      }}
+                      aria-label="Always include"
+                      data-testid="document-editor-always-include"
                     />
                   </div>
                 )}
@@ -2859,6 +3318,43 @@ export function DocumentEditor({
                   </div>
                 )}
 
+                {/* Relations — tasks only: blocks / blocked by / related /
+              duplicates. Not content, so editable in view mode too; the
+              caller's edit access to the task gates it. */}
+                {!isNew && nodeType === "task" && (
+                  <TaskRelations
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    canEdit={canEditContent && !isArchived}
+                    onOpen={(id, t) =>
+                      confirmLeave(`open "${t}"`, () => onNavigateDocument?.(nestId, id, title))
+                    }
+                  />
+                )}
+
+                {/* Custom fields — the nest's definitions that apply to this
+              node type, each saved on its own (see NodeFieldsPanel). */}
+                {!isNew && nodeType && (
+                  <NodeFieldsPanel
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    nodeType={nodeType}
+                    fields={nodeFields}
+                    statusSince={statusSince}
+                    canEdit={canEditContent && !isLocked}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      if (typeof n?.status === "string") setStatus(n.status);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                      setNodeFields(n?.fields ?? undefined);
+                    }}
+                  />
+                )}
+
+                {/* What agents and people logged on this task (context_task_log). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskActivityTimeline nestId={nestId} nodeId={nodeId} people={roster?.people} />
+                )}
 
                 {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
               control) on the left, Schedule (runnable orchestrator hint) on the
@@ -2868,7 +3364,7 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                {canEditContent && pageActive && (isNew || isRunnable || canTurnIntoHere) && (
                   <div className="flex flex-col sm:flex-row gap-4 w-full">
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
@@ -2908,6 +3404,14 @@ export function DocumentEditor({
                                   {
                                     value: "table", label: "Table", Icon: Table2,
                                     on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300"
+                                  },
+                                ]
+                                : []),
+                              ...(typeTaskEnabled
+                                ? [
+                                  {
+                                    value: "task", label: "Task", Icon: ListTodo,
+                                    on: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
                                   },
                                 ]
                                 : []),
@@ -3316,8 +3820,11 @@ export function DocumentEditor({
                               Rich editor
                             </Button>
                           </div>
-                          <textarea
+                          <HighlightedTextarea
                             value={content}
+                            ranges={rawRanges}
+                            activeId={activeThreadId}
+                            onRangeClick={setActiveThreadId}
                             onChange={(e) => {
                               if (fieldsDisabled) return;
                               setContent(e.target.value);
@@ -3327,7 +3834,6 @@ export function DocumentEditor({
                             readOnly={fieldsDisabled}
                             spellCheck={false}
                             placeholder="# Raw markdown"
-                            className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                             data-testid="document-editor-raw-markdown"
                           />
                         </div>
@@ -3377,6 +3883,7 @@ export function DocumentEditor({
                           onMouseMove={isNew ? undefined : onDocMouseMove}
                           className="min-h-[300px] cursor-text"
                           data-testid="document-view-surface"
+                          data-place-surface
                         >
                           {effectiveType === "table" && !isNew ? (
                             <div className="p-4">
@@ -3397,53 +3904,58 @@ export function DocumentEditor({
                           )}
                         </div>
                       ) : (
-                        <MarkdownEditor
-                          ref={editorRef}
-                          content={content}
-                          onChange={(next) => {
-                            setContent(next);
-                            // TipTap onUpdate fires only on real user input here.
-                            setTouched(true);
-                          }}
-                          onSave={handleSave}
-                          onBlur={saveOnBlur}
-                          nestId={nestId}
-                          currentNodeId={isNew ? undefined : nodeId}
-                          editable={!fieldsDisabled}
-                          onRequestDocLink={() => setShowDocPicker(true)}
-                          onUploadImage={async (file) => {
-                            const { url } = await api.uploadAsset(nestId, file);
-                            return url;
-                          }}
-                          onWikiLinkClick={handleWikiLinkClick}
-                          placeholder="Start writing, or select text to format it…"
-                          // Nobody gets the caret on open: a new document focuses
-                          // Title (see the effect below), an existing one reads as
-                          // a page until you click into it — "end" would also
-                          // scroll a long document to its last line on arrival.
-                          autofocus={false}
-                          variant="page"
-                          toolbarEnd={
-                            <>
-                              {/* Rich ↔ raw markdown at the editor's own right end, where the
-                                  writer already is (it used to hide in ⋮). */}
-                              {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2 text-xs"
-                                  onClick={() => setRawMode(true)}
-                                  title="Edit the raw markdown"
-                                  data-testid="document-editor-markdown-toggle"
-                                >
-                                  <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
-                                  <span className="hidden sm:inline">Markdown</span>
-                                </Button>
-                              )}
-                            </>
-                          }
-                        />
+                        // Clicking a painted quote while editing selects its
+                        // thread (the click still places the caret).
+                        <div ref={editorSurfaceRef} data-place-surface onClick={onDocClick}>
+                          <MarkdownEditor
+                            ref={editorRef}
+                            content={content}
+                            onChange={(next) => {
+                              setContent(next);
+                              // TipTap onUpdate fires only on real user input here.
+                              setTouched(true);
+                            }}
+                            onSave={handleSave}
+                            onBlur={saveOnBlur}
+                            nestId={nestId}
+                            currentNodeId={isNew ? undefined : nodeId}
+                            editable={!fieldsDisabled}
+                            onRequestDocLink={() => setShowDocPicker(true)}
+                            onUploadImage={async (file) => {
+                              const { url } = await api.uploadAsset(nestId, file);
+                              return url;
+                            }}
+                            onWikiLinkClick={handleWikiLinkClick}
+                            placeholder="Start writing, or select text to format it…"
+                            // Nobody gets the caret on open: a new document focuses
+                            // Title (see the effect below), an existing one reads as
+                            // a page until you click into it — "end" would also
+                            // scroll a long document to its last line on arrival.
+                            autofocus={false}
+                            variant="page"
+                            toolbarHidden={!pageActive}
+                            toolbarEnd={
+                              <>
+                                {/* Rich ↔ raw markdown at the editor's own right end, where the
+                                    writer already is (it used to hide in ⋮). */}
+                                {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setRawMode(true)}
+                                    title="Edit the raw markdown"
+                                    data-testid="document-editor-markdown-toggle"
+                                  >
+                                    <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
+                                    <span className="hidden sm:inline">Markdown</span>
+                                  </Button>
+                                )}
+                              </>
+                            }
+                          />
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3577,6 +4089,35 @@ export function DocumentEditor({
               {(() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
                 const showSubmit = !isViewOnly && canSubmitForReview;
+                if (reviewerEditing) {
+                  return (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8"
+                        disabled={saving}
+                        onClick={() => void cancelReviewerEdit()}
+                        data-testid="document-editor-review-edit-cancel"
+                      >
+                        Cancel
+                      </Button>
+                      <span className="inline-flex" title={isDirty ? "Publishes your edits with theirs; the author is notified." : "No changes yet — use Approve if it's fine as is."}>
+                        <Button
+                          size="sm"
+                          className="h-8"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => void handleEditAndApprove()}
+                          disabled={saving || !isDirty}
+                          data-testid="document-editor-save-approve"
+                        >
+                          {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Check className="h-4 w-4 mr-1.5" />}
+                          Save &amp; approve
+                        </Button>
+                      </span>
+                    </>
+                  );
+                }
                 return (
                   <>
                     {/* Discard only where there is unreviewed work to throw away —
@@ -3599,19 +4140,45 @@ export function DocumentEditor({
                       )}
                     {showSubmit && (
                       <Button
-                        variant="outline"
+                        variant={outcome === "draft" ? "default" : "outline"}
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
                         data-testid="document-editor-submit"
-                        title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                        title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
                         <span className="hidden sm:inline">Submit for review</span>
                       </Button>
                     )}
-                    {canWrite && (
+                    {/* Own pending submission auto-saves — a status line, not a Save button. */}
+                    {canWrite && outcome === "pending" && (
+                      <span className="text-xs text-muted-foreground" data-testid="document-editor-autosave">
+                        {saving
+                          ? "Saving…"
+                          : isDirty
+                            ? "Unsaved changes"
+                            : justSaved
+                              ? "Changes saved to your pending submission"
+                              : "Edits save to your pending submission"}
+                      </span>
+                    )}
+                    {canWrite && outcome !== "pending" && (
+                      // Tooltip on a wrapper: a disabled Button takes no pointer events.
+                      <span
+                        className="inline-flex"
+                        title={
+                          !canSave
+                            ? isDirty || isNew
+                              ? "Add a title and content first."
+                              : "No unsaved changes."
+                            : outcome === "publish"
+                              ? "Saves and publishes — it goes live now."
+                              : "Saves your changes as a draft. Doesn't publish or submit for review."
+                        }
+                      >
                       <Button
+                        variant={showSubmit && outcome === "draft" ? "outline" : "default"}
                         size="sm"
                         className="h-8"
                         // Keep focus in the editor field so clicking Save doesn't
@@ -3632,11 +4199,12 @@ export function DocumentEditor({
                         {saving
                           ? "Saving…"
                           : justSaved && !isDirty
-                            ? "Saved"
-                            : isNew
-                              ? "Create"
-                              : "Save"}
+                            ? outcome === "publish" ? "Published" : "Saved"
+                            : outcome === "publish"
+                              ? "Publish"
+                              : "Save draft"}
                       </Button>
+                      </span>
                     )}
                   </>
                 );
@@ -3688,6 +4256,7 @@ export function DocumentEditor({
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}
               onThreadsChange={setAnchoredThreads}
+              outdatedThreadIds={outdatedIds}
               activeThreadId={activeThreadId}
               commentMode={commentMode}
               onSetCommentMode={(on) => {
@@ -3921,46 +4490,6 @@ export function DocumentEditor({
 }
 
 export default DocumentEditor;
-
-// Status pill next to doc title; loud colours flag pending_review.
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    draft: {
-      label: "Draft",
-      cls: "bg-muted text-muted-foreground",
-    },
-    pending_review: {
-      label: "Pending review",
-      cls: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-    },
-    approved: {
-      label: "Approved",
-      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-    },
-    published: {
-      label: "Published",
-      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-    },
-    rejected: {
-      label: "Rejected",
-      cls: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
-    },
-    external_edit_pending: {
-      label: "External edit",
-      cls: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
-    },
-  };
-  const info = map[status];
-  if (!info) return null;
-  return (
-    <span
-      className={`shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${info.cls}`}
-      data-testid={`document-status-${status}`}
-    >
-      {info.label}
-    </span>
-  );
-}
 
 /**
  * Step-wise folder chooser for the create-form breadcrumb: lists existing

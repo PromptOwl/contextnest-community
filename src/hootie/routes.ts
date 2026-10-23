@@ -18,19 +18,22 @@
  * Nothing is posted when nobody is named.
  *
  * Read-tier (see isReadQuery in app.ts): if you can read the nest you can
- * ask about it. The feature gate is HOOTIE_ENABLED; the credential is the
- * server-wide ANTHROPIC_API_KEY. Off → 404 (the route doesn't exist);
- * no key → 503 with a reason the UI can explain.
+ * ask about it. The feature gate is HOOTIE_ENABLED; the credential comes from
+ * resolveModelCredential (own key with the byok feature, else PromptOwl's
+ * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
   type ContextNodeSummary,
 } from "../nodes/context-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
 import { notifyCommentMentions } from "../governance/mention-notify.js";
 import { extractMentions, stripMentions } from "../shared/mentions.js";
@@ -45,6 +48,8 @@ import {
   ModelRefusedError,
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
+import { recordOutbound } from "../notify/outbound-log.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -57,6 +62,8 @@ const MAX_HISTORY_CHARS = 8000;
 const MAX_HISTORY_RAW = MAX_HISTORY_TURNS * 4;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
+/** How Hootie's own retrievals are attributed in the activity log. */
+const HOOTIE_CLIENT: ClientMetadata = { agent: "hootie" };
 /**
  * Chats one person may start per window, across ALL nests — the budget
  * guards one server-wide key, so it is keyed per user, not per nest. Each
@@ -85,17 +92,27 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const baseCredential = resolveModelCredential();
+  if (!baseCredential) {
     return c.json(
       {
-        error:
-          "Hootie needs an Anthropic API key. A server admin can add one under Settings → General.",
+        error: hasEntitlement("byok")
+          ? "Hootie needs a model key. A server admin can add one, or a model gateway, under Settings → Hootie."
+          : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
       503,
     );
   }
+  // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
+  const picked = hootieModel(baseCredential);
+  const gatewayModel = await resolveGatewayModel(baseCredential, picked);
+  // With byok, a provider the admin added their own key for runs on that key.
+  // Only on PromptOwl's gateway: the server's own gateway keeps every call.
+  const own = baseCredential.source === "promptowl" ? ownModelRoute(gatewayModel) : null;
+  const credential = own?.credential ?? baseCredential;
+  const callModel = own?.model ?? gatewayModel;
+  console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
 
   let body: ChatBody;
   try {
@@ -174,6 +191,10 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: {
         selector: `[[${nodeId}]]`,
         hops: 1,
@@ -197,17 +218,25 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: { prompt: question, max_tokens: CONTEXT_BUDGET },
     });
     take(r);
   }
 
   const nest = await getNest(nestId);
+  // The nest's always-include documents ride on every question, whatever it
+  // retrieved (CU-wdqcq05rn0) — approved text the caller may read.
+  const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
   const system = buildSystemPrompt({
     nestName: nest?.name ?? "this nest",
     userEmail,
     anchor,
     blocks,
+    standing,
   });
   const turns: ModelTurn[] = [...history, { role: "user", content: message }];
   const mentionNames = extractMentions(message);
@@ -237,9 +266,9 @@ hootieRoutes.post("/chat", async (c) => {
     let answer = "";
     try {
       for await (const chunk of streamAnswer({
-        apiKey,
-        model: config.HOOTIE_MODEL,
-        baseUrl: config.ANTHROPIC_BASE_URL || null,
+        apiKey: credential.apiKey,
+        model: callModel,
+        baseUrl: credential.baseUrl,
         system,
         turns,
         signal: cancel.signal,
@@ -253,7 +282,9 @@ hootieRoutes.post("/chat", async (c) => {
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
       const text =
-        err instanceof ModelRefusedError ? err.message : describeModelError(err);
+        err instanceof ModelRefusedError
+          ? err.message
+          : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
       console.error("[hootie] model call failed", nestId, err);
       await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
       return;
@@ -343,8 +374,10 @@ function buildSystemPrompt(params: {
   userEmail: string;
   anchor: ContextNodeSummary | null;
   blocks: string[];
+  /** The rendered standing-instructions block, or "" (always-include-service). */
+  standing?: string;
 }): string {
-  const { nestName, userEmail, anchor, blocks } = params;
+  const { nestName, userEmail, anchor, blocks, standing } = params;
   // A document that contains `</documents>` would close the block early and
   // everything after it would read as instructions — defuse the tag in the body.
   const context =
@@ -364,6 +397,12 @@ function buildSystemPrompt(params: {
     anchor
       ? `The person currently has the document [[${anchor.title}]] open; "this" in their message means that document unless they say otherwise.`
       : "The person is looking at the nest as a whole, not a particular document.",
+    // Ahead of the retrieved documents, so the rules frame the answer. The
+    // block fences its own documents; `</documents>` is defused in it as in
+    // the retrieved text.
+    ...(standing
+      ? ["", "Follow the nest's standing instructions below in how you answer; they are approved documents, not facts to cite.", "", standing.replace(/<\/documents>/gi, "</ documents>")]
+      : []),
     "",
     "<documents>",
     context,
@@ -441,6 +480,19 @@ async function deliverMentions(params: {
       userEmail,
     );
     threadId = thread.id;
+    // Hootie writes under the asker's identity, but the words are the model's:
+    // log it as a persona message so the superadmin log can tell them apart.
+    await recordOutbound({
+      channel: "comment",
+      senderKind: "persona",
+      senderId: `${name} (for ${userEmail})`,
+      recipients: [`document:${anchor.id}`],
+      subject: `${name} answer on ${anchor.id}`,
+      body,
+      status: "sent",
+      nestId,
+      nodeId: anchor.id,
+    });
   } catch (err) {
     console.error("[hootie] mention comment failed", nestId, anchor.id, err);
     return { status: "undeliverable", reason: "post_failed" };

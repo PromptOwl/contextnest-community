@@ -11,6 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { toast } from "sonner";
 import { reads } from "../../lib/queries";
+import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
 import { documentFacets } from "../../lib/document-facets";
@@ -18,6 +19,9 @@ import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
 import { FolderDeleteDialog } from "./FolderDeleteDialog";
+import { FolderMoveDialog } from "./FolderMoveDialog";
+import { BulkSelectionBar } from "./BulkSelectionBar";
+import { Checkbox } from "@/components/ui/checkbox";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -29,7 +33,7 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus, Activity,
+  FolderOpen, ChevronRight, Share2, FolderPlus, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
 import { ActivityLogPanel } from "../ActivityLogPanel";
@@ -44,6 +48,7 @@ import { folderGrantTarget } from "../../lib/folder-target";
 import { checkFolderPath } from "../../lib/folder-path";
 import type { NestCaps } from "../../lib/nest-caps";
 import { NodeTypeIcon } from "./NodeTypeIcon";
+import { DocPinControl } from "./DocPins";
 import { typePill, byPathSegments, folderOfNode, STATUS_LABELS, DATE_LABELS, TYPE_LABELS } from "./node-display";
 
 import { Badge } from "@/components/ui/badge";
@@ -76,6 +81,8 @@ const EMPTY_FILTERS: DocFilters = { search: "", tags: [], status: "all", type: "
 
 interface Props {
   nestId: string;
+  /** Open this nest's structure rules at the rule governing a folder. */
+  onOpenStructure?: (folder: string) => void;
   initialSearch?: string;
   initialTags?: string[];
   /** The nest's cold load / any refetch (from the nest page). */
@@ -105,6 +112,8 @@ interface Props {
   stewardshipEnabled: boolean;
   allowSelfApprove: boolean;
   primeTags: string[];
+  /** Always-include tags — those documents are prime too. */
+  alwaysIncludeTags?: string[];
   visibility: api.NestVisibility;
   hasRoleOnNode: (node: Node, role: string) => boolean;
   canReviewNode: (node: Node) => boolean;
@@ -125,6 +134,7 @@ interface Props {
 
 export function DocumentsTab({
   nestId,
+  onOpenStructure,
   initialSearch,
   initialTags,
   initialLoad,
@@ -148,6 +158,7 @@ export function DocumentsTab({
   stewardshipEnabled,
   allowSelfApprove,
   primeTags,
+  alwaysIncludeTags = [],
   visibility,
   hasRoleOnNode,
   canReviewNode,
@@ -166,6 +177,8 @@ export function DocumentsTab({
   // Per-node comment counts drive the activity and "most comments" sorts —
   // a Documents-tab need, so it is read here, not on the nest page.
   const commentCounts = useQuery(reads.commentCounts(nestId)).data?.counts ?? {};
+  // Roster for author chips' display names; signed-out readers keep the email.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled: !!currentEmail });
   const fetchData = onRefresh;
 
 
@@ -181,6 +194,10 @@ export function DocumentsTab({
     ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
     : 0;
 
+  // Folder being renamed or moved (admin/owner).
+  const [moveFolderTarget, setMoveFolderTarget] = useState<
+    { path: string; label: string } | null
+  >(null);
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
     { path: string; label: string; total: number } | null
@@ -312,6 +329,19 @@ export function DocumentsTab({
   const moveResolvedDest =
     moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
 
+  // Multi-select: the documents ticked in the list, for bulk move / tag /
+  // delete. Server still judges each one; this only decides what to offer.
+  const [selected, setSelected] = useState<Map<string, any>>(new Map());
+  const toggleSelected = (node: any) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (!next.delete(node.id)) next.set(node.id, node);
+      return next;
+    });
+  const selectedNodes = [...selected.values()];
+  const isMine = (n: any) =>
+    !!n.author && !!currentEmail && n.author.toLowerCase() === currentEmail;
+
   // Every folder path in use (all prefixes, so intermediate levels with no
   // direct docs still appear) — options for the Move-to-folder dialog.
   const allFolders = useMemo(
@@ -354,6 +384,10 @@ export function DocumentsTab({
       return false;
     });
   };
+  // Who gets a select box: anyone who could act on the row (edit/move/tag, or
+  // delete as admin or author). Row, select-all and folder boxes share it.
+  const canSelect = (node: any) =>
+    !isReadOnly && (canEditNode(node) || canManage || isMine(node));
 
 
   // Node ids the caller can review right now (authoritative, from the queue
@@ -605,6 +639,14 @@ export function DocumentsTab({
         a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
       );
   })();
+
+  // Loaded, filtered docs the caller may select — what "Select all" covers.
+  const selectableVisible = sorted.filter(canSelect);
+  const selectableIn = (folder: string) =>
+    selectableVisible.filter((n) => {
+      const f = folderOfNode(n.id);
+      return f === folder || f.startsWith(`${folder}/`);
+    });
 
   // Every folder in the nest, so the tree can show one whose documents have
   // never been fetched. Memoised — FolderTree keys a useMemo on this.
@@ -1074,6 +1116,16 @@ export function DocumentsTab({
                   ))}
                 </div>
               )}
+              {!initialLoad && selectableVisible.length > 0 && (
+                <label className="mb-2 flex w-fit items-center gap-2 px-2 text-xs text-muted-foreground cursor-pointer">
+                  <Checkbox
+                    checked={selectionState(selected, selectableVisible)}
+                    onCheckedChange={() => setSelected((prev) => toggleMany(prev, selectableVisible))}
+                    data-testid="select-all-docs"
+                  />
+                  Select all ({selectableVisible.length})
+                </label>
+              )}
               {initialLoad || loadingFolders.has(baseFolder) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1126,8 +1178,15 @@ export function DocumentsTab({
                     canReviewNode(node) &&
                     (submitterByNode.get(node.id) !== currentEmail ||
                       (isOwner && allowSelfApprove));
+                  // A pending review freezes the doc for everyone but the
+                  // person who submitted it — the server lets them revise and
+                  // repoints the review (nodes/service updateNode), same as
+                  // DocumentEditor's isOwnPendingReview.
                   const canEdit =
-                    node.status !== "pending_review" && canEditNode(node);
+                    (node.status !== "pending_review" ||
+                      (!!currentEmail &&
+                        submitterByNode.get(node.id) === currentEmail)) &&
+                    canEditNode(node);
                   // Deleting is a nest admin/owner call — an editor who can
                   // write this doc still goes through the request queue. Same
                   // tier the document view uses for its Delete/Request split.
@@ -1265,6 +1324,17 @@ export function DocumentsTab({
                       </DropdownMenu>
                     </div>
                   );
+                  const selectBox =
+                    canSelect(node) ? (
+                      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                        <Checkbox
+                          checked={selected.has(node.id)}
+                          onCheckedChange={() => toggleSelected(node)}
+                          aria-label={`Select ${node.title}`}
+                          data-testid={`select-${node.id}`}
+                        />
+                      </div>
+                    ) : null;
                   return (
                     <div
                       key={node.id}
@@ -1305,9 +1375,11 @@ export function DocumentsTab({
                       }}
                       data-testid={`document-row-${node.id}`}
                     >
+                      {!cards && selectBox}
                       {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
+                          {cards && selectBox}
                           {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                           <span
                             className="font-medium truncate min-w-0"
@@ -1335,7 +1407,7 @@ export function DocumentsTab({
                           {/* Prime — the doc always needs approval, whoever
                               edits it. Only meaningful in a governed nest. */}
                           {stewardshipEnabled &&
-                            api.isPrimeNode(node, primeTags) && (
+                            api.isPrimeNode(node, primeTags, alwaysIncludeTags) && (
                             <span
                               className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
                               title={
@@ -1413,6 +1485,7 @@ export function DocumentsTab({
                               <AuthorshipChips
                                 author={node.author}
                                 collaborators={node.collaborators}
+                                people={roster?.people}
                               />
                             </>
                           )}
@@ -1460,6 +1533,7 @@ export function DocumentsTab({
                               <FolderInput className="h-3.5 w-3.5" />
                             </Button>
                           )}
+                          <DocPinControl nestId={nestId} nodeId={node.id} />
                           <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                             <History className="h-3.5 w-3.5" />
                           </Button>
@@ -1558,6 +1632,44 @@ export function DocumentsTab({
                         // genuinely empty folder stays a static row, no chevron.
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
+                        const folderDocs = selectableIn(node.path);
+                        // Same split as a document: admins/owners delete the
+                        // folder (and everything under it), editors raise a
+                        // request. Hidden while one is already pending, and
+                        // withheld from viewers — the server refuses a folder
+                        // flag below editor, and a folder-scope editor row
+                        // isn't enough for it either (canRequestDeletion
+                        // wants nest scope).
+                        const deleteButton =
+                          (canManage || canEditDocs) &&
+                          (canManage || !folderFlagPending(node.path)) ? (
+                            <button
+                              type="button"
+                              // An empty folder's only useful action is
+                              // removing it, so it shows without a hover.
+                              className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
+                                canManage
+                                  ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                                  : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                              }`}
+                              title={
+                                canManage
+                                  ? `Delete ${prettyFolderPath(node.path)} and everything in it`
+                                  : "Delete (needs admin approval)"
+                              }
+                              data-testid={`delete-folder-${node.path}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFolderTarget({
+                                  path: node.path,
+                                  label: prettyFolderPath(node.path),
+                                  total: node.total,
+                                });
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null;
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -1626,10 +1738,26 @@ export function DocumentsTab({
                               // collapsible folders.
                               <span className="h-3.5 w-3.5 shrink-0" />
                             )}
+                            {/* Expanded only: a collapsed folder's docs aren't
+                                loaded, so its box would select nothing. */}
+                            {!collapsed && folderDocs.length > 0 && (
+                              <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                                <Checkbox
+                                  checked={selectionState(selected, folderDocs)}
+                                  onCheckedChange={() => setSelected((prev) => toggleMany(prev, folderDocs))}
+                                  aria-label={`Select documents in ${prettyFolderPath(node.path)}`}
+                                  data-testid={`select-folder-${node.path}`}
+                                />
+                              </div>
+                            )}
                             <FolderOpen className="h-4 w-4 text-blue-500" />
                             <span className="text-sm font-medium">
                               {node.label}
                             </span>
+                            {/* An empty folder shows delete without a hover,
+                                so it sits right after the name — behind the
+                                hidden hover icons it floated at a fixed gap. */}
+                            {node.total === 0 && deleteButton}
                             {/* Recursive subtree total (this folder + all
                                   descendants), matching the Overview Contents
                                   card. Direct-count-only made a folder holding
@@ -1706,42 +1834,43 @@ export function DocumentsTab({
                                 <Activity className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), editors
-                                raise a request. Hidden while one is already
-                                pending, and withheld from viewers — the server
-                                refuses a folder flag below editor, and a
-                                folder-scope editor row isn't enough for it
-                                either (canRequestDeletion wants nest scope). */}
-                            {(canManage || canEditDocs) &&
-                              (canManage || !folderFlagPending(node.path)) && (
+                            {canManage && (
                               <button
                                 type="button"
-                                // An empty folder's only useful action is
-                                // removing it, so it shows without a hover.
-                                className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
-                                  canManage
-                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                }`}
-                                title={
-                                  canManage
-                                    ? `Delete ${prettyFolderPath(node.path)} and everything in it`
-                                    : "Delete (needs admin approval)"
-                                }
-                                data-testid={`delete-folder-${node.path}`}
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Rename or move ${prettyFolderPath(node.path)}`}
+                                aria-label={`Rename or move ${prettyFolderPath(node.path)}`}
+                                data-testid={`move-folder-${node.path}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setFolderTarget({
+                                  setMoveFolderTarget({
                                     path: node.path,
                                     label: prettyFolderPath(node.path),
-                                    total: node.total,
                                   });
                                 }}
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
+                                <Pencil className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {/* This folder's rules — where things go, how
+                                files are named. Everyone can look; owners and
+                                admins edit on the Structure page. */}
+                            {onOpenStructure && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Rules for ${prettyFolderPath(node.path)}`}
+                                aria-label={`Rules for ${prettyFolderPath(node.path)}`}
+                                data-testid={`folder-rules-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onOpenStructure(node.path);
+                                }}
+                              >
+                                <Ruler className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {node.total > 0 && deleteButton}
                             {folderFlagPending(node.path) && (() => {
                               const folderFlag = folderFlagByPath.get(node.path);
                               const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
@@ -1883,6 +2012,16 @@ export function DocumentsTab({
         />
       )}
 
+      <BulkSelectionBar
+        nestId={nestId}
+        nodes={selectedNodes}
+        folders={allFolders}
+        canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
+        canDelete={selectedNodes.every((n) => canManage || isMine(n))}
+        onClear={() => setSelected(new Map())}
+        onDone={fetchData}
+      />
+
       {/* Move to folder — the keyboard-accessible path to the same move the
           drag-and-drop performs; both funnel through handleMoveNode. */}
       <Dialog
@@ -1958,7 +2097,7 @@ export function DocumentsTab({
               ) : moveNewFolderCheck.rewritten && moveNewFolderCheck.path ? (
                 <p className="text-xs text-muted-foreground">
                   Will be created as{" "}
-                  <code className="font-mono">{moveNewFolderCheck.path}</code>
+                  <code className="font-mono">{moveNewFolderCheck.label}</code>
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground">
@@ -2019,6 +2158,22 @@ export function DocumentsTab({
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
           onClose={() => setPublishNode(null)}
+        />
+      )}
+
+      {moveFolderTarget && (
+        <FolderMoveDialog
+          nestId={nestId}
+          folder={moveFolderTarget}
+          folders={allFolders}
+          onClose={() => setMoveFolderTarget(null)}
+          onDone={() => {
+            // The old path no longer exists, so it can't stay the active filter.
+            const old = moveFolderTarget.path;
+            if (folderFilter && (folderFilter === old || folderFilter.startsWith(old + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 

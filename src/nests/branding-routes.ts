@@ -17,6 +17,7 @@
  * Read: there is no separate GET — the parsed branding rides GET /nests/:id,
  * which a public reader already fetches (and which 404s a private nest).
  */
+import { invalidateSiteNests } from "../site/invalidate.js";
 import { Hono } from "hono";
 import { access as fsAccess } from "node:fs/promises";
 import { join } from "node:path";
@@ -115,5 +116,6 @@ brandingRoutes.patch("/branding", async (c) => {
     await tx.run("UPDATE nests SET branding_json = ? WHERE id = ?", [value, nestId]);
     return value;
   });
+  invalidateSiteNests();
   return c.json({ branding: parseStoredBranding(stored, nestId) });
 });

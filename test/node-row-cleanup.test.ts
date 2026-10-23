@@ -88,12 +88,19 @@ describe("node row cleanup", () => {
       // these inline; delete keeps them.
       ["runs.agent_node", "run trace"],
       ["run_steps.node_id", "run trace"],
+      // What was sent about a document stays sent: the message log is a
+      // record of the past, pruned by its own retention window.
+      ["outbound_messages.node_id", "message log"],
       // The one row that must survive a delete — it IS the delete record.
       ["node_deletions.node_id", "deletion tombstone"],
       // Predicated: only rows whose scope/target_type names a document.
       // Handled beside the loop in both helpers.
       ["stewards.node_pattern", "document-scoped only"],
       ["grants.target", "document grants only; folder grants cover a prefix"],
+      ["access_requests.target_id", "node-targeted requests only; folder/nest targets aren't node ids"],
+      // Public docs-site URLs: move repoints them; delete keeps each path as a
+      // detached 410 marker (node_id ''). Handled beside the loop.
+      ["site_paths.node_id", "kept as a 410 marker on delete"],
     ]);
     const NODE_ID_COLUMNS = new Set([
       "node_id",
@@ -102,6 +109,7 @@ describe("node row cleanup", () => {
       "from_node",
       "to_node",
       "target",
+      "target_id",
     ]);
 
     const db = getDb();

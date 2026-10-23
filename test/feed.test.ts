@@ -13,7 +13,9 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  seedPeople,
 } from "./helpers.js";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 import { getDb } from "../src/db/client.js";
 
 describe("activity feed: changes + comments, newest first", () => {
@@ -101,8 +103,32 @@ describe("activity feed: changes + comments, newest first", () => {
 
   afterAll(() => env.cleanup());
 
+  // This suite pins the full feed, resolved thread included, so it opts back
+  // in; the default (resolved threads left out) is asserted on its own below.
   const getFeed = (qs: string) =>
+    jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/feed${qs ? `${qs}&` : "?"}resolved=include`,
+      undefined,
+      alice.apiKey,
+    );
+  const getDefaultFeed = (qs: string) =>
     jsonRequest(app, "GET", `/nests/${nestId}/feed${qs}`, undefined, alice.apiKey);
+
+  it("leaves comments on resolved threads out by default", async () => {
+    const { status, data } = await getDefaultFeed("");
+    expect(status).toBe(200);
+    // The 08:00 resolved thread is gone; everything else is unchanged.
+    expect(data.total).toBe(4);
+    expect(data.counts).toEqual({ changes: 1, comments: 3, pending_pushes: 0 });
+    expect(data.items.some((i: any) => i.snippet === "resolve me")).toBe(false);
+    expect(data.items.every((i: any) => i.type !== "comment" || !i.resolved)).toBe(true);
+
+    const comments = await getDefaultFeed("?filter=comments");
+    expect(comments.data.total).toBe(3);
+    expect(comments.data.items).toHaveLength(3);
+  });
 
   it("returns changes and comments interleaved, newest first", async () => {
     const { status, data } = await getFeed("");
@@ -389,6 +415,8 @@ describe("activity feed: license gate", () => {
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
     await dbClient.initDb();
+    // Past the Free tier, so the unlicensed gate closes.
+    await seedPeople(FREE_TIER_MAX_USERS + 1);
     const { createApp } = await import("../src/app.js");
     return createApp();
   }

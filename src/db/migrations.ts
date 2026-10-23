@@ -30,6 +30,8 @@ export function runMigrations(db: Database.Database): void {
       key_prefix TEXT NOT NULL,
       nest_id TEXT REFERENCES nests(id) ON DELETE CASCADE,
       label TEXT,
+      capability TEXT NOT NULL DEFAULT 'write',
+      origin TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_used_at TEXT
     );
@@ -1625,6 +1627,39 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("044_client_attribution");
   }
 
+  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
+  // "API-only" switch; `users.is_service` marks the identity behind an access
+  // key (no password, never listed as a person); `headless_readers` ties each
+  // such identity to the one nest its key reads.
+  if (!hasMigration("045_headless_publish")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("headless")) {
+        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      }
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!userCols.includes("is_service")) {
+        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS headless_readers (
+          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      `);
+    })();
+    recordMigration("045_headless_publish");
+  }
+
   // 046: attribute deletions (CU-wdqcq0314v). A delete purges every row tied
   //   to the node, so its tombstone is the only record left — which makes it
   //   where "which agent deleted this" has to live for the agent-activity
@@ -1671,37 +1706,633 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("047_node_access_events");
   }
 
-  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
-  // "API-only" switch; `users.is_service` marks the identity behind an access
-  // key (no password, never listed as a person); `headless_readers` ties each
-  // such identity to the one nest its key reads.
-  if (!hasMigration("045_headless_publish")) {
+  // 048: license_cache.features_json — the named licence features PromptOwl
+  // returns (CU-wdqcq03f2z), cached with the rest of the licence so an
+  // outage keeps the same entitlements. NULL = PromptOwl sent none (tier
+  // defaults apply). Numbered 048: 045 (MCP OAuth), 046 (#342) and 047 (#345)
+  // are taken on in-flight branches, and ids match by string.
+  if (!hasMigration("048_license_cache_features")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("features_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN features_json TEXT");
+    }
+    recordMigration("048_license_cache_features");
+  }
+
+  // 049: license_cache.gateway_json — the license's LiteLLM key, encrypted.
+  //   Was 046; renumbered after other branches merged 045-048, so numbers
+  //   stay unique and in order.
+  if (!hasMigration("049_license_cache_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN gateway_json TEXT");
+    }
+    recordMigration("049_license_cache_gateway");
+  }
+
+  // 050: agent read log — which version a read was served, and which agent
+  //   made it. node_access_events.version is the version the caller actually
+  //   got (NULL where the surface hands back no single version); .agent is the
+  //   caller's self-reported agent (client.agent, §9.4), split out of
+  //   client_json so "what did agent X read" is an indexed filter. Existing
+  //   rows are backfilled from client_json. nests.access_log_enabled (default
+  //   ON) lets an owner turn read logging off for a nest.
+  if (!hasMigration("050_agent_read_log")) {
+    const accessCols = (
+      db.prepare("PRAGMA table_info(node_access_events)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const nestCols050 = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    db.transaction(() => {
+      if (accessCols.length && !accessCols.includes("version")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN version INTEGER");
+      }
+      if (accessCols.length && !accessCols.includes("agent")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN agent TEXT");
+        db.exec(`
+          UPDATE node_access_events
+             SET agent = LOWER(json_extract(client_json, '$.agent'))
+           WHERE client_json IS NOT NULL AND json_valid(client_json)
+             AND json_type(client_json, '$.agent') = 'text'
+        `);
+      }
+      if (accessCols.length) {
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id)",
+        );
+      }
+      if (!nestCols050.includes("access_log_enabled")) {
+        db.exec("ALTER TABLE nests ADD COLUMN access_log_enabled INTEGER NOT NULL DEFAULT 1");
+      }
+    })();
+    recordMigration("050_agent_read_log");
+  }
+
+  // 051: saved Board views (CU-wdqcq03xn2). One row per named board on a nest;
+  //   the view itself (dimension, columns, filter, per-column card rank) is a
+  //   JSON blob the UI owns — board-routes.ts validates its shape. private=1
+  //   boards are visible only to created_by. 050 is taken on another branch.
+  if (!hasMigration("051_boards")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS boards (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
+    `);
+    recordMigration("051_boards");
+  }
+
+  // 052: nests.done_tags — which board column tags mean "completed" for a
+  //   task (CU-wdqcq03xn2). Moving a task into one stamps completed_at; out of
+  //   one clears it. Comma list like prime_tags; defaults to "done".
+  if (!hasMigration("052_nest_done_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("done_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN done_tags TEXT NOT NULL DEFAULT 'done'");
+    }
+    recordMigration("052_nest_done_tags");
+  }
+
+  // 055: access requests (CU-wdqcq041jn). Someone who can SEE a document,
+  //   folder or nest but not change it asks for write access instead of hitting
+  //   a dead-end 403; a nest owner/admin approves (which grants through the
+  //   existing share/collaborator paths) or denies with a note. One pending row
+  //   per (nest, requester, target); resolved rows stay as the record, and the
+  //   latest one is what the next refusal shows ("pending" / "denied").
+  if (!hasMigration("055_access_requests")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS access_requests (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          requested_by TEXT NOT NULL,      -- email, for display and inbox rows
+          target_type TEXT NOT NULL CHECK(target_type IN ('node', 'folder', 'nest')),
+          target_id TEXT NOT NULL,         -- node id, folder path, or the nest id
+          level TEXT NOT NULL DEFAULT 'write' CHECK(level IN ('read', 'write')),
+          note TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'approved', 'denied')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by TEXT,                -- email
+          resolved_at TEXT,
+          resolution_note TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+          ON access_requests(nest_id, requester_id, target_type, target_id)
+          WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_access_requests_nest
+          ON access_requests(nest_id, status);
+      `);
+    })();
+    recordMigration("055_access_requests");
+  }
+
+  // 053: license_cache.own_gateway_json — the licence's own-provider LiteLLM
+  //   key (byok) and its model list, encrypted like gateway_json.
+  if (!hasMigration("053_license_cache_own_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("own_gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN own_gateway_json TEXT");
+    }
+    recordMigration("053_license_cache_own_gateway");
+  }
+
+  // 054: metacognition agents (CU-wdqcq041jm). One row per agent node the
+  //   SERVER runs as a persona: the persona's service identity (users.is_service
+  //   = 1, no key, no password), and the run config (scope, caps, feeds, MCP
+  //   servers) as a JSON blob metacognition/config.ts validates. created_by is
+  //   the owner/admin whose access bounds what the persona may read and propose.
+  if (!hasMigration("054_metacognition_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metacognition_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        persona_user_id TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, node_id)
+      );
+      -- One running server-executed run per agent, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+    `);
+    recordMigration("054_metacognition_agents");
+  }
+
+  // 056: MCP OAuth (was 045, then 053 on its branch; both taken on development) (CU-wdqcq02p06). Three tables behind MCP_OAUTH_ENABLED —
+  // created unconditionally so turning the flag on needs no migration, but
+  // inert while it is off.
+  //
+  // Secrets are stored as SHA-256 hashes, never in the clear, the same
+  // discipline api_keys uses (src/auth/keys.ts): the values are 256 bits of
+  // randomBytes, so a plain fast hash is the right storage primitive and
+  // comparison is constant-time.
+  if (!hasMigration("056_mcp_oauth")) {
+    db.transaction(() => {
+      db.exec(`
+        -- A client is whatever registered with us: a CIMD https client_id, or
+        -- a row minted by dynamic registration. redirect_uris is a JSON array.
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('dcr', 'cimd')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_seen_at TEXT
+        );
+
+        -- Authorization codes. Single use: consumed by setting used_at, which
+        -- is what makes replay detectable rather than merely unlikely.
+        -- code_challenge is PKCE S256 and is never optional here.
+        CREATE TABLE IF NOT EXISTS oauth_codes (
+          code_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          code_challenge TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+          ON oauth_codes(expires_at);
+
+        -- One row per grant. The access token is short-lived; the refresh
+        -- token rotates on every use (OAuth 2.1 requires rotation for public
+        -- clients, which CIMD and DCR both make us).
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          client_id TEXT NOT NULL,
+          client_name TEXT NOT NULL,
+          access_token_hash TEXT NOT NULL UNIQUE,
+          refresh_token_hash TEXT UNIQUE,
+          scope TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          refresh_expires_at TEXT,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_used_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user
+          ON oauth_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access
+          ON oauth_tokens(access_token_hash);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
+          ON oauth_tokens(refresh_token_hash);
+      `);
+    })();
+    recordMigration("056_mcp_oauth");
+  }
+
+  // 064: task activity log. One row per interaction an agent (or a person)
+  //   registers on a task — "working on it", "done", "blocked: …" — through
+  //   MCP `context_task_log`, REST POST …/task-log or `ctx task log`. Attributed
+  //   to the authenticated user; a call on an API key also records which key
+  //   (id, label, prefix, whether it was nest-scoped), and the caller's §9.4
+  //   `client` block rides in client_json like it does on node_versions.
+  //   Outside the engine's hash chain on purpose — like comments, it is
+  //   collaboration metadata, not document content.
+  //
+  //   Numbered 064: 056–061 are taken or reserved by open branches.
+  if (!hasMigration("064_task_activity")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_activity (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          actor TEXT NOT NULL,             -- email of the authenticated user
+          user_id TEXT,
+          status TEXT CHECK(status IS NULL OR status IN ('working', 'done', 'blocked')),
+          note TEXT NOT NULL,
+          surface TEXT NOT NULL,           -- mcp | api
+          api_key_id TEXT,
+          api_key_label TEXT,
+          api_key_prefix TEXT,
+          key_scoped INTEGER NOT NULL DEFAULT 0,
+          client_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_activity_node
+          ON task_activity(nest_id, node_id, created_at);
+      `);
+    })();
+    recordMigration("064_task_activity");
+  }
+
+  // 057: review SLA escalation (056 is MCP OAuth).
+  //   `nests.review_sla_hours` is the per-nest SLA
+  //   (NULL = off, the default — the escalation tick never looks at the nest).
+  //   `review_requests.escalation_level` is the last rung a pending review was
+  //   escalated to (0 = none yet; 1 tag reviewers, 2 nest reviewers, 3 nest
+  //   owner) and `escalated_at` when that happened. Persisted on the request
+  //   row so a restart never re-notifies a rung, and a resubmission (a new
+  //   row) starts the ladder over. Plain ADD COLUMNs — no CHECK changes, so no
+  //   table rebuild.
+  if (!hasMigration("057_review_sla_escalation")) {
     db.transaction(() => {
       const nestCols = (
         db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
       ).map((c) => c.name);
-      if (!nestCols.includes("headless")) {
-        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      if (!nestCols.includes("review_sla_hours")) {
+        db.exec("ALTER TABLE nests ADD COLUMN review_sla_hours INTEGER");
       }
-      const userCols = (
-        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      const reviewCols = (
+        db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>
       ).map((c) => c.name);
-      if (!userCols.includes("is_service")) {
-        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
-      }
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS headless_readers (
-          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          key_id TEXT NOT NULL,
-          label TEXT NOT NULL,
-          created_by TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      if (!reviewCols.includes("escalation_level")) {
+        db.exec(
+          "ALTER TABLE review_requests ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0",
         );
-        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      }
+      if (!reviewCols.includes("escalated_at")) {
+        db.exec("ALTER TABLE review_requests ADD COLUMN escalated_at TEXT");
+      }
+    })();
+    recordMigration("057_review_sla_escalation");
+  }
+
+  // 060: run back-links. A proposal (review_requests), comment
+  //   (annotation_comments) or access request an agent run produced carries
+  //   that run's id, so the UI can say "agent run <id>" and open the trace.
+  //   Nullable: people's rows have no run.
+  if (!hasMigration("060_run_links")) {
+    db.transaction(() => {
+      const hasRunId = (table: string) =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "run_id");
+      if (!hasRunId("review_requests")) db.exec("ALTER TABLE review_requests ADD COLUMN run_id TEXT");
+      if (!hasRunId("annotation_comments")) db.exec("ALTER TABLE annotation_comments ADD COLUMN run_id TEXT");
+      if (!hasRunId("access_requests")) db.exec("ALTER TABLE access_requests ADD COLUMN run_id TEXT");
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
       `);
     })();
-    recordMigration("045_headless_publish");
+    recordMigration("060_run_links");
+  }
+
+  // 061: superadmin message log. Every message the server sends — email,
+  //   Slack/Teams/connector webhooks, in-app notifications, persona comments —
+  //   is recorded once at its choke point (notify/outbound-log.ts). Bodies are
+  //   redacted and capped at write time; MESSAGE_LOG_STORE_BODIES=false keeps
+  //   metadata only. message_log_views is the append-only audit of who read
+  //   the log.
+  if (!hasMigration("061_outbound_messages")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,           -- email | slack | msteams | webhook | inbox | comment
+        sender_kind TEXT NOT NULL DEFAULT 'system'
+          CHECK(sender_kind IN ('human', 'persona', 'system')),
+        sender_id TEXT,                  -- email / user id, or null for system
+        recipients_json TEXT NOT NULL DEFAULT '[]',
+        subject TEXT,
+        body_redacted TEXT,
+        status TEXT NOT NULL DEFAULT 'sent'
+          CHECK(status IN ('sent', 'failed', 'skipped')),
+        provider_id TEXT,
+        error TEXT,
+        nest_id TEXT,
+        node_id TEXT,
+        run_id TEXT,
+        via_proxy INTEGER,               -- 1/0 when it left through HTTPS_PROXY; null = n/a
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_log_views (
+        id TEXT PRIMARY KEY,
+        viewer_id TEXT NOT NULL,
+        action TEXT NOT NULL,            -- list | detail | views
+        filters_json TEXT,
+        message_id TEXT,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
+    `);
+    recordMigration("061_outbound_messages");
+  }
+
+  // 062: nest-level custom field definitions (056–061 are reserved by open
+  //   branches). One row per field a nest admin or steward defines; the VALUES
+  //   live on each node, in frontmatter `metadata.fields`, so they are
+  //   versioned and hash-chained with the document (src/nodes/custom-fields.ts).
+  //   options/default/applies_to are JSON. applies_to '["task"]' is the default;
+  //   '["*"]' means every node type.
+  if (!hasMigration("062_field_definitions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS field_definitions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        required INTEGER NOT NULL DEFAULT 0,
+        default_json TEXT,
+        applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+        unit TEXT,
+        preset TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+        ON field_definitions(nest_id, field_key);
+      -- One time-in-status field per nest, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+        ON field_definitions(nest_id) WHERE type = 'time_in_status';
+      -- Audit trail of definition changes (who, what, before → after).
+      -- Definitions are plain config rows, so this is their history.
+      CREATE TABLE IF NOT EXISTS field_definition_events (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+        actor_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+        ON field_definition_events(nest_id, at);
+    `);
+    recordMigration("062_field_definitions");
+  }
+
+  // 065: per-key capability — 'write' (full, historic behaviour) or 'read'
+  // (read-only: blocked from every write/governance mutation, enforced
+  // server-side at the REST guard and the MCP tool dispatch). DEFAULT 'write'
+  // is deliberate backward-compat: every key that exists today keeps the exact
+  // access it had, so no live integration breaks on upgrade. The column is
+  // added to the base CREATE TABLE above for fresh DBs; this ALTER covers
+  // databases created before capability existed. The PRAGMA guard keeps the
+  // ALTER idempotent even for a fresh DB that already has the column inline.
+  if (!hasMigration("065_api_key_capability")) {
+    const cols = (db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
+      name: string;
+    }>).map((c) => c.name);
+    if (!cols.includes("capability")) {
+      db.exec(
+        "ALTER TABLE api_keys ADD COLUMN capability TEXT NOT NULL DEFAULT 'write'",
+      );
+    }
+    recordMigration("065_api_key_capability");
+  }
+
+  // 066: per-key origin — 'manual' (the user minted it via /auth/keys) or
+  // 'exchange' (PromptOwl minted it for them via /auth/keys/exchange). Lets the
+  // exchange cap its own keys per nest without eating the user's own budget.
+  // Same inline-column + PRAGMA-guarded ALTER pattern as 065.
+  if (!hasMigration("066_api_key_origin")) {
+    const cols = (db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
+      name: string;
+    }>).map((c) => c.name);
+    if (!cols.includes("origin")) {
+      db.exec(
+        "ALTER TABLE api_keys ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'",
+      );
+    }
+    recordMigration("066_api_key_origin");
+  }
+
+  // 067: named systems (CU-wdqcq0538g). A system is a SERVICE identity
+  // (users.is_service = 1, the same no-login identity headless access keys and
+  // metacognition personas use, so every "people only" filter — seats,
+  // teammates, people search, sessions, OIDC, PromptOwl tickets — already
+  // excludes it). This table is what tells a system apart from those: its
+  // display name, its capability on the nests it is granted (read → viewer,
+  // write → editor collaborator rows) and who created it. created_by is
+  // deliberately NOT a foreign key: the system belongs to its nest(s), so
+  // removing the creator must neither cascade into it nor be blocked by it.
+  if (!hasMigration("067_system_accounts")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS system_accounts (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+        created_by TEXT,
+        created_by_email TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    recordMigration("067_system_accounts");
+  }
+
+  // Public docs sites (CU-wdqcq05jhm). nest_sites holds a nest's site
+  // settings — its custom domain (claimed with a DNS TXT token, served only
+  // once verified) and its SEO settings as JSON. site_paths maps public paths
+  // to documents: 'custom' is a URL the owner chose for a page; 'history' is
+  // every path a page has been served at, so a renamed or moved page 301s
+  // from its old URL instead of 404ing and losing its ranking.
+  if (!hasMigration("068_nest_sites")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_sites (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        domain TEXT,
+        site_key TEXT UNIQUE,
+        domain_token TEXT NOT NULL,
+        domain_verified_at TEXT,
+        settings TEXT NOT NULL DEFAULT '{}',
+        indexnow_key TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS site_paths (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
+    `);
+    recordMigration("068_nest_sites");
+  }
+
+  // 069: a docs site's public_url is honoured only once its host is proven
+  // with the same DNS TXT token as a custom domain (CU-wdqcq05jhm). Stores the
+  // host that was proven, so changing public_url to another host un-verifies it.
+  if (!hasMigration("069_site_public_url_host")) {
+    const cols = (db.prepare("PRAGMA table_info(nest_sites)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("public_url_host")) db.exec("ALTER TABLE nest_sites ADD COLUMN public_url_host TEXT");
+    recordMigration("069_site_public_url_host");
+  }
+
+  // 070: CONTEXT.md revisions (CU-wdqcq05mty). The nest's operating
+  // instructions are one file the engine overwrites in place, so this table is
+  // their only history: every write — the Instructions page, `ctx push`, a
+  // confirmed held push, MCP — records the full text it wrote. `seq` numbers a
+  // nest's revisions 1, 2, 3… and is what a save names as its base, so two
+  // editors can't silently overwrite each other.
+  if (!hasMigration("070_instructions_revisions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS instructions_revisions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        author_email TEXT,
+        note TEXT,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(nest_id, seq)
+      );
+    `);
+    recordMigration("070_instructions_revisions");
+  }
+
+  // 071: document pins (CU-wdqcq02crw, experimental — EXPERIMENTAL_DOC_PINS).
+  //   Two kinds in one table:
+  //   - scope 'nest': an editorial pin, the nest's own — user_id NULL, ordered
+  //     by position. pinned_by is attribution only (an email, NOT a foreign
+  //     key): the pin belongs to the nest, so removing the steward who made it
+  //     must neither cascade into it nor be blocked by it.
+  //   - scope 'user': a personal bookmark, user_id set, cascades with the user
+  //     (the nest_pins pattern, migration 039).
+  //   The CHECK is the "user_id is NULL iff scope = 'nest'" rule. Uniqueness is
+  //   per scope, so it is two partial unique indexes — a PRIMARY KEY can't hold
+  //   the COALESCE(user_id, '') the rule needs on either dialect. node_id is not
+  //   a foreign key (documents live on disk; node_index is a rebuildable mirror
+  //   whose full rescan would cascade every pin away): NODE_KEYED_TABLES purges
+  //   the rows on delete and repoints them on move.
+  if (!hasMigration("071_node_pins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_pins (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          scope TEXT NOT NULL CHECK(scope IN ('nest', 'user')),
+          user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          pinned_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK ((scope = 'nest' AND user_id IS NULL) OR (scope = 'user' AND user_id IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+          ON node_pins(nest_id, node_id) WHERE scope = 'nest';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+          ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
+        CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
+      `);
+    })();
+    recordMigration("071_node_pins");
+  }
+
+  // 073: nests.always_include_tags (CU-wdqcq05rn0). Tags whose documents'
+  //   APPROVED text is pushed to every agent and model that enters the nest
+  //   (MCP initialize, context_init, Hootie, metacognition, run bundles). Comma
+  //   list like prime_tags; defaults to "always-include". (072 is claimed by an
+  //   open branch.)
+  if (!hasMigration("073_nest_always_include_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("always_include_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN always_include_tags TEXT NOT NULL DEFAULT 'always-include'");
+    }
+    recordMigration("073_nest_always_include_tags");
+  }
+
+  // 074: org contributors (CU-wdqcq05rz6). Numbered past 072 (nest plugins)
+  // and 073 (always-include tags), both claimed by open branches.
+  //   - nests.org_contributions: 'off' | 'drafts'. 'drafts' lets anyone in the
+  //     organization create documents and propose edits on an org-visibility
+  //     nest, always as drafts for review (src/shared/access.ts). Any other
+  //     value reads as off.
+  //   - nests.org_domains: JSON array of bare email domains. On a shared
+  //     deployment it IS the org boundary (required to turn the setting on).
+  //   - users.email_verified_at: when an identity provider (OIDC, token
+  //     exchange, PromptOwl) last vouched for the address. A password sign-up
+  //     never sets it, so a domain match can't be claimed by signing up as
+  //     someone@their-domain.
+  if (!hasMigration("074_org_contributions")) {
+    const nestColumns = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestColumns.includes("org_contributions")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_contributions TEXT NOT NULL DEFAULT 'off'");
+    }
+    if (!nestColumns.includes("org_domains")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_domains TEXT");
+    }
+    const userColumns = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!userColumns.includes("email_verified_at")) {
+      db.exec("ALTER TABLE users ADD COLUMN email_verified_at TEXT");
+    }
+    recordMigration("074_org_contributions");
   }
 }
 

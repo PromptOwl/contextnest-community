@@ -4,6 +4,8 @@ import {
   nestOnlyKeyLabel,
   createKeyRequest,
   ALL_NESTS,
+  filterSortKeys,
+  keyCapability,
 } from "./api-key-scope";
 
 const nests = [
@@ -46,6 +48,26 @@ describe("createKeyRequest", () => {
   it("a picked nest → nest_id", () => {
     expect(createKeyRequest("Agent", "n1")).toEqual({ label: "Agent", nest_id: "n1" });
   });
+  it("read-only → capability: read alongside the nest", () => {
+    expect(createKeyRequest("Agent", "n1", "read")).toEqual({
+      label: "Agent",
+      nest_id: "n1",
+      capability: "read",
+    });
+  });
+  it("read-write sends no capability (server default)", () => {
+    expect(createKeyRequest("Agent", "n1", "write")).toEqual({ label: "Agent", nest_id: "n1" });
+  });
+});
+
+describe("keyCapability", () => {
+  it("labels read keys Read-only", () => {
+    expect(keyCapability({ capability: "read" })).toEqual({ kind: "read", label: "Read-only" });
+  });
+  it("labels write and legacy (missing) keys Read-write", () => {
+    expect(keyCapability({ capability: "write" }).kind).toBe("write");
+    expect(keyCapability({}).label).toBe("Read-write");
+  });
 });
 
 describe("nestOnlyKeyLabel", () => {
@@ -59,5 +81,28 @@ describe("nestOnlyKeyLabel", () => {
     const long = "x".repeat(100);
     expect(nestOnlyKeyLabel(long, []).length).toBeLessThanOrEqual(60);
     expect(nestOnlyKeyLabel(long, [nestOnlyKeyLabel(long, [])]).length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("filterSortKeys", () => {
+  const keys = [
+    { id: "a", label: "Laptop CLI", key_prefix: "cnst_aaa", nest_id: null, created_at: "2026-01-01T00:00:00Z", last_used_at: null },
+    { id: "b", label: "Zed agent", key_prefix: "cnst_bbb", nest_id: "n1", created_at: "2026-03-01T06:00:00Z", last_used_at: "2026-05-01T00:00:00Z" },
+    { id: "c", label: "Claude Desktop", key_prefix: "cnst_ccc", nest_id: null, created_at: "2026-03-01 12:00:00", last_used_at: "2026-04-01T00:00:00Z" }, // SQL-style stamp, same day as b,
+  ];
+  const ids = (opts: Parameters<typeof filterSortKeys>[2]) => filterSortKeys(keys, nests, opts).map((k) => k.id);
+
+  it("sorts newest first by default, by name, or by last used (never-used last)", () => {
+    expect(ids({ query: "", scope: "any", sort: "newest" })).toEqual(["c", "b", "a"]);
+    expect(ids({ query: "", scope: "any", sort: "name" })).toEqual(["c", "a", "b"]);
+    expect(ids({ query: "", scope: "any", sort: "last_used" })).toEqual(["b", "c", "a"]);
+  });
+
+  it("searches name, prefix and nest name; filters by scope", () => {
+    expect(ids({ query: "desk", scope: "any", sort: "newest" })).toEqual(["c"]);
+    expect(ids({ query: "CNST_AAA", scope: "any", sort: "newest" })).toEqual(["a"]);
+    expect(ids({ query: "sales", scope: "any", sort: "newest" })).toEqual(["b"]);
+    expect(ids({ query: "", scope: "nest", sort: "newest" })).toEqual(["b"]);
+    expect(ids({ query: "", scope: "all", sort: "newest" })).toEqual(["c", "a"]);
   });
 });

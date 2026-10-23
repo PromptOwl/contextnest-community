@@ -22,11 +22,15 @@ import { ValidationError } from "../shared/errors.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { nestRequiresPushConfirmation } from "./service.js";
+import { engineCache } from "../nodes/engine.js";
+import { derivedNodeId, FIRST_GENERATED_NAME } from "../nodes/service.js";
+import { assertPushConforms } from "../structure/writes.js";
 import { notifyPendingPush } from "../governance/notify-service.js";
 import {
   applyPublish,
   buildManifest,
   countPublishDocs,
+  publishableDocs,
   type PublishPayload,
   type PushManifestEntry,
 } from "../nodes/publish-apply.js";
@@ -35,6 +39,10 @@ export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
 
 /** '' key_id means "any of that user's keys" — see migration 040. */
 const ALL_KEYS = "";
+/** key_id for keyless agent writes (PromptOwl service ticket, signed-in MCP):
+ *  whitelists those alone, never the user's API keys. Real key ids are UUIDs,
+ *  so this can't collide with one. */
+const KEYLESS = "keyless";
 
 export interface PendingPushRow {
   id: string;
@@ -70,6 +78,8 @@ export interface PendingPushView {
   decided_by?: string;
   decided_at?: string;
   applied_node_count?: number;
+  /** Single-push GET only: the context.md the push would write. */
+  context_md?: string | null;
 }
 
 async function nestName(nestId: string): Promise<string> {
@@ -120,7 +130,7 @@ export async function isPushAllowlisted(
       WHERE nest_id = ? AND user_id = ?
         AND (key_id = ? OR key_id = ?)
       LIMIT 1`,
-    [nestId, userId, ALL_KEYS, keyId ?? ALL_KEYS],
+    [nestId, userId, ALL_KEYS, keyId ?? KEYLESS],
   )) as { 1: number } | undefined;
   return !!row;
 }
@@ -170,7 +180,11 @@ export async function listPushAllowlist(nestId: string): Promise<
     created_at: string;
   }>;
   // Surface the '' sentinel as null ("all keys") at the API boundary.
-  return rows.map((r) => ({ ...r, key_id: r.key_id === ALL_KEYS ? null : r.key_id }));
+  return rows.map((r) => ({
+    ...r,
+    key_id: r.key_id === ALL_KEYS ? null : r.key_id,
+    key_label: r.key_id === KEYLESS ? "PromptOwl / signed-in session" : r.key_label,
+  }));
 }
 
 export async function removeFromPushAllowlist(params: {
@@ -206,6 +220,18 @@ export async function createPendingPush(params: {
       `Push payload exceeds the ${config.MAX_PENDING_PUSH_BYTES}-byte limit for a held push (MAX_PENDING_PUSH_BYTES).`,
     );
   }
+
+  const { storage } = await engineCache.get(nestId);
+  await assertPushConforms(
+    storage,
+    publishableDocs(payload).map((d) => ({
+      title: d.title,
+      id: derivedNodeId(d.title, d.folder) ?? derivedNodeId(FIRST_GENERATED_NAME, d.folder)!,
+      type: d.type,
+      body: d.content,
+      status: d.status,
+    })),
+  );
 
   const id = uuid();
   const now = new Date();
@@ -299,7 +325,9 @@ export function heldWriteResponse(nestId: string, pending: PendingPushView) {
     confirm_url: `/nests/${nestId}/pending-pushes/${pending.id}/confirm`,
     poll_url: `/nests/${nestId}/pending-pushes/${pending.id}`,
     message:
-      `This nest holds agent writes for review. Your write of ${pending.doc_count} document(s) is waiting — ` +
+      `This nest holds agent writes for review. Your write of ${
+        pending.doc_count === 0 ? "the nest instructions (CONTEXT.md)" : `${pending.doc_count} document(s)`
+      } is waiting — ` +
       `it lands once a reviewer confirms it in ${pending.nest_name}.`,
     expires_at: pending.expires_at,
   };
@@ -357,7 +385,20 @@ export async function getPendingPush(
 ): Promise<PendingPushView | null> {
   const row = await getPendingPushRow(nestId, id);
   if (!row) return null;
-  return toView(row, await nestName(nestId));
+  const view = toView(row, await nestName(nestId));
+  // The single view carries what would be written, so a reviewer can read it
+  // before confirming. manifest_json was built from publishableDocs too, in order.
+  let docs: Array<{ content?: string }> = [];
+  try {
+    docs = publishableDocs(JSON.parse(row.payload_blob) as PublishPayload);
+  } catch {
+    docs = [];
+  }
+  return {
+    ...view,
+    manifest: view.manifest.map((m, i) => ({ ...m, content: docs[i]?.content })),
+    context_md: row.context_md,
+  };
 }
 
 /**
@@ -420,12 +461,12 @@ export async function confirmPendingPush(
     [result.published, id],
   );
 
-  // No key id (cookie-session push) would whitelist every key of the user.
-  if (opts.alwaysAllow && row.submitter_key_id) {
+  // A keyless push whitelists KEYLESS, never '' — that covers every key of the user.
+  if (opts.alwaysAllow) {
     await addToPushAllowlist({
       nestId,
       userId: row.submitter_user_id,
-      keyId: row.submitter_key_id,
+      keyId: row.submitter_key_id ?? KEYLESS,
       createdBy: deciderUserId,
     });
   }

@@ -16,6 +16,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
 import { listNestExternalEdits } from "./external-edit-service.js";
+import { describeTaskActivity, listTaskActivity } from "../nodes/task-activity.js";
 import type { Comment, CommentStatus, ActivityEntry } from "./types.js";
 
 // ─── Create ─────────────────────────────────────────────────────────────
@@ -249,6 +250,28 @@ export async function getActivity(params: {
         refId: r.id,
       });
     }
+  }
+
+  // Task interactions — what agents (and people) logged with context_task_log.
+  const taskRows = await listTaskActivity({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    limit,
+  });
+  for (const t of taskRows) {
+    const agent = typeof t.client?.agent === "string" ? t.client.agent : undefined;
+    entries.push({
+      type: "task_activity",
+      nodeId: t.nodeId,
+      actor: t.actor,
+      at: t.at,
+      detail: [t.status, excerpt(t.note, 200)].filter(Boolean).join(" · "),
+      refId: t.id,
+      ...(t.status ? { status: t.status } : {}),
+      ...(agent ? { agent } : {}),
+      ...(t.key ? { key: t.key } : {}),
+      summary: describeTaskActivity(t),
+    });
   }
 
   // Proposed edits — pending external-edit suggestions ("Bob proposed an

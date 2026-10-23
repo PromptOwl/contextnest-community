@@ -80,9 +80,39 @@ function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
 }
 
+const docsSitesCache: { raw: string | null; map: Map<string, string> } = { raw: null, map: new Map() };
+
+/** PUBLIC_BASE_URL's host name, lower-cased, or "" when unset or invalid. */
+function ownHost(): string {
+  try {
+    return new URL(process.env.PUBLIC_BASE_URL || "").hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
+  },
+  /**
+   * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
+   * proxy traffic. Unset = every interface (Node's default, unchanged).
+   */
+  get HOST(): string | undefined {
+    return process.env.HOST?.trim() || undefined;
+  },
+  /**
+   * Peers whose X-Forwarded-For / X-Real-IP / X-Forwarded-Proto are believed:
+   * comma-separated IPs, CIDRs, or the keywords `loopback` / `private`.
+   * Unset = legacy behaviour, every peer is trusted (see shared/trusted-proxies.ts).
+   */
+  get TRUSTED_PROXIES(): string {
+    return process.env.TRUSTED_PROXIES?.trim() || "";
+  },
+  /** Commit this build came from (GIT_SHA, or BUILD_SHA from some CI), for the status page. */
+  get GIT_SHA(): string {
+    return process.env.GIT_SHA?.trim() || process.env.BUILD_SHA?.trim() || "";
   },
   get DATA_ROOT() {
     return dataRoot();
@@ -214,6 +244,57 @@ export const config = {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
+   * Optional shared secret for GET /site-domain-check. Set, the endpoint
+   * answers only requests with `&token=<value>` (403 otherwise), so only your
+   * TLS edge can ask which domains this server serves.
+   */
+  get SITE_DOMAIN_CHECK_TOKEN(): string {
+    return (process.env.SITE_DOMAIN_CHECK_TOKEN || "").trim();
+  },
+  /**
+   * The DNS name customers point their docs domain at (a CNAME target), shown
+   * in the nest's site settings — e.g. the load balancer or edge proxy that
+   * terminates TLS for custom domains. Your edge should issue certificates
+   * only for domains GET /site-domain-check?domain= answers 200 for.
+   */
+  get SITE_DNS_TARGET(): string {
+    return (process.env.SITE_DNS_TARGET || "").trim();
+  },
+  /**
+   * Custom domains for public docs sites (CU-wdqcq05jhm), as
+   * `host=nestId[,host=nestId…]` — e.g. `docs.contextnest.ai=ad8fe978-…`.
+   * Point the domain's DNS at this server and the nest's docs site is served
+   * at that domain's root (the nest must still be public with Reader Mode on).
+   * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
+   */
+  get DOCS_SITES(): Map<string, string> {
+    // Parsed once per distinct value: this is read on every request.
+    const raw = `${process.env.DOCS_SITES || ""}\n${process.env.PUBLIC_BASE_URL || ""}`;
+    if (docsSitesCache.raw === raw) return docsSitesCache.map;
+    const map = new Map<string, string>();
+    for (const pair of (process.env.DOCS_SITES || "").split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq < 0) continue;
+      const host = pair.slice(0, eq).trim();
+      const nestId = pair.slice(eq + 1).trim();
+      if (!host || !nestId) continue;
+      // A docs host is the read-only site, ahead of auth and every API route,
+      // so listing this server's own host would lock out the app and the API.
+      const h = host.toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "");
+      if (h === ownHost()) {
+        console.warn(`[config] DOCS_SITES: ignoring ${host}, it is this server's own host (PUBLIC_BASE_URL).`);
+        continue;
+      }
+      map.set(h, nestId);
+    }
+    if (map.size && !ownHost()) {
+      console.warn("[config] DOCS_SITES is set but PUBLIC_BASE_URL is not, so an entry for this server's own host can't be caught; listing it would lock out the app and API.");
+    }
+    docsSitesCache.raw = raw;
+    docsSitesCache.map = map;
+    return map;
+  },
+  /**
    * Dedicated secret this deployment uses to SIGN the short-lived MCP tickets
    * minted by the SSO token-exchange (POST /auth/token-exchange). Kept distinct
    * from OFFICIAL_COMMUNITY_SSO_SECRET so a SELF-HOSTED server can issue its own
@@ -286,7 +367,7 @@ export const config = {
   /**
    * Manual (email + password) sign-in. Three modes, independent of
    * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
-   *   "open"        — anyone may log in and self-register (default).
+   *   "open"        — anyone may log in and self-register (default without SSO).
    *   "invite-only" — existing + admin-invited users may log in and an invited
    *                   placeholder may set its password ("claim"), but brand-new
    *                   self-registration is refused. Use this when the admin
@@ -296,12 +377,37 @@ export const config = {
    * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
    * validator refuses "disabled" while PromptOwl is also disabled, so a server
    * can never be left with no way to sign in.
+   *
+   * Unset, the default follows SSO: with OIDC enabled and configured it is
+   * "invite-only", because everyone the IdP vouches for already gets in
+   * through SSO, and an open password door would let anyone mint an account
+   * the IdP never sees (and can't disable). An explicit "open" is honoured,
+   * with a startup warning.
    */
   get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
-    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
-    return v === "invite-only" || v === "disabled"
-      ? (v as "invite-only" | "disabled")
-      : "open";
+    const raw = (process.env.MANUAL_SIGN_IN || "").trim().toLowerCase();
+    if (raw === "invite-only" || raw === "disabled" || raw === "open") return raw;
+    return this.OIDC_CONFIGURED ? "invite-only" : "open";
+  },
+  /**
+   * OIDC enabled AND fully configured (issuer + client id + secret). Same
+   * test as auth/oidc.ts isOidcReady(), kept here so config getters can use
+   * it without importing the auth layer.
+   */
+  get OIDC_CONFIGURED(): boolean {
+    return (
+      this.OIDC_ENABLED &&
+      !!this.OIDC_ISSUER &&
+      !!this.OIDC_CLIENT_ID &&
+      !!this.OIDC_CLIENT_SECRET
+    );
+  },
+  /**
+   * Password self-registration is open while SSO is live — the setup the
+   * startup log, /admin/settings and the Settings page warn about.
+   */
+  get MANUAL_SIGN_IN_OPEN_WITH_SSO(): boolean {
+    return this.OIDC_CONFIGURED && this.MANUAL_SIGN_IN === "open";
   },
   /**
    * Generic OIDC single sign-on (Microsoft Entra ID, Google, any spec-
@@ -429,6 +535,24 @@ export const config = {
     return process.env.SHARED_DEPLOYMENT === "true";
   },
   /**
+   * MCP OAuth authorization server. Default OFF, and off means the surface
+   * does not exist: `/.well-known/*` keeps 404ing and `/mcp` answers
+   * unauthenticated callers exactly as it did before.
+   *
+   * On, this server advertises itself as an OAuth 2.1 authorization server so
+   * a vendor-hosted agent (Claude, ChatGPT, Grok, Cursor) can sign its user in
+   * and be issued a token scoped to THAT person — which is the only way the
+   * per-user nest visibility `canRead()` already enforces can be reached from
+   * those surfaces. A shared API key makes every caller the same user.
+   *
+   * Requires PUBLIC_BASE_URL: the metadata's `resource` and the token audience
+   * are built from it, and a guessed value fails the client's exact-match
+   * check. Superadmin-togglable at runtime via /admin/settings.
+   */
+  get MCP_OAUTH_ENABLED(): boolean {
+    return process.env.MCP_OAUTH_ENABLED === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -471,6 +595,26 @@ export const config = {
     return Math.min(n, 3650);
   },
   /**
+   * Superadmin message log (outbound_messages behind GET /admin/messages)
+   * retention in days. 0 = keep forever. Invalid / negative → default 30;
+   * capped at 3650. Message bodies carry other users' content, so the default
+   * is deliberately short. Editable at runtime from /admin/settings.
+   */
+  get MESSAGE_LOG_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.MESSAGE_LOG_RETENTION_DAYS || "30", 10);
+    if (!Number.isFinite(n) || n < 0) return 30;
+    return Math.min(n, 3650);
+  },
+  /**
+   * Store (redacted) message bodies in the message log. On by default; "false"
+   * keeps metadata only — channel, sender, recipients, subject, status — for
+   * deployments that must not hold a second copy of message content.
+   * Editable at runtime from /admin/settings.
+   */
+  get MESSAGE_LOG_STORE_BODIES(): boolean {
+    return process.env.MESSAGE_LOG_STORE_BODIES !== "false";
+  },
+  /**
    * Optional custom logo URL shown in UI header + login screen.
    * Must be an absolute https://, http://, or data:image/… URL. Other
    * schemes (file://, javascript:, relative paths) are rejected with a
@@ -488,6 +632,10 @@ export const config = {
       return null;
     }
     return raw;
+  },
+  /** Display name for this community (Server settings → Basic). Unset = null. */
+  get COMMUNITY_NAME(): string | null {
+    return process.env.COMMUNITY_NAME?.trim() || null;
   },
   /**
    * Workflow plane ("turing" track): typed edges, edge-type registry, runs.
@@ -561,27 +709,30 @@ export const config = {
    * its POST /nests/:id/chat route. Default OFF (since 1.28, CU-wdqcq03ewc):
    * an admin opts in from Settings → General (hootie_enabled) or the deploy
    * sets HOOTIE_ENABLED=true. Off → the route 404s and the launcher is
-   * hidden. Answering additionally needs the server-wide ANTHROPIC_API_KEY;
-   * without one the route answers 503, not 404 — the feature is on, it just
-   * isn't configured yet. Its name/logo/colour/greeting are enterprise-only
+   * hidden. Answering additionally needs a model key (PromptOwl's gateway from
+   * the licence, or an own-provider key); without one the route answers 503,
+   * not 404 — the feature is on, it just isn't configured yet. Its name/logo/colour/greeting are enterprise-only
    * (src/hootie/brand.ts).
    */
   get HOOTIE_ENABLED(): boolean {
     return process.env.HOOTIE_ENABLED === "true";
   },
   /** Model Hootie answers with. Superadmin-editable at runtime via
-   *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
-   *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
+   *  /admin/settings (hootie_model): a plain name from the model list. */
   get HOOTIE_MODEL(): string {
-    return process.env.HOOTIE_MODEL || "claude-opus-5";
+    return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
+  },
+  /** Testing aid: log Hootie's full model request and answer (nest content!).
+   *  Off by default; summaries (model, key tail, tokens) are always logged. */
+  get HOOTIE_DEBUG_LOG(): boolean {
+    return process.env.HOOTIE_DEBUG_LOG === "true";
   },
   /**
-   * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
-   * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs
-   * through it — one setting: the runner honours the same variable via the
-   * run bundle's env floor. Superadmin-editable (anthropic_base_url).
-   * Never a per-user vendor key: that is the shadow-AI hole the gateway
-   * exists to close.
+   * The server's own model gateway (Enterprise, licence feature byok): a
+   * LiteLLM / Bedrock / Azure / Ollama front speaking Anthropic's
+   * /v1/messages. With ANTHROPIC_API_KEY as its key it routes Hootie AND agent
+   * runs (via the run bundle's env floor) — one setting, superadmin-editable
+   * (anthropic_base_url). Used only as a pair with the key; empty = off.
    */
   get ANTHROPIC_BASE_URL(): string {
     return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
@@ -596,6 +747,61 @@ export const config = {
   get FEATURE_SUBAGENT_RUNS(): boolean {
     return process.env.FEATURE_SUBAGENT_RUNS === "true";
   },
+  /**
+   * Metacognition agents (CU-wdqcq041jm): agent nodes the SERVER runs as a
+   * persona — a native ReAct loop on the nest's model key that reads within a
+   * configured scope and changes the nest only by filing proposals for review.
+   * Off by default. Requires FEATURE_WORKFLOW_PLANE (runs, schedules and the
+   * run trace are the plane's). This is the one place the server executes an
+   * agent itself; see WORKFLOW_PLANE.md.
+   */
+  get FEATURE_METACOGNITION(): boolean {
+    return process.env.FEATURE_METACOGNITION === "true";
+  },
+  /**
+   * Experimental: the cross-nest document stream (CU-wdqcq02crv) — GET
+   * /me/stream and the Stream page, one card per node version across every
+   * nest the caller can read. Off by default; off → the route 404s and the UI
+   * hides the page. Superadmin-editable at runtime via /admin/settings
+   * (experimental_doc_stream_enabled). Experimental: its shape may change or
+   * the feature may go away.
+   */
+  get EXPERIMENTAL_DOC_STREAM(): boolean {
+    return process.env.EXPERIMENTAL_DOC_STREAM === "true";
+  },
+
+  /**
+   * Experimental: document pins (CU-wdqcq02crw). Editorial pins (a steward pins
+   * documents to the front of a nest for everyone, in an order they choose) and
+   * personal pins (my own bookmark row). Off by default; a superadmin flips it
+   * under Settings → Features (`experimental_doc_pins`) with no restart. Off →
+   * every /nests/:id/pins route 404s and the UI renders no pin control. May
+   * change or disappear.
+   */
+  get EXPERIMENTAL_DOC_PINS(): boolean {
+    return process.env.EXPERIMENTAL_DOC_PINS === "true";
+  },
+  /**
+   * Development only: let a metacognition agent's feeds and MCP servers be
+   * plain-http or private addresses (a local MCP server, a feed on the LAN).
+   * Off, which is the only safe production setting: the server fetches these
+   * from its own network position.
+   */
+  get METACOGNITION_ALLOW_PRIVATE_URLS(): boolean {
+    return process.env.METACOGNITION_ALLOW_PRIVATE_URLS === "true";
+  },
+  /** Manual/hook starts per metacognition agent per hour; bounds spend. */
+  get METACOGNITION_STARTS_PER_HOUR(): number {
+    return Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+  },
+  /** Notifications one metacognition agent may send in any 24 hours, across runs. */
+  get METACOGNITION_NOTIFY_PER_DAY(): number {
+    return Number(process.env.METACOGNITION_NOTIFY_PER_DAY) || 20;
+  },
+  /** How often a running metacognition agent checks for a person's cancel (ms). */
+  get METACOGNITION_CANCEL_POLL_MS(): number {
+    return Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
+  },
   /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
    *  (haltable / statically bounded). Clamped to [1, 32]. */
   get SUBAGENT_MAX_DEPTH(): number {
@@ -608,6 +814,19 @@ export const config = {
   get SUBAGENT_MAX_CHILDREN(): number {
     const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
     return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
+  },
+  /**
+   * Agent-run retention in days (the runs + run_steps tables behind the Run
+   * Trace and the per-agent activity history). 0 = keep forever, the default:
+   * a run is the record of what an agent did, and an operator should choose to
+   * drop it. Finished runs older than this are pruned hourly; a running run is
+   * never pruned. Same [0, 3650] range as TRACE_RETENTION_DAYS. Editable at
+   * runtime from the admin Settings page (/admin/settings).
+   */
+  get RUN_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.RUN_RETENTION_DAYS || "0", 10);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(n, 3650);
   },
   /** Max steps a single run may accumulate — bounds a runaway/hostile
    *  runner's step log. Clamped to [10, 100000]. */
@@ -757,6 +976,15 @@ export const config = {
       .filter(Boolean);
     return [...new Set(["'self'", ...sources])].join(" ");
   },
+  /** Requests per minute a single headless access key (CU-wdqcq0314u) may
+   *  make. The keys are handed to outside parties by design, so the limit is
+   *  what stops one from becoming an unmetered scraping endpoint. Per key,
+   *  in-memory (same single-instance limiter as the auth endpoints). Clamped
+   *  to [1, 100000]; default 120. */
+  get HEADLESS_KEY_RATE_LIMIT_PER_MIN(): number {
+    const n = parseInt(process.env.HEADLESS_KEY_RATE_LIMIT_PER_MIN || "120", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(1, n)) : 120;
+  },
   /**
    * Max JSON body size in bytes. Prevents DoS via giant payloads.
    * Default: 10 MB. Override via MAX_BODY_BYTES env.
@@ -811,5 +1039,14 @@ export const config = {
   get PDF_MAX_BYTES() {
     const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
+
+  /**
+   * File operations one import keeps in flight (engine `limits.ioConcurrency`).
+   * Unset leaves the engine default (32). Raise it on a network mount (gcsfuse).
+   */
+  get IMPORT_IO_CONCURRENCY(): number | undefined {
+    const n = parseInt(process.env.IMPORT_IO_CONCURRENCY || "", 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
   },
 };

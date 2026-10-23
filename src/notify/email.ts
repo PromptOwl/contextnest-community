@@ -23,6 +23,7 @@ import {
   renderEmail,
   type EmailEventDetails,
 } from "./email-render.js";
+import { recordOutbound, type OutboundContext } from "./outbound-log.js";
 
 let transporterPromise: Promise<any> | null = null;
 let configuredKey: string | null = null;
@@ -199,16 +200,17 @@ export async function notifyEmailForNest(
   nestId: string,
   message: string,
   details?: EmailEventDetails,
+  ctx: OutboundContext = {},
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
   const to = config.NOTIFY_EMAIL_TO;
   if (!transportSettings() || !from || !to) return;
+  let subject = "";
+  let text = "";
   try {
     const transporter = await getTransporter();
     if (!transporter) return;
 
-    let subject: string;
-    let text: string;
     let html: string;
     if (details) {
       // Structured event → rich, per-event email (title, details, link).
@@ -232,7 +234,7 @@ export async function notifyEmailForNest(
     }
 
     // Multipart: plain-text fallback + branded HTML.
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from,
       to,
       subject,
@@ -241,7 +243,29 @@ export async function notifyEmailForNest(
       disableFileAccess: true,
       disableUrlAccess: true,
     });
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      nestId: ctx.nestId ?? nestId,
+      recipients: [to],
+      subject,
+      body: text,
+      status: "sent",
+      providerId: info?.messageId ?? null,
+      secrets: [details?.tempPassword],
+    });
   } catch (err) {
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      nestId: ctx.nestId ?? nestId,
+      recipients: [to],
+      subject,
+      body: text,
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      secrets: [details?.tempPassword],
+    });
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn(
@@ -330,18 +354,51 @@ async function sendMailWithRetry(
   }
 }
 
+/**
+ * Recipients mail can actually reach. Service identities — access keys and
+ * metacognition personas — have `.invalid` addresses (RFC 2606) that no
+ * mailbox answers; sending to one only earns the server a bounce. A verdict on
+ * a persona's proposal is the common case: reject() emails its requester.
+ */
+export function deliverableRecipients(to: string | string[]): string[] {
+  return (Array.isArray(to) ? to : [to]).filter((a) => !!a && !/\.invalid$/i.test(a.trim()));
+}
+
+/** What a send came to: "off" = no transport/sender configured. Callers that
+ *  fire and forget can ignore it; an agent's notify reports it honestly. */
+export type EmailOutcome = "sent" | "failed" | "skipped" | "off";
+
 export async function sendEmailToRecipient(
-  to: string | string[],
+  rawTo: string | string[],
   details: EmailEventDetails,
-): Promise<void> {
+  ctx: OutboundContext = {},
+): Promise<EmailOutcome> {
   const from = config.NOTIFY_EMAIL_FROM;
-  const hasRecipient = Array.isArray(to) ? to.length > 0 : !!to;
-  if (!transportSettings() || !from || !hasRecipient) return;
+  const to = deliverableRecipients(rawTo);
+  const hasRecipient = to.length > 0;
+  if (!transportSettings() || !from) return "off";
+  const secrets = [details.tempPassword];
+  if (!hasRecipient) {
+    // Every address was a service identity (.invalid) — nothing to deliver,
+    // but the log should still show the message was addressed and dropped.
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: Array.isArray(rawTo) ? rawTo : [rawTo],
+      subject: details.docTitle,
+      status: "skipped",
+      error: "No deliverable recipient (service identities only).",
+      secrets,
+    });
+    return "skipped";
+  }
+  let rendered: { subject: string; text: string } = { subject: details.docTitle, text: "" };
   try {
     const transporter = await getTransporter();
-    if (!transporter) return;
+    if (!transporter) return "off";
     const { subject, text, html } = renderEmail(details);
-    await sendMailWithRetry(transporter, {
+    rendered = { subject, text };
+    const info = await sendMailWithRetry(transporter, {
       from,
       ...recipientEnvelope(to, from),
       subject,
@@ -350,7 +407,28 @@ export async function sendEmailToRecipient(
       disableFileAccess: true,
       disableUrlAccess: true,
     });
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: to,
+      subject,
+      body: text,
+      status: "sent",
+      providerId: info?.messageId ?? null,
+      secrets,
+    });
+    return "sent";
   } catch (err) {
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: to,
+      subject: rendered.subject,
+      body: rendered.text,
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      secrets,
+    });
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn(
@@ -358,5 +436,6 @@ export async function sendEmailToRecipient(
         err instanceof Error ? err.message : err,
       );
     }
+    return "failed";
   }
 }

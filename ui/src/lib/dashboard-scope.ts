@@ -21,13 +21,13 @@ export type NestScope =
   | "unsynced";
 
 /**
- * The scope the dashboard opens on. "My nests" — owned or shared with me —
- * rather than everything I can read: on a shared server every customer's
- * org/public nest is readable, and a first screen full of strangers' nests
- * is noise at best and a leak of who else is here at worst. Discovery stays
- * one select away (Organization / Public / All). (CU-wdqcq02mek)
+ * The scope the dashboard opens on: everything I can read. A first screen of
+ * only "My nests" hid the org nests a team actually works in. Strangers' nests
+ * stay legible rather than hidden — every card says whose it is (see
+ * nestRelation), which is the "clearly distinguish" option CU-wdqcq02qzc
+ * allowed. (CU-wdqcq05m8z, replacing the CU-wdqcq02mek default)
  */
-export const DEFAULT_NEST_SCOPE: NestScope = "mine";
+export const DEFAULT_NEST_SCOPE: NestScope = "all";
 
 /** The shape of a nest row the scope rule needs — a subset of the list
  *  response so callers can pass the raw row. */
@@ -42,6 +42,47 @@ export interface ScopedNest {
 
 export function nestOwned(n: ScopedNest): boolean {
   return n.is_owner ?? (n.permission ?? "owner") === "owner";
+}
+
+/**
+ * Whose nest a card is, for the label it carries: one I own, one someone
+ * shared with me, or one I can only read because of its visibility tier
+ * (org/public) — nobody invited me, so it must never read as "Shared by".
+ */
+export type NestRelation = "owned" | "shared" | "discovered";
+
+export function nestRelation(n: ScopedNest): NestRelation {
+  if (n.discovered) return "discovered";
+  return nestOwned(n) ? "owned" : "shared";
+}
+
+export type NestRole = "admin" | "editor" | "reviewer" | "viewer";
+
+/** The caller's role on a nest they don't own. Grant roles win over the
+ *  permission fallback (a reviewer reads as 'read'); admin > editor >
+ *  reviewer > viewer. */
+export function nestRole(n: { roles?: string[] | null; permission?: string | null }): NestRole | null {
+  const roles = Array.isArray(n.roles) ? n.roles : [];
+  const ranked = (["admin", "editor", "reviewer", "viewer"] as const).find((r) => roles.includes(r));
+  if (ranked) return ranked;
+  return ({ admin: "admin", write: "editor", read: "viewer" } as Record<string, NestRole>)[n.permission ?? ""] ?? null;
+}
+
+/** One line naming whose nest this is, for nests that aren't mine — the
+ *  sidebar tooltip and the nest page banner. Null for my own. */
+export function nestRelationText(
+  n: ScopedNest & { owner_email?: string | null; roles?: string[] | null },
+): string | null {
+  const relation = nestRelation(n);
+  if (relation === "owned") return null;
+  const owner = n.owner_email ?? null;
+  if (relation === "discovered") {
+    const tier = n.visibility === "public" ? "Public" : "Org-visible";
+    return owner ? `${tier} · ${owner}` : tier;
+  }
+  const role = nestRole(n);
+  const by = owner ? `Shared by ${owner}` : "Shared with you";
+  return role ? `${by} · ${role[0].toUpperCase()}${role.slice(1)}` : by;
 }
 
 /** Does this registered nest belong in the scope? The text query is applied
@@ -73,18 +114,16 @@ export function scopeShowsNests(scope: NestScope): boolean {
 }
 
 /**
- * Unsynced folders survive the unscoped, "mine" and unsynced-only views only,
- * and then only when they match the text query (label or path). "mine"
- * keeps them because it is the default scope and a pending folder on the
- * operator's own disk is theirs — hiding it there would hide every waiting
- * import from every fresh dashboard.
+ * Unsynced folders appear only in the "Unsynced folders only" view, and then
+ * only when they match the text query (label or path). They aren't nests, so
+ * the nest list (every other scope) never shows or counts them.
  */
 export function visibleUnsynced(
   folders: UnsyncedFolder[],
   scope: NestScope,
   query: string,
 ): UnsyncedFolder[] {
-  if (scope !== "all" && scope !== "mine" && scope !== "unsynced") return [];
+  if (scope !== "unsynced") return [];
   const q = query.trim().toLowerCase();
   if (!q) return folders;
   return folders.filter(
@@ -94,12 +133,22 @@ export function visibleUnsynced(
 }
 
 /**
- * The scope to open on, given the one remembered from last visit. Narrow
- * scopes are kept; the broad ones that show other organizations' nests (All,
- * Organization, Public) fall back to the default, so they are always a fresh
- * choice rather than the first screen. (CU-wdqcq02qzc)
+ * The scope to open on, given the one remembered from last visit. Every scope
+ * is remembered, broad ones included — the cards carry whose-nest labels, so
+ * reopening on All/Organization/Public no longer passes strangers' nests off
+ * as your own. Anything unrecognised falls back to the default.
+ * (CU-wdqcq05m8z)
  */
-const REMEMBERED_SCOPES: NestScope[] = ["mine", "owned", "shared", "synced", "unsynced"];
+const NEST_SCOPES: NestScope[] = [
+  "all",
+  "mine",
+  "owned",
+  "shared",
+  "org",
+  "public",
+  "synced",
+  "unsynced",
+];
 export function restoredNestScope(saved: string | null): NestScope {
-  return REMEMBERED_SCOPES.includes(saved as NestScope) ? (saved as NestScope) : DEFAULT_NEST_SCOPE;
+  return NEST_SCOPES.includes(saved as NestScope) ? (saved as NestScope) : DEFAULT_NEST_SCOPE;
 }

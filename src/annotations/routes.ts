@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError } from "../shared/errors.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import { injectArtifactBridge } from "../shared/artifact-bridge.js";
 import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
 import {
   createThread,
@@ -13,7 +14,7 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
-import { notifyCommentMentions } from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /**
@@ -77,7 +78,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     },
     userEmail,
   );
-  await notifyCommentMentions({
+  await notifyComment({
     nestId,
     nodeId,
     body: input.body,
@@ -111,10 +112,14 @@ export async function handleAnnotationReply(
     throw new ValidationError("body is required");
   }
 
+  // addComment also reopens the thread when it was resolved.
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
-  await notifyCommentMentions({
+  // @mentions in the reply, everyone already in the thread, then the
+  // document's watchers and reviewer stewards.
+  await notifyComment({
     nestId,
     nodeId,
+    thread,
     body: input.body,
     actorEmail: userEmail,
     baseUrl: requestBaseUrl(c.req.url),
@@ -195,5 +200,9 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   // surfaces. See src/shared/artifact-sandbox.ts for the full rationale.
   applyArtifactSandboxHeaders(c);
   if (served != null) c.header("X-Artifact-Snapshot", String(served));
-  return c.html(html);
+  // ?embed=1 — the in-app viewer's iframe: append the place/highlight bridge
+  // (see src/shared/artifact-bridge.ts). Everyone else gets the bytes as-is.
+  // Exactly "1" on purpose: an internal flag only the viewer sends, so any
+  // other value (embed=true, embed=) serves the plain page rather than guess.
+  return c.html(c.req.query("embed") === "1" ? injectArtifactBridge(html) : html);
 });

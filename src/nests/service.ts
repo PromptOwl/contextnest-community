@@ -1,3 +1,5 @@
+import { invalidateSiteNests } from "../site/invalidate.js";
+import { claimSiteKeyIfLive } from "../site/settings.js";
 import { mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
@@ -7,10 +9,12 @@ import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { revokeAllHeadlessKeys } from "../auth/headless.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, parseOrgDomains } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
+import { assertCanGrant, billingConfirmed } from "../auth/seats.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
 
@@ -167,6 +171,8 @@ export async function setReaderMode(
   if (sets.length === 0) return;
   params.push(nestId);
   await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
+  invalidateSiteNests();
+  await claimSiteKeyIfLive(nestId);
 }
 
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
@@ -280,6 +286,187 @@ export async function setCreatorIsReviewer(
 }
 
 /**
+ * Org contributions (CU-wdqcq05rz6): whether anyone in the organization may
+ * suggest documents and edits on this org nest as drafts for review, and —
+ * on a shared deployment, where it is the org boundary — which email domains
+ * count as the organization. Who actually qualifies is decided in
+ * resolveNestAccess (src/shared/access.ts); this is only the stored setting.
+ */
+export type OrgContributions = "off" | "drafts";
+
+export async function nestOrgContributions(
+  nestId: string,
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] }> {
+  const row = (await getDb().get(
+    "SELECT org_contributions, org_domains FROM nests WHERE id = ?",
+    [nestId],
+  )) as { org_contributions: string | null; org_domains: string | null } | undefined;
+  return {
+    org_contributions: row?.org_contributions === "drafts" ? "drafts" : "off",
+    org_domains: parseOrgDomains(row?.org_domains),
+  };
+}
+
+/** A bare registrable-looking host: labels of [a-z0-9-] (no edge hyphens),
+ *  at least one dot, an alphabetic TLD. No wildcards, schemes, ports, paths
+ *  or local parts — a domain list is matched by exact equality. */
+const DOMAIN_RE = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+/** Trim, lowercase, drop one leading '@', dedupe. Throws on anything else. */
+export function normalizeOrgDomains(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+  }
+  if (input.length > 50) throw new ValidationError("org_domains takes at most 50 domains");
+  const out: string[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "string") {
+      throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+    }
+    const d = raw.trim().toLowerCase().replace(/^@/, "");
+    if (!DOMAIN_RE.test(d)) {
+      throw new ValidationError(
+        `"${raw}" isn't an email domain. Use the bare domain after the @, like acme.com — no wildcards, no https://.`,
+      );
+    }
+    if (!out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Validate an org-contributions change against the state it would leave, so
+ * a refused body writes nothing. Returns the new state, or null when the body
+ * doesn't touch these fields.
+ *
+ * - Turning it ON needs visibility 'org': on a private nest there is no
+ *   "anyone in the org" to admit, and on a public one the readers are the
+ *   whole internet. (A nest that later leaves 'org' keeps the stored value,
+ *   but resolveNestAccess admits nobody until it is 'org' again.)
+ * - On a shared deployment it needs a non-empty domain list, including when
+ *   a later change would empty the list under a setting that is on —
+ *   "everyone on the server" there is every customer.
+ */
+export async function validateOrgContributionsPatch(
+  nestId: string,
+  body: { org_contributions?: unknown; org_domains?: unknown },
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] } | null> {
+  if (body.org_contributions === undefined && body.org_domains === undefined) return null;
+  if (
+    body.org_contributions !== undefined &&
+    body.org_contributions !== "off" &&
+    body.org_contributions !== "drafts"
+  ) {
+    throw new ValidationError('org_contributions must be "off" or "drafts"');
+  }
+  const current = await nestOrgContributions(nestId);
+  const next = {
+    org_contributions: (body.org_contributions ?? current.org_contributions) as OrgContributions,
+    org_domains:
+      body.org_domains === undefined ? current.org_domains : normalizeOrgDomains(body.org_domains),
+  };
+  if (next.org_contributions === "drafts") {
+    if (body.org_contributions === "drafts") {
+      const row = (await getDb().get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as
+        | { visibility: string }
+        | undefined;
+      if (row?.visibility !== "org") {
+        throw new ValidationError(
+          "Org contributions only apply to a nest shared with the organization (visibility 'org'). Change its visibility first.",
+        );
+      }
+    }
+    if (config.SHARED_DEPLOYMENT && next.org_domains.length === 0) {
+      throw new ValidationError(
+        "This server hosts several organizations, so org contributions need your organization's email domains (org_domains) — otherwise every account on the server could contribute.",
+      );
+    }
+  }
+  return next;
+}
+
+export async function setOrgContributions(
+  nestId: string,
+  next: { org_contributions: OrgContributions; org_domains: string[] },
+): Promise<void> {
+  await getDb().run(
+    "UPDATE nests SET org_contributions = ?, org_domains = ? WHERE id = ?",
+    [
+      next.org_contributions,
+      next.org_domains.length ? JSON.stringify(next.org_domains) : null,
+      nestId,
+    ],
+  );
+}
+
+/** Longest review SLA a nest may set: a year. Past that it isn't an SLA. */
+export const MAX_REVIEW_SLA_HOURS = 8760;
+
+/**
+ * Review SLA in hours, or null when off (the default). When set, a review left
+ * pending this long escalates one rung up the steward ladder — tag reviewers,
+ * then nest reviewers, then the nest owner — each rung getting the same window
+ * before the next (see governance/review-sla.ts). Off means inert: the
+ * escalation tick never reads the nest.
+ */
+export async function nestReviewSlaHours(nestId: string): Promise<number | null> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT review_sla_hours FROM nests WHERE id = ?",
+    [nestId],
+  )) as { review_sla_hours: number | null } | undefined;
+  const hours = Number(row?.review_sla_hours);
+  return Number.isInteger(hours) && hours > 0 ? hours : null;
+}
+
+/**
+ * Set or clear the review SLA (admin-only). `null` (or 0) turns it off.
+ * Whole hours between 1 and MAX_REVIEW_SLA_HOURS; anything else throws so the
+ * route answers 400. Changing it never touches escalation already recorded —
+ * a rung that was notified stays notified.
+ */
+export async function setReviewSlaHours(
+  nestId: string,
+  hours: number | null,
+): Promise<void> {
+  if (hours !== null && hours !== 0) {
+    if (!Number.isInteger(hours) || hours < 1 || hours > MAX_REVIEW_SLA_HOURS) {
+      throw new Error(
+        `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
+      );
+    }
+  }
+  await getDb().run("UPDATE nests SET review_sla_hours = ? WHERE id = ?", [
+    hours ? hours : null,
+    nestId,
+  ]);
+}
+
+/**
+ * Whether reads, retrievals and exports of this nest's documents are recorded
+ * in the activity log (governance/access-log.ts). On by default (migration
+ * 050): the record of what each person and agent read is the point of a
+ * governed nest, so it is opt-out, not opt-in.
+ */
+export async function nestAccessLogEnabled(nestId: string): Promise<boolean> {
+  return readAccessLogSetting(nestId);
+}
+
+/** Turn read logging on or off for a nest. Takes effect for the next read;
+ *  rows already recorded are kept until the retention window prunes them. */
+export async function setAccessLogEnabled(
+  nestId: string,
+  enabled: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET access_log_enabled = ? WHERE id = ?", [
+    enabled ? 1 : 0,
+    nestId,
+  ]);
+  forgetAccessLogSetting(nestId);
+}
+
+/**
  * Tags that mark a document prime, normalized and deduped. Stored as a comma
  * list on the nest; an empty/blank value means "no tag marks a doc prime"
  * (document-level flags still apply).
@@ -305,6 +492,49 @@ export async function setPrimeTags(
 ): Promise<void> {
   const db = getDb();
   await db.run("UPDATE nests SET prime_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
+ * Tags that mark a document always-include (default "always-include"): its
+ * approved text is pushed to every agent and model entering the nest (see
+ * governance/always-include-service.ts). Same storage and normalisation as
+ * prime tags; empty means no tag does it (document flags still apply).
+ */
+export async function nestAlwaysIncludeTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get(
+    "SELECT always_include_tags FROM nests WHERE id = ?",
+    [nestId],
+  )) as { always_include_tags: string | null } | undefined;
+  return parsePrimeTags(row?.always_include_tags);
+}
+
+/** Replace the nest's always-include tag set (admin-only). */
+export async function setAlwaysIncludeTags(
+  nestId: string,
+  tags: string[],
+): Promise<void> {
+  await getDb().run("UPDATE nests SET always_include_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
+ * Tags whose board column means "completed" for a task (default "done").
+ * Same storage and normalisation as prime tags.
+ */
+export async function nestDoneTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get("SELECT done_tags FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { done_tags: string | null } | undefined;
+  return parsePrimeTags(row?.done_tags);
+}
+
+export async function setDoneTags(nestId: string, tags: string[]): Promise<void> {
+  await getDb().run("UPDATE nests SET done_tags = ? WHERE id = ?", [
     parsePrimeTags(tags.join(",")).join(","),
     nestId,
   ]);
@@ -395,6 +625,7 @@ export async function renameNest(
     );
     updates.push("name = ?", "slug = ?");
     params.push(trimmed, slug);
+    invalidateSiteNests();
   }
 
   if (patch.description !== undefined) {
@@ -421,8 +652,14 @@ export async function assertCanCreateNest(userId: string): Promise<void> {
     config.AUTH_MODE === "open" ||
     config.NEST_CREATION === "everyone" ||
     (await isServerAdminUserId(userId))
-  )
+  ) {
+    // A nest owner bills as a user (pricing §3.3). The anon commons doesn't.
+    // Creating your own nest isn't a raise the Account Owner confirms: plan cap only.
+    if (userId !== ANON_USER_ID) {
+      await billingConfirmed.run(true, () => assertCanGrant([{ userId, next: "user" }]));
+    }
     return;
+  }
   throw new ForbiddenError(
     "Only a server admin can create nests on this server. Ask your admin to share a nest with you.",
   );
@@ -910,6 +1147,10 @@ export async function deleteNest(nestId: string): Promise<void> {
   await db.transaction(async (tx) => {
     const id = nestId;
     await tx.run("DELETE FROM approved_versions WHERE nest_id = ?", [id]);
+    // A deleted nest releases its docs-site domain for whoever claims it next.
+    await tx.run("DELETE FROM site_paths WHERE nest_id = ?", [id]);
+    await tx.run("DELETE FROM nest_sites WHERE nest_id = ?", [id]);
+    invalidateSiteNests();
     await tx.run("DELETE FROM node_versions WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM review_requests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM stewards WHERE nest_id = ?", [id]);
@@ -933,6 +1174,10 @@ export async function deleteNest(nestId: string): Promise<void> {
     } catch {
       // Table not present on legacy DBs — nothing to clean.
     }
+    // Document pins (migration 071) — FK-cascaded too, explicit for the same
+    // reason as the rows above. No try/catch: the migration always creates the
+    // table, and on Postgres a failed statement aborts the transaction anyway.
+    await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

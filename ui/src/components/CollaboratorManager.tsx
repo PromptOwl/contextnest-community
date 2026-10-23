@@ -20,6 +20,8 @@ import React, { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -37,8 +39,9 @@ import {
 import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { nestReviewerState } from "../lib/nest-reviewer";
 import type { Team, TeamMember } from "../lib/api";
 import { isEmailish } from "../lib/utils";
 import {
@@ -98,6 +101,10 @@ interface CollaboratorManagerProps {
   /** Surface team-sharing (add a team, list shared teams) in this panel. Off
    *  by default so teams appear only in the Share dialog. */
   showTeams?: boolean;
+  /** Offer a nest-wide Reviewer switch per person and on invite, so access
+   *  and review are set in one place (CU-wdqcq04wnr). Pass only when
+   *  stewardship is on and the caller can assign stewards. */
+  reviewers?: boolean;
 }
 
 export function CollaboratorManager({
@@ -107,6 +114,7 @@ export function CollaboratorManager({
   currentUserEmail,
   callerPermission = "admin",
   showTeams = false,
+  reviewers = false,
 }: CollaboratorManagerProps) {
   const self = (currentUserEmail || "").toLowerCase();
   const callerRank = PERM_RANK[callerPermission] ?? PERM_RANK.read;
@@ -125,6 +133,13 @@ export function CollaboratorManager({
     useState<Collaborator["permission"]>("read");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inviteReviewer, setInviteReviewer] = useState(false);
+  // The Stewards tab's read (shared cache) — backs each row's Reviewer switch.
+  const stewardsQuery = useQuery({ ...reads.stewards(nestId), enabled: reviewers });
+  const stewards = stewardsQuery.data?.stewards ?? [];
+  const [reviewerBusy, setReviewerBusy] = useState<string | null>(null);
+  const makeReviewer = (email: string) =>
+    api.assignSteward(nestId, { scope: "nest", users: [{ email, role: "reviewer" }] });
 
   // Team-sharing state (only used when showTeams).
   const [addMode, setAddMode] = useState<"person" | "team">("person");
@@ -142,10 +157,8 @@ export function CollaboratorManager({
   const loadCollaborators = async () => {
     setLoading(true);
     try {
-      const { collaborators } = await qc.fetchQuery(
-        reads.collaborators(nestId),
-      );
-      setCollaborators(collaborators as Collaborator[]);
+      const res = await qc.fetchQuery(reads.collaborators(nestId));
+      setCollaborators((res?.collaborators ?? []) as Collaborator[]);
     } catch (err: any) {
       setError(err?.message || "Failed to load collaborators");
     } finally {
@@ -159,8 +172,8 @@ export function CollaboratorManager({
         qc.fetchQuery(reads.nestTeams(nestId)),
         qc.fetchQuery(reads.teamList()).catch(() => ({ teams: [] as Team[] })),
       ]);
-      setSharedTeams(nestTeams.teams);
-      setMyTeams(owned.teams);
+      setSharedTeams(nestTeams?.teams ?? []);
+      setMyTeams(owned?.teams ?? []);
     } catch (err: any) {
       setError(err?.message || "Failed to load teams");
     }
@@ -189,14 +202,39 @@ export function CollaboratorManager({
     setError(null);
     try {
       await api.addCollaborator(nestId, { email, permission: invitePermission });
+      if (reviewers && inviteReviewer) {
+        try {
+          await makeReviewer(email);
+        } catch (err: any) {
+          setError(`Added ${email}, but couldn't make them a reviewer: ${err?.message || "unknown error"}`);
+        }
+      }
       setInviteEmail("");
       setInvitePermission("read");
+      setInviteReviewer(false);
       await loadCollaborators();
       onChanged();
     } catch (err: any) {
       setError(err?.message || "Failed to add collaborator");
     } finally {
       setAdding(false);
+    }
+  };
+
+  const toggleReviewer = async (email: string, on: boolean) => {
+    const state = nestReviewerState(stewards, email);
+    setReviewerBusy(email);
+    setError(null);
+    try {
+      if (on) await makeReviewer(email);
+      else if (state.kind === "reviewer") await api.removeSteward(nestId, state.stewardId);
+      toast.success(on ? `${email} can now approve documents in this nest` : `${email} is no longer a reviewer`);
+      await loadCollaborators();
+      onChanged();
+    } catch (err: any) {
+      setError(err?.message || "Failed to update reviewer");
+    } finally {
+      setReviewerBusy(null);
     }
   };
 
@@ -411,6 +449,17 @@ export function CollaboratorManager({
                 {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
               </Button>
             </div>
+            {reviewers && (
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={inviteReviewer}
+                  onCheckedChange={(v) => setInviteReviewer(v === true)}
+                  disabled={adding}
+                  data-testid="collab-invite-reviewer"
+                />
+                Also make them a reviewer (approves documents across this nest)
+              </label>
+            )}
             <p className="text-xs text-muted-foreground">
               If they don't have an account yet, they'll get access when they
               register with this email.
@@ -462,7 +511,9 @@ export function CollaboratorManager({
           </p>
         ) : (
           <div className="space-y-1">
-            {collaborators.map((c) => (
+            {collaborators.map((c) => {
+              const reviewer = reviewers && c.email ? nestReviewerState(stewards, c.email) : null;
+              return (
               <div
                 key={c.id}
                 className="flex items-center gap-2 py-1.5"
@@ -471,8 +522,11 @@ export function CollaboratorManager({
                 <span className="flex-1 min-w-0 truncate text-sm">
                   {c.email || c.user_id}
                 </span>
-                {/* Steward roles held by the same user — read-only context. */}
-                {(c.stewardRoles ?? []).map((r) => (
+                {/* Steward roles held by the same user — read-only context.
+                    The switch below already says "reviewer" for the nest row. */}
+                {(c.stewardRoles ?? [])
+                  .filter((r) => !(reviewer?.kind === "reviewer" && r === "reviewer"))
+                  .map((r) => (
                   <Badge
                     key={r}
                     variant="outline"
@@ -482,6 +536,25 @@ export function CollaboratorManager({
                     {r}
                   </Badge>
                 ))}
+                {reviewer && (
+                  <label
+                    className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+                    title={
+                      reviewer.kind === "other"
+                        ? `Has a nest steward role (${reviewer.role}) — change it on the Stewards tab`
+                        : "Reviewers approve documents across this nest"
+                    }
+                  >
+                    <Switch
+                      checked={reviewer.kind === "reviewer"}
+                      disabled={reviewer.kind === "other" || reviewerBusy === c.email || stewardsQuery.isLoading}
+                      onCheckedChange={(on) => void toggleReviewer(c.email!, on)}
+                      aria-label={`Reviewer: ${c.email}`}
+                      data-testid={`collaborator-reviewer-${c.id}`}
+                    />
+                    Reviewer
+                  </label>
+                )}
                 {canManageRoster ? (
                   <>
                     <Select
@@ -530,7 +603,8 @@ export function CollaboratorManager({
                   </Badge>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

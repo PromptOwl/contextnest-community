@@ -27,8 +27,10 @@ import {
   Plug,
   Plus,
   Search,
+  Users,
 } from "lucide-react";
 import { reads, useNestMeta } from "../lib/queries";
+import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { useAuth } from "../auth/AuthContext";
@@ -113,7 +115,7 @@ export function DocumentSidebar({
 }: Props) {
   // Only inside a nest — the dashboard rail is app pages, not nests.
   const nests = useQuery({ ...reads.nestList(), enabled: nestId !== null });
-  const { isAdmin, workflowPlaneEnabled } = useAuth();
+  const { isAdmin, authMode, workflowPlaneEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -206,6 +208,7 @@ export function DocumentSidebar({
           <AppPagesNav
             active={dashboardTab}
             isAdmin={isAdmin}
+            isSuperadmin={isAdmin && authMode !== "open"}
             onOpen={onOpenDashboardTab}
           />
         )}
@@ -215,6 +218,7 @@ export function DocumentSidebar({
         {nestId !== null && rows.map((n) => {
           const open = openNests.has(n.id);
           const current = n.id === nestId;
+          const relation = nestRelation(n);
           return (
             <div key={n.id} className={cn("mb-1", current && "mb-3")}>
               <div
@@ -246,10 +250,18 @@ export function DocumentSidebar({
                 <button
                   type="button"
                   onClick={() => onOpenNest(nestTarget(n))}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground"
-                  title={`Open ${n.name}`}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground",
+                    // Readable only through its visibility tier — not mine, not shared.
+                    relation === "discovered" && "italic opacity-70",
+                  )}
+                  title={[`Open ${n.name}`, nestRelationText(n)].filter(Boolean).join(" — ")}
+                  data-relation={relation}
                 >
                   <span className="truncate">{n.name}</span>
+                  {relation === "shared" && (
+                    <Users className="h-3 w-3 shrink-0 text-blue-600" aria-label="Shared with you" />
+                  )}
                   <VisibilityGlyph visibility={n.visibility} />
                 </button>
                 {current && onNewDocument && (
@@ -299,13 +311,16 @@ export function DocumentSidebar({
 function AppPagesNav({
   active,
   isAdmin,
+  isSuperadmin,
   onOpen,
 }: {
   active: string | null;
   isAdmin: boolean;
+  isSuperadmin: boolean;
   onOpen?: (id: string) => void;
 }) {
-  const rail = appRail({ isAdmin });
+  const { mcpOauthEnabled, docStreamEnabled } = useAuth();
+  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled });
   const [closed, setClosedState] = useState<string[]>(
     () => readDocPagePrefs(localStorage).closedGroups,
   );

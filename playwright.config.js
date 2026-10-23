@@ -58,7 +58,132 @@ const testRun = [
     enabled: true,
     independent: true, // Self-contained auth tests
   },
-  // ── Add new suites here (nests, governance, documents, …) ─────────────────
+  {
+    // Community Dashboard (CN-DASH-001 … CN-DASH-062). Serial on purpose: the
+    // cases share one account, so a parallel run would have them filtering,
+    // counting and deleting each other's nests.
+    file: 'dashboard/community_dashboard.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nests; depends only on the orphan sweep
+  },
+  {
+    // My Work (CN-WORK-001 … CN-WORK-020). Serial on purpose: the cases share
+    // one inbox and one seeded nest, so a parallel run would have them
+    // approving, selecting and counting each other's reviews.
+    file: 'my-work/my_work.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, reviews and requests
+  },
+  {
+    // My Drafts (CN-DRAFT-001 … CN-DRAFT-013). Serial on purpose: the cases
+    // share one account's draft list and one seeded nest, so a parallel run
+    // would have them selecting, submitting and discarding each other's drafts.
+    file: 'my-drafts/my_drafts.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest and drafts
+  },
+  {
+    // Workspace → Teams (CN-TEAM-001 … CN-TEAM-005). Serial: the cases share
+    // one account's team list, and some count it.
+    file: 'teams/teams.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Creates and deletes its own teams
+  },
+  {
+    // Workspace → API keys (CN-KEYS-001 … CN-KEYS-009). Serial: the cases share
+    // one account's key list, which is capped at 20 keys.
+    file: 'api-keys/api_keys.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Creates and revokes its own keys; arranges its own nests
+  },
+  {
+    // Admin → Teammates (CN-TMATE-001 … CN-TMATE-011). Serial: the cases
+    // share one server's user directory. Writes to accounts are stubbed.
+    file: 'teammates/teammates.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real directory; arranges its own nest
+  },
+  {
+    // Admin → Server settings (CN-SET-001 … CN-SET-014). Serial: every case
+    // reads the same server-wide settings. All writes are stubbed.
+    file: 'server-settings/server_settings.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real settings; writes nothing to the server
+  },
+  {
+    // Admin → Activity trace (CN-TRACE-001 … CN-TRACE-008). Serial: the cases
+    // page through one server-wide trace. Read-only.
+    file: 'activity-trace/activity_trace.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real trace; writes nothing
+  },
+  {
+    // Admin → Message log (CN-MSG-001 … CN-MSG-029). Serial: the cases read
+    // one server-wide log and its access audit. Settings saves are stubbed.
+    file: 'message-log/message_log.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real log; arranges its own nests and keys
+  },
+  {
+    // Help → How it works (CN-HELP-001 … CN-HELP-009). Serial: a static page
+    // read by two accounts. Read-only.
+    file: 'how-it-works/how_it_works.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Static page; writes nothing
+  },
+  {
+    // User menu → Account (CN-ACCT-001 … CN-ACCT-010). Serial: the cases open
+    // the signed-in user's own account. Name and password writes are blocked.
+    file: 'account/account.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the accounts; never saves to them
+  },
+  {
+    // Sidebar rail (CN-RAIL-001 … CN-RAIL-008). Serial: the cases read the rail
+    // as two accounts. Read-only; /health switches are stubbed per browser.
+    file: 'sidebar-rail/sidebar_rail.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the rail; writes nothing
+  },
+  {
+    // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
+    // Serial: the cases share one seeded nest and build on each other's
+    // requests (ask → approve → deny → refused save).
+    file: 'access-requests/access_requests.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest; needs secondary_user
+  },
+  {
+    // Metacognition agents (CN-META-001 … CN-META-003). Skips unless the
+    // server has FEATURE_METACOGNITION on. Serial: one seeded nest.
+    file: 'metacognition/metacognition_agents.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest
+  },
+  {
+    // Annotations keep your place + highlights in every view (CN-ANNO-001 …
+    // CN-ANNO-004). Serial: the cases share one seeded nest. Skips itself on
+    // a server that doesn't serve the viewer bridge yet.
+    file: 'annotations/annotate_keep_place.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, artifact, doc and comments
+  },
+  // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
     file: 'global-cleanup/global_cleanup.spec.js',
@@ -141,7 +266,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -173,6 +298,12 @@ export default defineConfig({
   // 2 minutes per test — a self-hosted community server responds fast; tests
   // with known-long flows set larger budgets explicitly via test.setTimeout()
   timeout: 2 * 60 * 1000,
+  // How long an assertion waits. A deployed server shared by several runs can
+  // take seconds to render a page that is instant locally, so the 5s default
+  // turns load into failures. Override with PLAYWRIGHT_EXPECT_TIMEOUT (ms).
+  expect: {
+    timeout: parseInt(process.env.PLAYWRIGHT_EXPECT_TIMEOUT) || 15_000,
+  },
 
   // Test output directory
   outputDir: 'tests/test-results/artifacts',
@@ -204,15 +335,15 @@ export default defineConfig({
     // Playwright-managed download is unavailable (e.g. sandboxed CI).
     ...(process.env.PLAYWRIGHT_SLOW_MO || process.env.PLAYWRIGHT_CHROMIUM_PATH
       ? {
-          launchOptions: {
-            ...(process.env.PLAYWRIGHT_SLOW_MO
-              ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
-              : {}),
-            ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
-              ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-              : {}),
-          },
-        }
+        launchOptions: {
+          ...(process.env.PLAYWRIGHT_SLOW_MO
+            ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
+            : {}),
+          ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+            ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+            : {}),
+        },
+      }
       : {}),
   },
 
@@ -259,18 +390,161 @@ export default defineConfig({
     // duplicate test runs when running the full suite.
     ...(includeStandalone
       ? [
-          {
-            name: 'auth',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/auth/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        {
+          name: 'auth',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/auth/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-        ]
+        },
+        {
+          name: 'dashboard',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/dashboard/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'my-work',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-work/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'my-drafts',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-drafts/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'teams',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/teams/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'api-keys',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/api-keys/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'teammates',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/teammates/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'server-settings',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/server-settings/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'activity-trace',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/activity-trace/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'message-log',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/message-log/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'how-it-works',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/how-it-works/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'account',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/account/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'sidebar-rail',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/sidebar-rail/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'access-requests',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/access-requests/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+      ]
       : []),
   ],
 });

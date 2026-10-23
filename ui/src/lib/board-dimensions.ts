@@ -12,6 +12,14 @@
  * and keeps the governance guardrail in one obvious place.
  */
 
+import {
+  fieldColumnKeys,
+  fieldColumnOrder,
+  fieldKeyLabel,
+  fieldValueForMove,
+  type FieldDefinition,
+} from "./custom-fields";
+
 /** The bucket for nodes that don't carry a value for the active dimension. */
 export const UNCATEGORIZED = "__uncategorized__";
 
@@ -22,9 +30,43 @@ export interface BoardNode {
   type: string;
   tags: string[];
   status: string;
+  /** Board fields + timestamps, from the node listing (src/nodes/task-fields.ts). */
+  assignee?: string;
+  assigned_at?: string;
+  due?: string;
+  priority?: string;
+  parent?: string;
+  moved_at?: string;
+  completed_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** Document-scope prime flag; undefined = inherit from tags. */
+  prime?: boolean;
+  /** Blocking relations from nodes not yet in a done column (server-counted,
+   *  including blockers this viewer can't read). */
+  open_blockers?: number;
+  /** Custom field values (stored + computed), key → value. */
+  fields?: Record<string, unknown>;
+  /** When the node entered its current column — time-in-status counts from it. */
+  status_since?: string;
 }
 
-export type DimensionKind = "folder" | "status" | "tag";
+export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field";
+
+/** Field-valued dimensions: a column is a value of a board field, and a drag
+ *  between columns sets that field (Linear's group-by-assignee/priority). */
+export function isFieldDimension(d: DimensionKind): d is "assignee" | "priority" {
+  return d === "assignee" || d === "priority";
+}
+
+/** Linear's order, most urgent first. */
+export const PRIORITY_ORDER = ["urgent", "high", "medium", "low"];
+const PRIORITY_COLUMN_LABELS: Record<string, string> = {
+  urgent: "Urgent",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+};
 
 /**
  * The lifecycle states the server actually produces, in left→right order.
@@ -58,6 +100,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 export interface BoardConfig {
   dimension: DimensionKind;
+  /** For the "field" dimension: the custom field whose values are columns. */
+  field?: FieldDefinition;
   /** For the "tag" dimension: the namespace, e.g. "stage" groups by stage:* . */
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
@@ -165,6 +209,64 @@ function namespaceOf(config: { tagNamespace?: string }): string {
 const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
 const withHash = (t: string) => (t.startsWith("#") ? t : `#${t}`);
 
+/**
+ * Pattern columns (CU-wdqcq05pad). On the tag board a column key with a "*"
+ * — "status*", "*-review" — is a pattern, not a tag: it stands for one column
+ * per matching tag on the board, sorted, at the pattern's place in the order,
+ * so a status that appears later gets its column with no setup. A tag that
+ * is also listed as its own column keeps that column instead. Matching is a
+ * case-insensitive whole-value glob, "*" being any run of characters; it is
+ * deliberately not a regex — the server evaluates saved boards too, and a
+ * user's regex there is a catastrophic-backtracking risk.
+ */
+export function isColumnPattern(key: string): boolean {
+  return key.includes("*");
+}
+
+/** Whole-value glob match. No regex: the greedy last-star backtrack is
+ *  O(value × pattern) at worst — never exponential — and saved column keys
+ *  are capped at 600 characters server-side (board-service strList). */
+export function globMatch(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  let pi = 0;
+  let vi = 0;
+  let star = -1;
+  let mark = 0;
+  while (vi < v.length) {
+    if (pi < p.length && p[pi] === "*") {
+      star = pi++;
+      mark = vi;
+    } else if (pi < p.length && p[pi] === v[vi]) {
+      pi++;
+      vi++;
+    } else if (star >= 0) {
+      pi = star + 1;
+      vi = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (pi < p.length && p[pi] === "*") pi++;
+  return pi === p.length;
+}
+
+/**
+ * A column order rebuilt from the visible columns (a reorder) with the saved
+ * patterns carried over. The board only ever sees a pattern's expansion, so
+ * the rebuilt order would otherwise lose the pattern and stop picking up new
+ * tags. A reorder pins the expanded tags it writes out; add and remove edit
+ * the saved order instead, so they pin nothing.
+ */
+export function withoutPattern(order: string[] | undefined, pattern: string): string[] {
+  // Its columns go with it — including ones a reorder pinned in place.
+  return (order ?? []).filter((k) => k !== pattern && !globMatch(pattern, k));
+}
+
+export function keepPatterns(order: string[], saved: string[] | undefined): string[] {
+  return [...new Set([...order, ...(saved ?? []).filter(isColumnPattern)])];
+}
+
 /** A saved column layout for one dimension. */
 export interface ColumnLayout {
   columnOrder?: string[];
@@ -176,6 +278,22 @@ export interface BoardSettings {
   dimension: DimensionKind;
   tagNamespace?: string;
   layouts: Record<string, ColumnLayout>;
+  /** Show only `task` nodes — a project board rather than a nest map. */
+  tasksOnly?: boolean;
+  /** Show only cards carrying every one of these tags (bare, no "#"). */
+  filterTags?: string[];
+  /** Saved boards only: per-column card order, keyed by board-rank's rankKey. */
+  ranks?: Record<string, string[]>;
+  /** Sub-group columns into lanes. */
+  swimlane?: SwimlaneKind;
+  /** Hide cards completed more than this many days ago. */
+  hideDoneAfterDays?: number;
+  /** dimension "field": the custom field key whose values are the columns. */
+  fieldKey?: string;
+  /** swimlane "field": the custom field key whose values are the lanes. */
+  swimlaneField?: string;
+  /** Only cards whose custom fields match, key → value ("none" = unset). */
+  filterFields?: Record<string, string>;
 }
 
 /**
@@ -187,7 +305,9 @@ export interface BoardSettings {
 export function layoutKey(s: {
   dimension: DimensionKind;
   tagNamespace?: string;
+  fieldKey?: string;
 }): string {
+  if (s.dimension === "field") return `field:${s.fieldKey ?? ""}`;
   return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
 }
 
@@ -211,15 +331,24 @@ export function migrateLayout(key: string, layout: ColumnLayout): ColumnLayout {
 }
 
 /** The BoardConfig for the active dimension: its own layout, nothing else's. */
-export function resolveConfig(s: BoardSettings): BoardConfig {
+export function resolveConfig(s: BoardSettings, fieldDefs: FieldDefinition[] = []): BoardConfig {
   const layout = s.layouts[layoutKey(s)] ?? {};
+  const field =
+    s.dimension === "field" ? fieldDefs.find((d) => d.key === s.fieldKey) : undefined;
   return {
     dimension: s.dimension,
+    field,
     tagNamespace: s.tagNamespace,
     // Status defaults to the lifecycle order until the user reorders it.
     columnOrder:
       layout.columnOrder ??
-      (s.dimension === "status" ? STATUS_ORDER : undefined),
+      (s.dimension === "status"
+        ? STATUS_ORDER
+        : s.dimension === "priority"
+          ? PRIORITY_ORDER
+          : field
+            ? fieldColumnOrder(field)
+            : undefined),
     hiddenColumns: layout.hiddenColumns,
     // The tag board is user-curatable, but starts auto-populated: every
     // present tag is a column, exactly like folder/status, until the user
@@ -242,6 +371,14 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [folderOf(node.id)];
     case "status":
       return [node.status || UNCATEGORIZED];
+    case "assignee":
+      return [node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED];
+    case "priority":
+      return [node.priority || UNCATEGORIZED];
+    case "field":
+      return config.field
+        ? fieldColumnKeys(config.field, node.fields?.[config.field.key])
+        : [UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(config);
       const tags = node.tags.map(stripHash);
@@ -281,16 +418,26 @@ function shownKeys(
   // added: a card whose tags match none of them simply doesn't appear, and
   // there is no Uncategorized catch-all.
   if (config.explicitColumns) {
-    const allowed = new Set(
-      (config.columnOrder ?? []).filter((k) => !hidden.has(k)),
-    );
-    return keys.filter((k) => allowed.has(k));
+    const order = (config.columnOrder ?? []).filter((k) => !hidden.has(k));
+    const allowed = new Set(order);
+    const patterns = order.filter(isColumnPattern);
+    return keys.filter((k) => allowed.has(k) || patterns.some((p) => globMatch(p, k)));
   }
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
+/** The catch-all column's name, which on a field board is a real value. */
+function uncategorizedLabel(d: DimensionKind, field?: FieldDefinition): string {
+  if (d === "field" && field) return fieldKeyLabel(field, UNCATEGORIZED);
+  if (d === "assignee") return "Unassigned";
+  if (d === "priority") return "No priority";
+  return "Uncategorized";
+}
+
 function labelFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return "Uncategorized";
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension, config.field);
+  if (config.dimension === "field" && config.field) return fieldKeyLabel(config.field, key);
+  if (config.dimension === "priority") return PRIORITY_COLUMN_LABELS[key] ?? key;
   if (key === "" && config.dimension === "folder") return "(root)";
   // A status the server grew but this map hasn't: spaces beat raw snake_case,
   // since the heading is rendered with CSS `capitalize`.
@@ -308,11 +455,14 @@ function labelFor(key: string, config: BoardConfig): string {
  * have no such chip to match, so they keep the capitalize styling.
  */
 export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
-  return dimension !== "tag";
+  // Assignee columns are email addresses — capitalizing them misspells them.
+  // Field values are what the admin typed — keep their casing.
+  return dimension !== "tag" && dimension !== "assignee" && dimension !== "field";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return "Uncategorized";
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension, config.field);
+  if (config.dimension === "field" && config.field) return fieldKeyLabel(config.field, key);
   if (key === "" && config.dimension === "folder") return "(root)";
   return key;
 }
@@ -325,17 +475,36 @@ function titleFor(key: string, config: BoardConfig): string {
 export function buildColumns(
   nodes: BoardNode[],
   config: BoardConfig,
+  /** Folders holding nothing yet — columns on the folder board, as in the
+   *  sidebar tree, so an empty folder exists in both or neither (CU-wdqcq04wnz). */
+  emptyFolders: string[] = [],
 ): BoardColumn[] {
   const hidden = new Set(config.hiddenColumns ?? []);
   // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
   // order — nothing auto-appears, nothing trails. An empty order = empty board.
   if (config.explicitColumns) {
+    const order = config.columnOrder ?? [];
+    const listed = new Set(order.filter((k) => !isColumnPattern(k)));
+    // Tag values on the board's cards, for patterns to expand against.
+    const tagged = new Set<string>();
+    if (order.some(isColumnPattern)) {
+      for (const n of nodes) for (const k of cardColumnKeys(n, config)) tagged.add(k);
+      tagged.delete(UNCATEGORIZED);
+    }
     const seen = new Set<string>();
     const keys: string[] = [];
-    for (const key of config.columnOrder ?? []) {
+    for (const key of order) {
       if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
       seen.add(key);
-      keys.push(key);
+      if (!isColumnPattern(key)) {
+        keys.push(key);
+        continue;
+      }
+      for (const t of [...tagged].sort()) {
+        if (seen.has(t) || listed.has(t) || hidden.has(t) || !globMatch(key, t)) continue;
+        seen.add(t);
+        keys.push(t);
+      }
     }
     return keys.map((key) => ({
       key,
@@ -347,7 +516,16 @@ export function buildColumns(
   for (const n of nodes) {
     for (const key of shownKeys(n, config, hidden)) present.add(key);
   }
-  const needUncat = present.has(UNCATEGORIZED);
+  if (config.dimension === "folder") {
+    for (const f of emptyFolders) if (f && !hidden.has(f)) present.add(f);
+  }
+  // On a field board "Unassigned"/"No priority" is a value you drag TO, so it
+  // stays as a drop target even when nothing is in it.
+  // A checkbox board has no "unset" column — unset reads as unchecked.
+  const needUncat =
+    present.has(UNCATEGORIZED) ||
+    isFieldDimension(config.dimension) ||
+    (config.dimension === "field" && !!config.field && config.field.type !== "checkbox");
   present.delete(UNCATEGORIZED);
 
   const ordered: string[] = [];
@@ -378,9 +556,10 @@ export function buildColumns(
 export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
+  emptyFolders: string[] = [],
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
   const hidden = new Set(config.hiddenColumns ?? []);
-  const columns = buildColumns(nodes, config);
+  const columns = buildColumns(nodes, config, emptyFolders);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {
@@ -391,9 +570,39 @@ export function groupByColumn(
   return { columns, byColumn };
 }
 
+/**
+ * What the tag board's add-column box offers as you type: the tags on the
+ * nest's cards — all of them, since on a curated board the cards not shown
+ * are the ones whose tags are worth adding — with how many cards carry each,
+ * most used first, minus the ones already a column (directly or through a
+ * pattern). `query` is a case-insensitive substring.
+ */
+export function tagSuggestions(
+  nodes: BoardNode[],
+  config: BoardConfig,
+  query: string,
+): Array<{ value: string; count: number }> {
+  if (config.dimension !== "tag") return [];
+  const shown = new Set(buildColumns(nodes, config).map((c) => c.key));
+  const counts = new Map<string, number>();
+  for (const n of nodes) {
+    for (const k of cardColumnKeys(n, config)) {
+      if (k !== UNCATEGORIZED) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+  }
+  const q = query.trim().replace(/^#/, "").toLowerCase();
+  return [...counts]
+    .filter(([v]) => !shown.has(v) && (!q || v.toLowerCase().includes(q)))
+    .sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0))
+    .map(([value, count]) => ({ value, count }));
+}
+
 export type MovePlan =
   | { kind: "move-folder"; folder: string }
   | { kind: "retag"; tags: string[] }
+  | { kind: "set-fields"; fields: { assignee?: string | null; priority?: string | null } }
+  /** Custom field values — merged server-side, so only this key is sent. */
+  | { kind: "set-custom"; fields: Record<string, unknown> }
   | { kind: "unsupported"; reason: string };
 
 /**
@@ -452,5 +661,134 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+    case "field": {
+      const def = config.field;
+      if (!def) return { kind: "unsupported", reason: "This field no longer exists." };
+      if (def.type === "time_in_status") {
+        return { kind: "unsupported", reason: "Time in status is computed — it can't be set." };
+      }
+      if (fromKey ? fromKey === targetKey : cardColumnKey(node, config) === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      const value = fieldValueForMove(def, node.fields?.[def.key], targetKey, fromKey);
+      return { kind: "set-custom", fields: { [def.key]: value } };
+    }
+    case "assignee":
+    case "priority": {
+      if (cardColumnKey(node, config) === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      const value = targetKey === UNCATEGORIZED ? null : targetKey;
+      return { kind: "set-fields", fields: { [config.dimension]: value } };
+    }
   }
+}
+
+/**
+ * Where a card created from a column's "+ Add task" lands, so it shows up in
+ * the column it was added from: the column's tag (tag board) or folder
+ * (folder board). Null on the status board — a new node's status is decided
+ * by governance, not by which column you clicked.
+ */
+export function newCardPlacement(
+  columnKey: string,
+  config: BoardConfig,
+): {
+  tags?: string[];
+  folder?: string;
+  assignee?: string;
+  priority?: string;
+  fields?: Record<string, unknown>;
+} | null {
+  switch (config.dimension) {
+    case "field": {
+      const def = config.field;
+      if (!def || def.type === "time_in_status") return null;
+      if (columnKey === UNCATEGORIZED) return {};
+      return { fields: { [def.key]: fieldValueForMove(def, undefined, columnKey) } };
+    }
+    case "assignee":
+      return columnKey === UNCATEGORIZED ? {} : { assignee: columnKey };
+    case "priority":
+      return columnKey === UNCATEGORIZED ? {} : { priority: columnKey };
+    case "folder":
+      return columnKey === UNCATEGORIZED ? {} : { folder: columnKey };
+    case "tag": {
+      if (columnKey === UNCATEGORIZED) return { tags: [] };
+      const ns = namespaceOf(config);
+      return { tags: [withHash(ns ? `${ns}:${columnKey}` : columnKey)] };
+    }
+    case "status":
+      return null;
+  }
+}
+
+// ── Swimlanes ───────────────────────────────────────────────────────────────
+
+export type SwimlaneKind = "assignee" | "priority" | "parent" | "field";
+
+/** The lane a card rides in. A multi-select card rides in its first option. */
+export function laneKeyOf(node: BoardNode, lane: SwimlaneKind, field?: FieldDefinition): string {
+  if (lane === "field") {
+    return field ? fieldColumnKeys(field, node.fields?.[field.key])[0]! : UNCATEGORIZED;
+  }
+  if (lane === "assignee") return node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED;
+  if (lane === "priority") return node.priority || UNCATEGORIZED;
+  return node.parent || UNCATEGORIZED;
+}
+
+export interface Lane {
+  key: string;
+  label: string;
+  nodes: BoardNode[];
+}
+
+/**
+ * Cards split into lanes, in a stable order: priority lanes most urgent first;
+ * assignee and parent lanes by label; the "none" lane always last. Empty lanes
+ * are dropped — a lane exists because something is in it.
+ */
+export function buildLanes(
+  nodes: BoardNode[],
+  lane: SwimlaneKind,
+  labelOf: (key: string) => string,
+  field?: FieldDefinition,
+): Lane[] {
+  const groups = new Map<string, BoardNode[]>();
+  for (const n of nodes) {
+    const k = laneKeyOf(n, lane, field);
+    const list = groups.get(k) ?? [];
+    list.push(n);
+    groups.set(k, list);
+  }
+  const keys = [...groups.keys()].filter((k) => k !== UNCATEGORIZED);
+  const fieldOrder = lane === "field" && field ? fieldColumnOrder(field) : undefined;
+  if (lane === "priority") {
+    keys.sort((a, b) => PRIORITY_ORDER.indexOf(a) - PRIORITY_ORDER.indexOf(b));
+  } else if (fieldOrder) {
+    keys.sort((a, b) => fieldOrder.indexOf(a) - fieldOrder.indexOf(b));
+  } else {
+    keys.sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
+  }
+  if (groups.has(UNCATEGORIZED)) keys.push(UNCATEGORIZED);
+  return keys.map((k) => ({ key: k, label: labelOf(k), nodes: groups.get(k)! }));
+}
+
+/** The field write that moves a card into a lane. */
+export function laneFields(
+  lane: SwimlaneKind,
+  laneKey: string,
+  field?: FieldDefinition,
+): {
+  assignee?: string | null;
+  priority?: string | null;
+  parent?: string | null;
+  fields?: Record<string, unknown>;
+} {
+  if (lane === "field") {
+    if (!field || field.type === "time_in_status") return {};
+    return { fields: { [field.key]: fieldValueForMove(field, undefined, laneKey) } };
+  }
+  const v = laneKey === UNCATEGORIZED ? null : laneKey;
+  return { [lane]: v };
 }

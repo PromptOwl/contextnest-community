@@ -16,6 +16,14 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { ValidationError } from "../shared/errors.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
+import { sendEmailToRecipient } from "../notify/email.js";
+import {
+  docLink,
+  nestName,
+  prettyFolderPath,
+  titleForNode,
+} from "./title-resolver.js";
 
 export type GrantRole = "read" | "write";
 export type GrantTargetType = "document" | "folder";
@@ -118,6 +126,8 @@ export async function createGrant(params: {
   userId: string;
   role: GrantRole;
   grantedBy: string;
+  /** Request origin for the email link; falls back to PUBLIC_BASE_URL. */
+  baseUrl?: string;
 }): Promise<GrantRow> {
   const { nestId, targetType, target, userId, role, grantedBy } = params;
   if (!["document", "folder"].includes(targetType)) {
@@ -136,6 +146,7 @@ export async function createGrant(params: {
       throw new ValidationError("folder target must name a subfolder, not the nest root");
     }
   }
+  await assertCanGrant([{ userId, next: permissionClass(role) }]);
   const db = getDb();
   const now = new Date().toISOString();
   // Never shadow the nest owner (they already have everything) — but that's a
@@ -157,7 +168,49 @@ export async function createGrant(params: {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, nestId, targetType, target, userId, role, grantedBy, now, now],
   );
+  void emailGrantee(params);
   return (await db.get("SELECT * FROM grants WHERE id = ?", [id])) as GrantRow;
+}
+
+/**
+ * One email per new share. A role change on an existing grant sends nothing,
+ * and a nest member gets nothing: the nest share already told them, so a
+ * per-document email would only be noise. Best-effort, never throws.
+ */
+async function emailGrantee(p: {
+  nestId: string;
+  targetType: GrantTargetType;
+  target: string;
+  userId: string;
+  role: GrantRole;
+  grantedBy: string;
+  baseUrl?: string;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const member = await db.get(
+      `SELECT 1 FROM nests WHERE id = ? AND user_id = ?
+       UNION SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?`,
+      [p.nestId, p.userId, p.nestId, p.userId],
+    );
+    if (member) return;
+    const user = (await db.get("SELECT email FROM users WHERE id = ?", [p.userId])) as
+      | { email?: string }
+      | undefined;
+    if (!user?.email) return;
+    const isDoc = p.targetType === "document";
+    await sendEmailToRecipient(user.email, {
+      status: "doc_shared",
+      docTitle: isDoc ? await titleForNode(p.nestId, p.target) : prettyFolderPath(p.target),
+      path: await nestName(p.nestId),
+      permission: p.role,
+      by: p.grantedBy || undefined,
+      link: docLink(p.nestId, isDoc ? p.target : undefined, p.baseUrl),
+    });
+  } catch (err) {
+    // A lost email must never fail the share, but it must be debuggable.
+    console.error("[grants] share email failed", p.nestId, p.target, err);
+  }
 }
 
 export async function listGrants(nestId: string): Promise<GrantRow[]> {

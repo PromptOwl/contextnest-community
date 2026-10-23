@@ -10,7 +10,12 @@ import {
   verifyPassword,
   parseBearerToken,
   verifyKeyRequest,
+  normalizeCapability,
+  parseCapability,
+  insertApiKey,
+  MAX_EXCHANGE_KEYS_PER_NEST,
 } from "./keys.js";
+import { resolveMcpTicketUser, looksLikeTicket } from "./mcp-ticket.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import { NEST_SCOPED_KEY_CODE } from "./nest-scope-guard.js";
 import {
@@ -38,7 +43,11 @@ import {
 import { isSuperAdmin } from "../governance/access-service.js";
 // Guards the people-management surfaces below so a granted superadmin gets the
 // same operator powers as the license owner (see shared/access.ts).
-import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js";
+import {
+  isServerAdminUserId,
+  resolveNestPermission,
+  permissionLevel,
+} from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
 import { ssoCandidates } from "./community-sites.js";
@@ -48,6 +57,7 @@ import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { isEmailConfigured } from "../notify/email.js";
 import { createInvitedUser } from "./invited-user.js";
+import { markEmailVerified } from "./email-verified.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -260,6 +270,10 @@ async function provisionPromptowlUser(
     };
   }
 
+  // PromptOwl vouches for the address: its own login refuses an account
+  // whose email isn't verified (CU-wdqcq05rz6, see markEmailVerified).
+  await markEmailVerified(user.id, "promptowl");
+
   const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
 
@@ -314,6 +328,23 @@ authRoutes.post("/register", async (c) => {
   }
   assertValidPassword(body.password);
   const email = normalizeEmail(body.email);
+
+  // With SSO live and a domain allowlist, a password account is held to the
+  // same allowlist — otherwise "open" would let any outside address in
+  // around the IdP.
+  const allowedDomains = config.OIDC_CONFIGURED ? config.OIDC_ALLOWED_DOMAINS : [];
+  if (
+    allowedDomains.length > 0 &&
+    !allowedDomains.includes(email.slice(email.lastIndexOf("@") + 1))
+  ) {
+    return c.json(
+      {
+        error:
+          "This server only accepts accounts from its organisation's email domains. Sign in with single sign-on, or ask your admin for an invite.",
+      },
+      403,
+    );
+  }
 
   const ip = clientIp(c);
   if (!tryConsume(`register:ip:${ip}`, REGISTER_LIMIT)) {
@@ -418,7 +449,7 @@ authRoutes.post("/login", async (c) => {
 
   const db = getDb();
   const user = await db.get(
-    "SELECT id, email, name, password_hash, is_admin, is_invited FROM users WHERE LOWER(email) = ?",
+    "SELECT id, email, name, password_hash, is_admin, is_invited, is_service FROM users WHERE LOWER(email) = ?",
     [emailLower],
   ) as
     | {
@@ -428,10 +459,14 @@ authRoutes.post("/login", async (c) => {
       password_hash: string;
       is_admin: number;
       is_invited: number;
+      is_service?: number | null;
     }
     | undefined;
 
-  const check = user
+  // Service identities (systems, access keys, personas) never sign in. Their
+  // placeholder hash can't verify anyway; this says so explicitly, with the
+  // same answer as a wrong password — no oracle for "this is a system".
+  const check = user && !user.is_service
     ? await verifyPassword(body.password, user.password_hash)
     : { ok: false, needsRehash: false };
   if (!user || !check.ok) {
@@ -550,13 +585,34 @@ async function checkKeyNest(
 // The plaintext is shown ONCE on creation and never retrievable again —
 // the server stores only sha256(key).
 authRoutes.post("/keys", authMiddleware, async (c) => {
-  const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
-    () => ({}) as { label?: string; nest_id?: string },
-  );
+  const body = await c.req
+    .json<{ label?: string; nest_id?: string; capability?: string }>()
+    .catch(() => ({}) as { label?: string; nest_id?: string; capability?: string });
   const refused = refuseNestScopedCaller(c);
   if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
+
+  // A read-only credential mints nothing — not even another read key — so a
+  // leaked read key can't be laundered into a fresh (or broader) one.
+  if (c.get("keyCapability") === "read") {
+    return c.json(
+      { error: "A read-only API key cannot create or rotate API keys." },
+      403,
+    );
+  }
+
+  const capability = parseCapability(body.capability, "write");
+  if (!capability) {
+    return c.json({ error: 'capability must be "read" or "write".' }, 400);
+  }
+  const nestId = body.nest_id || null;
+  if (capability === "read" && !nestId) {
+    return c.json(
+      { error: "A read-only key must be scoped to one nest (nest_id)." },
+      400,
+    );
+  }
 
   const check = await verifyKeyRequest(db, userId, {
     action: "generate",
@@ -568,30 +624,156 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
     if (bad) return c.json({ error: bad.error }, bad.status);
   }
 
-  const apiKey = generateApiKey();
   const keyId = uuid();
-  await db.run(
-    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
-    [
-      keyId,
-      userId,
-      hashApiKey(apiKey),
-      getKeyPrefix(apiKey),
-      body.nest_id || null,
-      check.label,
-    ],
-  );
+  const { apiKey, keyPrefix } = await insertApiKey(db, {
+    id: keyId,
+    userId,
+    nestId,
+    label: check.label,
+    capability,
+    origin: "manual",
+  });
 
   return c.json(
     {
       id: keyId,
       api_key: apiKey,
-      key_prefix: getKeyPrefix(apiKey),
+      key_prefix: keyPrefix,
       label: check.label,
-      nest_id: body.nest_id || null,
+      nest_id: nestId,
+      capability,
     },
     201,
   );
+});
+
+// POST /auth/keys/exchange — trade a PromptOwl MCP service ticket for a
+// nest-scoped key (CU-wdqcq01afw).
+//
+// Lets PromptOwl (TheOwl) hand a signed-in user a "predefined nest endpoint":
+// it presents the same short-lived HS256 ticket the per-nest MCP transport
+// accepts (scope "mcp", aud = PUBLIC_BASE_URL, existing user by email) and
+// gets back a durable cnst_ key bound to ONE nest, read-only by default. The
+// key is minted only if the user already holds at least the asked-for
+// permission on that nest — the exchange never grants access, it only narrows
+// what the user already has into a credential. Capped at
+// MAX_EXCHANGE_KEYS_PER_NEST live keys per (user, nest); past that, 429.
+// Exchange mints a DURABLE credential, so only PromptOwl's secret
+// (OFFICIAL_COMMUNITY_SSO_SECRET) is accepted — never the server's own
+// MCP_SIGNING_SECRET — and only read keys.
+const EXCHANGE_LIMIT = { max: 120, windowMs: 60_000 }; // per IP
+const exchangesInFlight = new Set<string>();
+
+authRoutes.post("/keys/exchange", async (c) => {
+  if (!tryConsume(`key-exchange:ip:${clientIp(c)}`, EXCHANGE_LIMIT)) {
+    return c.json({ error: "Too many exchange attempts, try again later" }, 429);
+  }
+  const secrets = config.OFFICIAL_COMMUNITY_SSO_SECRET
+    ? [config.OFFICIAL_COMMUNITY_SSO_SECRET]
+    : [];
+  if (secrets.length === 0) {
+    return c.json(
+      { error: "PromptOwl ticket exchange is not configured on this server." },
+      503,
+    );
+  }
+  const header = c.req.header("Authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  if (!looksLikeTicket(token)) {
+    return c.json({ error: "A PromptOwl MCP service ticket is required." }, 401);
+  }
+  const resolved = await resolveMcpTicketUser(token, secrets);
+  if (!resolved.ok) {
+    return c.json(
+      resolved.code ? { error: resolved.error, code: resolved.code } : { error: resolved.error },
+      resolved.status,
+    );
+  }
+  const userId = resolved.userId;
+
+  const body = await c.req
+    .json<{ nest_id?: unknown; label?: unknown; capability?: unknown }>()
+    .catch(() => ({}) as { nest_id?: unknown; label?: unknown; capability?: unknown });
+  const nestId = typeof body.nest_id === "string" ? body.nest_id.trim() : "";
+  if (!nestId) return c.json({ error: "nest_id is required." }, 400);
+  const capability = parseCapability(body.capability, "read");
+  if (!capability) {
+    return c.json({ error: 'capability must be "read" or "write".' }, 400);
+  }
+  if (capability !== "read") {
+    return c.json({ error: "Ticket exchange only issues read keys." }, 400);
+  }
+
+  // Same resolver the /nests access gate uses. A missing nest resolves to
+  // "none", so an unknown id and a forbidden one answer the same 403.
+  const permission = await resolveNestPermission(nestId, userId);
+  if (permissionLevel(permission) < permissionLevel(capability)) {
+    return c.json(
+      {
+        error: `You need ${capability} access to this nest to get a ${capability} key for it.`,
+      },
+      403,
+    );
+  }
+
+  // The count and insert below span awaits; serialise per (user, nest) so
+  // concurrent exchanges can't slip past the cap.
+  const lockKey = `${userId}:${nestId}`;
+  if (exchangesInFlight.has(lockKey)) {
+    return c.json({ error: "Another exchange for this nest is in progress." }, 429);
+  }
+  exchangesInFlight.add(lockKey);
+  try {
+  const db = getDb();
+  const live = (await db.get(
+    "SELECT COUNT(*) AS n FROM api_keys WHERE user_id = ? AND nest_id = ? AND origin = 'exchange'",
+    [userId, nestId],
+  )) as { n: number | string } | undefined;
+  if (Number(live?.n ?? 0) >= MAX_EXCHANGE_KEYS_PER_NEST) {
+    return c.json(
+      {
+        error: `This account already has ${MAX_EXCHANGE_KEYS_PER_NEST} PromptOwl-issued keys for this nest. Reuse one, or revoke old ones in Connect.`,
+      },
+      429,
+    );
+  }
+
+  // Labels must be unique per user; an exchange without one gets a
+  // recognisable, collision-free default.
+  const label =
+    body.label === undefined || body.label === null || body.label === ""
+      ? `PromptOwl ${capability} key ${uuid().slice(0, 8)}`
+      : body.label;
+  const check = await verifyKeyRequest(db, userId, { action: "exchange", label });
+  if (!check.ok) return c.json({ error: check.error }, check.status);
+
+  const keyId = uuid();
+  const { apiKey, keyPrefix } = await insertApiKey(db, {
+    id: keyId,
+    userId,
+    nestId,
+    label: check.label,
+    capability,
+    origin: "exchange",
+  });
+  trackEvent("api_key.exchange", { userId, nestId, capability });
+
+  const base = config.PUBLIC_BASE_URL || requestBaseUrl(c.req.url);
+  return c.json(
+    {
+      key: apiKey,
+      id: keyId,
+      key_prefix: keyPrefix,
+      label: check.label,
+      nest_id: nestId,
+      capability,
+      mcp_url: `${base}/nests/${nestId}/mcp`,
+    },
+    201,
+  );
+  } finally {
+    exchangesInFlight.delete(lockKey);
+  }
 });
 
 // POST /auth/keys/rotate — replace ONE key, leaving the caller's others alone.
@@ -608,6 +790,13 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const db = getDb();
   const userId = c.get("userId");
 
+  if (c.get("keyCapability") === "read") {
+    return c.json(
+      { error: "A read-only API key cannot create or rotate API keys." },
+      403,
+    );
+  }
+
   const check = await verifyKeyRequest(db, userId, {
     action: "update",
     label: body.label,
@@ -619,6 +808,8 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     const bad = await checkKeyNest(userId, body.nest_id);
     if (bad) return c.json({ error: bad.error }, bad.status);
   }
+  // A rotate replaces the secret, never the capability: a read key stays read.
+  const capability = normalizeCapability(prior.capability);
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -629,6 +820,12 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   // leaving no way to un-scope a key.
   const nestScope =
     "nest_id" in body ? body.nest_id || null : prior.nest_id;
+  if (capability === "read" && !nestScope) {
+    return c.json(
+      { error: "A read-only key must stay scoped to one nest (nest_id)." },
+      400,
+    );
+  }
 
   // verifyKeyRequest resolved `prior` outside this transaction, so the row can
   // be gone by the time we get here — a concurrent rotate or revoke of the same
@@ -642,7 +839,7 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     );
     if (removed.changes === 0) return false;
     await tx.run(
-      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label, capability, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       [
         keyId,
         userId,
@@ -650,6 +847,8 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
         getKeyPrefix(apiKey),
         nestScope,
         check.label ?? prior.label,
+        capability,
+        prior.origin === "exchange" ? "exchange" : "manual",
       ],
     );
     return true;
@@ -668,6 +867,7 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     key_prefix: getKeyPrefix(apiKey),
     label: check.label ?? prior.label,
     nest_id: nestScope,
+    capability,
   });
 });
 
@@ -681,7 +881,7 @@ authRoutes.get("/keys", authMiddleware, async (c) => {
   if (!check.ok) return c.json({ error: check.error }, check.status);
 
   const keys = await db.all(
-    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    "SELECT id, key_prefix, nest_id, label, capability, origin, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
     [userId],
   );
   return c.json({ keys });
@@ -749,12 +949,12 @@ authRoutes.post("/device", async (c) => {
   return c.json(data);
 });
 
-// GET /auth/device/poll — poll for device approval
-authRoutes.get("/device/poll", async (c) => {
+// POST /auth/device/poll — poll for device approval, secret in the JSON body so
+// access logs never see it. GET with query params is deprecated, kept for
+// older CLIs.
+const devicePoll = async (c: Context, code?: string, clientSecret?: string) => {
   const blocked = await deviceGateBlocked(c);
   if (blocked) return c.json(blocked, 403);
-  const code = c.req.query("code");
-  const clientSecret = c.req.query("client_secret");
 
   if (!code || !clientSecret) {
     return c.json({ error: "code and client_secret are required" }, 400);
@@ -768,7 +968,19 @@ authRoutes.get("/device/poll", async (c) => {
 
   const data = await res.json();
   return c.json(data, res.status as any);
+};
+
+authRoutes.post("/device/poll", async (c) => {
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  return devicePoll(c, str(body?.code), str(body?.client_secret));
 });
+
+authRoutes.get("/device/poll", (c) =>
+  devicePoll(c, c.req.query("code"), c.req.query("client_secret")),
+);
 
 // POST /auth/promptowl — exchange PromptOwl token for a browser session
 authRoutes.post("/promptowl", async (c) => {
@@ -1101,10 +1313,16 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   const targetId = c.req.param("userId");
   const db = getDb();
   const target = await db.get(
-    "SELECT id, email FROM users WHERE id = ?",
+    "SELECT id, email, is_service FROM users WHERE id = ?",
     [targetId],
-  ) as { id: string; email: string } | undefined;
+  ) as { id: string; email: string; is_service?: number | null } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+  if (target.is_service) {
+    return c.json(
+      { error: "This is a system, not a person — it has no password. Rotate its key instead." },
+      400,
+    );
+  }
 
   // Peer protection: one server admin must not be able to password-hijack
   // another (license/config/granted alike). Own password goes through
@@ -1177,10 +1395,16 @@ authRoutes.delete("/users/:userId", async (c) => {
 
   const db = getDb();
   const target = await db.get(
-    "SELECT id, email FROM users WHERE id = ?",
+    "SELECT id, email, is_service FROM users WHERE id = ?",
     [targetId],
-  ) as { id: string; email: string } | undefined;
+  ) as { id: string; email: string; is_service?: number | null } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+  if (target.is_service) {
+    return c.json(
+      { error: "This is a system, not a person — it has no password. Rotate its key instead." },
+      400,
+    );
+  }
 
   // Peer protection: a server admin can't delete another server admin
   // (license/config/granted alike). Revoke their superadmin grant first
@@ -1216,6 +1440,16 @@ authRoutes.delete("/users/:userId", async (c) => {
     await tx.run("DELETE FROM nest_collaborators WHERE user_id = ?", [
       target.id,
     ]);
+    // Grants this user MADE outlive them (granted_by is a FK to users): hand
+    // the attribution to the nest owner so removing a person never fails on,
+    // or cascades into, access they gave others — including the systems they
+    // created, which belong to the nest, not to them (CU-wdqcq0538g).
+    await tx.run(
+      `UPDATE nest_collaborators
+          SET granted_by = (SELECT n.user_id FROM nests n WHERE n.id = nest_collaborators.nest_id)
+        WHERE granted_by = ?`,
+      [target.id],
+    );
     await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
     // Pins cascade on user_id, but stay explicit like the rows above — and a
     // database created by an earlier build of migration 039 has the FK without
@@ -1226,6 +1460,12 @@ authRoutes.delete("/users/:userId", async (c) => {
     } catch {
       // Table not present on a DB predating the pins migration.
     }
+    // Their personal document pins (migration 071) go too — cascaded, explicit
+    // like nest_pins. Editorial pins they made belong to the nest and stay
+    // (pinned_by is attribution only, not a foreign key). No try/catch: the
+    // migration creates the table at startup, and on Postgres a failed
+    // statement aborts the whole transaction, so a catch couldn't save it.
+    await tx.run("DELETE FROM node_pins WHERE user_id = ?", [target.id]);
     await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);

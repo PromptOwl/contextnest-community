@@ -7,6 +7,7 @@
  * nest 'write' to invite (escalation-capped here); the MCP tool checks the
  * caller's effective roles.
  */
+import { isSystemUser } from "../auth/systems.js";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -18,6 +19,7 @@ import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors
 import { isEmailish } from "../config.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
 
 const VALID_PERMISSIONS = ["read", "write", "admin"] as const;
 
@@ -62,6 +64,14 @@ export async function addCollaborator(params: {
 
   const db = getDb();
 
+  // Plan limit, also before any placeholder user exists.
+  const existing =
+    params.userId ??
+    ((params.email
+      ? await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [params.email])
+      : undefined) as { id: string } | undefined)?.id;
+  await assertCanGrant([{ userId: existing, next: permissionClass(params.permission), email: params.email }]);
+
   // Resolve the target user, creating a placeholder for an unregistered email
   // (they claim it by registering with the same address — see auth claim flow).
   let userId = params.userId;
@@ -81,6 +91,14 @@ export async function addCollaborator(params: {
   }
   if (!userId) {
     throw new ValidationError("user_id or email is required");
+  }
+  // Systems join nests only through /systems (CU-wdqcq0538g), which checks the
+  // granting admin manages the system. A plain invite would let anyone who
+  // learns a system's identity adopt it.
+  if (await isSystemUser(userId)) {
+    throw new ValidationError(
+      "That is a system, not a person. Add it to this nest from its system settings (POST /systems/:id/nests).",
+    );
   }
 
   // The nest owner already has full access — never add them as a collaborator

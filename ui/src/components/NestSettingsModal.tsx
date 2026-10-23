@@ -25,6 +25,11 @@ import {
   UserPen,
   Star,
   ShieldCheck,
+  Clock,
+  Eye,
+  SlidersHorizontal,
+  ChevronRight,
+  Megaphone,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -35,21 +40,34 @@ interface NestSettingsModalProps {
   allowSelfApprove: boolean;
   primeOnlyReview: boolean;
   primeTags: string[];
+  /** Tags whose documents are pushed to every agent (always-include). */
+  alwaysIncludeTags?: string[];
   /** Push Confirmation Gate (superadmin-set). */
   requirePushConfirmation: boolean;
   /** True only for a server superadmin — gates the push-confirmation switch. */
   isServerAdmin: boolean;
   creatorIsReviewer: boolean;
+  /** Review SLA in hours; null = off. */
+  reviewSlaHours: number | null;
+  /** Reads, pulls and exports go to the activity log (default on). */
+  accessLogEnabled?: boolean;
+  /** Owner or server admin — the only callers who may turn the log OFF. */
+  canDisableAccessLog?: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
+  /** Jump to the nest's Fields tab (custom field definitions). */
+  onManageFields?: () => void;
   onChanged: (next: {
     stewardshipEnabled: boolean;
     allowSelfApprove: boolean;
     primeOnlyReview: boolean;
     primeTags: string[];
+    alwaysIncludeTags: string[];
     requirePushConfirmation: boolean;
     creatorIsReviewer: boolean;
+    reviewSlaHours: number | null;
+    accessLogEnabled: boolean;
   }) => void;
 }
 
@@ -60,11 +78,16 @@ export function NestSettingsModal({
   allowSelfApprove,
   primeOnlyReview,
   primeTags,
+  alwaysIncludeTags = ["always-include"],
   requirePushConfirmation,
   isServerAdmin,
   creatorIsReviewer,
+  reviewSlaHours,
+  accessLogEnabled = true,
+  canDisableAccessLog = false,
   canManageStewardship,
   onClose,
+  onManageFields,
   onChanged,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
@@ -72,9 +95,18 @@ export function NestSettingsModal({
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
   const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
+  const [alwaysIncludeText, setAlwaysIncludeText] = useState(alwaysIncludeTags.join(", "));
   const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
+  // Text, not a number: an empty box means "off", and the field must allow
+  // the transient empty state while someone retypes it.
+  const [slaText, setSlaText] = useState(
+    reviewSlaHours ? String(reviewSlaHours) : "",
+  );
+  const [accessLog, setAccessLog] = useState(accessLogEnabled);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Shown under the SLA field: it's the last control, so the top banner is off-screen.
+  const [slaError, setSlaError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
   // OFF (was on, now off). Toggling on, or no change, doesn't need it.
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
@@ -136,14 +168,16 @@ export function NestSettingsModal({
 
   // Normalized the same way the server does, so the dirty check below doesn't
   // fire on cosmetic differences ("#Prime, " vs "prime").
-  const nextPrimeTags = [
+  const tagList = (text: string) => [
     ...new Set(
-      primeTagText
+      text
         .split(",")
         .map((t) => t.trim().replace(/^#+/, "").toLowerCase())
         .filter(Boolean),
     ),
   ];
+  const nextPrimeTags = tagList(primeTagText);
+  const nextAlwaysIncludeTags = tagList(alwaysIncludeText);
 
   const handleSave = async () => {
     const stewardshipChanged = enabled !== stewardshipEnabled;
@@ -151,18 +185,34 @@ export function NestSettingsModal({
     const primeOnlyChanged = primeOnly !== primeOnlyReview;
     const primeTagsChanged =
       nextPrimeTags.join(",") !== primeTags.join(",");
+    const alwaysIncludeTagsChanged =
+      nextAlwaysIncludeTags.join(",") !== alwaysIncludeTags.join(",");
     // Only a superadmin may change this; never send it otherwise (a per-field
     // 403 would otherwise reject the whole PATCH for a non-superadmin).
     const pushConfirmChanged =
       isServerAdmin && pushConfirm !== requirePushConfirmation;
     const creatorReviewsChanged = creatorReviews !== creatorIsReviewer;
+    const slaTrimmed = slaText.trim();
+    const nextSla = slaTrimmed === "" || slaTrimmed === "0" ? null : Number(slaTrimmed);
+    if (
+      nextSla !== null &&
+      (!Number.isInteger(nextSla) || nextSla < 1 || nextSla > 8760)
+    ) {
+      setSlaError("Review SLA must be a whole number of hours (1–8760), or empty for off.");
+      return;
+    }
+    const slaChanged = nextSla !== (reviewSlaHours ?? null);
+    const accessLogChanged = accessLog !== accessLogEnabled;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
       !primeTagsChanged &&
+      !alwaysIncludeTagsChanged &&
       !pushConfirmChanged &&
-      !creatorReviewsChanged
+      !creatorReviewsChanged &&
+      !slaChanged &&
+      !accessLogChanged
     ) {
       onClose();
       return;
@@ -175,8 +225,11 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
+        ...(alwaysIncludeTagsChanged ? { always_include_tags: nextAlwaysIncludeTags } : {}),
         ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
         ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
+        ...(slaChanged ? { review_sla_hours: nextSla } : {}),
+        ...(accessLogChanged ? { access_log_enabled: accessLog } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
@@ -185,7 +238,9 @@ export function NestSettingsModal({
         result.allow_self_approve !== selfApprove ||
         result.prime_only_review !== primeOnly ||
         (pushConfirmChanged && result.require_push_confirmation !== pushConfirm) ||
-        result.creator_is_reviewer !== creatorReviews
+        result.creator_is_reviewer !== creatorReviews ||
+        (slaChanged && (result.review_sla_hours ?? null) !== nextSla) ||
+        (accessLogChanged && result.access_log_enabled !== accessLog)
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -200,8 +255,11 @@ export function NestSettingsModal({
         allowSelfApprove: result.allow_self_approve,
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
+        alwaysIncludeTags: result.always_include_tags ?? nextAlwaysIncludeTags,
         requirePushConfirmation: result.require_push_confirmation,
         creatorIsReviewer: result.creator_is_reviewer,
+        reviewSlaHours: result.review_sla_hours ?? null,
+        accessLogEnabled: result.access_log_enabled ?? accessLog,
       });
     } catch (err: any) {
       setError(err.message);
@@ -228,6 +286,29 @@ export function NestSettingsModal({
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
+          )}
+
+          {/* Custom fields live on their own tab (a list with CRUD doesn't
+              fit this form); this row is the way there from settings. */}
+          {onManageFields && (
+            <button
+              type="button"
+              onClick={onManageFields}
+              className="flex w-full items-center justify-between gap-4 rounded-lg border p-4 text-left hover:bg-muted/40"
+              data-testid="settings-manage-fields"
+            >
+              <span className="space-y-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Custom fields
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  Define fields like Severity, Estimate or Time in status for this
+                  nest's tasks.
+                </span>
+              </span>
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
           )}
 
           {/* Stewardship — manage-rights only. */}
@@ -394,6 +475,31 @@ export function NestSettingsModal({
           </div>
           )}
 
+          {/* Always include — any nest, governed or not: what every agent is
+              told when it connects (CU-wdqcq05rn0). */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-1">
+            <Label className="flex items-center gap-2 text-sm font-medium">
+              <Megaphone className="h-4 w-4" />
+              Always-include tags
+            </Label>
+            <Input
+              value={alwaysIncludeText}
+              onChange={(e) => setAlwaysIncludeText(e.target.value)}
+              placeholder="always-include"
+              data-testid="nest-settings-always-include-tags"
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma-separated. The approved text of any document carrying one
+              of these tags, with the nest instructions, goes to every agent
+              and model that works in this nest — MCP connections, Hootie,
+              agents and workflow runs. They are also prime: with stewardship
+              on, a change to them needs steward approval. A single document
+              can also be switched on or off from its editor.
+            </p>
+          </div>
+          )}
+
           {/* Creator reviews — only meaningful once stewardship is on. */}
           {canManageStewardship && enabled && (
           <div className="rounded-lg border p-4 space-y-3">
@@ -423,6 +529,81 @@ export function NestSettingsModal({
                 its reviewer, but someone else has to approve the first
                 version.
               </div>
+            </div>
+          </div>
+          )}
+
+          {/* Review SLA — only meaningful once stewardship is on. */}
+          {canManageStewardship && enabled && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="space-y-1">
+              <Label className="flex items-center gap-2 text-sm font-medium">
+                <Clock className="h-4 w-4" />
+                Review SLA (hours)
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Default off. When set, a review left pending this long is
+                escalated one rung — to the document&rsquo;s tag reviewers,
+                then the nest&rsquo;s reviewers, then the nest owner — and
+                each rung gets the same window before the next. Escalation
+                only notifies; it never changes who can approve.
+              </p>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={8760}
+              step={1}
+              value={slaText}
+              onChange={(e) => {
+                setSlaText(e.target.value);
+                setSlaError(null);
+              }}
+              placeholder="Off"
+              className="w-32"
+              aria-invalid={slaError !== null}
+              aria-describedby={slaError ? "review-sla-error" : undefined}
+            />
+            {slaError && (
+              <p id="review-sla-error" role="alert" className="text-xs text-destructive">
+                {slaError}
+              </p>
+            )}
+          </div>
+          )}
+          {/* Read log — the record of what each person and agent read. Any
+              nest admin may turn it on; only the owner (or server admin)
+              may turn it off. The server enforces the same rule. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3" data-testid="access-log-setting">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <Eye className="h-4 w-4" />
+                  Record what people and agents read
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default on. Every read, search hit, and export of a document
+                  is kept in its Activity log — who, which agent, which
+                  version, and when. Only document ids and versions are
+                  stored, never content or what was searched. Kept for the
+                  activity-trace retention window.{" "}
+                  <strong>Only the owner can turn this off.</strong>
+                </p>
+              </div>
+              <span
+                title={
+                  accessLog && !canDisableAccessLog
+                    ? "Only the nest owner or a server admin can turn this off."
+                    : undefined
+                }
+              >
+                <Switch
+                  checked={accessLog}
+                  onCheckedChange={setAccessLog}
+                  disabled={accessLog && !canDisableAccessLog && accessLogEnabled}
+                />
+              </span>
             </div>
           </div>
           )}

@@ -7,11 +7,23 @@
  */
 
 import { Hono } from "hono";
+import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError, ConflictError } from "../shared/errors.js";
+import { isPublicReader } from "../shared/access.js";
+import {
+  orgContributorRequesters,
+  ownsWorkingDraft,
+} from "./org-contribution.js";
+import {
+  ValidationError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+} from "../shared/errors.js";
+import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -22,7 +34,9 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
+import { isPrimeDocument } from "./prime-service.js";
 import {
+  updateNode,
   bodyOnly,
   deleteNode,
   deleteFolder,
@@ -30,6 +44,8 @@ import {
   vaultFolderExists,
 } from "../nodes/service.js";
 import * as agentActivity from "./agent-activity-service.js";
+import { logTaskInteraction } from "../nodes/task-log.js";
+import { listTaskActivity } from "../nodes/task-activity.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
@@ -38,7 +54,7 @@ import {
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
-import { notifyCommentMentions } from "./mention-notify.js";
+import { notifyComment } from "./mention-notify.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -86,7 +102,8 @@ governanceRoutes.get("/stewards", async (c) => {
     }
     enriched.push({ ...s, ...merged });
   }
-  return c.json({ stewards: enriched });
+  const ownerEmail = await stewardship.getNestOwnerEmail(nestId);
+  return c.json({ stewards: enriched, ownerEmail });
 });
 
 // POST /nests/:nestId/stewards
@@ -185,10 +202,17 @@ governanceRoutes.get("/review-queue", async (c) => {
   const status = c.req.query("status") || "pending";
   const limit = parseInt(c.req.query("limit") || "50", 10);
   const offset = parseInt(c.req.query("offset") || "0", 10);
+  const email = await getUserEmail(c);
 
+  // A visibility-only reader (anyone reaching the nest only because it is
+  // 'org' or 'public' — an org contributor among them) sees their OWN
+  // requests here, not everyone's: a request names an unapproved draft, and
+  // drafts are private to the people who work on the nest (CU-wdqcq05rz6).
+  const ownOnly = await isPublicReader(nestId, c.get("userId"));
   const result = await reviews.getReviewQueue({
     nestId,
     status: status as any,
+    ...(ownOnly ? { requestedByEmail: email.toLowerCase() } : {}),
     limit,
     offset,
   });
@@ -198,18 +222,24 @@ governanceRoutes.get("/review-queue", async (c) => {
   // + separation-of-duties). The UI gates the Review button + queue off this
   // instead of re-deriving steward scope client-side, which diverged for
   // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
-  // follow-up). Cached per node across rows.
-  const email = await getUserEmail(c);
-  const canReviewCache = new Map<string, boolean>();
-  const requests = [];
-  for (const r of result.requests) {
-    let canReview = canReviewCache.get(r.nodeId);
-    if (canReview === undefined) {
-      canReview = (await stewardship.canUserApprove(nestId, r.nodeId, email)).allowed;
-      canReviewCache.set(r.nodeId, canReview);
-    }
-    requests.push({ ...r, canReview });
-  }
+  // follow-up). Resolved for the whole page at once, not per row.
+  const verdicts = await stewardship.canUserApproveMany(
+    nestId,
+    result.requests.map((r) => r.nodeId),
+    email,
+  );
+  // "Org contributor (not a collaborator)": the requester reaches this nest
+  // only through the org-contributions setting — the reviewer should know the
+  // author isn't someone they added.
+  const contributors = await orgContributorRequesters(
+    nestId,
+    result.requests.map((r) => r.requestedBy),
+  );
+  const requests = result.requests.map((r) => ({
+    ...r,
+    canReview: verdicts.get(r.nodeId)?.allowed ?? false,
+    requestedByOrgContributor: contributors.has(r.requestedBy.toLowerCase()),
+  }));
 
   return c.json({ ...result, requests });
 });
@@ -264,20 +294,20 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
   // One batch is one call: validated once, recorded on the batch's trace row,
   // and carried onto every version the approvals seal (§9.4).
   const client = attributeRequest(c, body.client);
-  const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
-  for (const nodeId of nodeIds) {
-    try {
-      if (body.action === "approve") {
-        await reviews.approve({
-          nestId,
-          nodeId,
-          approvedBy: userEmail,
-          note: body.note,
-          override: false,
-          baseUrl,
-          client,
-        });
-      } else {
+  let results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
+  if (body.action === "approve") {
+    // One engine publish for the whole batch — one checkpoint, one index rebuild.
+    results = await reviews.approveMany({
+      nestId,
+      nodeIds,
+      approvedBy: userEmail,
+      note: body.note,
+      baseUrl,
+      client,
+    });
+  } else {
+    for (const nodeId of nodeIds) {
+      try {
         await reviews.reject({
           nestId,
           nodeId,
@@ -285,10 +315,10 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
           note: body.note!,
           baseUrl,
         });
+        results.push({ nodeId, ok: true });
+      } catch (err: any) {
+        results.push({ nodeId, ok: false, error: err?.message || "Failed" });
       }
-      results.push({ nodeId, ok: true });
-    } catch (err: any) {
-      results.push({ nodeId, ok: false, error: err?.message || "Failed" });
     }
   }
   // No override path here: forcing past a refusal is a per-document decision.
@@ -528,7 +558,8 @@ governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
   return c.json({ withdrawn: true, request });
 });
 
-// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
+// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=&resolved=include
+// Comment activity on resolved threads is left out unless resolved=include.
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
 // comment threads + replies), newest first. ADDITIVE sibling of
@@ -561,6 +592,7 @@ governanceRoutes.get("/feed", async (c) => {
     filter,
     limit,
     offset,
+    includeResolved: c.req.query("resolved") === "include",
   });
   return c.json({ ...result, filter, limit, offset });
 });
@@ -648,19 +680,33 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
+  // Same node-level gate as /versions below: a document the caller cannot
+  // open must not hand out who stewards it (that names it, and its people).
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
   const { stewards: resolved, fallbackToOwner, ownerEmail } =
     await stewardship.resolveStewardsWithFallback(nestId, nodeId);
+  // Members see who reviews their work; a public reader is an outsider and
+  // gets the roles without anyone's email address.
+  const hideEmails = await isPublicReader(nestId, userId);
   return c.json({
     nodeId,
     stewards: resolved.map((r) => ({
-      email: r.steward.userEmail,
+      ...(hideEmails ? {} : { email: r.steward.userEmail }),
       role: r.steward.role,
       scope: r.steward.scope,
-      source: r.source,
+      ...(hideEmails ? {} : { source: r.source }),
       priority: r.priority,
     })),
     fallbackToOwner,
-    ownerEmail,
+    ownerEmail: hideEmails ? null : ownerEmail,
   });
 });
 
@@ -778,8 +824,23 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
   }
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
+  // A historical version's full body is a read of that version: record it in
+  // the activity log like any other read (fire-and-forget).
+  const recordVersionRead = () =>
+    recordNodeAccess({
+      nestId,
+      nodeIds: [nodeId],
+      action: "read",
+      surface: "api",
+      userId,
+      userEmail,
+      client: readClient(c),
+      versions: { [nodeId]: version },
+      detail: "version",
+    });
   try {
     const raw = await versionManager.reconstructVersion(nodeId, version);
+    recordVersionRead();
     return c.json({ version, content: bodyOnly(nodeId, raw) });
   } catch (err) {
     // The unreviewed draft on top is never in the chain (see the draft branch
@@ -788,6 +849,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
     try {
       const node = await storage.readDocument(nodeId);
       if ((node.frontmatter.version ?? 1) === version) {
+        recordVersionRead();
         return c.json({ version, content: node.body ?? "" });
       }
     } catch {
@@ -860,11 +922,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     );
   }
   // Tagging someone in a comment reaches them: inbox row + configured
-  // channels. Outside the try above, whose catch turns anything thrown into a
+  // channels; the document's watchers and reviewer stewards get a "new
+  // comment" row too (never the author). Outside the try above, whose catch turns anything thrown into a
   // 400 — the fan-out swallows its own failures, and a notification problem is
   // not a bad request. Awaited like the document-save fan-out: a local insert
   // is cheaper than returning before it lands.
-  await notifyCommentMentions({
+  await notifyComment({
     nestId,
     nodeId,
     body: comment.body,
@@ -912,6 +975,43 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   return c.json({ activity });
 });
 
+// POST /nests/:nestId/nodes/:nodeId/task-log
+// Register an interaction on a task — body { note, status?, claim?, client? }.
+// Attributed to the caller; an API-key call also records the key (see
+// src/nodes/task-activity.ts). Same core as MCP context_task_log.
+governanceNodeRoutes.post("/:nodeId{.+}/task-log", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
+  const body = await c.req
+    .json<{ note?: unknown; status?: unknown; claim?: unknown; client?: unknown }>()
+    .catch(() => ({}) as Record<string, unknown>);
+  if (body.claim !== undefined && typeof body.claim !== "boolean") {
+    throw new ValidationError("claim must be a boolean");
+  }
+  const result = await logTaskInteraction({
+    nestId,
+    nodeId,
+    userEmail: await getUserEmail(c),
+    userId: c.get("userId"),
+    note: body.note,
+    status: body.status,
+    claim: body.claim === true,
+    surface: "api",
+    apiKeyId: c.get("apiKeyId") ?? null,
+    client: attributeRequest(c, body.client),
+  });
+  return c.json(result, 201);
+});
+
+// GET /nests/:nestId/nodes/:nodeId/task-log — the logged interactions alone,
+// newest first. The full timeline (edits, reviews, comments too) is /activity.
+governanceNodeRoutes.get("/:nodeId{.+}/task-log", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  return c.json({ entries: await listTaskActivity({ nestId, nodeId, limit }) });
+});
+
 // POST /nests/:nestId/nodes/:nodeId/submit-review
 governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -928,6 +1028,18 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   }
 
   const userEmail = await getUserEmail(c);
+
+  // A visibility-only reader — an org contributor (CU-wdqcq05rz6), or anyone
+  // else reaching the nest only because it is 'org'/'public' — may send only
+  // their OWN draft to review. This route is admitted at read tier (reviewers
+  // need it), so without this a reader could push anyone's draft into the
+  // queue under their own name.
+  if (
+    (await isPublicReader(nestId, c.get("userId"))) &&
+    !(await ownsWorkingDraft(nestId, nodeId, userEmail))
+  ) {
+    throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
 
   let request;
   try {
@@ -1121,6 +1233,107 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   }
 });
 
+// POST /nests/:nestId/nodes/:nodeId/approve-with-edits
+//   { title?, content?, tags?, changeNote?, note? }
+//
+// A reviewer fixes a small problem and approves in one step instead of
+// rejecting it back (CU-wdqcq04wnw). Only for someone who can already both
+// edit and approve the document. The edit lands as a new version under the
+// reviewer's name and the open review repoints to it — the submitter stays the
+// author, so separation of duties is unchanged. Refused on prime documents
+// (before or after the edit): prime means every change is seen by two people,
+// and the reviewer's own edit would be seen by one.
+governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req
+    .json<{
+      title?: string;
+      content?: string;
+      tags?: string[];
+      changeNote?: string;
+      note?: string;
+      /** The version the reviewer opened — refuses a write over a newer author edit. */
+      baseVersion?: number;
+      client?: unknown;
+    }>()
+    .catch(() => {
+      throw new ValidationError("Request body must be JSON");
+    });
+  for (const k of ["title", "content", "changeNote", "note"] as const) {
+    if (body[k] !== undefined && typeof body[k] !== "string") {
+      throw new ValidationError(`${k} must be a string`);
+    }
+  }
+  if (body.tags !== undefined && !(Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string"))) {
+    throw new ValidationError("tags must be an array of strings");
+  }
+  if (body.baseVersion !== undefined && !Number.isInteger(body.baseVersion)) {
+    throw new ValidationError("baseVersion must be an integer");
+  }
+  const userEmail = await getUserEmail(c);
+
+  const pending = await reviews.getPendingReview(nestId, nodeId);
+  if (!pending) throw new ConflictError("No pending review for this document");
+  if (pending.requestedBy.toLowerCase() === userEmail.toLowerCase()) {
+    throw new ForbiddenError("This is your own submission — save your edits instead");
+  }
+  const [edit, approval] = await Promise.all([
+    stewardship.canUserEdit(nestId, nodeId, userEmail),
+    stewardship.canUserApprove(nestId, nodeId, userEmail, { requestedBy: pending.requestedBy }),
+  ]);
+  if (!edit.allowed || !approval.allowed) {
+    throw new ForbiddenError("Edit & approve needs both edit and approve rights on this document");
+  }
+  const { storage } = await engineCache.get(nestId);
+  const before = await storage.readDocument(nodeId);
+  const tagsBefore = (before.frontmatter.tags || []) as string[];
+  const metadata = before.frontmatter.metadata;
+  if (
+    (await isPrimeDocument(nestId, tagsBefore, metadata)) ||
+    (body.tags !== undefined && (await isPrimeDocument(nestId, body.tags, metadata)))
+  ) {
+    throw new ForbiddenError(
+      "Prime documents can't be edited and approved in one step — approve or reject it, and leave edits to the author",
+    );
+  }
+
+  // Same contract as PATCH's X-Base-Version: the author may still be revising
+  // their submission, and the reviewer's text must not silently replace that.
+  if (body.baseVersion !== undefined) {
+    const conflict = await versions.checkConflict(nestId, nodeId, body.baseVersion);
+    if (conflict.conflict) {
+      throw new ConflictError(
+        `The author changed this document since you opened it (now v${conflict.currentVersion}). Reload to see their latest version.`,
+      );
+    }
+  }
+  const client = attributeRequest(c, body.client);
+  await updateNode(
+    nestId,
+    nodeId,
+    {
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      ...(body.content !== undefined ? { content: body.content } : {}),
+      ...(body.tags !== undefined ? { tags: body.tags } : {}),
+      changeNote: body.changeNote || "Reviewer edit before approval",
+      client,
+    },
+    userEmail,
+    { reviewerEdit: true },
+  );
+  const review = await reviews.approve({
+    nestId,
+    nodeId,
+    approvedBy: userEmail,
+    note: body.note || "Approved with reviewer edits",
+    baseUrl: requestBaseUrl(c.req.url),
+    client,
+    withEdits: true,
+  });
+  return c.json({ review });
+});
+
 // POST /nests/:nestId/nodes/:nodeId/reject
 governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -1167,6 +1380,46 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-approve", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const userEmail = await getUserEmail(c);
   return c.json(await stewardship.canUserApprove(nestId, nodeId, userEmail));
+});
+
+/** Most roster members checked by /approvers — one approval check each. */
+const MAX_APPROVER_CANDIDATES = 200;
+
+// GET /nests/:nestId/nodes/:nodeId/approvers
+//
+// Who besides the caller could approve the caller's submission of this
+// document, so an author learns who to wait for — or that nobody can
+// (CU-wdqcq02t1r). Each roster member goes through canUserApprove with the
+// caller as the submitter, so the list is exactly what approve would allow.
+// Same roster gate as /mentionable: a visibility-only reader can't enumerate.
+governanceNodeRoutes.get("/:nodeId{.+}/approvers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const userId = c.get("userId");
+  const me = (await resolveCallerEmail(userId)).toLowerCase();
+  const people = await listNestPeople(nestId);
+  if (!(await canSeeRoster(nestId, userId, me, people))) {
+    throw new ForbiddenError("Only people on this nest can see who approves");
+  }
+  if (!(await canReadNode(nestId, nodeId, userId, me))) {
+    throw new NotFoundError("Document not found");
+  }
+  // ponytail: one check per member, capped; batch like canUserApproveMany if
+  // nests grow past a few hundred people.
+  const others = people.filter((p) => p.email.toLowerCase() !== me);
+  const candidates = others.slice(0, MAX_APPROVER_CANDIDATES);
+  const verdicts = await Promise.all(
+    candidates.map((p) =>
+      stewardship.canUserApprove(nestId, nodeId, p.email, { requestedBy: me }),
+    ),
+  );
+  return c.json({
+    approvers: candidates
+      .filter((_, i) => verdicts[i]!.allowed)
+      .map((p) => ({ email: p.email, name: p.name })),
+    // Past the cap the list is partial — an empty one then proves nothing.
+    truncated: others.length > MAX_APPROVER_CANDIDATES,
+  });
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-edit

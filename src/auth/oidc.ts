@@ -26,6 +26,7 @@ import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { idpVouchesForEmail, markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -107,12 +108,15 @@ const discoveryCache = new Map<
 
 /** Enabled AND fully configured — the only state the login button is live. */
 export function isOidcReady(): boolean {
-  return (
-    config.OIDC_ENABLED &&
-    !!config.OIDC_ISSUER &&
-    !!config.OIDC_CLIENT_ID &&
-    !!config.OIDC_CLIENT_SECRET
-  );
+  return config.OIDC_CONFIGURED;
+}
+
+export const GOOGLE_ISSUER = "https://accounts.google.com";
+
+/** Any issuer but Google's is an enterprise IdP (licence feature sso). */
+export function isEnterpriseIssuer(issuer: string): boolean {
+  const i = issuer.trim().replace(/\/$/, "");
+  return i !== "" && i !== GOOGLE_ISSUER;
 }
 
 export async function discover(issuer: string): Promise<{
@@ -489,6 +493,11 @@ oidcRoutes.get("/callback", async (c) => {
     } catch (err) {
       console.error("[oidc] department upsert failed (login continues):", err);
     }
+
+    // Record it only when the token actually vouches for the address (see
+    // idpVouchesForEmail): sign-in tolerates an absent claim, a domain match
+    // on a shared server does not.
+    if (idpVouchesForEmail(claims)) await markEmailVerified(user.id, "oidc");
 
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the

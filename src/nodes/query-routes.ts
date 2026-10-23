@@ -8,11 +8,13 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { rebuildNodeIndex } from "./node-index.js";
+import { readClient } from "../shared/client-metadata.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
   resolveCallerEmail,
   filterAccessible,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import {
   resolveContext,
@@ -25,7 +27,7 @@ import {
   nodesToMarkdown,
   isMarkdownFormat,
 } from "./markdown-export.js";
-import { resolveExportBody } from "./readable-body.js";
+import { resolveExportBody, resolveReadableBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader } from "../shared/access.js";
@@ -37,12 +39,14 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  moveFolder,
   isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { recordNodeAccess } from "../governance/access-log.js";
+import { liveVersions, recordNodeAccess } from "../governance/access-log.js";
+import { serverRunNodeIds } from "../metacognition/store.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -189,11 +193,15 @@ queryRoutes.get("/runnables", async (c) => {
     // run the thing, so this surface pays for the file reads.
     withContent: true,
   });
-  const runnables = all.map((n) => ({
+  // Metacognition agents are executed by this server; an external
+  // orchestrator that also ran them on their schedule would double them up.
+  const serverRun = config.FEATURE_METACOGNITION ? await serverRunNodeIds(nestId) : new Set<string>();
+  const runnables = all.filter((n) => !serverRun.has(n.id)).map((n) => ({
     id: n.id,
     title: n.title,
     type: n.type,
     schedule: n.schedule ?? null,
+    model: n.model ?? null,
     status: n.status,
     tags: n.tags,
     updated_at: n.updated_at,
@@ -253,6 +261,7 @@ queryRoutes.post("/context", async (c) => {
     userId: c.get("userId"),
     baseUrl: requestBaseUrl(c.req.url),
     body,
+    client: readClient(c),
   });
   return c.json(result);
 });
@@ -275,12 +284,33 @@ queryRoutes.post("/table-query", async (c) => {
   }>();
   const ref = typeof body.table === "string" ? body.table.trim() : "";
   if (!ref) throw new ValidationError("table is required — [[Title]] or node id");
+  // Gated like GET /nodes/:id: canReadNode, and a public/org reader gets the
+  // approved version's rows, never the working copy's.
+  const userId = c.get("userId");
   const result = await queryTableNode(
     nestId,
     ref,
     typeof body.query === "string" ? body.query : "",
     body.include_drafts === true,
+    {
+      userId,
+      userEmail: await resolveCallerEmail(userId),
+      approvedOnly: await isPublicReader(nestId, userId),
+    },
   );
+  // Admin activity log: the table the rows came from, at the version queried.
+  const tableUser = c.get("userId");
+  recordNodeAccess({
+    nestId,
+    nodeIds: [result.table],
+    action: "retrieve",
+    surface: "api",
+    userId: tableUser,
+    userEmail: await resolveCallerEmail(tableUser),
+    client: readClient(c),
+    ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+    detail: "table-query",
+  });
   return c.json(result);
 });
 
@@ -306,7 +336,8 @@ queryRoutes.post("/query", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
+    versions: liveVersions(accessible),
     detail: "query",
   });
 
@@ -338,7 +369,22 @@ queryRoutes.get("/search", async (c) => {
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
-  const accessible = await filterAccessible(nestId, userId, userEmail, matches);
+  let accessible = await filterAccessible(nestId, userId, userEmail, matches);
+
+  // Public readers (anonymous, or a headless access key) may only ever see the
+  // APPROVED body. The match and the snippet above ran on the on-disk working
+  // copy, which can hold an unapproved draft edit — so swap in the approved
+  // body and re-match on it: no draft text in a snippet, and a hit that only
+  // matched draft text doesn't reveal that it did (CU-wdqcq0538g).
+  if (await isPublicReader(nestId, userId)) {
+    const approved = await Promise.all(
+      accessible.map(async (n) => ({
+        ...n,
+        body: await resolveReadableBody(nestId, n.id, userId, n.body || ""),
+      })),
+    );
+    accessible = matchDocuments(approved, q);
+  }
   recordNodeAccess({
     nestId,
     nodeIds: accessible.map((n) => n.id),
@@ -346,7 +392,8 @@ queryRoutes.get("/search", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
+    versions: liveVersions(accessible),
     detail: "search",
   });
 
@@ -359,20 +406,24 @@ queryRoutes.get("/search", async (c) => {
 
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
-  const { storage } = await engineCache.get(c.req.param("nestId")!);
-  // Derived annotation projections stay out of the counts and — because this
-  // is where the tag facet comes from — out of tag filtering too.
-  const documents = (await storage.discoverDocuments()).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
-  );
+  // Caller-gated, like MCP context_overview: this used to list every node's
+  // title, tags and a body excerpt straight off disk, so a public reader could
+  // read a governed nest's unapproved drafts here. listNodesForCaller applies
+  // filterAccessible and serves public readers the approved body. It also
+  // keeps the derived annotation projections out, as this route always did.
+  const documents = (
+    await listNodesForCaller(c.req.param("nestId")!, c.get("userId"), {
+      withContent: true,
+    })
+  ).filter((d) => !isDerivedAnnotationsNode(d.id));
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};
 
   for (const node of documents) {
-    const t = node.frontmatter.type || "document";
+    const t = node.type || "document";
     types[t] = (types[t] || 0) + 1;
-    for (const tag of node.frontmatter.tags || []) {
+    for (const tag of node.tags || []) {
       tags[tag] = (tags[tag] || 0) + 1;
     }
   }
@@ -383,10 +434,10 @@ queryRoutes.get("/overview", async (c) => {
     tags,
     nodes: documents.map((n) => ({
       id: n.id,
-      title: n.frontmatter.title,
-      type: n.frontmatter.type || "document",
-      tags: n.frontmatter.tags || [],
-      snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
+      title: n.title,
+      type: n.type || "document",
+      tags: n.tags || [],
+      snippet: (n.content || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
 });
@@ -407,12 +458,15 @@ queryRoutes.get("/census", async (c) => {
 // The nest's folder tree on its own, for callers that need the SHAPE of the
 // vault (a navigable tree, a folder picker) and none of its content. Reads
 // directory entries only — no document is opened, so this stays cheap on a
-// vault where listing the documents would not be.
+// vault where listing the documents would not be. A caller who cannot read
+// the whole nest gets the tree of what they CAN read (see listNestFolders).
 queryRoutes.get("/folders", async (c) => {
   const q = c.req.query();
+  const userId = c.get("userId");
   const folders = await listNestFolders(c.req.param("nestId")!, {
     ...(q.folder !== undefined ? { folder: q.folder } : {}),
     ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
+    caller: { userId, userEmail: await resolveCallerEmail(userId) },
   });
   return c.json({ folders });
 });
@@ -432,6 +486,25 @@ queryRoutes.post("/folders", async (c) => {
   }
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
   return c.json({ folder }, 201);
+});
+
+// POST /nests/:nestId/folders/move  { "folder": "projects/acme", "to": "archive/acme" }
+//
+// Rename or move a folder with everything in it — a rename is a move to a path
+// with the same parent. Owner/admin only, like deleting one.
+queryRoutes.post("/folders/move", async (c) => {
+  const permission = c.get("nestPermission");
+  if (permission !== "owner" && permission !== "admin") {
+    throw new ForbiddenError("Only the nest owner or an admin can rename or move a folder");
+  }
+  const body = await c.req
+    .json<{ folder?: string; to?: string }>()
+    .catch(() => ({}) as { folder?: string; to?: string });
+  if (typeof body.folder !== "string" || typeof body.to !== "string") {
+    throw new ValidationError('folder and to (paths like "gtm/deals") are required');
+  }
+  const userEmail = await resolveCallerEmail(c.get("userId"));
+  return c.json(await moveFolder(c.req.param("nestId")!, body.folder, body.to, userEmail));
 });
 
 // POST /nests/:nestId/reindex
@@ -457,9 +530,30 @@ queryRoutes.post("/reindex", async (c) => {
 // GET /nests/:nestId/comment-counts
 // Per-node annotation (comment) counts for the whole nest, so the UI can sort
 // document lists by "most comments" in one call instead of N per-node fetches.
+// Keyed by node id, so it is narrowed to the documents the caller can read: an
+// unreadable draft's id — and the fact someone is discussing it — must not
+// reach a caller who would be refused opening it.
 queryRoutes.get("/comment-counts", async (c) => {
-  const counts = await countThreadsByNode(c.req.param("nestId")!);
-  return c.json({ counts });
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  const counts = await countThreadsByNode(nestId);
+  if (await readsWholeNest(nestId, userId, userEmail)) return c.json({ counts });
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        userEmail,
+        Object.keys(counts).map((id) => ({ id })),
+      )
+    ).map((n) => n.id),
+  );
+  return c.json({
+    counts: Object.fromEntries(
+      Object.entries(counts).filter(([id]) => readable.has(id)),
+    ),
+  });
 });
 
 // GET /nests/:nestId/context
@@ -478,23 +572,33 @@ queryRoutes.get("/export", async (c) => {
   const nestId = c.req.param("nestId")!;
 
   // Portability bundle (?format=bundle): the nest's documents as a .zip that
-  // the existing folder importer (POST /nests/import) ingests. Gated the same
-  // as the markdown export above — the nest access middleware already 404s
-  // callers with no access at all, so any reader (viewer and up) may export.
+  // the existing folder importer (POST /nests/import) ingests. Any reader may
+  // export, but only what they can read: a caller without whole-nest read
+  // (public/org reader, scoped steward, share grantee) gets the
+  // filterAccessible set and no version history.
   // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
   if (c.req.query("format") === "bundle") {
     const draftsParam = c.req.query("includeDrafts");
-    const includeDrafts = draftsParam === "1" || draftsParam === "true";
-    const zip = await exportNestBundle(nestId, includeDrafts);
     const bundleUser = c.get("userId");
+    const bundleEmail = await resolveCallerEmail(bundleUser);
+    // Drafts are for collaborators. A caller who reaches the nest only through
+    // org/public visibility gets the approved bundle whatever they ask for
+    // (CU-wdqcq0538j).
+    const includeDrafts =
+      (draftsParam === "1" || draftsParam === "true") &&
+      !(await isPublicReader(nestId, bundleUser));
+    const narrow = (await readsWholeNest(nestId, bundleUser, bundleEmail))
+      ? undefined
+      : (docs: ContextNode[]) => filterAccessible(nestId, bundleUser, bundleEmail, docs);
+    const zip = await exportNestBundle(nestId, includeDrafts, narrow);
     recordNodeAccess({
       nestId,
-      wholeNest: true,
+      wholeNest: !narrow,
       action: "export",
       surface: "api",
       userId: bundleUser,
-      userEmail: await resolveCallerEmail(bundleUser),
-      client: c.get("clientMetadata"),
+      userEmail: bundleEmail,
+      client: readClient(c),
       detail: includeDrafts ? "bundle export (incl. drafts)" : "bundle export",
     });
     const filename = `nest-${nestId}.zip`;
@@ -579,7 +683,7 @@ queryRoutes.get("/export", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: `markdown export (${included.length} documents${selector ? ", selector" : ""})`,
   });
 

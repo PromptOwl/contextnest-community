@@ -5,20 +5,25 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
+import { OrgContributorPanel } from "./OrgContribution";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { matchesFilters } from "../lib/node-filter";
-import { decideWikiLinkAction } from "../lib/wiki-preview";
+import { reviewIdFromSearch, withReviewParam } from "../lib/review-pane";
 import { checkFolderPath } from "../lib/folder-path";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
   FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
-  FileStack, FolderPlus, X,
+  FileStack, FolderPlus, X, ListChecks,
   Activity, BookOpen, Archive, Eye, Palette, History,
+  KeyRound,
 } from "lucide-react";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
 
@@ -27,12 +32,14 @@ import { prettyFolderPath } from "./FolderTree";
 export { NodeTypeIcon } from "./nest/NodeTypeIcon";
 import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
-import { groupNodesByFolder } from "@/lib/nest-overview";
+import { groupNodesByFolder, queueBreakdown } from "@/lib/nest-overview";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { PushConfirmationModal } from "./PushConfirmationModal";
+import { untilTime } from "../lib/dates";
 import { ReaderView } from "./ReaderView";
 import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { PublicSiteDialog } from "./PublicSiteDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
@@ -58,6 +65,11 @@ import { RenameNestDialog } from "./RenameNestDialog";
 import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
+const DocStream = lazyChunk(() => import("./DocStream").then((m) => ({ default: m.DocStream })));
+const InstructionsTab = lazyChunk(() =>
+  import("./nest/InstructionsTab").then((m) => ({ default: m.InstructionsTab })),
+);
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
@@ -84,13 +96,12 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardModal,
-  ReviewActions,
   ReasonDialog,
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
+import { PinnedStrip } from "./nest/DocPins";
 import { ActivityLogPanel } from "./ActivityLogPanel";
-import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
 
 
@@ -112,6 +123,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open this nest's structure rules, at a folder's rule when one is given. */
+  onOpenStructure?: (folder?: string) => void;
   /** Open the account-level API keys page. */
   onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
@@ -130,6 +143,8 @@ interface NestViewProps {
   initialTab?: string;
   /** Reports tab changes up so App can mirror them into ?tab=. */
   onTabChange?: (tab: string) => void;
+  /** Open the settings dialog once the nest has loaded (deep link). */
+  initialSettings?: boolean;
 }
 
 /** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
@@ -147,14 +162,16 @@ export function NestView({
   onReaderDocChange,
   onOpenDocument,
   onOpenTrace,
+  onOpenStructure,
   onManageKeys,
   initialSearch,
   initialTags,
   initialFolder,
   initialTab,
   onTabChange,
+  initialSettings,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -166,6 +183,8 @@ export function NestView({
   // Local mirror of the nest name so inline rename feels instant while the
   // backend autosave lands. Resets if the parent passes a different nest.
   const [editableName, setEditableName] = useState(nestName);
+  // "Request edit access" for a viewer of the nest (CU-wdqcq041jn).
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
     setEditableName(nestName);
@@ -257,7 +276,10 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
+  const [reviewSlaHours, setReviewSlaHours] = useState<number | null>(null);
+  const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const [alwaysIncludeTags, setAlwaysIncludeTags] = useState<string[]>(["always-include"]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
   // Held agent writes awaiting confirmation (reviewer view). Empty when the
@@ -284,6 +306,7 @@ export function NestView({
   // reader-mode dialog, applied by ReaderView (and the shell, for readers).
   const [branding, setBranding] = useState<NestBranding | null>(null);
   const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
+  const [siteDialogOpen, setSiteDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -347,7 +370,21 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
-  const [reviewNode, setReviewNode] = useState<any | null>(null);
+  // The change open in the Review tab's pane. Mirrored into ?review= so a
+  // review can be linked and survives a refresh (CU-wdqcq05mhk).
+  const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : reviewIdFromSearch(window.location.search),
+  );
+  const setOpenReviewId = (nodeId: string | null) => {
+    setOpenReviewIdState(nodeId);
+    if (typeof window === "undefined") return;
+    const search = withReviewParam(window.location.search, nodeId);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + search + window.location.hash,
+    );
+  };
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   // Admin activity log for the whole nest (CU-wdqcq03aw2).
   const [showNestActivity, setShowNestActivity] = useState(false);
@@ -412,8 +449,13 @@ export function NestView({
   // clicks that jump to Documents — mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     setActiveTabState(tab);
+    if (tab !== "review" && openReviewId) setOpenReviewId(null);
     onTabChange?.(tab);
   };
+  // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
+  useEffect(() => {
+    if (initialTab) setActiveTabState(initialTab);
+  }, [initialTab]);
   // Expanded folders, not collapsed ones: a folder's documents are fetched on
   // first expand, so the default has to be closed.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -421,6 +463,11 @@ export function NestView({
 
 
   const qc = useQueryClient();
+  // Whose nest this is, from the cached dashboard list (owner, roles,
+  // discovered) — the banner above the tabs names it when it isn't mine.
+  const listRow = useQuery(reads.nestList()).data?.nests?.find((n) => n.id === nestId);
+  const relation = listRow ? nestRelation(listRow) : "owned";
+  const relationText = listRow ? nestRelationText(listRow) : null;
 
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
@@ -584,7 +631,12 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
+    setReviewSlaHours((settingsData as api.NestSettings).review_sla_hours ?? null);
+    setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
+    setAlwaysIncludeTags(
+      (settingsData as Partial<api.NestSettings>).always_include_tags ?? ["always-include"],
+    );
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -805,14 +857,42 @@ export function NestView({
   const tabVisible: Record<string, boolean> = {
     overview: true,
     documents: true,
+    instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
     "external-edits": !isReadOnly,
     stewards: stewardshipEnabled && canManageGovernance,
     collaborators: canManage || collabCanWrite,
+    fields: !grantOnly,
+    // Experimental document stream, pinned to this nest.
+    stream: docStreamEnabled && !isReaderView,
   };
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
   }, [initialLoad, activeTab, tabVisible[activeTab]]);
+  // Deep link from a document: open settings only after the first load, so the
+  // dialog never seeds itself from the pre-load defaults (stewardship "off").
+  const settingsOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!initialSettings || initialLoad || settingsOpenedRef.current) return;
+    settingsOpenedRef.current = true;
+    if (!isReadOnly && canManageGovernance) setShowSettings(true);
+  }, [initialSettings, initialLoad, isReadOnly, canManageGovernance]);
+  // The governance stat cards open the queue they count (CU-wdqcq04wnu).
+  const reviewCardProps = tabVisible.review
+    ? {
+      role: "button",
+      tabIndex: 0,
+      title: "Open the review queue",
+      onClick: () => setActiveTab("review"),
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setActiveTab("review");
+      },
+      className:
+        "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+    }
+    : {};
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -828,6 +908,11 @@ export function NestView({
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
+  const queueNote = queueBreakdown({
+    pending: stats.reviewQueue,
+    reviewable: stats.reviewable,
+    ownBlocked: myPendingSubmissions.filter((r) => !reviewableQueue.includes(r)).length,
+  });
 
   // Overview/index landing (CU-wdqcpztgwp): a grouped table-of-contents +
   // recently-edited, so opening a nest presents an index rather than only the
@@ -859,30 +944,32 @@ export function NestView({
     }
   };
 
-  const handleApprove = async (note?: string) => {
-    if (!reviewNode) return;
+  // Decisions from the review pane. Errors are rethrown so the pane shows
+  // them inline beside the button that failed (a 403 from SoD, scope or
+  // licensing must not look like nothing happened).
+  const handleApprove = async (nodeId: string, note?: string) => {
     try {
-      await api.approveNode(nestId, reviewNode.id, note);
-      toast.success("Approved");
-      setReviewNode(null);
-      fetchData();
+      await api.approveNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] approveNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Approve failed");
+      console.error("[NestView] approveNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Approve failed");
     }
+    toast.success("Approved and published");
+    // Drop the row now; fetchData below reconciles in the background.
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
-  const handleReject = async (note: string) => {
-    if (!reviewNode) return;
+  const handleRequestChanges = async (nodeId: string, note: string) => {
     try {
-      await api.rejectNode(nestId, reviewNode.id, note);
-      toast.success("Rejected");
-      setReviewNode(null);
-      fetchData();
+      await api.rejectNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] rejectNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Reject failed");
+      console.error("[NestView] rejectNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Request changes failed");
     }
+    toast.success("Sent back to the author");
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
   // Cancel your own pending review — the document goes back to Draft rather
@@ -1249,7 +1336,10 @@ export function NestView({
                   {p.submitter_label || p.submitter_email || "an API key"}
                 </span>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  Review →
+                  {untilTime(p.expires_at) === "expired"
+                    ? "Expired"
+                    : `Expires ${untilTime(p.expires_at)}`}{" "}
+                  · Review →
                 </span>
               </button>
             ))}
@@ -1486,6 +1576,28 @@ export function NestView({
             Add with AI
           </Button>
         )}
+        {/* Someone who can read this nest but not add to it can ask for that
+            instead of finding no way in (CU-wdqcq041jn). Signed-in only —
+            there's no one to grant a signed-out reader anything. */}
+        {!canEditDocs && !nestArchived && !previewReader && !!adminStatus?.me && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setAccessOffer({
+                nestId,
+                target: { type: "nest", id: nestId },
+                level: "write",
+                label: editableName || nestName,
+              })
+            }
+            data-testid="nest-request-access"
+            title="Ask the nest owner or an admin for edit access to this nest"
+          >
+            <KeyRound className="h-3.5 w-3.5 mr-1.5" />
+            Request edit access
+          </Button>
+        )}
         {canManage && !isPhone && (
           // Inside the nest, Share IS the Collaborators tab — one surface
           // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
@@ -1556,6 +1668,13 @@ export function NestView({
               label: "Nest settings",
               icon: SettingsIcon,
               onSelect: () => setShowSettings(true),
+            });
+          // This nest's own folder rules — owners and admins set them.
+          if (canManageGovernance && onOpenStructure && !nestArchived)
+            actions.push({
+              label: "Structure rules",
+              icon: ListChecks,
+              onSelect: () => onOpenStructure(),
             });
           // Gate on canManageGovernance (owner/admin on THIS nest), not the
           // server-admin flag — otherwise a license admin who is only an
@@ -1629,6 +1748,29 @@ export function NestView({
         />
       )}
 
+      {relationText && (
+        <div
+          data-testid="nest-relation-banner"
+          className={`mb-4 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+            relation === "shared"
+              ? "border-blue-200 bg-blue-50 text-blue-800"
+              : "border-dashed bg-muted/40 text-muted-foreground"
+          }`}
+        >
+          {relation === "shared" ? (
+            <Users className="h-4 w-4 shrink-0" />
+          ) : listRow?.visibility === "public" ? (
+            <Globe className="h-4 w-4 shrink-0" />
+          ) : (
+            <Building2 className="h-4 w-4 shrink-0" />
+          )}
+          <span className="truncate">
+            {relation === "shared"
+              ? relationText
+              : `Not shared with you — you can read it because it's ${relationText}`}
+          </span>
+        </div>
+      )}
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
@@ -1648,6 +1790,10 @@ export function NestView({
           <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
             <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
             <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
+            {/* The nest's CONTEXT.md — what every agent reads first. */}
+            {!grantOnly && (
+              <TabsTrigger value="instructions" className={NEST_TAB}>Instructions</TabsTrigger>
+            )}
             {/* Governance tabs hidden for view-only. */}
             {showReviewTab && !isReadOnly && (
               <TabsTrigger value="review" className={NEST_TAB + " gap-2"}>
@@ -1684,6 +1830,16 @@ export function NestView({
               caller's permission (see CollaboratorManager). */}
             {(canManage || collabCanWrite) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
+            )}
+            {/* Custom fields — readable by everyone on the nest (they explain
+              the values on its documents); the tab's own controls appear only
+              for admins and nest-wide reviewers (server-decided can_manage). */}
+            {!grantOnly && (
+              <TabsTrigger value="fields" className={NEST_TAB}>Fields</TabsTrigger>
+            )}
+            {/* Experimental: this nest's document stream (EXPERIMENTAL_DOC_STREAM). */}
+            {docStreamEnabled && !isReaderView && (
+              <TabsTrigger value="stream" className={NEST_TAB}>Stream</TabsTrigger>
             )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
@@ -1738,7 +1894,9 @@ export function NestView({
           carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
         {activeTab !== "overview" && (
           <div
-            className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
+            // While a review is open, small screens skip the stats so the
+            // review itself is the first thing on screen.
+            className={`${activeTab === "review" && openReviewId ? "hidden lg:grid" : "grid"} grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
               ? "md:grid-cols-4"
               : "md:grid-cols-1 max-w-sm"
               }`}
@@ -1776,7 +1934,7 @@ export function NestView({
             </Card>
             {stewardshipEnabled && (
               <>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-pending">
                   <CardHeader className="pb-2">
                     <CardDescription>Pending Approvals</CardDescription>
                     <CardTitle className="text-3xl text-amber-600">
@@ -1818,7 +1976,7 @@ export function NestView({
                     </div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-review">
                   <CardHeader className="pb-2">
                     <CardDescription>Your Review Queue</CardDescription>
                     <CardTitle className="text-3xl text-blue-600">
@@ -1834,11 +1992,9 @@ export function NestView({
                       <Shield className="h-4 w-4" />
                       <span>
                         Need your review
-                        {stats.reviewQueue > stats.reviewable && (
-                          <span className="ml-1 text-xs">
-                            ({stats.reviewQueue} pending total,
-                            {" "}
-                            {stats.reviewQueue - stats.reviewable} outside your scope)
+                        {queueNote && (
+                          <span className="ml-1 text-xs" data-testid="nest-stat-review-note">
+                            ({queueNote})
                           </span>
                         )}
                       </span>
@@ -1854,6 +2010,9 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
+          {/* An org contributor's way in (CU-wdqcq05rz6); renders nothing for
+              anyone else. */}
+          <OrgContributorPanel nestId={nestId} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <OverviewTab
               initialLoad={initialLoad || !censusSettled}
@@ -1899,9 +2058,13 @@ export function NestView({
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
+          {/* Experimental document pins — renders nothing while the switch is
+              off or the nest has no pins the caller can read. */}
+          <PinnedStrip nestId={nestId} onOpenDocument={(id) => onOpenDocument(id)} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <DocumentsTab
               nestId={nestId}
+              onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
               initialTags={initialTags}
               initialLoad={initialLoad}
@@ -1925,6 +2088,7 @@ export function NestView({
               stewardshipEnabled={stewardshipEnabled}
               allowSelfApprove={allowSelfApprove}
               primeTags={primeTags}
+              alwaysIncludeTags={alwaysIncludeTags}
               visibility={visibility}
               hasRoleOnNode={hasRoleOnNode}
               canReviewNode={canReviewNode}
@@ -1933,7 +2097,13 @@ export function NestView({
               deletionRequests={deletionRequests}
               stats={stats}
               onOpenDocument={onOpenDocument}
-              onReview={setReviewNode}
+              onReview={(node) => {
+                // Review happens in the Review tab's pane, with the diff and
+                // the author's note — not a second, thinner surface here.
+                if (!showReviewTab) return onOpenDocument(node.id);
+                setActiveTab("review");
+                setOpenReviewId(node.id);
+              }}
               onRefresh={fetchData}
               onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
               importInputRef={importInputRef}
@@ -1956,17 +2126,14 @@ export function NestView({
                 loading={loading}
                 onRefresh={fetchData}
                 onOpenDocument={onOpenDocument}
-                onSelectRequest={(req) => {
-                  const node = nodes.find((n) => n.id === req.nodeId);
-                  if (node) {
-                    setReviewNode(node);
-                    return;
-                  }
-                  // Not in the loaded levels. Under lazy loading that usually
-                  // just means its folder was never expanded, so open the
-                  // document itself rather than calling it missing.
-                  onOpenDocument(req.nodeId);
-                }}
+                openReviewId={openReviewId}
+                onOpenReview={setOpenReviewId}
+                onApproveReview={handleApprove}
+                onRequestChanges={handleRequestChanges}
+                currentUser={currentEmail}
+                canEditDocs={canEditDocs}
+                primeTags={primeTags}
+                alwaysIncludeTags={alwaysIncludeTags}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />
@@ -1995,6 +2162,33 @@ export function NestView({
                 onAssign={() => setShowAssignSteward(true)}
                 onRemove={setRemoveStewardId}
                 onEditRole={setEditingSteward}
+              />
+            </Suspense>
+          </TabsContent>
+        )}
+
+        {!grantOnly && (
+          <TabsContent value="instructions" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <InstructionsTab nestId={nestId} canEdit={canManage && !isReadOnly} />
+            </Suspense>
+          </TabsContent>
+        )}
+
+        {!grantOnly && (
+          <TabsContent value="fields" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <FieldsTab nestId={nestId} />
+            </Suspense>
+          </TabsContent>
+        )}
+
+        {docStreamEnabled && !isReaderView && (
+          <TabsContent value="stream" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <DocStream
+                pinnedNestId={nestId}
+                onOpen={(item, threadId) => onOpenDocument(item.nodeId, threadId ? { thread: threadId } : undefined)}
               />
             </Suspense>
           </TabsContent>
@@ -2065,6 +2259,9 @@ export function NestView({
         />
       )}
 
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {showGenerate && (
         <GenerateContextModal
           isOpen={showGenerate}
@@ -2088,11 +2285,19 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          alwaysIncludeTags={alwaysIncludeTags}
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
+          reviewSlaHours={reviewSlaHours}
+          accessLogEnabled={accessLogEnabled}
+          canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
+          onManageFields={() => {
+            setShowSettings(false);
+            setActiveTab("fields");
+          }}
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
@@ -2102,8 +2307,11 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setAlwaysIncludeTags(next.alwaysIncludeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
+            setReviewSlaHours(next.reviewSlaHours);
+            setAccessLogEnabled(next.accessLogEnabled);
             fetchData();
           }}
         />
@@ -2225,7 +2433,7 @@ export function NestView({
           ) : newFolderCheck.rewritten && newFolderCheck.path ? (
             <p className="text-xs text-muted-foreground" data-testid="new-folder-preview">
               Will be created as{" "}
-              <code className="font-mono">{newFolderCheck.path}</code>
+              <code className="font-mono">{newFolderCheck.label}</code>
             </p>
           ) : null}
           <DialogFooter>
@@ -2350,6 +2558,32 @@ export function NestView({
             </Button>
           </div>
 
+          {/* Public site — the static, crawlable docs site a public reader-mode
+              nest publishes: domain, page URLs, search and AI settings. */}
+          {readerModeEnabled && (
+            <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">Public site</Label>
+                <p className="text-xs text-muted-foreground">
+                  A search-engine-ready docs site with its own domain, page
+                  URLs and AI settings. Live while the nest is public.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0 gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setSiteDialogOpen(true);
+                }}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Site settings
+              </Button>
+            </div>
+          )}
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2370,6 +2604,8 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PublicSiteDialog open={siteDialogOpen} onOpenChange={setSiteDialogOpen} nestId={nestId} />
 
       <ReaderBrandingDialog
         open={brandingDialogOpen}
@@ -2460,19 +2696,6 @@ export function NestView({
       )}
 
 
-      {reviewNode && (
-        <ReviewDocumentModal
-          node={reviewNode}
-          nestId={nestId}
-          onApprove={handleApprove}
-          onReject={handleReject}
-          onClose={() => setReviewNode(null)}
-          onOpenDocument={(nodeId) => {
-            setReviewNode(null);
-            onOpenDocument(nodeId);
-          }}
-        />
-      )}
 
 
       {removeStewardId && (
@@ -2560,122 +2783,5 @@ export function NestView({
       )}
 
     </div>
-  );
-}
-
-// ─── Sub-modals ─────────────────────────────────────────────────
-
-function ReviewDocumentModal({
-  node,
-  nestId,
-  onApprove,
-  onReject,
-  onClose,
-  onOpenDocument,
-}: {
-  node: any;
-  nestId: string;
-  onApprove: (note?: string) => Promise<void>;
-  onReject: (note: string) => Promise<void>;
-  onClose: () => void;
-  onOpenDocument: (nodeId: string) => void;
-}) {
-  const [linkError, setLinkError] = useState<string | null>(null);
-  const qc = useQueryClient();
-
-  // The row that opened this modal comes from the document list, which carries
-  // metadata only — a body per row costs a file read per row, and nothing in
-  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
-  // one document, on open. Falls back to a body the caller already had, so a
-  // row that does carry one renders without a round trip.
-  const { data: full, isLoading: bodyLoading } = useQuery({
-    ...reads.node(nestId, node.id),
-    enabled: !node.content,
-  });
-  const body = node.content || full?.node?.content || "";
-
-  // Resolve `[[Title]]` clicks to a node id and jump straight to that
-  // doc. Without this the wiki-link decoration renders but click does
-  // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
-  // is provided. `id` (the decoration's cached existence check) is never
-  // trusted for navigation — it can go stale between when the decoration
-  // checked and when it's clicked — so every click re-resolves against the
-  // live node list via the shared decideWikiLinkAction (same rule as the
-  // editor), which also picks up a target created after the reviewer opened
-  // the modal. Broken links are NOT routed to the create flow (canAuthor:
-  // false) — the caller is acting as a reviewer here (read-only role for
-  // this surface), so silently dropping them into an authoring page would
-  // mislead them; instead we surface an inline note.
-  const handleWikiLinkClick = async (
-    title: string,
-    _id: string | null,
-    displayText?: string | null,
-  ) => {
-    setLinkError(null);
-    try {
-      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
-      const action = decideWikiLinkAction(
-        nodes as Array<{ id: string; title: string }>,
-        title,
-        false,
-        displayText,
-      );
-      if (action.kind === "navigate") {
-        onOpenDocument(action.node.id);
-        return;
-      }
-      setLinkError(
-        `"${action.title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
-      );
-    } catch (e) {
-      console.error("[NestView] wiki-link lookup failed", nestId, title, e);
-      setLinkError("Couldn't look up that document — try again later.");
-    }
-  };
-
-  return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>{node.title}</DialogTitle>
-        </DialogHeader>
-        {linkError && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-            {linkError}
-          </div>
-        )}
-        <div className="flex-1 overflow-y-auto rounded-md">
-          {body ? (
-            <MarkdownEditor
-              // Remount when the reviewer switches between docs in the
-              // queue. Same modal instance otherwise → TipTap keeps its
-              // previous doc's editor state and the body briefly shows
-              // the wrong content on swap.
-              key={node.id}
-              content={body}
-              onChange={() => { }}
-              editable={false}
-              nestId={nestId}
-              onWikiLinkClick={handleWikiLinkClick}
-            />
-          ) : bodyLoading ? (
-            // Distinct from "(no content)": approving on the strength of an
-            // empty box that was merely still loading is the one mistake this
-            // modal must not invite.
-            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
-          ) : (
-            <p className="text-sm text-muted-foreground p-4">(no content)</p>
-          )}
-        </div>
-        <DialogFooter>
-          <ReviewActions
-            documentTitle={node.title}
-            version={node.version || 1}
-            onApprove={onApprove}
-            onReject={onReject}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

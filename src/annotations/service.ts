@@ -41,13 +41,14 @@ interface CommentRow {
   author: string;
   body: string;
   created_at: string;
+  run_id: string | null;
 }
 
 async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
   const rows = await db
     .all(
-      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT id, author, body, created_at, run_id FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
       [threadId],
     ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
@@ -55,6 +56,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
     author: r.author,
     body: r.body,
     createdAt: r.created_at,
+    ...(r.run_id ? { runId: r.run_id } : {}),
   }));
 }
 
@@ -197,11 +199,21 @@ export async function addComment(
   await getScopedThreadRow(threadId, nestId, nodeId);
 
   const db = getDb();
-  await db.run(
-    `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
-     VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
-    [uuid(), threadId, authorEmail, trimmed],
-  );
+  await db.transaction(async (tx) => {
+    await tx.run(
+      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
+       VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
+      [uuid(), threadId, authorEmail, trimmed],
+    );
+    // A reply on a resolved thread reopens it (the Google Docs / GitHub rule):
+    // someone still has something to say, so it belongs back in the open list
+    // and the rail, not folded under "Resolved". Done here rather than in a
+    // route so the REST reply and the MCP context_comment reply agree.
+    await tx.run(
+      "UPDATE annotation_threads SET status = 'open', resolved_by = NULL, resolved_at = NULL WHERE id = ? AND status = 'resolved'",
+      [threadId],
+    );
+  });
 
   return rowToThread((await getThreadRow(threadId))!);
 }

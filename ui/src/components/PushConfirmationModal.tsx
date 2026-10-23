@@ -29,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { formatServerDate, untilTime } from "../lib/dates";
 
 interface PushConfirmationModalProps {
   nestId: string;
@@ -53,6 +54,8 @@ export function PushConfirmationModal({
   const [alwaysAllow, setAlwaysAllow] = useState(false);
   const [deciding, setDeciding] = useState<null | "confirm" | "reject">(null);
   const [copied, setCopied] = useState(false);
+  // Manifest row whose content is expanded for reading; null = none.
+  const [openRow, setOpenRow] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -96,6 +99,9 @@ export function PushConfirmationModal({
   };
 
   const decided = pending && pending.status !== "pending";
+  const updates = existingNodeIds
+    ? (pending?.manifest ?? []).filter((m) => m.id && existingNodeIds.has(m.id)).length
+    : 0;
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -155,14 +161,36 @@ export function PushConfirmationModal({
                 <span className="text-muted-foreground">
                   {new Date(pending.created_at).toLocaleString()}
                 </span>
+                {!decided && (
+                  <div className="text-xs text-amber-700 dark:text-amber-500">
+                    {untilTime(pending.expires_at) === "expired"
+                      ? `Expired ${formatServerDate(pending.expires_at)} — it can no longer be confirmed.`
+                      : `Expires ${untilTime(pending.expires_at)} · ${formatServerDate(pending.expires_at)} — not confirmed by then, it is dropped and never applied.`}
+                  </div>
+                )}
               </div>
 
+              {existingNodeIds && pending.manifest.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  {pending.manifest.length - updates} new · {updates} update
+                  {updates === 1 ? "" : "s"} — click a document to read it.
+                </div>
+              )}
+
               {/* Manifest. */}
-              <div className="rounded-lg border divide-y max-h-64 overflow-y-auto">
+              <div className="rounded-lg border divide-y max-h-80 overflow-y-auto">
                 {pending.manifest.length === 0 && (
                   <div className="p-3 text-xs text-muted-foreground">
                     No document rows (context.md only).
                   </div>
+                )}
+                {pending.context_md && (
+                  <details className="p-2.5 text-sm">
+                    <summary className="cursor-pointer font-medium">context.md</summary>
+                    <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                      {pending.context_md}
+                    </pre>
+                  </details>
                 )}
                 {pending.manifest.map((m, i) => {
                   // A null id means the server will generate one on apply, so
@@ -171,24 +199,33 @@ export function PushConfirmationModal({
                     ? (existingNodeIds?.has(m.id) ?? false)
                     : false;
                   return (
-                    <div
-                      key={`${m.id ?? m.title}:${i}`}
-                      className="p-2.5 flex items-start justify-between gap-3"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">
-                          {m.title}
+                    <div key={`${m.id ?? m.title}:${i}`}>
+                      <button
+                        type="button"
+                        onClick={() => setOpenRow(openRow === i ? null : i)}
+                        aria-expanded={openRow === i}
+                        className="w-full p-2.5 flex items-start justify-between gap-3 text-left hover:bg-accent"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium truncate">
+                            {m.title}
+                          </div>
+                          <div className="text-xs text-muted-foreground truncate">
+                            {m.type}
+                            {m.tags.length > 0 ? ` · ${m.tags.join(" ")}` : ""}
+                          </div>
                         </div>
-                        <div className="text-xs text-muted-foreground truncate">
-                          {m.type}
-                          {m.tags.length > 0 ? ` · ${m.tags.join(" ")}` : ""}
-                        </div>
-                      </div>
-                      {existingNodeIds ? (
-                        <Badge variant={isUpdate ? "secondary" : "default"}>
-                          {isUpdate ? "Update" : "New"}
-                        </Badge>
-                      ) : null}
+                        {existingNodeIds ? (
+                          <Badge variant={isUpdate ? "secondary" : "default"}>
+                            {isUpdate ? "Update" : "New"}
+                          </Badge>
+                        ) : null}
+                      </button>
+                      {openRow === i && (
+                        <pre className="mx-2.5 mb-2.5 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                          {m.content ?? "(content unavailable)"}
+                        </pre>
+                      )}
                     </div>
                   );
                 })}
@@ -218,7 +255,9 @@ export function PushConfirmationModal({
                       Always allow automated writes from {label} to this nest
                     </span>
                     <span className="block text-xs text-muted-foreground">
-                      Whitelists this exact API key. Future writes on it apply
+                      Whitelists the credential that sent this: its API key, or,
+                      for a PromptOwl / signed-in session write, all of this
+                      user&rsquo;s keyless writes. Future writes on it apply
                       immediately without holding for confirmation.
                     </span>
                   </span>

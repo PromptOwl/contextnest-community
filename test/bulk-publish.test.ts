@@ -36,7 +36,7 @@ describe("bulk publish — partial-batch reporting", () => {
     const admin = await registerUser(app, OWNER_EMAIL);
     const nestId = await makeNest(app, admin.apiKey);
 
-    // Middle row is over the 120-char title bound. Before per-row reporting it
+    // Middle row is over the 200-char title bound. Before per-row reporting it
     // threw, leaving "First" written and nothing in the response naming it.
     const res = await jsonRequest(
       app,
@@ -45,7 +45,7 @@ describe("bulk publish — partial-batch reporting", () => {
       {
         documents: [
           { title: "First", content: "# one" },
-          { title: "T".repeat(200), content: "# too long" },
+          { title: "T".repeat(201), content: "# too long" },
           { title: "Third", content: "# three" },
         ],
       },
@@ -56,8 +56,8 @@ describe("bulk publish — partial-batch reporting", () => {
     expect(res.data.published).toBe(2);
     expect(res.data.node_ids).toEqual(["nodes/first", "nodes/third"]);
     expect(res.data.failed).toHaveLength(1);
-    expect(res.data.failed[0].title).toBe("T".repeat(200));
-    expect(res.data.failed[0].error).toMatch(/120 characters/);
+    expect(res.data.failed[0].title).toBe("T".repeat(201));
+    expect(res.data.failed[0].error).toMatch(/200 characters/);
 
     // The row AFTER the failure is the one that used to be abandoned.
     const third = await jsonRequest(
@@ -128,5 +128,40 @@ describe("bulk publish — partial-batch reporting", () => {
     expect(res.status).toBe(201);
     expect(res.data.published).toBe(1);
     expect(res.data.node_ids).toEqual(["nodes/subteam/nested-doc"]);
+  });
+
+  it("drops the blank lines a pushed body starts with, so an HTML page stays a page", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const nestId = await makeNest(app, admin.apiKey);
+
+    // `ctx push` sends the body as it sits after the frontmatter, which starts
+    // with the blank line under the closing `---`.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      {
+        documents: [
+          { title: "Page", type: "artifact", content: "\n\n<!doctype html>\n<html><body>Hi</body></html>\n" },
+          { title: "Indented", content: "\n   \n    code on line one\n" },
+          { title: "Crlf", type: "artifact", content: "\r\n\r\n<!doctype html>\r\n" },
+          // Nothing left after the strip: dropped, not stored as an empty doc.
+          { title: "Blank", content: "\n  \n" },
+        ],
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.published).toBe(3);
+    expect(res.data.node_ids).not.toContain("nodes/blank");
+
+    const page = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/page`, undefined, admin.apiKey);
+    expect(page.data.node.content.startsWith("<!doctype html>")).toBe(true);
+    // Only whole blank lines go: the first real line keeps its indentation.
+    const md = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/indented`, undefined, admin.apiKey);
+    expect(md.data.node.content.startsWith("    code on line one")).toBe(true);
+    const crlf = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/crlf`, undefined, admin.apiKey);
+    expect(crlf.data.node.content.startsWith("<!doctype html>")).toBe(true);
   });
 });

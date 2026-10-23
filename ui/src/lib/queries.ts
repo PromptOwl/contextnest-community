@@ -36,6 +36,11 @@ export const keys = {
   nest: (nestId: string) => [...keys.nests, "detail", nestId] as const,
 
   settings: (nestId: string) => [...keys.nest(nestId), "settings"] as const,
+  // CONTEXT.md and its history (CU-wdqcq05mty). Revisions sit under it, so a
+  // save that drops the instructions drops the history with them.
+  instructions: (nestId: string) => [...keys.nest(nestId), "instructions"] as const,
+  instructionsRevisions: (nestId: string) =>
+    [...keys.instructions(nestId), "revisions"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
   // Under keys.nodes so every write that drops the listing drops the lazily
   // loaded folder levels with it — see the invalidation table below.
@@ -49,6 +54,9 @@ export const keys = {
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
   census: (nestId: string) => [...keys.nodes(nestId), "census"] as const,
+  // Experimental document pins (CU-wdqcq02crw). Under keys.nodes so every
+  // document write (rename, move, delete) drops the strip with the listing.
+  docPins: (nestId: string) => [...keys.nodes(nestId), "pins"] as const,
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
@@ -58,6 +66,9 @@ export const keys = {
   mentionable: (nestId: string) =>
     [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
+  structure: (nestId: string) => [...keys.nest(nestId), "structure"] as const,
+  // Custom field definitions — what a document's `fields` values mean.
+  fields: (nestId: string) => [...keys.nest(nestId), "fields"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
   overview: (nestId: string) => [...keys.nest(nestId), "overview"] as const,
@@ -95,8 +106,12 @@ export const keys = {
     [...keys.node(nestId, nodeId), "reviews"] as const,
   nodeStewards: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "stewards"] as const,
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "approvers"] as const,
   nodeWatchers: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "watchers"] as const,
+  nodeRelations: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "relations"] as const,
   nodeAnnotations: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "annotations"] as const,
   nodePendingEdit: (nestId: string, nodeId: string) =>
@@ -122,6 +137,7 @@ export const keys = {
   auth: ["auth"] as const,
   teammates: () => [...keys.auth, "teammates"] as const,
   apiKeys: () => [...keys.auth, "keys"] as const,
+  connectedApps: () => [...keys.auth, "connected-apps"] as const,
 
   license: ["license"] as const,
   licenseStatus: () => [...keys.license, "status"] as const,
@@ -216,6 +232,12 @@ const NEST_WRITE_SCOPES: Array<{
       keys.commentCounts(n),
       [...keys.nest(n), "feed"],
     ],
+  },
+  // Task relations. Both ends' panels and every card's "Blocked" badge read
+  // them, so drop the whole listing (which holds every node key) and My Work.
+  {
+    match: /^\/nodes\/(.+)\/relations(?:\/|$)/,
+    affects: (n) => [keys.nodes(n), keys.me],
   },
   // Who gets notified about a document — nothing else reads it.
   {
@@ -324,7 +346,15 @@ const NEST_WRITE_SCOPES: Array<{
   // Branding rides GET /nests/:id (nest.branding), which the reader and the
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
+  // CONTEXT.md (CU-wdqcq05mty): its text and history, nothing else.
+  { match: /^\/instructions/, affects: (n) => [keys.instructions(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
+  // A structure check judges, never writes; saving rules changes only the rules.
+  { match: /^\/structure\/check$/, affects: () => [] },
+  { match: /^\/structure$/, affects: (n) => [keys.structure(n)] },
+  // A definition change re-labels or hides values on every listed document,
+  // and a time-in-status field changes what the listing computes.
+  { match: /^\/fields/, affects: (n) => [keys.fields(n), keys.nodes(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
   { match: /^\/env/, affects: (n) => [keys.env(n)] },
@@ -345,7 +375,7 @@ const NEST_WRITE_SCOPES: Array<{
     ],
   },
   {
-    match: /^\/(delete-folder|request-deletion)/,
+    match: /^\/(delete-folder|folders\/move|request-deletion)/,
     affects: (n) => [keys.nodes(n), keys.nestListAll()],
   },
   // Archiving or restoring moves the nest between the two lists and takes its
@@ -359,6 +389,9 @@ const NEST_WRITE_SCOPES: Array<{
   // Pinning reorders the dashboard grid and the palette's nest rows, both of
   // which read `pinned` off the cached nest list. Nothing inside the nest
   // changes, so this deliberately does NOT drop keys.nest(n).
+  // Document pins (CU-wdqcq02crw) — BEFORE the nest-pin rule below, whose
+  // `/pin` is a prefix of `/pins`.
+  { match: /^\/pins(?:\/|$)/, affects: (n) => [keys.docPins(n)] },
   { match: /^\/pin/, affects: () => [keys.nestList()] },
 ];
 
@@ -477,6 +510,18 @@ export const reads = {
       queryFn: () => api.getNest(nestId),
       staleTime: STALE.reference,
     }),
+  instructions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructions(nestId),
+      queryFn: () => api.getInstructions(nestId),
+      staleTime: STALE.reference,
+    }),
+  instructionsRevisions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructionsRevisions(nestId),
+      queryFn: () => api.listInstructionsRevisions(nestId),
+      staleTime: STALE.reference,
+    }),
   settings: (nestId: string) =>
     queryOptions({
       queryKey: keys.settings(nestId),
@@ -533,10 +578,28 @@ export const reads = {
       queryFn: () => api.suggestPeople(q),
       staleTime: STALE.reference,
     }),
+  docPins: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.docPins(nestId),
+      queryFn: () => api.getDocPins(nestId),
+      staleTime: STALE.reference,
+    }),
+  fields: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.fields(nestId),
+      queryFn: () => api.listFields(nestId),
+      staleTime: STALE.reference,
+    }),
   definitions: (nestId: string) =>
     queryOptions({
       queryKey: keys.definitions(nestId),
       queryFn: () => api.listDefinitions(nestId),
+      staleTime: STALE.reference,
+    }),
+  structure: (nestId: string, opts: { folder?: string; report?: boolean } = {}) =>
+    queryOptions({
+      queryKey: [...keys.structure(nestId), opts.folder ?? "", opts.report ? "report" : ""] as const,
+      queryFn: () => api.getStructure(nestId, opts),
       staleTime: STALE.reference,
     }),
   commentCounts: (nestId: string) =>
@@ -684,11 +747,23 @@ export const reads = {
       queryFn: () => api.getNodeStewards(nestId, nodeId),
       staleTime: STALE.reference,
     }),
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeApprovers(nestId, nodeId),
+      queryFn: () => api.getNodeApprovers(nestId, nodeId),
+      staleTime: STALE.governance,
+    }),
   nodeWatchers: (nestId: string, nodeId: string) =>
     queryOptions({
       queryKey: keys.nodeWatchers(nestId, nodeId),
       queryFn: () => api.listNodeWatchers(nestId, nodeId),
       staleTime: STALE.reference,
+    }),
+  nodeRelations: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeRelations(nestId, nodeId),
+      queryFn: () => api.listRelations(nestId, nodeId),
+      staleTime: STALE.listing,
     }),
   nodeAnnotations: (nestId: string, nodeId: string) =>
     queryOptions({
@@ -760,6 +835,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.apiKeys(),
       queryFn: () => api.listApiKeys(),
+      staleTime: STALE.reference,
+    }),
+  connectedApps: () =>
+    queryOptions({
+      queryKey: keys.connectedApps(),
+      queryFn: () => api.listConnectedApps(),
       staleTime: STALE.reference,
     }),
   licenseStatus: () =>
@@ -837,6 +918,7 @@ export const useAdminSettings = () => useQuery(reads.adminSettings());
 export const useTeammates = () => useQuery(reads.teammates());
 export const useApiKeys = (opts?: { enabled?: boolean }) =>
   useQuery({ ...reads.apiKeys(), ...opts });
+export const useConnectedApps = () => useQuery(reads.connectedApps());
 export const useNestTeams = (nestId: string | undefined) =>
   useQuery({ ...reads.nestTeams(nestId ?? ""), enabled: !!nestId });
 export const useDefinitions = (nestId: string | undefined) =>

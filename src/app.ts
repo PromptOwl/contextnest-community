@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { getSessionIdFromRequest } from "./auth/sessions.js";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
@@ -6,12 +8,27 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { boardRoutes } from "./nests/board-routes.js";
+import { fieldRoutes } from "./nests/field-routes.js";
+import { pinRoutes } from "./nests/pin-routes.js";
+import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
+import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
+import { instructionsRoutes } from "./nests/instructions-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
+import {
+  siteRoutes,
+  docsDomainMiddleware,
+  robotsTxt,
+  sitemapIndex,
+  legacySiteRedirect,
+  siteDomainCheck,
+} from "./site/routes.js";
+import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
@@ -21,6 +38,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
+import { getDocStream } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -29,7 +47,9 @@ import {
   discoverForSearch,
   titleScore,
 } from "./nodes/search.js";
-import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
+import { resolveCallerEmail, filterAccessible, canReadNode } from "./governance/access-guard.js";
+import { assertSoleNodePatchRoute, credentialMayContribute } from "./governance/org-contribution.js";
+import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
@@ -59,8 +79,10 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
@@ -68,7 +90,10 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
-import { isDerivedAnnotationsNode } from "./nodes/service.js";
+import { structureRoutes } from "./structure/routes.js";
+import { ContextNestError } from "@promptowl/contextnest-engine";
+import { forPeople } from "./structure/writes.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -91,20 +116,25 @@ import {
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
 import { communitySiteRoutes } from "./auth/community-sites-routes.js";
+import { ssoCandidates } from "./auth/community-sites.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import { accessRequestRoutes } from "./governance/access-request-routes.js";
+import {
+  accessRequestHint,
+  canDecideAccessRequests,
+  listAccessRequests,
+  writeTargetForPath,
+} from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
-import {
-  verifySsoTicket,
-  isValidTicketSub,
-  SsoTokenError,
-  type SsoTicketClaims,
-} from "./auth/sso-token.js";
+import { isValidTicketSub } from "./auth/sso-token.js";
+import { resolveMcpTicketUser, mcpTicketSecrets } from "./auth/mcp-ticket.js";
+import { systemRoutes, nestSystemRoutes } from "./auth/system-routes.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -118,6 +148,8 @@ import {
   AppError,
   ValidationError,
   VaultBusyError,
+  PlanLimitError,
+  BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -131,17 +163,49 @@ import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
   isSuspended,
   getSuspensionReason,
+  getOfflineLock,
   getCurrentLicense,
   installLicenseKey,
+  getLastLicenseCheck,
+  getLicenseOwnerEmail,
+  getPendingRejections,
+  getEntitlement,
+  getOwnGateway,
+  setOwnProviderKey,
+  validateLicense,
+  OWN_KEY_PROVIDERS,
+  DEFAULT_LICENSE_CONTACT,
+  type LicenseInfo,
 } from "./auth/license.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage, billingConfirmed } from "./auth/seats.js";
+import { hasEntitlement } from "./auth/entitlements.js";
+import {
+  resolveModelCredential,
+  hootieModel,
+  listCredentialModels,
+  bareModelName,
+  modelProvider,
+} from "./shared/model-credential.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "./auth/license-copy.js";
+import { tryConsume } from "./shared/rate-limit.js";
+import { clientIp } from "./shared/request-ip.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
+import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
-import { isOidcReady } from "./auth/oidc.js";
+import {
+  protectedResourceMetadata,
+  authorizationServerMetadata,
+  mcpChallenge,
+} from "./auth/oauth-metadata.js";
+import { oauthRoutes } from "./auth/oauth-routes.js";
+import { resolveAccessToken } from "./auth/oauth-store.js";
+import { isEnterpriseIssuer, isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -150,16 +214,6 @@ import { existsSync, readFileSync } from "node:fs";
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
-// is one level up from either.
-const SERVICE_VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
-      .version as string;
-  } catch {
-    return "unknown";
-  }
-})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -168,6 +222,46 @@ const UI_DIR_ABS =
   UI_DIR_CANDIDATES.find((p) => existsSync(p)) || UI_DIR_CANDIDATES[0];
 const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 
+/** Whole days until an ISO date (negative once past); null = no date. */
+function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso) - Date.now();
+  return isNaN(ms) ? null : Math.ceil(ms / 86_400_000);
+}
+
+/** License-term fields shared by /license/status, /admin/license and a
+ *  rejected install: what the license is, when it ends, why PromptOwl last
+ *  refused it, and who to talk to. */
+function licenseTerms(lic: LicenseInfo | null | undefined) {
+  return {
+    trial: !!lic?.trial,
+    expires_at: lic?.expiresAt ?? null,
+    days_left: daysUntil(lic?.expiresAt),
+    reason: lic?.reason ?? null,
+    grace_ends_at: lic?.graceEndsAt ?? null,
+    contact: lic?.contact ?? DEFAULT_LICENSE_CONTACT,
+  };
+}
+
+/** Operator-facing message for a key PromptOwl refused at install time. */
+function rejectedKeyMessage(info: LicenseInfo): string {
+  const contact = info.contact ?? DEFAULT_LICENSE_CONTACT;
+  const talk = `Talk to PromptOwl (${contact.url} or ${contact.email}) to renew or get a new key.`;
+  switch (info.reason) {
+    case "expired": {
+      const when = info.expiresAt
+        ? ` on ${new Date(info.expiresAt).toDateString()}`
+        : "";
+      return `This ${info.trial ? "trial" : "license"} ended${when}, so the key wasn't saved. ${talk}`;
+    }
+    case "deactivated":
+      return `This license key has been deactivated, so it wasn't saved. ${talk}`;
+    case "suspended":
+      return `This license is suspended, so it wasn't saved. ${talk}`;
+    default:
+      return "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.";
+  }
+}
 // True for a browser loading this URL as a page (hard reload, typed/bookmarked
 // link), false for the app's own fetch()es and other programmatic callers.
 // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
@@ -193,8 +287,41 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const anonId = await ensureAnonymousUser();
   c.set("userId", anonId);
   c.set("nestScope", null);
+  c.set("keyCapability", "write");
   await next();
 });
+
+/** Nest surfaces a named system key (CU-wdqcq0538g) never reaches, whatever
+ *  its collaborator standing: people, sharing, settings, publishing,
+ *  credentials and automation wiring. A system syncs content; it doesn't
+ *  administer the nest (and can't confirm its own held pushes). */
+const SYSTEM_DENIED_RESOURCES = new Set([
+  "collaborators",
+  "teams",
+  "visibility",
+  "settings",
+  "reader-mode",
+  "site",
+  "grants",
+  "systems",
+  "headless",
+  "publications",
+  "branding",
+  "metacognition",
+  "schedules",
+  "hooks",
+  "env",
+  "connectors",
+  "trace",
+  "stewards",
+  "archive",
+  "restore",
+  "push-allowlist",
+  "pending-pushes",
+  // Document pins (CU-wdqcq02crw) are curation and personal bookmarks — a
+  // person's acts, not content a sync carries.
+  "pins",
+]);
 
 // Unauth GETs in key mode: allow read-only access to a specific nest
 // (/nests/:id and its sub-routes) so public nests work without login.
@@ -214,10 +341,100 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
+/**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
+/**
+ * The OAuth challenge on /mcp. Runs ahead of every other auth path.
+ *
+ * An MCP client's first request carries no credential on purpose: it expects a
+ * 401 whose WWW-Authenticate header points at the protected-resource metadata,
+ * and that is the ONLY thing that starts the authorization flow. Claude does
+ * not honour the header on a 200 and treats a tool-level error as a tool
+ * error, so the status and the header have to be exactly this.
+ *
+ * Deliberately narrow:
+ * - Only when a credential is entirely absent. A stale OAuth access token is
+ *   answered by mcpOAuthBearer with `error="invalid_token"`, which tells the
+ *   client to refresh or re-authorize; other bad credentials get the
+ *   ordinary rejection.
+ * - Never in open mode, where there is no credential to ask for.
+ * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
+ *   endpoint is byte-identical to before.
+ */
+const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
+  if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
+    return next();
+  if (!config.PUBLIC_BASE_URL) return next();
+  const hasAuth = !!c.req.header("Authorization");
+  if (hasAuth || hasSessionCookie(c)) return next();
+  c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL));
+  return c.json(
+    {
+      error: "Authentication required — authorize this client to continue.",
+      code: "missing_credentials",
+    },
+    401,
+  );
+});
+
+/**
+ * Accept an access token this server issued, and resolve it to its user.
+ *
+ * Runs after the challenge and before the ticket path. A credential that is
+ * not 64 hex is passed through untouched, so `cnst_` keys and MCP tickets keep
+ * working exactly as before. A 64-hex token that does not resolve is one of
+ * ours gone stale, and gets a 401 with `error="invalid_token"`.
+ *
+ * The user id set here is what `buildNestIndex` gates on, which is the whole
+ * point: the caller now arrives as a person rather than as whoever owns a
+ * pasted key.
+ */
+const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
+  const fallThrough = () => flexAuthWithPromptowlTicket(c, next);
+  if (!config.MCP_OAUTH_ENABLED) return fallThrough();
+  const header = c.req.header("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return fallThrough();
+  const token = header.slice("Bearer ".length);
+  // Our access tokens are 64 hex chars and share no prefix with cnst_ keys or
+  // the dotted JWT tickets, so this check costs one lookup at most.
+  if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
+
+  const grant = await resolveAccessToken(token);
+  // Expired, revoked, or its user removed. Nothing else is 64 hex, so this is
+  // a stale token of ours: answer with the challenge so the client refreshes
+  // or re-authorizes (MCP authorization spec; RFC 6750 §3.1).
+  if (!grant) {
+    if (config.PUBLIC_BASE_URL)
+      c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL, "invalid_token"));
+    return c.json(
+      { error: "This connection has expired or was revoked — reconnect to continue.", code: "invalid_token" },
+      401,
+    );
+  }
+
+  c.set("userId", grant.userId);
+  // OAuth grants are never narrowed to one nest: the whole point is that one
+  // connection reads across everything the person can see.
+  c.set("nestScope", null);
+  // OAuth grants are narrowed by oauthScope at tool dispatch, not by a key
+  // capability: the credential itself is the person's (full tier).
+  c.set("keyCapability", "write");
+  // What the person actually consented to. Enforced at tool dispatch — a
+  // consent screen that says "read" while write tools still work is a lie.
+  c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
+  return next();
+});
+
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const hasBearer = c.req.header("Authorization")?.startsWith("Bearer cnst_");
-  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
-  if (hasBearer || hasCookie) {
+  if (hasBearer || hasSessionCookie(c)) {
     return authMiddleware(c, next);
   }
 
@@ -225,6 +442,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -232,6 +450,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -276,80 +495,34 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     // under EITHER — each attempt is an independent constant-time HMAC check,
     // and a ticket matching neither is rejected. Order is irrelevant: a forged
     // token fails both; a genuine one matches exactly the secret that signed it.
-    const secrets = [
-      config.OFFICIAL_COMMUNITY_SSO_SECRET,
-      config.MCP_SIGNING_SECRET,
-    ].filter(Boolean);
+    const secrets = mcpTicketSecrets();
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
     if (!looksLikeJwt || secrets.length === 0) {
       return flexAuthMiddleware(c, next);
     }
 
-    let claims: SsoTicketClaims | null = null;
-    // A signature check can only find "expired" once it's already matched the
-    // signing secret, so seeing that reason from ANY candidate means this was
-    // a genuine ticket that aged out — not a forged/malformed one — even if a
-    // later candidate in the loop fails differently.
-    let expired = false;
-    for (const secret of secrets) {
-      try {
-        claims = verifySsoTicket(token, secret);
-        break;
-      } catch (err) {
-        if (err instanceof SsoTokenError && err.message === "Ticket expired") {
-          expired = true;
-        }
-        // Wrong secret (or malformed) — try the next candidate.
-      }
-    }
-    if (!claims) {
-      if (expired) {
-        return c.json(
-          { error: "Service ticket expired — reconnect to refresh.", code: "ticket_expired" },
-          401,
-        );
-      }
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Require the MCP scope AND reject a present jti. A one-time-use jti is the
-    // mark of an SSO *login* ticket (redeemable at GET /auth/sso for a browser
-    // session); an MCP bearer must carry neither, so we don't rely on the
-    // issuer keeping scope and jti mutually exclusive — this side enforces it,
-    // and /auth/sso rejects scope "mcp" for the symmetric guarantee.
-    if (claims.scope !== "mcp" || claims.jti) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Audience binding — same policy as GET /auth/sso: enforced when
-    // PUBLIC_BASE_URL is set (official deployments), so a ticket minted for
-    // another server can't be replayed against this one.
-    const expectedAud = config.PUBLIC_BASE_URL;
-    if (expectedAud && (claims.aud || "").replace(/\/$/, "") !== expectedAud) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-
-    // Same sub-shape guard as GET /auth/sso (shared helper so the two
-    // ticket-consuming paths can't drift): a whitespace/garbage sub must never
-    // resolve a user here either.
-    const sub = claims.sub.trim();
-    if (!isValidTicketSub(sub)) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    const db = getDb();
-    // Access-key identities (CU-wdqcq0314u) are never a ticket's user.
-    const user = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
-      [sub],
-    )) as { id: string } | undefined;
-    if (!user) {
+    // Verification (either secret, expiry code, scope:"mcp", no jti,
+    // audience, existing person) lives in auth/mcp-ticket.ts, shared with
+    // POST /auth/keys/exchange so the two ticket consumers can't drift.
+    const resolved = await resolveMcpTicketUser(token, secrets);
+    if (!resolved.ok) {
       return c.json(
-        { error: "No ContextNest account exists for this PromptOwl user" },
-        404,
+        resolved.code ? { error: resolved.error, code: resolved.code } : { error: resolved.error },
+        resolved.status,
       );
     }
+    const { claims, sub } = resolved;
 
-    c.set("userId", user.id);
+    c.set("userId", resolved.userId);
     c.set("nestScope", null);
+    // PromptOwl service tickets act as the full user (never read-only).
+    c.set("keyCapability", "write");
+    // Shared agent driven by someone else: label held pushes with who asked.
+    const act = typeof claims.act === "string" ? claims.act.trim() : "";
+    if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
+      c.set("apiKeyLabel", `${act} via ${sub}'s agent`);
+    }
     return next();
   },
 );
@@ -410,6 +583,10 @@ export function createApp(): Hono<AuthEnv> {
       ? cors({ origin: "*" })
       : cors({ origin: corsOrigins, credentials: true }),
   );
+
+  // Pricing spec v21: a role change that raises someone's billed class needs
+  // explicit confirmation; apps and scripts give it with this header.
+  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
 
   // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
   // this server. CORS does not cover this: it governs who may *read* our
@@ -493,6 +670,10 @@ export function createApp(): Hono<AuthEnv> {
   // ahead of every route (and every route's own auth) so a route added later
   // is closed to nest keys until it is allowlisted on purpose — see
   // auth/nest-scope-guard.ts for what a nest key may reach.
+  // A docs domain (verified custom domain or DOCS_SITES) is entirely its docs
+  // site — answered before any key guard or app route sees it (CU-wdqcq05jhm).
+  app.use("*", docsDomainMiddleware);
+
   app.use("*", nestScopedKeyGuard);
 
   // Health check (public)
@@ -503,10 +684,12 @@ export function createApp(): Hono<AuthEnv> {
       service: "contextnest-community",
       version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
+      // Lets a client know this server can run the OAuth flow before it tries.
+      mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
       logo_url: config.LOGO_URL,
       // Presence only, never the value: lets the UI stop prompting for a
-      // runner key once the server-wide one exists.
-      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
+      // runner key once runs have a credential (own key or PromptOwl's).
+      runner_key_configured: !!resolveModelCredential(),
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
@@ -529,6 +712,13 @@ export function createApp(): Hono<AuthEnv> {
       // (login.microsoftonline.com → Microsoft, accounts.google.com → Google).
       oidc_enabled: oidcReady,
       ...(oidcReady && { oidc_issuer: config.OIDC_ISSUER }),
+      // "Sign in with Google" via PromptOwl: the button sends the browser to
+      // PromptOwl's community-sso route, which signs the user in (Google
+      // creates the PromptOwl account) and returns a ticket to GET /auth/sso.
+      // Live only when this server can verify that ticket.
+      ...(ssoCandidates().length > 0 && {
+        promptowl_google_url: `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/api/auth/community-sso?provider=google`,
+      }),
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
@@ -541,18 +731,33 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // Project-board tasks — on once the engine knows the type (see
+      // ACCEPTED_NODE_TYPES). Off → the board's "+ Add task" makes documents.
+      type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
       // Hootie in the nest (default OFF — admins opt in). Off → POST
       // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
       // actually answer is runner_key_configured above — the UI shows the
       // launcher whenever the feature is on and explains the missing key,
       // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // Metacognition agents (default OFF; needs the workflow plane too). Off →
+      // /nests/:id/metacognition 404s and the Workflows view hides its tab.
+      metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Experimental features, one key each (default OFF; superadmin switches
+      // under Settings → Features). Off → the feature's routes 404 and the UI
+      // renders none of it. Add new experimental switches as keys here.
+      experimental: {
+        doc_pins: config.EXPERIMENTAL_DOC_PINS,
+        doc_stream: config.EXPERIMENTAL_DOC_STREAM,
+      },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
       // renders before sign-in, and none of it is secret.
       hootie_brand: effectiveHootieBrand(),
       hootie_branding_available: hootieBrandingAvailable(),
+      // Own model key / gateway allowed (licence feature byok, Enterprise).
+      byok_available: hasEntitlement("byok"),
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -572,17 +777,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
-  // Admin-features gate: teammate management and governance routes are
-  // blocked until a valid license is installed. Login/register/device/
-  // promptowl/admin-status stay public so users can sign in and reach
-  // the setup flow.
+  // Admin-features gate: teammate management is blocked until a valid
+  // license is installed, unless the server is within the Free tier.
+  // Login/register/device/promptowl/admin-status stay public so users can
+  // sign in and reach the setup flow.
   app.use("/auth/invite", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key before inviting teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -590,12 +794,11 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
   app.use("/auth/teammates", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key to view teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -607,6 +810,11 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/auth", authRoutes);
 
   // ─── License setup endpoints (public — needed before unlock) ──────────
+  // Public, so it says nothing about WHY a license lapsed (trial ended,
+  // deactivated…) — that is between PromptOwl and the admin, on
+  // GET /admin/license. `setup_required` is true only for a server that has
+  // never been licensed; a workspace whose license lapsed stays usable
+  // read-only instead of dropping everyone onto the activation screen.
   app.get("/license/status", (c) => {
     const lic = getCurrentLicense();
     return c.json({
@@ -617,10 +825,69 @@ export function createApp(): Hono<AuthEnv> {
       suspended: !!lic?.suspended,
       suspended_reason: lic?.suspendedReason || null,
       limits: lic?.limits || null,
+      setup_required: !lic?.valid && !getLicenseOwnerEmail(),
     });
   });
 
+  // License detail for the people who can act on it — server admins and the
+  // key's owner (even once it lapsed): the Settings → License tab and the
+  // admin banner, including the live seat count.
+  app.use("/admin/license", flexAuthMiddleware);
+  app.get("/admin/license", async (c) => {
+    if (!(await canSeeLicenseDetail(c.get("userId"))))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const lic = getCurrentLicense();
+    const ent = getEntitlement();
+    const licensed = ent.maxUsers;
+    const billed = await countBilled();
+    const used = billed.users;
+    return c.json({
+      plan: ent.plan,
+      subscribers: { licensed: ent.maxSubscribers, used: billed.subscribers },
+      max_account_owners: ent.maxAccountOwners,
+      valid: !!lic?.valid,
+      tier: lic?.tier || "none",
+      org: lic?.org || null,
+      owner_email: lic?.ownerEmail || null,
+      suspended: !!lic?.suspended,
+      suspended_reason: lic?.suspendedReason || null,
+      ...licenseTerms(lic),
+      seats: {
+        licensed,
+        used,
+        over_limit: licensed != null && used > licensed,
+        at_limit: licensed != null && used >= licensed,
+      },
+      // Consecutive rejections PromptOwl has sent that haven't been acted on
+      // yet (3 drop the license) — the "we're checking your license" banner.
+      pending_rejections: getPendingRejections(),
+      // Set while PromptOwl has been unreachable past the 24h offline limit
+      // (the last good check); the server is read-only until it answers.
+      offline_since: getOfflineLock(),
+      last_checked_at: getLastLicenseCheck(),
+      // Own model keys / LLM gateway (licence feature byok), for the License tab.
+      byok: hasEntitlement("byok"),
+      // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
+      manage_url: config.PROMPTOWL_KEY
+        ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
+        : null,
+    });
+  });
+
+  // Installing the FIRST key is public — that's how a fresh server gets set
+  // up. Once the server has a license owner, replacing the key is theirs (or
+  // a server admin's) to do: a lapsed license must not let any visitor paste
+  // their own key and become this server's admin.
+  app.use("/license/install", async (c, next) =>
+    getLicenseOwnerEmail() ? flexAuthMiddleware(c, next) : next(),
+  );
   app.post("/license/install", async (c) => {
+    if (getLicenseOwnerEmail() && !(await canSeeLicenseDetail(c.get("userId")))) {
+      return c.json(
+        { error: "Only the server admin can replace this server's license key." },
+        403,
+      );
+    }
     let body: { key?: string };
     try {
       body = await c.req.json();
@@ -640,8 +907,8 @@ export function createApp(): Hono<AuthEnv> {
         return c.json(
           {
             valid: false,
-            error:
-              "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.",
+            error: rejectedKeyMessage(info),
+            ...licenseTerms(info),
           },
           400,
         );
@@ -685,6 +952,10 @@ export function createApp(): Hono<AuthEnv> {
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
+    // True while password self-registration is open alongside live SSO —
+    // the Settings page shows a warning on the Manual sign-in card.
+    manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
+    community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
     posthog_key: config.POSTHOG_KEY,
@@ -695,21 +966,42 @@ export function createApp(): Hono<AuthEnv> {
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
+    type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
-    hootie_model: config.HOOTIE_MODEL,
+    // The model in use: the admin's pick, else the efficient default (see hootieModel).
+    hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
     // are in effect and whether edits are accepted.
     ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
+    // Own model keys are in effect and editable only with byok.
+    byok_available: hasEntitlement("byok"),
+    // Own-provider keys PromptOwl holds for this licence (masked tails only).
+    own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
+    // The server's own model gateway (byok): URL + key used as a pair, ahead of
+    // PromptOwl's gateway. The key is NEVER returned — masked tail only.
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
+    // Which key Hootie's calls use: own (the server's gateway) or promptowl (credits).
+    model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    metacognition_enabled: config.FEATURE_METACOGNITION,
+    experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
+    experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // Unset shows the engine's default bound.
+    import_io_concurrency: config.IMPORT_IO_CONCURRENCY ?? 32,
+    message_log_retention_days: config.MESSAGE_LOG_RETENTION_DAYS,
+    message_log_store_bodies: config.MESSAGE_LOG_STORE_BODIES,
+    run_retention_days: config.RUN_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
-    // reported, never the value (same discipline as the Anthropic key below).
+    // reported, never the value.
     oidc_enabled: config.OIDC_ENABLED,
     oidc_issuer: config.OIDC_ISSUER,
     oidc_client_id: config.OIDC_CLIENT_ID,
@@ -717,9 +1009,12 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Enterprise identity providers allowed (licence feature sso). Google is on every plan.
+    sso_available: hasEntitlement("sso"),
     nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
+    mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -735,10 +1030,6 @@ export function createApp(): Hono<AuthEnv> {
     // its own "enabled but not configured" warning from the unsaved draft
     // instead, so this is for API consumers (and tests) rather than that badge.
     oidc_ready: isOidcReady(),
-    // Server-wide runner default. NEVER the value — masked tail only.
-    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
-      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
-      : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
     email_provider: config.EMAIL_PROVIDER,
@@ -757,6 +1048,45 @@ export function createApp(): Hono<AuthEnv> {
     return c.json(currentServerSettings());
   });
 
+  // Models the current credential can reach — the Hootie model picker. On the
+  // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
+  // an own key (byok), whatever that key's provider/gateway lists. With byok,
+  // the licence's own-provider models are added and named in `own_models`.
+  app.use("/admin/models", flexAuthMiddleware);
+  app.get("/admin/models", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const credential = resolveModelCredential();
+    const current = hootieModel(credential);
+    // On the server's own gateway every call stays there, so PromptOwl-held
+    // own-provider models aren't offered.
+    const own = hasEntitlement("byok") && credential?.source !== "own" ? getOwnGateway()?.models ?? [] : [];
+    // `providers`: name → provider, read before PromptOwl's prefix comes off,
+    // so the picker can group the list (OpenAI, Anthropic, …).
+    const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
+      const providers: Record<string, string> = {};
+      names.forEach((n, i) => (providers[n] = modelProvider(ids[i])));
+      for (const m of own) providers[m] = modelProvider(m);
+      return c.json({
+        models: [...new Set([...names, ...own])].sort(),
+        current,
+        source: credential?.source ?? null,
+        providers,
+        ...(own.length ? { own_models: own } : {}),
+        ...extra,
+      });
+    };
+    if (!credential) return reply([], []);
+    try {
+      const ids = await listCredentialModels(credential);
+      // People pick plain names; PromptOwl's instance prefix is added per call.
+      return reply(ids, credential.source === "promptowl" ? ids.map(bareModelName) : ids);
+    } catch (err) {
+      console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
+      return reply([], [], { error: "Could not list models right now." });
+    }
+  });
+
   // Send a test notification to the saved Slack/Teams webhook so the admin can
   // confirm the connector works without waiting for a real governance event.
   app.post("/admin/settings/test-notification", async (c) => {
@@ -773,6 +1103,37 @@ export function createApp(): Hono<AuthEnv> {
     const result = await sendTestNotification(body.channel);
     return result.ok ? c.json({ ok: true }) : c.json({ error: result.error }, 502);
   });
+
+  // Network & status (Settings → Network & status). Admin-only, secret-free:
+  // see src/ops/status.ts. The probes only ever dial hosts derived from this
+  // server's own config (never a URL from the request), are rate-limited, and
+  // never follow redirects.
+  app.use("/admin/status", flexAuthMiddleware);
+  app.use("/admin/status/*", flexAuthMiddleware);
+  const OPS_PROBE_LIMIT = { max: 10, windowMs: 60_000 };
+  const opsProbeAllowed = (c: any) =>
+    tryConsume(`ops-probe:${c.get("userId") ?? clientIp(c)}`, OPS_PROBE_LIMIT);
+
+  app.get("/admin/status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { buildStatusReport } = await import("./ops/status.js");
+    return c.json(await buildStatusReport(c.req.url, (name) => c.req.header(name)));
+  });
+
+  for (const [path, run] of [
+    ["egress", async () => (await import("./ops/egress.js")).runEgressChecks()],
+    ["inbound", async () => (await import("./ops/egress.js")).runInboundCheck()],
+    ["oidc-discovery", async () => (await import("./ops/egress.js")).runOidcDiscoveryCheck()],
+  ] as const) {
+    app.post(`/admin/status/${path}`, async (c) => {
+      if (!(await serverAdminAllowed(c)))
+        return c.json({ error: "Only the server admin can do this." }, 403);
+      if (!opsProbeAllowed(c))
+        return c.json({ error: "Too many checks — wait a minute and try again." }, 429);
+      return c.json(await run());
+    });
+  }
 
   app.patch("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
@@ -816,6 +1177,50 @@ export function createApp(): Hono<AuthEnv> {
       for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
     }
 
+    // Own model keys: Enterprise only (pricing spec §9.3, licence feature
+    // byok). Setting one is refused whole; clearing is always allowed.
+    const providerKeysIn =
+      body.provider_keys && typeof body.provider_keys === "object" && !Array.isArray(body.provider_keys)
+        ? (body.provider_keys as Record<string, unknown>)
+        : null;
+    if (
+      !hasEntitlement("byok") &&
+      ((["anthropic_api_key", "anthropic_base_url"] as const).some(
+        (f) => f in body && String(body[f] ?? "").trim() !== "",
+      ) ||
+        Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== ""))
+    ) {
+      return c.json(
+        {
+          error:
+            "Models on this server are supplied by PromptOwl. Using your own model key or gateway is an Enterprise feature.",
+          code: "byok_required",
+          settings: currentServerSettings(),
+        },
+        403,
+      );
+    }
+
+    // Enterprise IdPs (Entra, Okta, custom OIDC): Enterprise only (licence
+    // feature sso). Only switching to one or turning it on is refused, so a
+    // server already on one keeps signing in. Google is on every plan.
+    if (!hasEntitlement("sso")) {
+      const issuer =
+        "oidc_issuer" in body ? String(body.oidc_issuer ?? "").trim().replace(/\/$/, "") : config.OIDC_ISSUER;
+      const turningOn = "oidc_enabled" in body && !!body.oidc_enabled && !config.OIDC_ENABLED;
+      if (isEnterpriseIssuer(issuer) && (issuer !== config.OIDC_ISSUER || turningOn)) {
+        return c.json(
+          {
+            error:
+              "Single sign-on with Entra ID, Okta or another identity provider is an Enterprise feature. Google sign-in works on every plan.",
+            code: "sso_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
+    }
+
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
@@ -831,6 +1236,12 @@ export function createApp(): Hono<AuthEnv> {
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
+    }
+    if ("community_name" in body) {
+      const v = String(body.community_name ?? "").trim();
+      if (v.length > 100 || /[\r\n]/.test(v))
+        addError("community_name", "Community name must be one line, 100 characters or fewer.");
+      else pending.push({ name: "COMMUNITY_NAME", value: v || null });
     }
     // Validated, not just trimmed. This value is spliced into the copy-paste
     // snippets the Connecting-agents panel renders — a `bash` block for the
@@ -904,20 +1315,25 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("hootie_model" in body) {
       const v = String(body.hootie_model ?? "").trim();
-      if (!v) addError("hootie_model", "Model is required — e.g. claude-opus-5.");
+      if (!v) addError("hootie_model", "Model is required — e.g. claude-sonnet-5.");
       else if (v.length > 200 || /\s/.test(v))
         addError("hootie_model", "Model must be a single identifier with no spaces.");
-      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
+      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-sonnet-5" ? null : v });
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
-    // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
-    // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
-    // onto it cleanly.
+    // The server's own model gateway (byok, gated above): an http(s) URL with
+    // no trailing slash, so the SDK joins /v1/messages onto it; empty clears.
     if ("anthropic_base_url" in body) {
       const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
-      if (!v) pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
-      else {
+      if (!v) {
+        // The key goes with it: left alone, a bare key would be handed to
+        // PromptOwl's gateway at the next boot (moveStoredAnthropicKey).
+        pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
+        // Only a key that WAS paired with a URL: a bare key waits for hand-over.
+        if (config.ANTHROPIC_BASE_URL && !("anthropic_api_key" in body))
+          pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else {
         let ok = false;
         try {
           const u = new URL(v);
@@ -928,31 +1344,50 @@ export function createApp(): Hono<AuthEnv> {
         if (!ok)
           addError(
             "anthropic_base_url",
-            "Model gateway URL must be an http(s) URL, e.g. http://gateway:4000 — or empty to call Anthropic directly.",
+            "Model gateway URL must be an http(s) URL, e.g. http://litellm:4000 — or empty to turn it off.",
           );
+        else if (v !== config.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY && !("anthropic_api_key" in body))
+          // The stored key is write-only: never send it to a host it wasn't checked against.
+          addError("anthropic_api_key", "Paste the gateway key again: a new gateway URL needs its key re-entered.");
         else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
       }
     }
+    // The gateway's key (a LiteLLM virtual key, or an Anthropic key behind a
+    // proxy). Any non-empty string: gateways mint their own formats. Checked
+    // against the gateway THIS patch leaves in place before it is saved.
     if ("anthropic_api_key" in body) {
       const v = body.anthropic_api_key;
       if (v === null || v === "") {
         pending.push({ name: "ANTHROPIC_API_KEY", value: null });
-      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
-        addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
+      } else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512) {
+        addError("anthropic_api_key", "Gateway key must be a single token with no spaces, up to 512 characters (or empty to clear it).");
       } else {
-        // Shape is not validity: a well-formed key that Anthropic rejects
-        // saves cleanly and then fails on the first question someone asks.
-        // One call settles it here, against the gateway THIS patch leaves in
-        // place (it may be setting one in the same request).
         const key = v.trim();
         const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
-        const baseUrl = patchedBase
-          ? patchedBase.value
-          : config.ANTHROPIC_BASE_URL || null;
-        const rejected = await verifyModelKey(key, baseUrl);
-        if (rejected) addError("anthropic_api_key", rejected);
-        else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
+        const baseUrl = patchedBase ? patchedBase.value : config.ANTHROPIC_BASE_URL || null;
+        if (!baseUrl) {
+          addError("anthropic_api_key", "Set the model gateway URL too: the key is only used with it.");
+        } else {
+          const rejected = await verifyModelKey(key, baseUrl);
+          if (rejected) addError("anthropic_api_key", rejected);
+          else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
+        }
       }
+    }
+    // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
+    // only — sent after every other field validates, never kept here.
+    const providerKeys: Array<[string, string | null]> = [];
+    if ("provider_keys" in body) {
+      if (!providerKeysIn) addError("provider_keys", "provider_keys must be an object of provider → key.");
+      else
+        for (const [p, v] of Object.entries(providerKeysIn)) {
+          const field = `provider_keys.${p}`;
+          if (!(OWN_KEY_PROVIDERS as readonly string[]).includes(p)) addError(field, `Unknown model provider "${p}".`);
+          else if (v === null || v === "") providerKeys.push([p, null]);
+          else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512)
+            addError(field, "Paste the provider's API key as one line.");
+          else providerKeys.push([p, v.trim()]);
+        }
     }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
@@ -975,6 +1410,36 @@ export function createApp(): Hono<AuthEnv> {
           value: body.subagent_runs_enabled ? "true" : null,
         });
       }
+    }
+    // Metacognition agents run on the plane's runs and schedules, so they
+    // need it on, same as sub-agent runs. Off clears the row (falls to env).
+    if ("metacognition_enabled" in body) {
+      const planeOn =
+        "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      if (body.metacognition_enabled && !planeOn) {
+        addError("metacognition_enabled", "Metacognition agents require the Workflow plane to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
+      }
+    }
+    // Experimental: the cross-nest document stream. Its own switch, no
+    // dependencies. Off writes a tombstone (null): the switch is off now and
+    // stays off across a restart with the same deploy env, even if that env
+    // says true (db/settings.ts precedence) — same as FEATURE_METACOGNITION.
+    if ("experimental_doc_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_STREAM",
+        value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
+    }
+
+    // Experimental: document pins (CU-wdqcq02crw). Default OFF — enabling
+    // writes "true", disabling clears the row (falls back to the default).
+    if ("experimental_doc_pins" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_PINS",
+        value: body.experimental_doc_pins ? "true" : null,
+      });
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
     // a UI-set value gates identically to an env-set one. null clears → default.
@@ -1012,6 +1477,50 @@ export function createApp(): Hono<AuthEnv> {
         if (!Number.isInteger(n) || n < 0 || n > 3650)
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Import I/O bound (engine limits.ioConcurrency). Capped: each in-flight
+    // file is held in memory. null clears → engine default (32).
+    if ("import_io_concurrency" in body) {
+      const v = body.import_io_concurrency;
+      const n = Number(v);
+      if (v === null || v === "") pending.push({ name: "IMPORT_IO_CONCURRENCY", value: null });
+      else if (!Number.isInteger(n) || n < 1 || n > 256)
+        addError("import_io_concurrency", "Import concurrency must be a whole number between 1 and 256.");
+      else pending.push({ name: "IMPORT_IO_CONCURRENCY", value: String(n) });
+    }
+    // Message-log retention (outbound_messages). Same [0, 3650] range as the
+    // getter; 0 keeps messages forever, null clears → default (30).
+    if ("message_log_retention_days" in body) {
+      const v = body.message_log_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("message_log_retention_days", "Message log retention must be a whole number of days between 0 and 3650 (0 keeps messages forever).");
+        else pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Store redacted bodies (default on). Off persists "false"; on clears to
+    // the default so an unset env stays the source of truth.
+    if ("message_log_store_bodies" in body) {
+      pending.push({
+        name: "MESSAGE_LOG_STORE_BODIES",
+        value: body.message_log_store_bodies ? null : "false",
+      });
+    }
+    // Agent-run retention in days. Same [0, 3650] range as the config getter.
+    // 0 = keep every run (the default). null clears → default (0).
+    if ("run_retention_days" in body) {
+      const v = body.run_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "RUN_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("run_retention_days", "Run retention must be a whole number of days between 0 and 3650 (0 keeps every run).");
+        else pending.push({ name: "RUN_RETENTION_DAYS", value: String(n) });
       }
     }
     // ── OIDC SSO ──
@@ -1105,6 +1614,29 @@ export function createApp(): Hono<AuthEnv> {
         name: "SHARED_DEPLOYMENT",
         value: body.shared_deployment ? "true" : null,
       });
+    }
+    // MCP OAuth authorization server. Turning it on without a canonical base
+    // URL produces metadata that cannot be correct — `resource` has to equal
+    // the URL the user types into their client — so the feature would be on
+    // and silently broken. Refuse the combination with a reason instead of
+    // letting an admin discover it through a failing connector. The base URL
+    // may be set in this same PATCH, so read the pending value first.
+    if ("mcp_oauth_enabled" in body) {
+      const turningOn = !!body.mcp_oauth_enabled;
+      const pendingBase = pending.find((p) => p.name === "PUBLIC_BASE_URL");
+      const baseAfter =
+        pendingBase !== undefined ? pendingBase.value : config.PUBLIC_BASE_URL;
+      if (turningOn && !baseAfter) {
+        addError(
+          "mcp_oauth_enabled",
+          "Set the public base URL first — OAuth metadata must name this server's canonical address, and a guessed one silently fails the client's check.",
+        );
+      } else {
+        pending.push({
+          name: "MCP_OAUTH_ENABLED",
+          value: turningOn ? "true" : null,
+        });
+      }
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
@@ -1409,6 +1941,26 @@ export function createApp(): Hono<AuthEnv> {
       else process.env[name] = value;
     }
 
+    // Own-provider keys go to PromptOwl, which tests each with the provider —
+    // after the settings above are saved, so a refused key never strands them.
+    // ponytail: one at a time, so a later refusal leaves earlier ones saved;
+    // the error names the provider that failed. Without byok there is no own
+    // key to clear (PromptOwl blocks it), so nothing is sent.
+    const toSend = hasEntitlement("byok") ? providerKeys : [];
+    let savedAny = false;
+    for (const [p, v] of toSend) {
+      const refused = await setOwnProviderKey(p, v);
+      if (refused) {
+        if (savedAny) await validateLicense({ forceFresh: true });
+        return c.json(
+          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
+          400,
+        );
+      }
+      savedAny = true;
+    }
+    if (savedAny) await validateLicense({ forceFresh: true });
+
     return c.json({ settings: currentServerSettings() });
   });
 
@@ -1522,6 +2074,9 @@ export function createApp(): Hono<AuthEnv> {
     if (isLicenseOwner || isSuperAdmin(email)) {
       return c.json({ error: "This user is already a superadmin." }, 409);
     }
+    // A superadmin is an Account Owner, and bills as a user (pricing §3).
+    await assertCanAddAccountOwner(email);
+    await assertCanGrant([{ userId: (user as { id: string }).id, next: "user" }]);
 
     const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
     try {
@@ -1610,6 +2165,14 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/admin/community-sites/*", flexAuthMiddleware);
   app.route("/admin/community-sites", communitySiteRoutes);
 
+  // ─── /admin/messages — superadmin message log ────────────────────────────
+  // Every message the server sent, redacted. Superadmin ONLY (never open
+  // mode, never nest admins); every read is audited. See
+  // notify/message-log-routes.ts.
+  app.use("/admin/messages", flexAuthMiddleware);
+  app.use("/admin/messages/*", flexAuthMiddleware);
+  app.route("/admin/messages", messageLogRoutes);
+
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
   // ─── My Work — cross-nest inbox of things that need this person ──────────
@@ -1674,6 +2237,8 @@ export function createApp(): Hono<AuthEnv> {
       requested_by: r.requestedBy,
       requested_at: r.requestedAt,
       priority: r.priority,
+      // Filed by an agent run (migration 060): the inbox links to its trace.
+      run_id: r.runId ?? null,
     });
     // Deletion flags ride the same inbox, as a second item type: `reason` and
     // `request_id` are the extra fields resolving one needs.
@@ -1696,9 +2261,48 @@ export function createApp(): Hono<AuthEnv> {
       // must not treat it as a document to open.
       target_type: r.targetType,
     });
+    // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
+    // edit something they can only read. node_id is the document for a node
+    // target, else the folder path / nest id — target_type says which.
+    // Capped (500, newest first), not paginated: a person can have at most
+    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
+    // the count below reflects what is shown.
+    // Decider nests first, so only rows this caller can act on (or filed) load.
+    const deciderNestIds = (
+      await Promise.all(
+        [...nestName.keys()].map(async (id) =>
+          (await canDecideAccessRequests(id, userId)) ? id : null,
+        ),
+      )
+    ).filter((id): id is string => id !== null);
+    const [decidable, myAccessAsks] = await Promise.all([
+      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
+      listAccessRequests({
+        nestIds: [...nestName.keys()],
+        requesterId: userId,
+        status: "pending",
+        limit: 500,
+      }),
+    ]);
+    const toAccessItem = (r: (typeof decidable)[number]) => ({
+      type: "access" as const,
+      nest_id: r.nest_id,
+      nest_name: nestName.get(r.nest_id)!,
+      node_id: r.target_id,
+      title: r.title || r.target_id,
+      requested_by: r.requested_by,
+      requested_at: r.created_at,
+      priority: "normal" as const,
+      reason: r.note ?? "",
+      request_id: r.id,
+      target_type: r.target_type,
+      level: r.level,
+      run_id: r.run_id ?? null,
+    });
     type WorkItem =
       | ReturnType<typeof toItem>
-      | ReturnType<typeof toDeletionItem>;
+      | ReturnType<typeof toDeletionItem>
+      | ReturnType<typeof toAccessItem>;
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
@@ -1756,9 +2360,14 @@ export function createApp(): Hono<AuthEnv> {
         .filter((r) => nestManage.get(r.nestId))
         .map(toDeletionItem),
     );
+    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
+    items.push(
+      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
+    );
     items.sort(byNewest);
     waiting.push(
       ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
+      ...myAccessAsks.map(toAccessItem),
     );
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
@@ -1793,19 +2402,26 @@ export function createApp(): Hono<AuthEnv> {
         }),
       ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
-    // Deletion flags ride the same two buckets (above) but aren't paginated
-    // (listDeletionRequests always fetches every pending one), so folding in
+    // Deletion flags and access requests ride the same two buckets (above)
+    // but aren't paginated (both lists fetch every pending one), so folding in
     // however many are actually shown keeps the total exact regardless of
     // which review page this call fetched.
-    const deletionsShown =
-      items.filter((i) => i.type === "deletion").length +
-      waiting.filter((i) => i.type === "deletion").length;
+    const requestsShown =
+      items.filter((i) => i.type === "deletion" || i.type === "access").length +
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
+    // Board cards assigned to me (open ones), across every nest I can see.
+    // Best-effort: a failure here must not take the reviews inbox down with it.
+    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
+      console.error("[me/work] assigned list failed", err);
+      return [];
+    });
     return c.json({
       items,
       waiting,
       notifications,
+      assigned,
       pagination: {
-        total: reviewTotal + deletionsShown,
+        total: reviewTotal + requestsShown,
         limit,
         offset,
         has_more: offset + requests.length < total,
@@ -1853,6 +2469,95 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
+  // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // One item per node version across every nest the caller can read, newest
+  // first, access-filtered per nest (see governance/stream-service.ts). Behind
+  // its own switch: off → 404. Version history is a licensed governance view,
+  // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
+  const streamUnreadableWarned = new Set<string>();
+  app.get("/me/stream", async (c) => {
+    if (!config.EXPERIMENTAL_DOC_STREAM) {
+      return c.json(
+        {
+          error:
+            "The document stream is an experimental feature that is not enabled on this server. A superadmin can turn it on in Settings (EXPERIMENTAL_DOC_STREAM).",
+        },
+        404,
+      );
+    }
+    const userId = c.get("userId");
+    if (!getCurrentLicense()?.valid) {
+      const denial = await readOnlyDenial(userId);
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
+    const list = (name: string) =>
+      [
+        ...new Set(
+          (c.req.queries(name) ?? [])
+            .flatMap((v) => v.split(","))
+            .map((v) => v.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 50);
+    let since: string | undefined;
+    const sinceRaw = c.req.query("since");
+    if (sinceRaw) {
+      // Timestamps are UTC throughout: the stream's own `at` values
+      // ("YYYY-MM-DD HH:MM:SS") round-trip, and an ISO date-time with no zone
+      // is read as UTC too, never as the server's local time.
+      const noZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(sinceRaw);
+      const t = Date.parse(noZone ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
+      if (Number.isNaN(t)) return c.json({ error: "since must be a date, e.g. 2026-10-01T00:00:00Z" }, 400);
+      // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
+      since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
+    }
+    const me = await resolveCallerEmail(userId);
+    const nests = new Map<string, string>();
+    for (const n of await listVisibleNests(userId, { readable: true }))
+      nests.set(n.id, n.name ?? n.id);
+    const page = await getDocStream({
+      userId,
+      userEmail: me,
+      nests,
+      filters: {
+        nest: list("nest"),
+        tag: list("tag"),
+        type: list("type"),
+        author: list("author"),
+        since,
+      },
+      // The service clamps (limit 1–100, default 50; offset 0–10000).
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
+      readVersion: async (nestId, nodeId, version) => {
+        const { storage, versions } = await engineCache.get(nestId);
+        try {
+          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
+        } catch {
+          // The unreviewed draft on top is never in the chain — its bytes are
+          // the live file (same fallback as GET …/versions/:version).
+          const node = await storage.readDocument(nodeId);
+          if ((node.frontmatter.version ?? 1) === version) {
+            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
+          }
+          // Neither the chain nor the live file has this version: a broken
+          // chain. The card shows no summary; say so once per document.
+          const key = `${nestId}:${nodeId}`;
+          if (!streamUnreadableWarned.has(key)) {
+            // Bounded: a long-lived server forgets old ones rather than grow.
+            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
+            streamUnreadableWarned.add(key);
+            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
+          }
+          return null;
+        }
+      },
+    });
+    return c.json(page);
+  });
+
   // Watcher notifications — read + mark-read (auth via the /me/* middleware).
   app.get("/me/notifications", async (c) => {
     const me = await resolveCallerEmail(c.get("userId"));
@@ -1883,6 +2588,10 @@ export function createApp(): Hono<AuthEnv> {
       `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
       [new Date().toISOString(), me, nestId],
     );
+    // Leaving takes the leaver's personal document pins here with them
+    // (CU-wdqcq02crw) — unless they still reach the nest another way (a team,
+    // a share grant). One rule with collaborator removal.
+    if (info.changes > 0) await dropPersonalPinsIfGone(nestId, c.get("userId"));
     return c.json({ left: info.changes > 0 });
   });
 
@@ -2014,10 +2723,27 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
-  app.use("/index", flexAuthWithPromptowlTicket);
+  // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
+  // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
+  app.route("/d", siteRoutes);
+  app.get("/robots.txt", robotsTxt);
+  app.get("/sitemap.xml", sitemapIndex);
+  app.get("/site-domain-check", siteDomainCheck);
+  // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
+  // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
+  // token that works on one must work on the other.
+  app.use("/index", mcpOAuthBearer);
   app.route("/index", nestIndexRoutes);
-  app.use("/mcp", flexAuthWithPromptowlTicket);
+  app.use("/mcp", mcpOAuthChallenge);
+  app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
+
+  // Named systems (CU-wdqcq0538g). Admin-gated in the service layer
+  // (owner/admin of the nests involved); a system or headless key never gets
+  // here (the nest-scope guard fences those out).
+  app.use("/systems", flexAuthMiddleware);
+  app.use("/systems/*", flexAuthMiddleware);
+  app.route("/systems", systemRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -2044,10 +2770,75 @@ export function createApp(): Hono<AuthEnv> {
       : flexAuthMiddleware(c, next);
   });
 
+  // Why a write is refused on a read-only server — suspended by PromptOwl, or
+  // no valid license past the Free tier — worded for who asked: admins get the
+  // reason and who to talk to, everyone else one neutral line. null = writes
+  // are allowed (licensed, or unlicensed with FREE_TIER_MAX_USERS or fewer
+  // people; see writesAllowed in auth/free-tier.ts).
+  const readOnlyDenial = async (
+    userId: string,
+  ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
+    const admin = () => canSeeLicenseDetail(userId);
+    if (isSuspended()) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      const lic = getCurrentLicense();
+      return {
+        error: "Server suspended by PromptOwl",
+        extra: {
+          reason: getSuspensionReason(),
+          contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
+          contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
+        },
+      };
+    }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      return {
+        error: "License check overdue",
+        extra: { reason: offlineLockMessage(offlineSince), offline_since: offlineSince },
+      };
+    }
+    if (await writesAllowed()) return null;
+    const lic = getCurrentLicense();
+    if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+    // licenseTerms carries the machine reason code; expose it as
+    // license_reason so it doesn't clobber the human-readable reason.
+    const { reason: licenseReason, ...terms } = licenseTerms(lic);
+    return {
+      error: "License required",
+      extra: {
+        ...terms,
+        license_reason: licenseReason,
+        reason:
+          lic?.reason === "expired"
+            ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
+            : FREE_TIER_EXCEEDED_MESSAGE,
+        setup_url: "/setup",
+      },
+    };
+  };
+
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
     const parts = nestPathParts(c.req.path);
+    // Nest-level writes (create, rename, delete: /nests, /nests/:id) and the
+    // unsynced-folder actions skip the per-nest checks below, but a read-only
+    // server must refuse them too.
+    if ((parts.length < 2 || parts[0] === "unsynced") && c.req.method !== "GET") {
+      const denial = await readOnlyDenial(c.get("userId"));
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
     if (parts.length < 2) return next();
+
+    // Experimental document pins (CU-wdqcq02crw): while the switch is off the
+    // routes do not exist — 404 before the license gate, the permission merge
+    // or the nest lookup, so "off" answers the same whoever asks. Exact
+    // resource segment; documents live under /nodes, never here.
+    const isDocPinsPath = parts[1] === "pins";
+    if (isDocPinsPath && !config.EXPERIMENTAL_DOC_PINS) {
+      return c.json({ error: "Not found" }, 404);
+    }
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
@@ -2122,16 +2913,16 @@ export function createApp(): Hono<AuthEnv> {
       );
     }
 
-    // Kill switch: if suspended, block writes but allow reads
-    if (isSuspended() && c.req.method !== "GET") {
-      return deny(503, "Server suspended by PromptOwl", {
-        reason: getSuspensionReason(),
-        contact: "support@promptowl.ai",
-      });
+    // Kill switch or offline limit: block writes but allow reads
+    // Only admins hear why; everyone else gets the neutral read-only line.
+    if ((isSuspended() || getOfflineLock()) && c.req.method !== "GET") {
+      const denial = await readOnlyDenial(userId);
+      if (denial) return deny(503, denial.error, denial.extra);
     }
 
     // License gate: block writes until a valid PromptOwl key is
-    // installed via /license/install. Reads stay open for plain
+    // installed via /license/install — unless the server is within the Free
+    // tier (readOnlyDenial → writesAllowed). Reads stay open for plain
     // node/nest browsing — but governance endpoints (stewards,
     // review-queue, approve/reject, version history, capability
     // checks) are admin features and stay locked regardless of HTTP
@@ -2147,7 +2938,8 @@ export function createApp(): Hono<AuthEnv> {
       const isCommentPath =
         /\/comments$/.test(path) ||
         /\/comments\/[^/]+\/resolve$/.test(path);
-      const isActivityPath = /\/activity$/.test(path);
+      // The task log is a slice of the same timeline.
+      const isActivityPath = /\/(activity|task-log)$/.test(path);
       // The activity feed serves the review queue's rows under another URL
       // (/nests/:id/feed?filter=changes), so it must sit behind the same
       // license gate as /review-queue. Match the exact nest-scoped route
@@ -2186,7 +2978,10 @@ export function createApp(): Hono<AuthEnv> {
         isActivityPath ||
         isFeedPath ||
         isDeletionQueuePath ||
-        isAgentActivityPath;
+        isAgentActivityPath ||
+        // Document pins (CU-wdqcq02crw) are a curation surface, licensed like
+        // the governance views even on GET. Exact segment (parts[1]).
+        parts[1] === "pins";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -2196,15 +2991,9 @@ export function createApp(): Hono<AuthEnv> {
       const isPushRelease = path.includes("/pending-pushes");
       const needsLicense =
         !isPushRelease && (c.req.method !== "GET" || isGovernance);
-      if (needsLicense) {
-        const lic = getCurrentLicense();
-        if (!lic?.valid) {
-          return deny(503, "License required", {
-            reason:
-              "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
-            setup_url: "/setup",
-          });
-        }
+      if (needsLicense && !getCurrentLicense()?.valid) {
+        const denial = await readOnlyDenial(userId);
+        if (denial) return deny(503, denial.error, denial.extra);
       }
     }
 
@@ -2265,6 +3054,53 @@ export function createApp(): Hono<AuthEnv> {
     const isReadQuery =
       parts.length === 2 &&
       ["context", "query", "search", "export", "chat"].includes(parts[1]);
+    // Checking a title or folder against the structure rules reads, never
+    // writes: viewers check names in the new-document form. The handler asks
+    // for owner/admin itself when the body carries draft rules.
+    const isStructureCheck =
+      parts.length === 3 && parts[1] === "structure" && parts[2] === "check";
+
+    // CAPABILITY GATE (read-only keys). A key minted read-only must never reach
+    // a write or governance mutation on ANY nest — enforced HERE, server-side,
+    // not by UI filtering. A "pure read" is a GET, a read-tier query POST
+    // (context/query/search/export, above), or the MCP transport (always POST;
+    // its per-tool capability gate in mcp/tools.ts blocks the write tools while
+    // leaving reads working). Everything else — node create/update/delete,
+    // approve/reject/submit-review, comments, annotations, deletion requests,
+    // stewards, sharing, sync — is a mutation and is denied. This sits BEFORE
+    // the per-route permission resolution below because a read-only credential
+    // is denied regardless of how much nest permission the underlying user has.
+    // Named system keys never touch the nest's people/settings/credential/
+    // automation surfaces, even when their collaborator standing would allow
+    // it (CU-wdqcq0538g).
+    if (
+      c.get("principalKind") === "system" &&
+      SYSTEM_DENIED_RESOURCES.has(parts[1])
+    ) {
+      return deny(
+        403,
+        "A system key can't manage this nest's people, settings, publishing, keys or automation.",
+      );
+    }
+
+    if (c.get("keyCapability") === "read") {
+      const isPureRead =
+        c.req.method === "GET" ||
+        // chat can post a mention comment and spends model credits — not a read.
+        (isReadQuery && parts[1] !== "chat") ||
+        isMcpTransport;
+      if (!isPureRead) {
+        return deny(
+          403,
+          "This API key is read-only and cannot perform write or governance actions.",
+          {
+            reason:
+              "Mint a read-write key (or use a session) for changes. Read-only keys may only read, query, search, and export.",
+            capability: "read",
+          },
+        );
+      }
+    }
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -2302,6 +3138,24 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (
+        parts[1] === "access-requests" &&
+        ((parts.length === 2 && c.req.method === "POST") ||
+          (parts.length === 3 && parts[2] === "mine" && c.req.method === "GET"))
+      ) {
+        // Asking for more access (CU-wdqcq041jn), for someone who reaches this
+        // nest only through a document or folder share — the person a refused
+        // write most often stops. Filing and reading back their OWN request is
+        // all this opens; the service 404s a target they can't see, and
+        // deciding stays owner/admin-only in the handler.
+        grantNestVisible = access.hasGrant;
+      } else if (parts[1] === "pins") {
+        // Document pins (CU-wdqcq02crw), for someone who reaches this nest only
+        // through a document or folder grant: the list is narrowed to the
+        // documents they can read (filterAccessible), a personal pin needs read
+        // access to its document, and editorial writes are refused in the
+        // handler — so this opens nothing past their grants.
+        grantNestVisible = access.hasGrant;
       } else if (isPinAction) {
         // Pinning, for someone who reaches this nest only through a document or
         // folder grant. They see the nest on their dashboard, so they see its
@@ -2313,7 +3167,7 @@ export function createApp(): Hono<AuthEnv> {
         // half of that same rule.
         grantNestVisible = access.hasGrant;
       } else if (
-        parts[1] === "definitions" &&
+        (parts[1] === "definitions" || parts[1] === "fields") &&
         parts.length === 2 &&
         c.req.method === "GET"
       ) {
@@ -2332,6 +3186,27 @@ export function createApp(): Hono<AuthEnv> {
             "The nest id may be wrong, or these credentials have no access to it. Ask the nest owner to share the nest with you, then reconnect.",
         });
       }
+    }
+
+    // A nest VIEWER can hold a write share on one document or folder (an
+    // approved access request is exactly that). The share has to count on that
+    // node's write routes too, or the grant would read as access and refuse
+    // every edit. Reads don't need it — the viewer already reads the nest.
+    if (
+      permission === "read" &&
+      !grantRole &&
+      access.hasGrant &&
+      parts[1] === "nodes" &&
+      parts.length >= 3 &&
+      c.req.method !== "GET"
+    ) {
+      let targetTail = parts.slice(2).join("/");
+      try {
+        targetTail = decodeURIComponent(targetTail);
+      } catch {
+        /* malformed escape — resolve as-is */
+      }
+      grantRole = await resolveNodeGrant(nestId, userId, targetTail);
     }
 
     let required: NestPermission = "read";
@@ -2393,6 +3268,20 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // Asking for access is what a viewer does (CU-wdqcq041jn), so the whole
+    // /access-requests surface sits at read tier. Approve/deny are refused in
+    // the handler for anyone but the owner, a nest admin or the server admin.
+    // Exact resource segment, so a node slugged "access-requests" stays a node.
+    const isAccessRequestAction = parts[1] === "access-requests";
+    // Custom field definitions: a nest-wide reviewer steward may define them
+    // while holding only read collaborator access, so writes are admitted at
+    // read tier and gated in the handler (assertCanManageFields), which also
+    // refuses an archived nest. Exact resource segment.
+    // ANY route added under /fields inherits this bypass — every handler in
+    // src/nests/field-routes.ts must call assertCanManageFields itself
+    // (test/custom-fields.test.ts pins read collaborators, editor stewards
+    // and tag-scoped reviewers at 403).
+    const isFieldDefinitionAction = parts[1] === "fields";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs
     // before this point.
@@ -2440,9 +3329,15 @@ export function createApp(): Hono<AuthEnv> {
       resource === "visibility" ||
       resource === "reader-mode" ||
       resource === "branding" ||
+      // site (CU-wdqcq05jhm): the public docs site's domain, URLs and SEO —
+      // what the nest says about itself on the open web.
+      resource === "site" ||
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
-      resource === "headless"
+      resource === "headless" ||
+      // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
+      // first, so changing it is owner/admin. Reading stays at read tier.
+      (resource === "instructions" && c.req.method !== "GET")
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -2478,10 +3373,17 @@ export function createApp(): Hono<AuthEnv> {
       !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isAccessRequestAction &&
+      !isFieldDefinitionAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
+      // Document pins: personal pins need only read access; editorial writes
+      // are gated in the handler (assertCanCurate) — a nest-wide reviewer
+      // steward may hold only read collaborator access.
+      !isDocPinsPath &&
       !isAnnotationAction &&
       !isReadQuery &&
+      !isStructureCheck &&
       !isMcpTransport
     ) {
       required = "write";
@@ -2555,8 +3457,32 @@ export function createApp(): Hono<AuthEnv> {
         : 0;
     const effectiveLevel = Math.max(permissionLevel(permission), grantLevel);
 
+    // Org contributor (CU-wdqcq05rz6): a person in the organization who holds
+    // only READ here may still create a document (POST /nodes) or propose an
+    // edit (PATCH /nodes/:id) on an org nest that opted in — and nothing else.
+    // Their permission is NOT raised (nestPermission stays 'read', so every
+    // other gate refuses them as before); the two handlers see
+    // `orgContribution` and route the write through governance/org-contribution
+    // (always a draft, always to review). Exact routes only: the node update is
+    // the ONLY PATCH under /nodes (test/org-contributors.test.ts pins the route
+    // table), and POST with exactly two segments is the create.
+    const isContributionRoute =
+      parts[1] === "nodes" &&
+      ((c.req.method === "POST" && parts.length === 2) ||
+        (c.req.method === "PATCH" && parts.length >= 3));
+    const orgContribution =
+      isContributionRoute &&
+      required === "write" &&
+      !stewardEditorBypass &&
+      permission === "read" &&
+      effectiveLevel < permissionLevel("write") &&
+      access.orgContributor &&
+      credentialMayContribute(c);
+    c.set("orgContribution", orgContribution);
+
     if (
       !stewardEditorBypass &&
+      !orgContribution &&
       effectiveLevel < permissionLevel(required)
     ) {
       // The archive cap is what refused this, not the caller's standing —
@@ -2570,22 +3496,54 @@ export function createApp(): Hono<AuthEnv> {
           { archived: true },
         );
       }
+      // Someone who can see the target but not change it may ask for the
+      // access instead of stopping here (CU-wdqcq041jn). Writes only: a GET
+      // held at write tier (the collaborator roster, hooks) is a read the UI
+      // makes on its own, not something the person tried to change, and
+      // admin-tier routes (visibility, roles) aren't something to request.
+      const hint =
+        required === "write" &&
+        c.req.method !== "GET" &&
+        effectiveLevel >= permissionLevel("read")
+          ? await accessRequestHint({
+              nestId,
+              userId,
+              target: writeTargetForPath(nestId, parts, c.req.method),
+            })
+          : null;
       return deny(
         403,
-        `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
+        hint
+          ? `You don't have edit access here. Your permission: '${permission}'. You can request write access from the nest owner or an admin (POST /nests/${nestId}/access-requests).`
+          : `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
         {
           required_permission: required,
           your_permission: permission,
+          ...hint,
         },
       );
     }
 
-    // Downstream sees the grant role when the caller is acting purely via a
-    // grant (nest permission "none") — so node handlers treat them correctly.
-    c.set(
-      "nestPermission",
-      permission === "none" && grantRole ? grantRole : permission,
-    );
+    // Downstream sees the grant role when it outranks the nest permission — a
+    // caller acting purely via a grant (nest permission "none"), or a viewer
+    // holding a write share on this node — so node handlers treat them
+    // correctly.
+    let effectivePermission: NestPermission =
+      grantRole && permissionLevel(grantRole) > permissionLevel(permission)
+        ? grantRole
+        : permission;
+    // A read-only key caps the effective permission at 'read', so any handler
+    // that keys off nestPermission (and GET /nests/:id, which reports it to the
+    // UI) sees the truth: this credential cannot write here. Defense in depth —
+    // the pure-read gate above already blocked the mutation; this keeps the
+    // reported permission honest and closes any handler that gates on it.
+    if (
+      c.get("keyCapability") === "read" &&
+      permissionLevel(effectivePermission) > permissionLevel("read")
+    ) {
+      effectivePermission = "read";
+    }
+    c.set("nestPermission", effectivePermission);
     return next();
   });
 
@@ -2601,6 +3559,23 @@ export function createApp(): Hono<AuthEnv> {
   // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
   nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
     assertSafeNodeId(c.req.param("nodeId")!);
+    return next();
+  });
+
+  // A browser opening a node's API URL (a pasted or agent-written link) gets
+  // the app's document page, not raw JSON. Such links often drop the `nodes/`
+  // id prefix, so that form is tried too. Anything else falls through (CU-wdqcq05rah).
+  nestsApp.get("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    if (c.req.header("Sec-Fetch-Dest") !== "document" || new URL(c.req.url).search) return next();
+    const nestId = c.req.param("nestId")!;
+    const raw = c.req.param("nodeId")!;
+    const userEmail = await resolveCallerEmail(c.get("userId"));
+    const { storage } = await engineCache.get(nestId);
+    for (const id of raw.startsWith("nodes/") ? [raw] : [raw, `nodes/${raw}`]) {
+      if (!(await canReadNode(nestId, id, c.get("userId"), userEmail))) continue;
+      const found = await storage.readDocument(id).then(() => true, () => false);
+      if (found) return c.redirect(`/nest/${encodeURIComponent(nestId)}?${new URLSearchParams({ doc: id })}`, 302);
+    }
     return next();
   });
 
@@ -2641,7 +3616,8 @@ export function createApp(): Hono<AuthEnv> {
   // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
   // activity log for one document, one folder, or (neither) the whole nest:
   // who changed, reviewed, commented on, deleted, read, retrieved or exported
-  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // it (CU-wdqcq03aw2). ?agent=<name> narrows it to one agent ("what did
+  // agent X read"); read rows carry the version served. Same guard as /trace above — owner, nest admin, or
   // server admin; everyone else 403. Registered before the sub-routers so it
   // matches first under the LinearRouter.
   nestsApp.get("/:nestId/activity-log", async (c) => {
@@ -2681,6 +3657,11 @@ export function createApp(): Hono<AuthEnv> {
       scope,
       types: types as ActivityType[] | undefined,
       actor: c.req.query("actor") || undefined,
+      agent: (() => {
+        const a = c.req.query("agent")?.trim();
+        if (a && a.length > 200) throw new ValidationError("agent must be at most 200 characters");
+        return a || undefined;
+      })(),
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });
@@ -2692,6 +3673,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
+  nestsApp.route("/:nestId", accessRequestRoutes);
   nestsApp.route("/:nestId", governanceRoutes);
   // Node-level sub-routers all share the /:nestId/nodes base and rely on a
   // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the
@@ -2722,22 +3704,31 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
+  nestsApp.route("/:nestId", instructionsRoutes);
+  nestsApp.route("/:nestId", siteSettingsRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document
   // public links; the public render surface is the top-level /p route above.
   nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
+  nestsApp.route("/:nestId/boards", boardRoutes);
+  nestsApp.route("/:nestId/fields", fieldRoutes);
+  nestsApp.route("/:nestId/pins", pinRoutes);
+  nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
+  nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
+  nestsApp.route("/:nestId/systems", nestSystemRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);
@@ -2748,6 +3739,36 @@ export function createApp(): Hono<AuthEnv> {
   // `Unexpected token '<', "<!DOCTYPE "...` instead of falling back cleanly.
   // This server authenticates with Bearer cnst_ keys, not OAuth — no metadata
   // to serve, so 404 is the correct answer.
+  // OAuth discovery, served ONLY when the MCP authorization server is turned
+  // on. Registered ahead of the blanket 404 below so that with the flag off
+  // this whole surface is indistinguishable from before.
+  //
+  // PUBLIC_BASE_URL is required rather than guessed: `resource` has to equal
+  // the URL the user typed into their client, and a value derived from the
+  // request Host is both spoofable and wrong behind a proxy. 503 (not 404)
+  // because the feature is configured-but-unusable, which is an operator
+  // problem worth surfacing, not a missing endpoint.
+  app.get("/.well-known/oauth-protected-resource/mcp", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(protectedResourceMetadata(config.PUBLIC_BASE_URL));
+  });
+  app.get("/.well-known/oauth-authorization-server", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(authorizationServerMetadata(config.PUBLIC_BASE_URL));
+  });
+
+  app.route("/oauth", oauthRoutes);
+
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
@@ -2775,8 +3796,16 @@ export function createApp(): Hono<AuthEnv> {
   app.get(
     "*",
     async (c, next) => {
-      if (isDocumentNavigation(c)) return next();
-      return c.json({ error: "Not found" }, 404);
+      const navigation = isDocumentNavigation(c);
+      // An anonymous GET or HEAD of a docs-site nest's app URL gets the page,
+      // whatever it Accepts: link checkers, AI fetchers and plain curl send
+      // `*/*` or no Accept at all, and a 404 there made every link already out
+      // there look dead. legacySiteRedirect keeps API clients, signed-in
+      // users and `?app=1` on the app.
+      const moved = await legacySiteRedirect(c);
+      if (moved) return moved;
+      if (!navigation) return c.json({ error: "Not found" }, 404);
+      return next();
     },
     serveIndexShell,
   );
@@ -2791,7 +3820,7 @@ export function createApp(): Hono<AuthEnv> {
   // for predictable failure modes (constraint violations, missing rows,
   // disk/path errors). Anything truly unexpected still falls through
   // to the 500.
-  app.onError((err, c) => {
+  app.onError(async (err, c) => {
     // Vault write-lock timeout: retryable, so it carries Retry-After — the
     // one AppError with a header. Raw engine errors are converted here too,
     // for any route that throws them without passing through toSafeError.
@@ -2801,6 +3830,18 @@ export function createApp(): Hono<AuthEnv> {
         "Retry-After": String(busy.retryAfterSeconds),
       });
     }
+    if (err instanceof PlanLimitError) {
+      // Only a server admin can change the plan; everyone else is told who to ask.
+      const userId = (c as any).get?.("userId") as string | undefined;
+      const forAdmin = !!userId && (await isServerAdminUserId(userId).catch(() => false));
+      return c.json(
+        { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
+        402,
+      );
+    }
+    if (err instanceof BillingConfirmError) {
+      return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
+    }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);
     }
@@ -2808,6 +3849,13 @@ export function createApp(): Hono<AuthEnv> {
     const e = err as { code?: string; message?: string };
     const code = e.code;
     const msg = e.message || "";
+
+    // The engine refusing a write it judges invalid — a structure rule the
+    // document breaks, a reserved path — is the caller's to fix: a 400 with
+    // the engine's message (it names the rule), never an opaque 500.
+    if (code === "VALIDATION_FAILED" && err instanceof ContextNestError) {
+      return c.json({ error: forPeople(msg) }, 400);
+    }
 
     // SQLite constraint errors — surface a clear conflict instead of 500.
     if (code === "SQLITE_CONSTRAINT_UNIQUE") {
@@ -2886,6 +3934,10 @@ export function createApp(): Hono<AuthEnv> {
       500,
     );
   });
+
+  // Fail closed: the org-contributor admission above assumes the node update
+  // is the only PATCH under /nodes (see assertSoleNodePatchRoute).
+  assertSoleNodePatchRoute(app.routes);
 
   return app;
 }

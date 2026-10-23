@@ -65,7 +65,26 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[]; ownerEmail?: string; tier?: string } = {},
+  opts: {
+    superAdmins?: string[];
+    ownerEmail?: string;
+    tier?: string;
+    /** Named licence features (entitlements.ts). */
+    features?: string[];
+    /** License limits the mocked license reports. Read on every call, so a
+     *  test can mutate maxUsers after seeding users (seat-limit tests). */
+    licenseLimits?: { maxUsers: number; maxNests: number };
+    /** Fields merged over the mocked license on every call — mutate it to
+     *  flip the server to lapsed/suspended mid-suite. */
+    licenseOverrides?: Record<string, unknown>;
+    /** Pricing entitlement (see license.getEntitlement). Read on every call.
+     *  Defaults to unlimited so plan limits never touch unrelated tests. */
+    entitlement?: Partial<import("../src/auth/license.js").Entitlement>;
+    /** The PromptOwl model gateway the licence check hands out (default none). */
+    gateway?: { baseUrl: string; key: string; defaultModel?: string | null } | null;
+    /** The licence's own-provider gateway (byok; default none). */
+    ownGateway?: import("../src/auth/license.js").OwnGateway | null;
+  } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -82,10 +101,26 @@ export async function createTestApp(
         valid: true,
         tier: opts.tier ?? "test",
         org: "Test Org",
-        limits: null,
+        limits: opts.licenseLimits ?? null,
         suspended: false,
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
+        ...(opts.features ? { features: opts.features } : {}),
+        ...(opts.licenseOverrides ?? {}),
+      }),
+      getModelGateway: () => (opts.gateway ? { defaultModel: null, ...opts.gateway } : null),
+      getOwnGateway: () => opts.ownGateway ?? null,
+      // Kill switch: `licenseOverrides.suspended = true` engages it mid-suite.
+      isSuspended: () => opts.licenseOverrides?.suspended === true || actual.isSuspended(),
+      // Offline limit: `licenseOverrides.offlineSince = <iso>` engages it mid-suite.
+      getOfflineLock: () => (opts.licenseOverrides?.offlineSince as string | undefined) ?? actual.getOfflineLock(),
+      isOfflineLocked: () => !!opts.licenseOverrides?.offlineSince || actual.isOfflineLocked(),
+      getEntitlement: () => ({
+        plan: "enterprise",
+        maxUsers: null,
+        maxAccountOwners: null,
+        maxSubscribers: null,
+        ...(opts.entitlement ?? {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives
@@ -149,6 +184,30 @@ export async function createTestApp(
   return createApp();
 }
 
+/**
+ * Insert `count` people straight into the users table. Each owns a nest, so
+ * each bills as a user — the head-count the Free tier measures
+ * (auth/free-tier.ts); `{ viewers: true }` seeds plain sign-ups instead. Call
+ * AFTER the app's DB is open (createTestApp, or a hand-built app after
+ * initDb): the dynamic import picks up the same post-resetModules db/client
+ * instance the app uses.
+ */
+export async function seedPeople(count: number, prefix = "person", opts: { viewers?: boolean } = {}) {
+  const { getDb } = await import("../src/db/client.js");
+  for (let i = 0; i < count; i++) {
+    const id = randomUUID();
+    await getDb().run(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      [id, `${prefix}-${id}@example.com`, null, "x"],
+    );
+    if (!opts.viewers) {
+      await getDb().run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", [
+        randomUUID(), id, `${prefix} nest`, `${prefix}-nest`,
+      ]);
+    }
+  }
+}
+
 /** Register a user and return their API key + user ID.
  *
  * Note: `/auth/register` only opens a browser session — it deliberately
@@ -204,6 +263,8 @@ export async function jsonRequest(
 ) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Suites raise roles freely; billing-confirm.test.ts covers the 409 without it.
+    "X-Confirm-Billing": "true",
   };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 

@@ -223,6 +223,129 @@ d("PostgresAdapter conformance", () => {
       assertNoDuplicateEdge(adapter, "n-edge", "a", "b", type, "e-1"),
     ).resolves.toBeUndefined();
   });
+
+  it("creates the docs-site tables (068/069) and allows one nest per verified domain", async () => {
+    // Running the migrations again must be a no-op (CREATE / ADD COLUMN IF NOT EXISTS).
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const cols = await adapter.all<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nest_sites'",
+    );
+    expect(cols.map((c) => c.column_name)).toEqual(
+      expect.arrayContaining(["site_key", "domain", "domain_verified_at", "settings", "public_url_host"]),
+    );
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["site-u", "site@example.com", "h"]);
+    for (const id of ["site-a", "site-b"]) {
+      await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", [id, "site-u", id, id]);
+      await adapter.run(
+        "INSERT INTO nest_sites (nest_id, domain, domain_token, indexnow_key) VALUES (?, ?, ?, ?)",
+        [id, "docs.example.com", `t-${id}`, `k-${id}`],
+      );
+    }
+    // Both may claim the domain; the partial unique index lets only one verify it.
+    await adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-a"]);
+    await expect(
+      adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-b"]),
+    ).rejects.toThrow(/unique|duplicate/i);
+    await adapter.run("UPDATE nest_sites SET public_url_host = ? WHERE nest_id = ?", ["example.com", "site-a"]);
+    expect((await adapter.get<{ h: string }>("SELECT public_url_host AS h FROM nest_sites WHERE nest_id = ?", ["site-a"]))?.h).toBe("example.com");
+  });
+
+  it("adds the org-contribution columns (074) with fail-closed defaults, idempotently", async () => {
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["oc-u", "oc@acme.com", "h"]);
+    await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", ["oc-n", "oc-u", "oc", "oc"]);
+    const row = await adapter.get<{ c: string; d: string | null; v: string | null }>(
+      `SELECT n.org_contributions AS c, n.org_domains AS d, u.email_verified_at AS v
+         FROM nests n LEFT JOIN users u ON u.id = ? WHERE n.id = ?`,
+      ["oc-u", "oc-n"],
+    );
+    expect(row).toEqual({ c: "off", d: null, v: null });
+    const { HISTORICAL_MIGRATIONS } = await import("../src/db/migrations.postgres.js");
+    expect(HISTORICAL_MIGRATIONS).toContain("074_org_contributions");
+    // The contributor's own-drafts query (governance/org-contribution.ts).
+    await adapter.run(
+      "INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status) VALUES (?, ?, ?, ?, ?, ?)",
+      ["oc-n", "nodes/idea", 1, "h", "oc@acme.com", "pending_review"],
+    );
+    const mine = await adapter.all<{ node_id: string; review_id: string | null }>(
+      `SELECT v.node_id, v.version, v.status, v.created_at,
+              (SELECT r.id FROM review_requests r
+                WHERE r.nest_id = v.nest_id AND r.node_id = v.node_id
+                  AND r.status = 'pending' LIMIT 1) AS review_id
+         FROM node_versions v
+        WHERE v.nest_id = ? AND v.author = ?
+          AND v.status IN ('draft', 'pending_review', 'rejected')
+          AND v.version = (SELECT MAX(v2.version) FROM node_versions v2
+                            WHERE v2.nest_id = v.nest_id AND v2.node_id = v.node_id)
+        ORDER BY v.created_at DESC
+        LIMIT 200`,
+      ["oc-n", "oc@acme.com"],
+    );
+    expect(mine.map((m) => m.node_id)).toEqual(["nodes/idea"]);
+  });
+
+  it("adds the run claim columns to a runs table that predates them", async () => {
+    // Prod's runs table was created before claimed_by existed; boot crashed
+    // building the metacognition index on it (42703).
+    await adapter.exec("ALTER TABLE runs DROP COLUMN claimed_by, DROP COLUMN claimed_at");
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const cols = await adapter.all<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'runs'",
+    );
+    expect(cols.map((c) => c.column_name)).toEqual(
+      expect.arrayContaining(["claimed_by", "claimed_at"]),
+    );
+  });
+
+  it("adds nests.always_include_tags (073) defaulting to always-include, also to a nests table that predates it", async () => {
+    await adapter.exec("ALTER TABLE nests DROP COLUMN always_include_tags");
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const col = await adapter.get<{ column_default: string; is_nullable: string }>(
+      "SELECT column_default, is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nests' AND column_name = 'always_include_tags'",
+    );
+    expect(col?.is_nullable).toBe("NO");
+    expect(col?.column_default).toContain("always-include");
+    // The resolver's approved-tags join (always-include-service.ts) runs here.
+    const rows = await adapter.all(
+      `SELECT a.node_id, v.tags_json
+         FROM approved_versions a
+         JOIN node_versions v
+           ON v.nest_id = a.nest_id AND v.node_id = a.node_id AND v.version = a.approved_version
+        WHERE a.nest_id = ?`,
+      ["no-such-nest"],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("runs the doc stream's JSON id-list scope and facet SQL (CU-wdqcq02crv)", async () => {
+    const { jsonTextValues } = await import("../src/db/sql.js");
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["u-ds", "ds@example.com", "h"]);
+    await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", ["n-ds", "u-ds", "DS", "ds"]);
+    for (const [node, v, author] of [["nodes/a", 1, "Ds@Example.com"], ["nodes/a", 2, "ds@example.com"], ["nodes/b", 1, "ds@example.com"]] as const) {
+      await adapter.run(
+        `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, created_at)
+         VALUES (?, ?, ?, 'h', ?, 'published', ?)`,
+        ["n-ds", node, v, author, `2026-10-0${v} 00:00:00`],
+      );
+    }
+    const rows = await adapter.all<{ node_id: string }>(
+      `SELECT v.node_id FROM node_versions v
+        WHERE v.nest_id = ? AND v.node_id IN (${jsonTextValues(adapter)}) AND v.created_at >= ?
+        ORDER BY v.created_at DESC, v.id DESC LIMIT ? OFFSET ?`,
+      ["n-ds", JSON.stringify(["nodes/a"]), "2026-10-01 00:00:00", 10, 0],
+    );
+    expect(rows.map((r: { node_id: string }) => r.node_id)).toEqual(["nodes/a", "nodes/a"]);
+    const authors = await adapter.all<{ value: string; n: number | string }>(
+      `SELECT LOWER(v.author) AS value, COUNT(*) AS n FROM node_versions v
+        WHERE v.nest_id = ? GROUP BY LOWER(v.author)`,
+      ["n-ds"],
+    );
+    expect(authors.map((a: { value: string; n: number | string }) => [a.value, Number(a.n)])).toEqual([["ds@example.com", 3]]);
+  });
 });
 
 function hashStr(s: string): number {
