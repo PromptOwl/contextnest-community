@@ -106,3 +106,62 @@ export function visibilityBlockedReason(
     return "Only a server admin can make nests organization-wide on this server.";
   return null;
 }
+
+export interface VisibilityMenuOption {
+  value: NestVisibility;
+  label: string;
+  /** The tier's one-liner, or why it's blocked when it is. */
+  hint: string;
+  disabled: boolean;
+  current: boolean;
+}
+
+const TIER_LABELS: Array<[NestVisibility, string]> = [
+  ["private", "Private"],
+  ["org", "Organization"],
+  ["public", "Public"],
+];
+
+/** The choices every visibility control offers — the nest header button,
+ *  the document top bar and the Collaborators card alike: all three tiers
+ *  from any tier, with a capped one disabled and explained. */
+export function visibilityMenuOptions(
+  current: NestVisibility,
+  ctx: VisibilityContext,
+  policy: VisibilityPolicy,
+): VisibilityMenuOption[] {
+  return TIER_LABELS.map(([value, label]) => {
+    const reason = visibilityBlockedReason(value, current, policy);
+    return {
+      value,
+      label,
+      hint: reason ?? visibilityTierHint(value, ctx),
+      disabled: reason !== null,
+      current: value === current,
+    };
+  });
+}
+
+/** Settle a visibility save into what the control should show. Success takes
+ *  the server's echoed (re-read) value verbatim; failure reverts to the
+ *  PREVIOUS value — never one derived from the target, which once showed a
+ *  public badge on a nest that never went public. */
+export async function settleVisibilityChange(
+  prev: NestVisibility,
+  target: NestVisibility,
+  send: () => Promise<{ visibility?: NestVisibility }>,
+): Promise<{ visibility: NestVisibility; error: string | null }> {
+  try {
+    const result = await send();
+    const visibility = result?.visibility || target;
+    return {
+      visibility,
+      error:
+        visibility === target
+          ? null
+          : "Server did not accept the change. You may not have admin access to this nest.",
+    };
+  } catch (err: any) {
+    return { visibility: prev, error: err?.message || "Failed to change visibility" };
+  }
+}

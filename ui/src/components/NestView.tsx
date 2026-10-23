@@ -3,7 +3,7 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { lazyChunk } from "../lib/lazy-chunk";
 import { OrgContributorPanel } from "./OrgContribution";
 import * as api from "../lib/api";
@@ -17,7 +17,7 @@ import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
   FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
+  Pencil, Trash2, Globe, Building2, FolderInput, Users,
   FileStack, FolderPlus, X, ListChecks,
   Activity, BookOpen, Archive, Eye, Palette, History,
   KeyRound,
@@ -42,16 +42,6 @@ import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
 import { PublicSiteDialog } from "./PublicSiteDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { UploadingOverlay } from "./UploadingOverlay";
@@ -87,7 +77,6 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -171,7 +160,7 @@ export function NestView({
   onTabChange,
   initialSettings,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode, sharedDeployment, docStreamEnabled } = useAuth();
+  const { isAdmin, adminStatus, authMode, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -288,13 +277,6 @@ export function NestView({
   // The held push whose confirm modal is open, if any.
   const [openPushId, setOpenPushId] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
-  const [visibilitySaving, setVisibilitySaving] = useState(false);
-  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
-  // becomes readable by anyone on the internet, outside your organization.
-  const [confirmPublic, setConfirmPublic] = useState(false);
-  // What the new readers will see beside the name. Prefilled from the nest on
-  // open and saved on confirm, same as NestVisibilityControl's dialog.
-  const [publicDescriptionDraft, setPublicDescriptionDraft] = useState("");
   // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
   // read-only presentation to the clean docs reader; reader_home_node names the
   // designated landing/hub node (empty → resolve by convention).
@@ -1040,71 +1022,6 @@ export function NestView({
   };
 
 
-  // Inline visibility toggle from the header (owner/admin only). Optimistic
-  // flip with revert on failure, mirroring ShareNestDialog so the control
-  // never lies about server state. Surfaces the public/private switch outside
-  // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
-  const applyVisibility = async (
-    next: api.NestVisibility,
-    acknowledgePublic?: boolean,
-  ) => {
-    const prev = visibility;
-    setVisibility(next);
-    setVisibilitySaving(true);
-    try {
-      const result = await api.setNestVisibility(
-        nestId,
-        next,
-        acknowledgePublic,
-      );
-      if (result?.visibility) setVisibility(result.visibility);
-    } catch (err: any) {
-      setVisibility(prev); // revert
-      toast.error(err?.message || "Failed to change visibility");
-    } finally {
-      setVisibilitySaving(false);
-    }
-  };
-
-  const handleVisibilityToggle = async () => {
-    // Going public makes the nest readable by anyone on the internet, outside
-    // your organization — confirm first (and send acknowledge_public). Going
-    // back to private is unguarded.
-    // Minimal UX improvement: when the nest is Organization-visible, route to
-    // the full three-tier control on the Collaborators tab so callers discover
-    // the Private option too (org → private path). (Bugfix)
-    if (visibility === "org") {
-      setActiveTab("collaborators");
-      return;
-    }
-    if (visibility !== "public") {
-      setPublicDescriptionDraft(nestDescription ?? "");
-      setConfirmPublic(true);
-      return;
-    }
-    await applyVisibility("private");
-  };
-
-  // Confirm publishing: save a newly written description first — best-effort,
-  // because a failed description save must not block the publish the user just
-  // acknowledged — then apply with the acknowledgement.
-  const confirmPublicWiden = async () => {
-    setConfirmPublic(false);
-    const next = publicDescriptionDraft.trim();
-    if (next && next !== (nestDescription ?? "").trim()) {
-      try {
-        await api.updateNest(nestId, { description: next });
-        setNestDescription(next);
-      } catch (err: any) {
-        toast.error(
-          err?.message || "Failed to save the description — publishing anyway",
-        );
-      }
-    }
-    await applyVisibility("public", true);
-  };
-
-  const publicConfirmCopy = visibilityConfirmCopy("public", { sharedDeployment });
 
   // Public Docs Reader Mode config (server admin, or this nest's own
   // owner/admin — see canManageReaderMode below). Optimistic flip with
@@ -1419,52 +1336,24 @@ export function NestView({
         }
         badges={
           <>
-            {/* Visibility — an inline toggle for owner/admin (so the public/
-              private switch isn't buried in the Share dialog), a read-only
-              badge for everyone else. Gated on !initialLoad (not `loading`,
+            {/* Visibility — a three-tier menu for owner/admin (so the switch
+              isn't buried in the Share dialog), a read-only badge for
+              everyone else. Gated on !initialLoad (not `loading`,
               which flips on every background refetch too — see its
               definition above) so the header never flashes the "private"
               default before the real value lands from fetchData. */}
             {!initialLoad && (canManage ? (
-              // Two-state on purpose: a header shortcut for the common flip,
-              // private <-> public. An org nest routes to the full three-tier
-              // control on the Collaborators tab instead (see
-              // handleVisibilityToggle), since it can move either direction.
-              // Choosing among all three tiers lives in NestVisibilityControl
-              // (Collaborators tab / Share dialog), which is also where each
-              // tier is explained.
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleVisibilityToggle}
-                disabled={visibilitySaving}
-                className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
-                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-                  : ""
-                  }`}
-                title={
-                  visibility === "public"
-                    ? "Public — anyone with the URL can read. Click to make private."
-                    : visibility === "org"
-                      ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
-                      : "Private. Click to make public (anyone with the URL can read)."
-                }
-              >
-                {visibilitySaving ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : visibility === "public" ? (
-                  <Globe className="h-3.5 w-3.5" />
-                ) : visibility === "org" ? (
-                  <Building2 className="h-3.5 w-3.5" />
-                ) : (
-                  <Lock className="h-3.5 w-3.5" />
-                )}
-                {visibility === "public"
-                  ? "Public"
-                  : visibility === "org"
-                    ? "Organization"
-                    : "Private"}
-              </Button>
+              // All three tiers, the acknowledgements and the server's
+              // admins-only caps — the same control as the Collaborators tab
+              // and the document top bar, behind the header's badge button.
+              <NestVisibilityControl
+                nestId={nestId}
+                variant="header"
+                onChanged={fetchData}
+                onError={(m) => {
+                  if (m) toast.error(m);
+                }}
+              />
             ) : (
               visibility !== "private" && (
                 <Badge
@@ -2634,42 +2523,6 @@ export function NestView({
         />
       )}
 
-      {/* Outside-org publish acknowledgement — flipping a nest to public makes
-          it readable by anyone on the internet, outside your organization.
-          Confirm sends acknowledge_public:true; the server 409s without it. */}
-      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{publicConfirmCopy.title}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {publicConfirmCopy.body}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {/* What those readers will see beside the name. Prefilled from the
-              nest; an empty one can be written here and is saved on confirm. */}
-          <div className="space-y-1.5">
-            <Label htmlFor="nest-public-description" className="text-xs">
-              {(nestDescription ?? "").trim()
-                ? "Description readers will see"
-                : "This nest has no description — readers will only see its name. Add one? (optional)"}
-            </Label>
-            <Textarea
-              id="nest-public-description"
-              value={publicDescriptionDraft}
-              onChange={(e) => setPublicDescriptionDraft(e.target.value)}
-              placeholder="What this nest is for, and who it's meant for"
-              rows={2}
-              data-testid="nest-public-description"
-            />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void confirmPublicWiden()}>
-              {publicConfirmCopy.confirm}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
 
       {showAssignSteward && (
