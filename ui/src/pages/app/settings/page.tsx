@@ -49,6 +49,7 @@ import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
+import { PluginsSettingsCard } from "./PluginsSettingsCard";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -111,6 +112,8 @@ const TABS: {
     label: "Features",
     keys: [
       "workflow_plane_enabled",
+      "plugins_enabled",
+      "plugins_packages",
       "subagent_runs_enabled",
       "metacognition_enabled",
       "experimental_doc_stream_enabled",
@@ -1151,6 +1154,17 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Nest Plugins — outside sources into nests (FEATURE_PLUGINS) */}
+            <PluginsSettingsCard
+              enabled={!!draft.plugins_enabled}
+              packages={draft.plugins_packages ?? ""}
+              loaded={settings?.plugins_loaded ?? []}
+              loadErrors={settings?.plugins_load_errors ?? []}
+              dirty={dirtyKeys.includes("plugins_packages") || dirtyKeys.includes("plugins_enabled")}
+              error={fieldErrors.plugins_packages}
+              onChange={set}
+            />
 
             {/* Metacognition agents — server-run, so they need the plane */}
             <Card>
@@ -2655,7 +2669,17 @@ export default function SettingsRoute() {
   ) => {
     try {
       const res = await updateAdminSettings(patch);
-      setServerSettings(res.settings);
+      // What loaded from the plugin allowlist comes only with GET (the server
+      // reloads the set on save), so re-read when the plugin settings moved.
+      if ("plugins_enabled" in patch || "plugins_packages" in patch) {
+        setServerSettings(await getAdminSettings().catch(() => res.settings));
+      } else {
+        setServerSettings((prev) => ({
+          ...res.settings,
+          plugins_loaded: prev?.plugins_loaded,
+          plugins_load_errors: prev?.plugins_load_errors,
+        }));
+      }
       // Feature flags gate other views (workflow-plane nav, sub-agent picker,
       // PromptOwl teams …) off the /health-sourced AuthContext state, not
       // serverSettings. Always re-read health after a save so ANY flag exposed

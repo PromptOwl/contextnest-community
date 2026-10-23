@@ -264,6 +264,9 @@ export async function getHealth() {
     /** Present when PromptOwl SSO tickets are accepted — the Google button target. */
     promptowl_google_url?: string;
     workflow_plane_enabled?: boolean;
+    /** Nest Plugins (default OFF). Off → /nests/:id/plugins 404s and the
+     *  nest's Plugins page is not listed. */
+    plugins_enabled?: boolean;
     /** Import teams from PromptOwl (default OFF). Off → the panel is hidden. */
     promptowl_teams_enabled?: boolean;
     /** Content-type toggles — default ON server-side; the editor's type
@@ -386,6 +389,13 @@ export interface AdminSettings {
   message_log_store_bodies: boolean;
   /** Agent-run retention (runs + steps); 0 keeps every run. */
   run_retention_days: number;
+  /** Nest Plugins (FEATURE_PLUGINS, default OFF). */
+  plugins_enabled: boolean;
+  /** The plugin allowlist: comma-separated package names or module paths. */
+  plugins_packages: string;
+  /** Read-only, GET only: what the allowlist loaded, and what it refused. */
+  plugins_loaded?: PluginLoaded[];
+  plugins_load_errors?: PluginLoadError[];
   /** OIDC SSO. The client secret is write-only — only its presence comes back. */
   oidc_enabled: boolean;
   oidc_issuer: string;
@@ -3831,6 +3841,131 @@ export interface EnvEntry {
   value_masked: string;
   updated_by: string;
   updated_at: string;
+}
+
+// ── Nest Plugins ─────────────────────────────────────────────────────────
+// /nests/:id/plugins (FEATURE_PLUGINS). Shapes mirror src/plugins/service.ts.
+
+/** One loaded plugin, as /admin/settings lists it. */
+export interface PluginLoaded {
+  name: string;
+  version: string;
+  displayName: string;
+  capabilities: string[];
+}
+
+/** A plugin spec on the allowlist that did not load, and why. */
+export interface PluginLoadError {
+  spec: string;
+  error: string;
+}
+
+/** One property of a plugin's settings JSON Schema. `x-secret` marks a
+ *  credential: write-only, stored encrypted, returned only as "••••". */
+export interface PluginSettingProperty {
+  type?: string;
+  title?: string;
+  description?: string;
+  enum?: string[];
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  pattern?: string;
+  "x-secret"?: boolean;
+}
+
+export interface PluginSettingsSchema {
+  type?: string;
+  required?: string[];
+  properties?: Record<string, PluginSettingProperty>;
+}
+
+export interface PluginRun {
+  id: string;
+  /** "manual:<email>" for Run now. */
+  triggered_by: string;
+  status: "clean" | "conflicts" | "failed";
+  created: number;
+  updated: number;
+  unchanged: number;
+  /** Items kept because someone edited the node here. */
+  conflicts: Array<{ externalId: string; id: string }>;
+  /** Error text only at the write tier; null for a viewer. */
+  failed: Array<{ externalId: string; error: string | null }>;
+  error: string | null;
+  started_at: string;
+  finished_at: string;
+}
+
+/** A plugin as one nest sees it: the manifest plus this nest's config. */
+export interface NestPlugin {
+  name: string;
+  version: string;
+  displayName: string;
+  description: string;
+  capabilities: string[];
+  itemKinds: string[];
+  settingsSchema: PluginSettingsSchema;
+  secretKeys: string[];
+  faces: { pull: boolean; process: boolean; healthcheck: boolean };
+  configured: boolean;
+  enabled: boolean;
+  mode: "raw" | "summary";
+  folder: string | null;
+  /** Plain values as stored; a set secret is "••••", an unset one absent. */
+  settings: Record<string, unknown>;
+  cursor: unknown;
+  /** The system identity the plugin writes as. */
+  system: { id: string; name: string; email: string; capability: string } | null;
+  last_run_at: string | null;
+  last_status: PluginRun["status"] | null;
+  runs: PluginRun[];
+}
+
+export interface NestPluginsResponse {
+  plugins: NestPlugin[];
+  /** Empty below the write tier. */
+  load_errors: PluginLoadError[];
+}
+
+/** PUT body. A secret: string sets, null clears, omitted keeps. */
+export interface ConfigurePluginBody {
+  enabled?: boolean;
+  mode?: "raw" | "summary";
+  folder?: string | null;
+  settings?: Record<string, unknown>;
+}
+
+const pluginPath = (nestId: string, name?: string) =>
+  `/nests/${nestId}/plugins${name ? `/${encodeURIComponent(name)}` : ""}`;
+
+export async function listNestPlugins(nestId: string) {
+  return request<NestPluginsResponse>(pluginPath(nestId));
+}
+
+export async function configureNestPlugin(nestId: string, name: string, body: ConfigurePluginBody) {
+  return request<{ plugin: NestPlugin }>(pluginPath(nestId, name), {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function removeNestPlugin(nestId: string, name: string) {
+  return request<{ deleted: true }>(pluginPath(nestId, name), { method: "DELETE" });
+}
+
+export async function runNestPlugin(nestId: string, name: string) {
+  return request<{ run: PluginRun & { skipped: number; clean: boolean } }>(`${pluginPath(nestId, name)}/run`, {
+    method: "POST",
+  });
+}
+
+export async function listNestPluginRuns(nestId: string, name: string, limit = 20) {
+  return request<{ runs: PluginRun[] }>(`${pluginPath(nestId, name)}/runs?limit=${limit}`);
+}
+
+export async function nestPluginHealth(nestId: string, name: string) {
+  return request<{ ok: boolean; detail?: string }>(`${pluginPath(nestId, name)}/health`);
 }
 
 export async function listEnv(nestId: string) {

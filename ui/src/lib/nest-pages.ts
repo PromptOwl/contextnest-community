@@ -1,6 +1,6 @@
 /**
  * Nest view registry — the pages that live beside a nest's own page
- * (/nest/<id>): Board, Graph, Definitions, Workflows. Same shape as the
+ * (/nest/<id>): Board, Graph, Definitions, Workflows, Structure, Plugins. Same shape as the
  * app page registry (pages.ts): one folder per page,
  *
  *   ui/src/pages/nest/<slug>/meta.ts   — path segment, label, icon, order, gate
@@ -24,6 +24,8 @@ export interface NestPageCaps {
   isReaderView: boolean;
   canEditDocs: boolean;
   workflowPlaneEnabled: boolean;
+  /** The server has Nest Plugins on (FEATURE_PLUGINS, from /health). */
+  pluginsEnabled?: boolean;
 }
 
 export interface NestPageMeta {
@@ -34,7 +36,7 @@ export interface NestPageMeta {
   /** Sidebar / tab-strip order, ascending. */
   order: number;
   /** The App view this page renders as. */
-  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
+  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "plugins";
   beta?: boolean;
   /** Who gets the page listed and reachable. Reader mode hides every nest
    *  view regardless (see nest-caps isViewBlockedInReaderMode); this gate
