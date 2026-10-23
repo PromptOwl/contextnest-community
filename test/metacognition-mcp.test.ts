@@ -350,6 +350,15 @@ describe("the server-wide /mcp", () => {
     const viaNest = await call("context_metacognition_list", {});
     expect(isError(viaServer)).toBe(false);
     expect(viaServer.result.structuredContent).toEqual(viaNest.result.structuredContent);
+    const suggestServer = await mcp(
+      "/mcp",
+      "tools/call",
+      { name: "context_metacognition_suggest", arguments: { nest: nestId, agent: "nodes/scout" } },
+      owner.apiKey,
+    );
+    const suggestNest = await call("context_metacognition_suggest", { agent: "nodes/scout" });
+    expect(isError(suggestServer)).toBe(false);
+    expect(suggestServer.result.structuredContent).toEqual(suggestNest.result.structuredContent);
     const dry = await mcp(
       "/mcp",
       "tools/call",
@@ -376,8 +385,13 @@ describe("the server-wide /mcp", () => {
   it("a writer doesn't see them and is refused a call naming the nest", async () => {
     const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
     for (const t of TOOLS) expect(names).not.toContain(t);
-    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
-    expect(isError(r)).toBe(true);
+    for (const [name, args] of [
+      ["context_metacognition_list", { nest: nestId }],
+      ["context_metacognition_suggest", { nest: nestId, agent: "nodes/scout" }],
+    ] as const) {
+      const r = await mcp("/mcp", "tools/call", { name, arguments: args }, editor.apiKey);
+      expect(isError(r), name).toBe(true);
+    }
   });
 });
 

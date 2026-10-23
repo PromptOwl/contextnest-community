@@ -457,11 +457,6 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edge_types_list",
 ]);
 
-/** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
- *  UI/REST parity. Advertised only to a person who owns/administers the nest
- *  and holds a full credential (mcp/routes.ts), and re-checked on every call
- *  by the same service layer the REST routes use. Not in MCP_READ_TOOLS or
- *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 /** The zod field for an `array` property in a tool's JSON schema, shared by
  *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
  *  (metacognition feeds, MCP servers): each item must be an object, its fields
@@ -470,6 +465,11 @@ export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny
   return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
 }
 
+/** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
+ *  UI/REST parity. Advertised only to a person who owns/administers the nest
+ *  and holds a full credential (mcp/routes.ts), and re-checked on every call
+ *  by the same service layer the REST routes use. Not in MCP_READ_TOOLS or
+ *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   "context_systems",
