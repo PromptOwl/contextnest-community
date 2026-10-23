@@ -182,7 +182,7 @@ sharingRoutes.get("/mentionable", async (c) => {
 });
 
 // PATCH /nests/:nestId/visibility — the rules (server cap, acknowledgement,
-// headless) live in visibility-service.ts, shared with MCP context_set_visibility.
+// headless) live in visibility-service.ts.
 sharingRoutes.patch("/visibility", async (c) => {
   const body = await c.req.json<{
     visibility?: string;

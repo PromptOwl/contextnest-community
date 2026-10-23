@@ -7,9 +7,10 @@ import { claimSiteKeyIfLive } from "../site/settings.js";
 import type { NestVisibility } from "../shared/types.js";
 
 /**
- * Changing a nest's visibility — shared by REST (PATCH /nests/:id/visibility
- * in sharing-routes.ts) and MCP (context_set_visibility) so the two surfaces
- * can't drift. Callers have already checked the nest "admin" tier.
+ * Changing a nest's visibility — the service behind REST PATCH
+ * /nests/:id/visibility (sharing-routes.ts), kept out of the route so an MCP
+ * twin can reuse it once the engine defines the op. Callers have already
+ * checked the nest "admin" tier.
  */
 
 const RANK: Record<NestVisibility, number> = { private: 0, org: 1, public: 2 };
@@ -108,17 +109,29 @@ export async function setNestVisibility(
   }
   // Widening is conditional on the nest not being headless (CU-wdqcq0314u), so
   // a headless toggle racing this request can't leave it both public and
-  // headless. A zero-row result is then told apart from "no such nest" below.
+  // headless — and on the tier the cap was checked against, so a concurrent
+  // narrowing can't turn an allowed "narrow to org" into an uncapped widening.
+  // A zero-row result is then told apart from "no such nest" below.
   const result = await db.run(
     visibility === "private"
       ? "UPDATE nests SET visibility = ? WHERE id = ?"
-      : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
-    [visibility, nestId],
+      : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0 AND visibility = ?",
+    visibility === "private" ? [visibility, nestId] : [visibility, nestId, nest.visibility],
   );
   invalidateSiteNests();
   if (result.changes > 0) await claimSiteKeyIfLive(nestId);
   if (result.changes === 0 && visibility !== "private" && (await isNestHeadless(nestId))) {
     return { ok: false, status: 409, error: headlessRefusal };
+  }
+  if (result.changes === 0 && visibility !== "private") {
+    const now = await db.get("SELECT 1 FROM nests WHERE id = ?", [nestId]);
+    if (now) {
+      return {
+        ok: false,
+        status: 409,
+        error: "This nest's visibility changed while you were saving. Reload and try again.",
+      };
+    }
   }
   // A zero-row update means the nest id didn't resolve — report it instead of
   // echoing success, which previously let the UI flip to a state the DB never
