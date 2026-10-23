@@ -3,8 +3,8 @@
  *
  * An agent document the SERVER runs as a persona, on the nest's model key. It
  * reads inside the folders you give it, and every change it wants is filed as
- * a proposal for a reviewer — it never publishes. Configure one (owner/admin),
- * run it now, and see what each run cost and did. Scheduling is the ordinary
+ * a proposal for a reviewer — it never publishes. Owners and admins only:
+ * configure one, run it now, and see what each run cost and did. Scheduling is the ordinary
  * Activity → Schedules row; the full step-by-step trace is the Run tab.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -17,111 +17,15 @@ import {
   listNodesMeta,
   listRuns,
   type MetacognitionAgent,
-  type MetacognitionAgentConfig,
   type MetacognitionTrace,
   type RunSummary,
 } from "../lib/api";
 import { formatServerDate } from "../lib/dates";
 import { AgentActivity } from "./AgentActivity";
-import { MetacognitionNotifySection, EMPTY_NOTIFY, toNotifyConfig, toNotifyDraft, type NotifyDraft } from "./MetacognitionNotifySection";
+import { emptyForm, formFromConfig, summarize, type FormState } from "../lib/metacognition-form";
+import { MetacognitionForm } from "./MetacognitionForm";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { Input } from "./ui/input";
-import { Textarea } from "./ui/textarea";
-import { Label } from "./ui/label";
-import { Switch } from "./ui/switch";
-
-interface Draft {
-  node_id: string;
-  enabled: boolean;
-  name: string;
-  avatar: string;
-  read: string;
-  propose: string;
-  max_steps: number;
-  max_proposals: number;
-  max_comments: number;
-  max_seconds: number;
-  max_tokens: number;
-  feeds: string;
-  mcp: string;
-  model: string;
-  notify: NotifyDraft;
-}
-
-const EMPTY: Draft = {
-  node_id: "",
-  enabled: true,
-  name: "",
-  avatar: "",
-  read: "",
-  propose: "",
-  max_steps: 12,
-  max_proposals: 5,
-  max_comments: 5,
-  max_seconds: 300,
-  max_tokens: 300_000,
-  feeds: "",
-  mcp: "",
-  model: "",
-  notify: EMPTY_NOTIFY,
-};
-
-const list = (s: string) =>
-  s
-    .split(/[,\n]/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-function toDraft(a: MetacognitionAgent): Draft {
-  return {
-    node_id: a.node_id,
-    enabled: a.enabled,
-    name: a.persona.name,
-    // A URL avatar saved before glyph-only avatars is dropped on the next save.
-    avatar: a.persona.avatar && !a.persona.avatar.includes("://") ? a.persona.avatar : "",
-    read: a.scope.read.join(", "),
-    propose: a.scope.propose.join(", "),
-    max_steps: a.caps.max_steps,
-    max_proposals: a.caps.max_proposals,
-    max_comments: a.caps.max_comments ?? 5,
-    max_seconds: a.caps.max_seconds,
-    max_tokens: a.caps.max_tokens,
-    feeds: a.feeds.map((f) => `${f.name} ${f.url}`).join("\n"),
-    mcp: a.mcp_servers
-      .map((m) => [m.name, m.url, m.allowed_tools.join(","), m.auth_env ?? ""].join(" ").trim())
-      .join("\n"),
-    model: a.model ?? "",
-    notify: toNotifyDraft(a.notify),
-  };
-}
-
-/** "name url" per line → feeds; "name url tool1,tool2 [ENV_KEY]" → MCP servers. */
-function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
-  const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
-  return {
-    enabled: d.enabled,
-    persona: { name: d.name.trim(), avatar: d.avatar.trim() || null },
-    scope: { read: list(d.read), propose: list(d.propose) },
-    caps: {
-      max_steps: d.max_steps,
-      max_proposals: d.max_proposals,
-      max_comments: d.max_comments,
-      max_seconds: d.max_seconds,
-      max_tokens: d.max_tokens,
-    },
-    feeds: lines(d.feeds).map((l) => {
-      const [name, url] = l.split(/\s+/);
-      return { name, url };
-    }),
-    mcp_servers: lines(d.mcp).map((l) => {
-      const [name, url, tools, auth_env] = l.split(/\s+/);
-      return { name, url, allowed_tools: list(tools ?? ""), ...(auth_env ? { auth_env } : {}) };
-    }),
-    model: d.model.trim() || null,
-    notify: toNotifyConfig(d.notify),
-  };
-}
 
 /** A glyph, never an image: a remote image URL would be fetched by every
  *  reviewer's browser that shows the persona. */
@@ -154,13 +58,12 @@ export function RunCost({ trace }: { trace: MetacognitionTrace | null | undefine
   );
 }
 
+/** Shown to nest owners and admins only (WorkflowsView gates the tab). */
 export function MetacognitionPanel({
   nestId,
-  canConfigure,
   onOpenRun,
 }: {
   nestId: string;
-  canConfigure: boolean;
   /** Open a run's trace (Workflows → Run). */
   onOpenRun?: (runId: string) => void;
 }) {
@@ -169,8 +72,9 @@ export function MetacognitionPanel({
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [saving, setSaving] = useState(false);
+  // The setup form, when open: a new setup (prefilled from the document) or
+  // an existing agent's saved config.
+  const [draft, setDraft] = useState<{ form: FormState; isNew: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Which agents have their activity history open.
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -218,25 +122,6 @@ export function MetacognitionPanel({
   );
   const titleOf = (id: string) => agentDocs.find((d) => d.id === id)?.title || id.replace(/^nodes\//, "");
 
-  const save = async () => {
-    if (!draft) return;
-    setSaving(true);
-    try {
-      await saveMetacognitionAgent(nestId, draft.node_id, toConfig(draft));
-      setDraft(null);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const num = (k: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setDraft((d) => (d ? { ...d, [k]: Number(e.target.value) || 0 } : d));
-  const text = (k: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-    setDraft((d) => (d ? { ...d, [k]: e.target.value } : d));
-
   return (
     <div className="space-y-4" data-testid="metacognition-panel">
       <p className="text-sm text-muted-foreground">
@@ -262,9 +147,7 @@ export function MetacognitionPanel({
           <p className="text-sm font-medium mb-1">No metacognition agents yet</p>
           <p className="text-xs text-muted-foreground">
             {agentDocs.length
-              ? canConfigure
-                ? "Turn one of this nest's agent documents into one below."
-                : "An owner or admin can turn an agent document into one."
+              ? "Turn one of this nest's agent documents into one below."
               : "Create an agent document first (Documents → New → type Agent). Its approved text is the agent's instructions."}
           </p>
         </div>
@@ -285,7 +168,7 @@ export function MetacognitionPanel({
                       off
                     </Badge>
                   )}
-                  <Badge variant="secondary" className="text-[10px] shrink-0" title="Where it may read / propose">
+                  <Badge variant="secondary" className="text-[10px] shrink-0" title={summarize(a)}>
                     reads {a.scope.read.length ? a.scope.read.join(", ") : "everything"} · proposes in{" "}
                     {a.scope.propose[0] === "*" ? "what it reads" : a.scope.propose.length ? a.scope.propose.join(", ") : "nothing (proposals off)"}
                   </Badge>
@@ -330,31 +213,27 @@ export function MetacognitionPanel({
                     )}
                     {last?.status === "running" ? "Running" : "Run now"}
                   </Button>
-                  {canConfigure && (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 shrink-0"
-                        title="Edit"
-                        onClick={() => setDraft(toDraft(a))}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
-                        title="Stop it being a metacognition agent (the document stays)"
-                        onClick={async () => {
-                          await deleteMetacognitionAgent(nestId, a.node_id);
-                          await load();
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 shrink-0"
+                    title="Edit"
+                    onClick={() => setDraft({ form: formFromConfig(a.node_id, a.enabled, a), isNew: false })}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                    title="Stop it being a metacognition agent (the document stays)"
+                    onClick={async () => {
+                      await deleteMetacognitionAgent(nestId, a.node_id);
+                      await load();
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
                 {last && (
                   <div className="pl-9 text-xs space-y-0.5">
@@ -391,11 +270,11 @@ export function MetacognitionPanel({
         </div>
       )}
 
-      {canConfigure && !draft && unconfigured.length > 0 && (
+      {!draft && unconfigured.length > 0 && (
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setDraft({ ...EMPTY, node_id: unconfigured[0].id, name: unconfigured[0].title.slice(0, 60) })}
+          onClick={() => setDraft({ form: emptyForm(unconfigured[0].id, unconfigured[0].title), isNew: true })}
           data-testid="metacognition-add"
         >
           <Plus className="h-3.5 w-3.5 mr-1" /> Make an agent document a metacognition agent
@@ -403,103 +282,17 @@ export function MetacognitionPanel({
       )}
 
       {draft && (
-        <div className="rounded-lg border p-4 space-y-3" data-testid="metacognition-form">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1">
-              <Label>Agent document</Label>
-              {agents.some((a) => a.node_id === draft.node_id) ? (
-                <div className="text-sm">{titleOf(draft.node_id)}</div>
-              ) : (
-                <select
-                  value={draft.node_id}
-                  onChange={(e) => setDraft({ ...draft, node_id: e.target.value })}
-                  className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-                >
-                  {unconfigured.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.title}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-            <div className="flex items-end gap-2">
-              <Switch checked={draft.enabled} onCheckedChange={(v) => setDraft({ ...draft, enabled: v })} />
-              <span className="text-sm">{draft.enabled ? "On" : "Off"}</span>
-            </div>
-            <div className="space-y-1">
-              <Label>Persona name</Label>
-              <Input value={draft.name} onChange={text("name")} placeholder="Archivist" data-testid="metacognition-name" />
-            </div>
-            <div className="space-y-1">
-              <Label>Avatar (an emoji or up to 4 letters)</Label>
-              <Input value={draft.avatar} onChange={text("avatar")} placeholder="🦉" />
-            </div>
-            <div className="space-y-1">
-              <Label>Reads in (folders, comma-separated; empty = whole nest)</Label>
-              <Input value={draft.read} onChange={text("read")} placeholder="gtm, ops" data-testid="metacognition-read" />
-            </div>
-            <div className="space-y-1">
-              <Label>Proposes in (inside what it reads; * = anywhere it reads; empty = no proposals)</Label>
-              <Input value={draft.propose} onChange={text("propose")} placeholder="gtm" data-testid="metacognition-propose" />
-            </div>
-          </div>
-          <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
-            <div className="space-y-1">
-              <Label>Turns per run</Label>
-              <Input type="number" min={1} max={50} value={draft.max_steps} onChange={num("max_steps")} />
-            </div>
-            <div className="space-y-1">
-              <Label>Proposals per run</Label>
-              <Input type="number" min={0} max={20} value={draft.max_proposals} onChange={num("max_proposals")} />
-            </div>
-            <div className="space-y-1">
-              <Label>Comments per run</Label>
-              <Input type="number" min={0} max={20} value={draft.max_comments} onChange={num("max_comments")} />
-            </div>
-            <div className="space-y-1">
-              <Label>Seconds per run</Label>
-              <Input type="number" min={10} max={1800} value={draft.max_seconds} onChange={num("max_seconds")} />
-            </div>
-            <div className="space-y-1">
-              <Label>Tokens per run</Label>
-              <Input type="number" min={10000} max={2000000} step={10000} value={draft.max_tokens} onChange={num("max_tokens")} />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <Label>Feeds — one per line: name https-url</Label>
-            <Textarea rows={2} value={draft.feeds} onChange={text("feeds")} placeholder="news https://example.com/feed.xml" />
-          </div>
-          <div className="space-y-1">
-            <Label>
-              MCP servers — one per line: name https-url allowed,tools [MCP_… env name holding a bearer token]
-            </Label>
-            <Textarea
-              rows={2}
-              value={draft.mcp}
-              onChange={text("mcp")}
-              placeholder="desk https://mcp.example.com/mcp search_tickets,get_ticket MCP_DESK_TOKEN"
-            />
-            <p className="text-[11px] text-muted-foreground">
-              Only the tools you list can be called. What feeds and MCP tools return is treated as untrusted data,
-              and the agent can only act on it by proposing.
-            </p>
-          </div>
-          <MetacognitionNotifySection nestId={nestId} value={draft.notify} onChange={(notify) => setDraft({ ...draft, notify })} />
-          <div className="space-y-1 sm:w-1/2">
-            <Label>Model (optional; default is the nest's Hootie model)</Label>
-            <Input value={draft.model} onChange={text("model")} placeholder="claude-sonnet-5" />
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" onClick={save} disabled={saving || !draft.name.trim() || !draft.node_id} data-testid="metacognition-save">
-              {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-              Save
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
+        <MetacognitionForm
+          nestId={nestId}
+          initial={draft.form}
+          isNew={draft.isNew}
+          agentDocs={draft.isNew ? unconfigured : agentDocs}
+          onSaved={() => {
+            setDraft(null);
+            void load();
+          }}
+          onCancel={() => setDraft(null)}
+        />
       )}
     </div>
   );
