@@ -10,6 +10,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { saveOutcome } from "../lib/save-outcome";
@@ -393,6 +394,9 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // CU-wdqcq05rz6: may suggest edits here as drafts for review.
+  const isOrgContributor = !!(nestMeta.data as { org_contributor?: boolean } | undefined)?.org_contributor;
+  const [suggestOpen, setSuggestOpen] = useState(false);
   // Read straight off the same GET /nests/:id response `permission` above
   // comes from, rather than a prop threaded down through App.tsx's View
   // state — the document page is reachable via wiki-link nav, a board/graph
@@ -2119,6 +2123,14 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {isOrgContributor && (
+        <SuggestDialog
+          nestId={nestId}
+          open={suggestOpen}
+          onOpenChange={setSuggestOpen}
+          edit={{ nodeId, title, content }}
+        />
+      )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
       )}
@@ -2682,7 +2694,22 @@ export function DocumentEditor({
               {/* A viewer gets the way to ask instead of no Edit at all. Not on
                   an archived nest (nobody edits it) or for a signed-out reader
                   (nobody to grant it to). */}
-              {isViewOnly && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+              {/* An org contributor (CU-wdqcq05rz6) can suggest the edit
+                  instead of asking for access — it goes to review. */}
+              {isViewOnly && isOrgContributor && !isArchived && !isNew && !isPdfNode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setSuggestOpen(true)}
+                  data-testid="document-editor-suggest-edit"
+                  title="Suggest a change. It goes to review; the document stays as it is until a reviewer approves it."
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Suggest an edit
+                </Button>
+              )}
+              {isViewOnly && !isOrgContributor && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
                 <Button
                   variant="outline"
                   size="sm"

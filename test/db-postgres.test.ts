@@ -251,6 +251,41 @@ d("PostgresAdapter conformance", () => {
     expect((await adapter.get<{ h: string }>("SELECT public_url_host AS h FROM nest_sites WHERE nest_id = ?", ["site-a"]))?.h).toBe("example.com");
   });
 
+  it("adds the org-contribution columns (074) with fail-closed defaults, idempotently", async () => {
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["oc-u", "oc@acme.com", "h"]);
+    await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", ["oc-n", "oc-u", "oc", "oc"]);
+    const row = await adapter.get<{ c: string; d: string | null; v: string | null }>(
+      `SELECT n.org_contributions AS c, n.org_domains AS d, u.email_verified_at AS v
+         FROM nests n LEFT JOIN users u ON u.id = ? WHERE n.id = ?`,
+      ["oc-u", "oc-n"],
+    );
+    expect(row).toEqual({ c: "off", d: null, v: null });
+    const { HISTORICAL_MIGRATIONS } = await import("../src/db/migrations.postgres.js");
+    expect(HISTORICAL_MIGRATIONS).toContain("074_org_contributions");
+    // The contributor's own-drafts query (governance/org-contribution.ts).
+    await adapter.run(
+      "INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status) VALUES (?, ?, ?, ?, ?, ?)",
+      ["oc-n", "nodes/idea", 1, "h", "oc@acme.com", "pending_review"],
+    );
+    const mine = await adapter.all<{ node_id: string; review_id: string | null }>(
+      `SELECT v.node_id, v.version, v.status, v.created_at,
+              (SELECT r.id FROM review_requests r
+                WHERE r.nest_id = v.nest_id AND r.node_id = v.node_id
+                  AND r.status = 'pending' LIMIT 1) AS review_id
+         FROM node_versions v
+        WHERE v.nest_id = ? AND v.author = ?
+          AND v.status IN ('draft', 'pending_review', 'rejected')
+          AND v.version = (SELECT MAX(v2.version) FROM node_versions v2
+                            WHERE v2.nest_id = v.nest_id AND v2.node_id = v.node_id)
+        ORDER BY v.created_at DESC
+        LIMIT 200`,
+      ["oc-n", "oc@acme.com"],
+    );
+    expect(mine.map((m) => m.node_id)).toEqual(["nodes/idea"]);
+  });
+
   it("adds the run claim columns to a runs table that predates them", async () => {
     // Prod's runs table was created before claimed_by existed; boot crashed
     // building the metacognition index on it (42703).

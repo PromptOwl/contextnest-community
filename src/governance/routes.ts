@@ -11,6 +11,10 @@ import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
 import {
+  orgContributorRequesters,
+  ownsWorkingDraft,
+} from "./org-contribution.js";
+import {
   ValidationError,
   ConflictError,
   ForbiddenError,
@@ -198,10 +202,17 @@ governanceRoutes.get("/review-queue", async (c) => {
   const status = c.req.query("status") || "pending";
   const limit = parseInt(c.req.query("limit") || "50", 10);
   const offset = parseInt(c.req.query("offset") || "0", 10);
+  const email = await getUserEmail(c);
 
+  // A visibility-only reader (anyone reaching the nest only because it is
+  // 'org' or 'public' — an org contributor among them) sees their OWN
+  // requests here, not everyone's: a request names an unapproved draft, and
+  // drafts are private to the people who work on the nest (CU-wdqcq05rz6).
+  const ownOnly = await isPublicReader(nestId, c.get("userId"));
   const result = await reviews.getReviewQueue({
     nestId,
     status: status as any,
+    ...(ownOnly ? { requestedByEmail: email.toLowerCase() } : {}),
     limit,
     offset,
   });
@@ -212,15 +223,22 @@ governanceRoutes.get("/review-queue", async (c) => {
   // instead of re-deriving steward scope client-side, which diverged for
   // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
   // follow-up). Resolved for the whole page at once, not per row.
-  const email = await getUserEmail(c);
   const verdicts = await stewardship.canUserApproveMany(
     nestId,
     result.requests.map((r) => r.nodeId),
     email,
   );
+  // "Org contributor (not a collaborator)": the requester reaches this nest
+  // only through the org-contributions setting — the reviewer should know the
+  // author isn't someone they added.
+  const contributors = await orgContributorRequesters(
+    nestId,
+    result.requests.map((r) => r.requestedBy),
+  );
   const requests = result.requests.map((r) => ({
     ...r,
     canReview: verdicts.get(r.nodeId)?.allowed ?? false,
+    requestedByOrgContributor: contributors.has(r.requestedBy.toLowerCase()),
   }));
 
   return c.json({ ...result, requests });
@@ -1010,6 +1028,18 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   }
 
   const userEmail = await getUserEmail(c);
+
+  // A visibility-only reader — an org contributor (CU-wdqcq05rz6), or anyone
+  // else reaching the nest only because it is 'org'/'public' — may send only
+  // their OWN draft to review. This route is admitted at read tier (reviewers
+  // need it), so without this a reader could push anyone's draft into the
+  // queue under their own name.
+  if (
+    (await isPublicReader(nestId, c.get("userId"))) &&
+    !(await ownsWorkingDraft(nestId, nodeId, userEmail))
+  ) {
+    throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
 
   let request;
   try {

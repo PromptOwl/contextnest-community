@@ -49,6 +49,9 @@ export interface ReviewRequest {
   canReview?: boolean;
   /** Set when an agent run filed this proposal: links to its trace. */
   runId?: string;
+  /** The requester reaches this nest only through its org-contributions
+   *  setting — not someone the reviewer added (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
 }
 
 /** A comment event from the nest activity feed (new thread or reply) —
@@ -351,6 +354,16 @@ export function ReviewQueue({
                           </AvatarFallback>
                         </Avatar>
                         <span>{request.requestedBy}</span>
+                        {request.requestedByOrgContributor && (
+                          <Badge
+                            variant="outline"
+                            className="ml-1 h-4 px-1 text-[10px] font-normal"
+                            title="Suggested through this nest's org-contributions setting. This person wasn't added to the nest."
+                            data-testid="review-org-contributor"
+                          >
+                            org contributor (not a collaborator)
+                          </Badge>
+                        )}
                       </div>
                       {request.runId && (
                         <>

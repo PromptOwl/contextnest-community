@@ -1049,6 +1049,12 @@ export interface NestSettings {
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
+  /** "drafts": anyone in the organization may suggest documents and edits on
+   *  this org nest, as drafts for review (CU-wdqcq05rz6). */
+  org_contributions?: "off" | "drafts";
+  /** Email domains that count as the organization — required on a shared
+   *  deployment. Bare domains, matched exactly. */
+  org_domains?: string[];
 }
 
 // ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
@@ -1125,6 +1131,8 @@ export async function updateNestSettings(
     review_sla_hours?: number | null;
     /** Owner / server admin only to turn OFF; any nest admin may turn on. */
     access_log_enabled?: boolean;
+    org_contributions?: "off" | "drafts";
+    org_domains?: string[];
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -1941,6 +1949,55 @@ export async function createNode(
   });
 }
 
+// ── Org contributions (CU-wdqcq05rz6) ─────────────────────────────────────
+
+/** A review request as an org contribution returns it. */
+export interface ContributionReview {
+  id: string;
+  status: string;
+  version: number;
+}
+
+/** Suggest a new document as an org contributor: it is saved as a draft and
+ *  sent to review — never published by this call. */
+export async function suggestDocument(
+  nestId: string,
+  data: { title: string; content: string; folder?: string; tags?: string[] },
+) {
+  return request<{ node: any; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Propose an edit as an org contributor: a draft version for review; the
+ *  published text is unchanged until a reviewer approves it. */
+export async function suggestEdit(
+  nestId: string,
+  nodeId: string,
+  data: { content?: string; title?: string; changeNote?: string },
+) {
+  return request<{ node: any; version: number; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes/${nodeId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
+  );
+}
+
+export interface MyContribution {
+  node_id: string;
+  title: string | null;
+  version: number;
+  status: "draft" | "pending_review" | "rejected" | string;
+  created_at: string;
+  review_id: string | null;
+  content: string;
+}
+
+/** The caller's own unpublished contributions in this nest. */
+export async function listMyContributions(nestId: string) {
+  return request<{ contributions: MyContribution[] }>(`/nests/${nestId}/contributions/mine`);
+}
+
 /** The `pdf:` block a pdf node carries (engine §1.11). */
 export interface PdfMeta {
   file: string;
@@ -2397,6 +2454,8 @@ export interface FeedChangeItem {
   status: string;
   priority: string;
   canReview: boolean;
+  /** Requester reaches the nest only as an org contributor (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
   createdAt: string;
 }
 

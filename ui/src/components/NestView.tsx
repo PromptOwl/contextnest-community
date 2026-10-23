@@ -5,6 +5,7 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
+import { OrgContributorPanel } from "./OrgContribution";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -2009,6 +2010,9 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
+          {/* An org contributor's way in (CU-wdqcq05rz6); renders nothing for
+              anyone else. */}
+          <OrgContributorPanel nestId={nestId} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <OverviewTab
               initialLoad={initialLoad || !censusSettled}
