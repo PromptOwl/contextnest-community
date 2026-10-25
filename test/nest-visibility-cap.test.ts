@@ -317,3 +317,50 @@ describe("GWT 7 — MCP parity (context_set_visibility)", () => {
     expect(await visibilityNow()).toBe("private");
   });
 });
+
+describe("GWT 8 — ordering and who sees the MCP tool", () => {
+  it("shared deployment + org = admins: the owner gets the 403 cap, not the 409 acknowledgement prompt", async () => {
+    process.env.NEST_ORG_VISIBILITY = "admins";
+    process.env.SHARED_DEPLOYMENT = "true";
+    try {
+      const r = await setVisibility("org", owner.apiKey, false);
+      expect(r.status).toBe(403);
+      expect(r.data.code).toBe("visibility_restricted");
+    } finally {
+      delete process.env.SHARED_DEPLOYMENT;
+    }
+    expect(await visibilityNow()).toBe("private");
+  });
+
+  it("a write collaborator doesn't see context_set_visibility and is refused calling it", async () => {
+    const editor = await registerUser(app, "editor@cap.test", "Editor");
+    const add = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: editor.email, permission: "write" },
+      owner.apiKey,
+    );
+    expect(add.status).toBe(201);
+    const list = await mcp("tools/list", {}, editor.apiKey);
+    expect((list?.result?.tools ?? []).map((t: any) => t.name)).not.toContain("context_set_visibility");
+    const r = await callTool({ visibility: "public", acknowledge: true }, editor.apiKey);
+    expect(r.isError).toBe(true);
+    expect(await visibilityNow()).toBe("private");
+  });
+
+  it("re-sending the current tier after a concurrent change is a 409, not a silent overwrite", async () => {
+    await reset("org");
+    const db = getDb();
+    // The service reads 'public' (stale); the nest is really 'org'.
+    const spy = vi.spyOn(db, "get").mockResolvedValueOnce({ visibility: "public" } as any);
+    try {
+      const r = await setNestVisibility(nestId, owner.userId, "public", true);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.status).toBe(409);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await visibilityNow()).toBe("org");
+  });
+});

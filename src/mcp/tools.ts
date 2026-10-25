@@ -2285,11 +2285,21 @@ async function runTool(
       if (!r.ok) {
         // Same refusal as REST; the acknowledgement case carries the warning
         // the agent should put to the user before retrying with acknowledge.
-        const msg = r.requires_acknowledgement ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.` : r.error;
-        return toolError(
-          msg,
-          r.status === 404 ? "DOCUMENT_NOT_FOUND" : r.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
-        );
+        // The other 409s (headless, a concurrent change) are state conflicts,
+        // flagged as such so an agent re-reads instead of re-sending blindly.
+        const conflict = r.status === 409 && !r.requires_acknowledgement;
+        const msg = r.requires_acknowledgement
+          ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.`
+          : conflict
+            ? `${r.error} Re-read the nest (context_overview) before trying again.`
+            : r.error;
+        const code =
+          r.status === 404
+            ? "DOCUMENT_NOT_FOUND"
+            : r.status === 403
+              ? "UNAUTHORIZED_ACTION"
+              : "VALIDATION_FAILED";
+        return toolError(msg, code, conflict ? { conflict: true } : undefined);
       }
       return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
     }

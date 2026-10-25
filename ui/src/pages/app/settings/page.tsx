@@ -1537,7 +1537,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <CardDescription>
                   Who can open a nest beyond the people added to it. Making a
                   nest private is always allowed, and nests that are already
-                  public or organization-wide stay as they are.
+                  public or organization-wide stay as they are. This covers
+                  whole nests only: single-document public links are separate.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
