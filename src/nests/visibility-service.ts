@@ -8,8 +8,8 @@ import type { NestVisibility } from "../shared/types.js";
 
 /**
  * Changing a nest's visibility — the service behind REST PATCH
- * /nests/:id/visibility (sharing-routes.ts), kept out of the route so an MCP
- * twin can reuse it once the engine defines the op. Callers have already
+ * /nests/:id/visibility (sharing-routes.ts), shared with the MCP twin
+ * context_set_visibility so the two surfaces can't drift. Callers have already
  * checked the nest "admin" tier.
  */
 

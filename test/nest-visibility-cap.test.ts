@@ -6,7 +6,7 @@
  * `owners` (default — today's behaviour) or `admins`. With `admins`, only a
  * server admin may widen a nest to that tier; narrowing is always allowed.
  * Enforced on every path that widens: REST PATCH /nests/:id/visibility and
- * the service behind it (visibility-service.ts). No MCP tool sets visibility yet.
+ * its MCP twin context_set_visibility (one service, so they can't drift).
  *
  * GWT:
  *  1. defaults (owners): an owner publishes with the acknowledgement as before
@@ -16,6 +16,7 @@
  *  4. org=admins: owner → 403; a public nest can still narrow to org
  *  5. open mode (AUTH_MODE=open) ignores the cap
  *  6. the widening write is conditional on the tier the cap was checked against
+ *  7. MCP refuses the same widening the same way; acknowledge is boolean-only
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { getDb } from "../src/db/client";
@@ -70,6 +71,34 @@ afterEach(async () => {
 });
 
 afterAll(() => env.cleanup());
+
+const MCP_HEADERS = {
+  "Content-Type": "application/json",
+  Accept: "application/json, text/event-stream",
+};
+
+async function mcp(
+  method: string,
+  params: Record<string, unknown>,
+  key: string,
+): Promise<any> {
+  const res = await app.request(`/nests/${nestId}/mcp`, {
+    method: "POST",
+    headers: { ...MCP_HEADERS, Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  const line = (await res.text()).split("\n").find((l) => l.startsWith("data: "));
+  return line ? JSON.parse(line.slice(6)) : {};
+}
+const callTool = async (args: Record<string, unknown>, key: string) => {
+  const body = await mcp("tools/call", { name: "context_set_visibility", arguments: args }, key);
+  return {
+    isError: !!body?.result?.isError || !!body?.error,
+    text: body?.error?.message ?? (body?.result?.content ?? []).map((p: any) => p?.text ?? "").join(""),
+  };
+};
 
 describe("GWT 1 — defaults leave today's behaviour alone", () => {
   it("an owner publishes with the acknowledgement and opens to org", async () => {
@@ -240,6 +269,51 @@ describe("GWT 6 — a stale tier can't turn a narrowing into a widening", () => 
     } finally {
       spy.mockRestore();
     }
+    expect(await visibilityNow()).toBe("private");
+  });
+});
+
+describe("GWT 7 — MCP parity (context_set_visibility)", () => {
+  it("is advertised to the nest owner", async () => {
+    const list = await mcp("tools/list", {}, owner.apiKey);
+    expect((list?.result?.tools ?? []).map((t: any) => t.name)).toContain("context_set_visibility");
+  });
+
+  it("with defaults, an owner sets public with acknowledge and gets the ack prompt without it", async () => {
+    const noAck = await callTool({ visibility: "public" }, owner.apiKey);
+    expect(noAck.isError).toBe(true);
+    expect(noAck.text).toMatch(/acknowledg/i);
+    expect(await visibilityNow()).toBe("private");
+    const ok = await callTool({ visibility: "public", acknowledge: true }, owner.apiKey);
+    expect(ok.isError).toBe(false);
+    expect(await visibilityNow()).toBe("public");
+  });
+
+  it("public = admins: the owner is refused the same way; the superadmin isn't", async () => {
+    process.env.NEST_PUBLIC_VISIBILITY = "admins";
+    const r = await callTool({ visibility: "public", acknowledge: true }, owner.apiKey);
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/Who can make nests public/);
+    expect(await visibilityNow()).toBe("private");
+    const ok = await callTool({ visibility: "public", acknowledge: true }, root.apiKey);
+    expect(ok.isError).toBe(false);
+    expect(await visibilityNow()).toBe("public");
+  });
+
+  it("org = admins: the owner is refused over MCP; narrowing to private still works", async () => {
+    process.env.NEST_ORG_VISIBILITY = "admins";
+    const r = await callTool({ visibility: "org", acknowledge: true }, owner.apiKey);
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/Who can make nests organization-wide/);
+    await reset("org");
+    const down = await callTool({ visibility: "private" }, owner.apiKey);
+    expect(down.isError).toBe(false);
+    expect(await visibilityNow()).toBe("private");
+  });
+
+  it("acknowledge must be the boolean true — the string \"true\" is not an acknowledgement (same as REST)", async () => {
+    const r = await callTool({ visibility: "public", acknowledge: "true" }, owner.apiKey);
+    expect(r.isError).toBe(true);
     expect(await visibilityNow()).toBe("private");
   });
 });
