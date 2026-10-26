@@ -33,7 +33,7 @@ import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
-import { assertWritable } from "./shared/data-dir-check.js";
+import { assertWritable, DataDirError } from "./shared/data-dir-check.js";
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
@@ -41,7 +41,9 @@ async function main() {
 
   // Refuse to boot, with the chown fix, on a data directory this user can't
   // write (e.g. a volume left root-owned by an older image that ran as root).
-  const dataDirWarning = assertWritable([
+  // SKIP_DATA_DIR_CHECK=1 is the escape hatch for storage where permission
+  // bits don't reflect what the server can actually write.
+  const dataDirWarning = process.env.SKIP_DATA_DIR_CHECK === "1" ? null : assertWritable([
     { label: "DATA_ROOT", path: config.DATA_ROOT },
     { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },
     ...(config.DB_DRIVER === "sqlite"
@@ -305,6 +307,8 @@ ${config.AUTH_MODE === "key" ? `
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  // An unusable data directory is an operator fix, not a bug: message only.
+  if (err instanceof DataDirError) console.error(`Fatal: ${err.message}`);
+  else console.error("Fatal:", err);
   process.exit(1);
 });

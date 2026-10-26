@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { assertWritable } from "../src/shared/data-dir-check.js";
+import { assertWritable, DataDirError } from "../src/shared/data-dir-check.js";
 
 // Root ignores permission bits, so the refusal cases only mean something as non-root.
 const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -38,8 +38,9 @@ describe("assertWritable (boot check for the data directory)", () => {
     mkdirSync(dir);
     lock(dir);
     expect(() => assertWritable([{ label: "DATA_ROOT", path: dir }])).toThrow(
-      new RegExp(`DATA_ROOT ${dir} is not writable[\\s\\S]*chown -R`),
+      new RegExp(`DATA_ROOT ${dir} is not writable[\\s\\S]*chown -R[\\s\\S]*SKIP_DATA_DIR_CHECK=1`),
     );
+    expect(() => assertWritable([{ label: "DATA_ROOT", path: dir }])).toThrow(DataDirError);
   });
 
   it("returns null when everything is writable", () => {

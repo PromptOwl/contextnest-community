@@ -1,13 +1,18 @@
 import { accessSync, constants, existsSync, mkdirSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 
+/** Thrown for an unusable data directory; index.ts prints its message without a stack. */
+export class DataDirError extends Error {
+  override name = "DataDirError";
+}
+
 /** How many unwritable paths to list before summarising the rest. */
 const MAX_LISTED = 5;
 /**
- * How many entries of a `children` directory to check. Each is one access()
- * call, a network round trip on FUSE/NFS storage, so boot cost stays bounded
- * however many nests there are. A volume chowned at the top only is caught by
- * the first few nests.
+ * How many entries of a `children` directory to check (in readdir order,
+ * which the filesystem decides). Each is one access() call, a network round
+ * trip on FUSE/NFS storage, so boot cost stays bounded however many nests
+ * there are. A volume chowned at the top only is caught by any of them.
  */
 const MAX_CHILDREN = 50;
 
@@ -41,8 +46,8 @@ function code(err: unknown): string {
  * its directory (SQLite creates -wal/-journal files beside it), the file and
  * its -wal/-shm/-journal companions when they exist.
  *
- * Warning (returned, the server still boots): with `children`, any of the
- * first MAX_CHILDREN entries that isn't writable — a top-level-only chown
+ * Warning (returned, the server still boots): with `children`, any of up to
+ * MAX_CHILDREN entries that isn't writable — a top-level-only chown
  * leaves root-owned nests behind, but one odd entry (a deliberately read-only
  * nest, a stray file) shouldn't stop the whole server.
  *
@@ -93,7 +98,7 @@ export function assertWritable(checks: WritableCheck[]): string | null {
     }
   }
   if (fatal.length > 0) {
-    throw new Error(explain("The server can't write its data directory", fatal));
+    throw new DataDirError(explain("The server can't write its data directory", fatal));
   }
   return warn.length > 0
     ? explain("Some nests can't be written, so edits to them will fail", warn)
@@ -111,6 +116,7 @@ function explain(headline: string, problems: string[]): string {
     ...listed,
     `Give that user ownership, e.g. \`chown -R ${uid}:${gid} <dir>\`. The container image runs as`,
     "1000:1000; a volume written by an older image that ran as root needs this once. On Kubernetes",
-    "set podSecurityContext.fsGroup. See CONFIGURATION.md → Docker.",
+    "set podSecurityContext.fsGroup. See CONFIGURATION.md → Docker. If this check is wrong for your",
+    "storage (it reads permission bits), SKIP_DATA_DIR_CHECK=1 skips it.",
   ].join("\n");
 }
