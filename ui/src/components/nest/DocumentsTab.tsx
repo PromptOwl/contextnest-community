@@ -570,6 +570,17 @@ export function DocumentsTab({
   }, [nestId, filter.search]);
 
   const hasActiveFilters = hasActiveFiltersOn(filter);
+  // A filtered tree opens fully (matches come from the whole nest), so its
+  // collapse state is separate from expandedFolders and starts fresh per filter.
+  const [filterCollapsed, setFilterCollapsed] = useState<Set<string>>(new Set());
+  useEffect(() => setFilterCollapsed(new Set()), [filter]);
+  const setFilterFolderOpen = (path: string, open: boolean) =>
+    setFilterCollapsed((prev) => {
+      const next = new Set(prev);
+      if (open) next.delete(path);
+      else next.add(path);
+      return next;
+    });
 
   useEffect(() => {
     if (hasActiveFilters) void loadFullNest();
@@ -737,7 +748,8 @@ export function DocumentsTab({
     cancelDragExpand();
     dragExpandTimer.current = setTimeout(() => {
       dragExpandTimer.current = null;
-      expandFolder(path);
+      if (hasActiveFilters) setFilterFolderOpen(path, true);
+      else expandFolder(path);
     }, 600);
   };
 
@@ -1610,8 +1622,7 @@ export function DocumentsTab({
                       // as one "F1 / F2 / F3" row per chain.
                       known={hasActiveFilters ? undefined : knownFolders}
                       isCollapsed={(p) =>
-                        // A filtered list shows every match, wherever it lives.
-                        hasActiveFilters ? false : !expandedFolders.has(p)
+                        hasActiveFilters ? filterCollapsed.has(p) : !expandedFolders.has(p)
                       }
                       renderFolder={(node, { collapsed }) => {
                         // Valid drop = a doc is being dragged and this isn't
@@ -1679,7 +1690,10 @@ export function DocumentsTab({
                               }`}
                             onClick={
                               collapsible
-                                ? () => toggleFolderExpanded(node.path)
+                                ? () =>
+                                    hasActiveFilters
+                                      ? setFilterFolderOpen(node.path, collapsed)
+                                      : toggleFolderExpanded(node.path)
                                 : undefined
                             }
                             onDragOver={(e) => {
