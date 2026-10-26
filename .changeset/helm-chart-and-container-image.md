@@ -1,0 +1,5 @@
+---
+"@promptowl/contextnest-community": minor
+---
+
+Kubernetes and container support for self-hosting. Each release now publishes a multi-arch (amd64/arm64) image to `ghcr.io/promptowl/contextnest-community:<version>` and `:latest`. The image runs as the non-root user uid/gid 1000, which owns `/data`. A bind mount, or a volume written by an earlier image (which ran as root), needs `chown -R 1000:1000` once. A new Helm chart in `deploy/helm/contextnest-community` covers a PVC (or `existingClaim`), a Secret (or `existingSecret`), a ConfigMap, an optional Ingress and ServiceAccount, `/health` probes, a non-root read-only pod, and external Postgres. It defaults to one pod with the `Recreate` strategy, and refuses `replicaCount > 1` unless Postgres and ReadWriteMany storage are configured, because nests are files and SQLite can't be shared. The chart has its own README with a values table.

@@ -580,6 +580,27 @@ npm start
 
 Terminate TLS at the proxy and set `HOST=127.0.0.1` and `TRUSTED_PROXIES=loopback` so only the proxy can reach the server and only its forwarded headers count. Details in [Reverse proxies](#reverse-proxies).
 
+### Docker
+
+The image (`ghcr.io/promptowl/contextnest-community:<version>`, published on every release, or `docker build .`) sets `DATA_ROOT=/data` and `PORT=3838`, and runs as the non-root user uid/gid 1000, which owns `/data`. Mount a volume there: `docker run -p 3838:3838 -v contextnest-data:/data …`. A bind mount, or a volume written by an image from before 2.3.0 (which ran as root), must be writable by uid 1000: run `chown -R 1000:1000` on it once. The server writes only to `/data` and `/tmp`, so `--read-only --tmpfs /tmp` works. On Cloud Run, a Cloud Storage volume is owned by root unless it's mounted with `mount-options="uid=1000;gid=1000"`.
+
+### Kubernetes (Helm)
+
+The chart in `deploy/helm/contextnest-community` runs the image as one Deployment with a PersistentVolumeClaim at `/data`. Its [README](./deploy/helm/contextnest-community/README.md) has the full values table.
+
+```bash
+helm install cn deploy/helm/contextnest-community \
+  --set config.publicBaseUrl=https://nest.example.com \
+  --set secrets.promptowlKey=pk_...
+```
+
+- Settings map to the env vars on this page: `config.*` and `config.env` go into a ConfigMap, and `secrets.*` and `secrets.env` into a Secret. Use `existingSecret` to supply your own Secret, keyed by env var name.
+- External Postgres: `postgres.url`, `postgres.existingSecret`, or `postgres.host` with `user`, `database` and `password` or `passwordSecret`. Any of them sets `DB_DRIVER=postgres`.
+- **One pod by default.** Nests are files under `/data` and SQLite is a single file, so the default is `replicaCount: 1`, a ReadWriteOnce volume and the `Recreate` strategy. The chart refuses `replicaCount > 1` unless Postgres is configured and `persistence.accessMode` is `ReadWriteMany`. Storage without file locking (such as Cloud Storage FUSE) is single-writer: keep one pod there.
+- Probes use `GET /health`. The startup probe allows 10 minutes for the [first-boot upgrade passes](#first-boot-upgrade-passes).
+- The pod runs as uid 1000 with `runAsNonRoot`, `fsGroup: 1000` and a read-only root filesystem (`/tmp` is an emptyDir).
+- Behind an ingress controller, `config.trustedProxies` defaults to `private`, and `config.publicBaseUrl` should be set to the external URL.
+
 ### Reverse proxies
 
 The server reads three forwarded headers: `X-Forwarded-For` / `X-Real-IP` (the client IP that per-IP rate limits on sign-in are keyed on) and `X-Forwarded-Proto` (whether session cookies get `Secure`). A header is only as trustworthy as whoever set it, so tell the server which peers are proxies:
