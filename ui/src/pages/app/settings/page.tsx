@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
+import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
@@ -40,7 +40,7 @@ import {
   removeCommunitySite,
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/SearchableSelect";
@@ -511,7 +511,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
-  const [copiedRedirect, setCopiedRedirect] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
@@ -1685,25 +1684,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                           <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
                             {redirectUri}
                           </code>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              if (!(await copyTextWithToast(redirectUri))) return;
-                              setCopiedRedirect(true);
-                              setTimeout(() => setCopiedRedirect(false), 1500);
-                            }}
-                          >
-                            {copiedRedirect ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
-                            <span className="ml-1.5">
-                              {copiedRedirect ? "Copied" : "Copy"}
-                            </span>
-                          </Button>
+                          <CopyButton text={redirectUri} label="Copy" />
                         </div>
                       );
                     })()}

@@ -8,9 +8,10 @@
  */
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Loader2, Plus, Copy, FolderOpen } from "lucide-react";
+import { ListChecks, Loader2, Plus, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -628,19 +629,7 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
             {structure.data?.yaml || "# No structure rules saved for this nest yet."}
           </pre>
           <div className="flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                navigator.clipboard
-                  .writeText(structure.data?.yaml ?? "")
-                  .then(() => toast.success("Copied"))
-                  .catch(() => toast.error("Could not copy"))
-              }
-            >
-              <Copy className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-              Copy
-            </Button>
+            <CopyButton text={structure.data?.yaml ?? ""} label="Copy" toastMessage="Copied" />
           </div>
         </DialogContent>
       </Dialog>
