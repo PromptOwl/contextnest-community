@@ -253,6 +253,16 @@ ${config.AUTH_MODE === "key" ? `
         nest documents behind it, is written to the logs. Testing only.
     `);
   }
+  // The visibility caps fail open to `owners` on anything but `admins`, so a
+  // typo (`admin`) would silently leave publishing open — say so at boot.
+  for (const key of ["NEST_PUBLIC_VISIBILITY", "NEST_ORG_VISIBILITY"] as const) {
+    const raw = process.env[key]?.trim().toLowerCase();
+    if (raw && raw !== "owners" && raw !== "admins") {
+      console.warn(
+        `  ⚠️  ${key}=${process.env[key]} is not 'owners' or 'admins' — treated as 'owners' (nest owners can widen).`,
+      );
+    }
+  }
 
   // Parse DOCS_SITES now, so an entry for this server's own host warns at boot.
   void config.DOCS_SITES;

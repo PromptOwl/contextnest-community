@@ -122,6 +122,8 @@ const TABS: {
       "type_table_enabled",
       "telemetry_enabled",
       "nest_creation",
+      "nest_public_visibility",
+      "nest_org_visibility",
       "people_suggest_all_users",
       "shared_deployment",
       "oidc_enabled",
@@ -1518,6 +1520,55 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     }
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Who may widen a nest past its roster. Owners (default) is
+                today's behaviour; server admins only stops an owner publishing
+                by accident. The server enforces it on REST and MCP; the
+                visibility pickers disable the tier and say why. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Globe2 className="h-4 w-4 text-muted-foreground" />
+                  Nest visibility
+                </CardTitle>
+                <CardDescription>
+                  Who can open a nest beyond the people added to it. Making a
+                  nest private is always allowed, and nests that are already
+                  public or organization-wide stay as they are. This covers
+                  whole nests only: single-document public links are separate.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {([
+                  ["nest_public_visibility", "Who can make nests public", "Public nests are readable by anyone on the internet with the URL."],
+                  ["nest_org_visibility", "Who can make nests organization-wide", draft.shared_deployment
+                    ? "Organization nests are readable by every account on this server — other organizations included."
+                    : "Organization nests are readable by everyone signed in to this server."],
+                ] as const).map(([field, label, hint], i) => (
+                  <div
+                    key={field}
+                    className={`flex items-start justify-between gap-4 ${i > 0 ? "pt-4 border-t" : ""}`}
+                  >
+                    <div className="pr-4">
+                      <div className="text-sm font-medium">{label}</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>
+                    </div>
+                    <Select
+                      value={draft[field] ?? "owners"}
+                      onValueChange={(v) => set({ [field]: v as "owners" | "admins" })}
+                    >
+                      <SelectTrigger className="h-8 w-[190px]" aria-label={label} data-testid={`settings-${field}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="owners">Nest owners</SelectItem>
+                        <SelectItem value="admins">Server admins only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
               </CardContent>
             </Card>
 
