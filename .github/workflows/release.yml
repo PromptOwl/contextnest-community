@@ -5,7 +5,9 @@ on:
     branches: [main]
   # Recovery only: (re)build and push the container image for a release that
   # is already tagged, e.g. when the image job failed after npm published. It
-  # never runs the npm release job.
+  # never runs the npm release job, only runs when started from main, and
+  # refuses to replace an image tag that already exists unless `overwrite` is
+  # set (a rebuild isn't byte-identical: base image and npm resolve afresh).
   workflow_dispatch:
     inputs:
       version:
@@ -14,6 +16,11 @@ on:
         type: string
       latest:
         description: "Also move the latest tag (only for the newest stable release)"
+        required: false
+        type: boolean
+        default: false
+      overwrite:
+        description: "Replace the image if this version's tag already exists in GHCR"
         required: false
         type: boolean
         default: false
@@ -71,10 +78,13 @@ jobs:
   image:
     name: Container image
     needs: release
+    # !cancelled(): on a dispatch the release job is skipped, and a plain
+    # `needs` would skip this job too. On a push, a failed release job leaves
+    # `published` empty, so nothing is pushed.
     if: >-
       !cancelled() && (
         (github.event_name == 'push' && needs.release.outputs.published == 'true') ||
-        github.event_name == 'workflow_dispatch'
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -100,6 +110,8 @@ jobs:
             echo "::error::tag v$INPUT_VERSION has package.json version $version"; exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The commit actually built (the tag's commit on a dispatch).
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           # `latest` moves only for a stable version, never for a prerelease
           # (x.y.z-next.0). Releases ship from main only, so on a release run
           # versions only rise; a recovery dispatch moves it only when asked.
@@ -108,9 +120,15 @@ jobs:
           if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_LATEST" != true ]; then latest=false; fi
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           # The chart's default image tag is its appVersion: flag drift here.
-          app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/contextnest-community/Chart.yaml 2>/dev/null || true)
-          if [ -n "$app" ] && [ "$app" != "$version" ]; then
-            echo "::warning::deploy/helm/contextnest-community/Chart.yaml appVersion is $app but this release is $version; bump it so the chart's default image tag exists."
+          # (npm has already published, so this warns rather than fails.)
+          chart=deploy/helm/contextnest-community/Chart.yaml
+          if [ -f "$chart" ]; then
+            app=$(grep -E '^appVersion:' "$chart" | head -n 1 | sed -E 's/^appVersion:[[:space:]]*//; s/[[:space:]]+#.*$//; s/["'"'"']//g; s/[[:space:]]*$//' || true)
+            if [ -z "$app" ]; then
+              echo "::warning::could not read appVersion from $chart"
+            elif [ "$app" != "$version" ]; then
+              echo "::warning::$chart appVersion is $app but this release is $version; bump it so the chart's default image tag exists."
+            fi
           fi
 
       - name: Set up QEMU
@@ -126,6 +144,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to replace a published image (recovery run)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ghcr.io/promptowl/contextnest-community:${{ steps.version.outputs.version }}
+          OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1 && [ "$OVERWRITE" != true ]; then
+            echo "::error::$IMAGE already exists. Re-run with overwrite to replace it."; exit 1
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -138,7 +166,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.version.outputs.revision }}
             org.opencontainers.image.title=contextnest-community
           cache-from: type=gha
           cache-to: type=gha,mode=max
