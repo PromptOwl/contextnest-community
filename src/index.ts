@@ -42,7 +42,9 @@ async function main() {
   // Refuse to boot, with the chown fix, on a data directory this user can't
   // write (e.g. a volume left root-owned by an older image that ran as root).
   // SKIP_DATA_DIR_CHECK=1 is the escape hatch for storage where permission
-  // bits don't reflect what the server can actually write.
+  // bits don't reflect what the server can actually write. Read from the
+  // process env directly, not `config`: this runs before the DB-backed
+  // settings overlay exists, and it is deploy-env only by design.
   const dataDirWarning = process.env.SKIP_DATA_DIR_CHECK === "1" ? null : assertWritable([
     { label: "DATA_ROOT", path: config.DATA_ROOT },
     { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },

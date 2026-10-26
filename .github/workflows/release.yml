@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Released version to build the image for (its git tag v<version> must exist), e.g. 2.3.0"
+        description: "Released version to build the image for, e.g. 2.3.0. Its tag v<version> must exist and include the non-root Dockerfile (2.3.0 or later)"
         required: true
         type: string
       latest:
