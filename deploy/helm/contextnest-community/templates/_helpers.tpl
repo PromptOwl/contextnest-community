@@ -94,6 +94,12 @@ in Postgres AND the volume is ReadWriteMany (both pods see the same files).
 {{- if not (include "contextnest-community.postgresConfigured" .) }}
 {{- fail (printf "replicaCount=%d needs an external Postgres (postgres.url, postgres.existingSecret or postgres.host) and ReadWriteMany persistence. Nests are files on the /data volume, and SQLite can't be shared between pods. Keep replicaCount=1, or configure Postgres and set persistence.accessMode=ReadWriteMany." (int .Values.replicaCount)) }}
 {{- end }}
+{{- with .Values.persistence.existingClaim }}
+{{- $pvc := lookup "v1" "PersistentVolumeClaim" $.Release.Namespace . }}
+{{- if and $pvc (not (has "ReadWriteMany" ($pvc.spec.accessModes | default list))) }}
+{{- fail (printf "replicaCount=%d, but persistence.existingClaim %q is %v, not ReadWriteMany. Nests are files on the /data volume: every pod must share it." (int $.Values.replicaCount) . $pvc.spec.accessModes) }}
+{{- end }}
+{{- end }}
 {{- if not (include "contextnest-community.sharedVolume" .) }}
 {{- fail (printf "replicaCount=%d needs persistence.enabled=true with persistence.accessMode=ReadWriteMany. Nests are files on the /data volume: every pod must read and write the same volume, which a ReadWriteOnce (or no) volume can't give. Keep replicaCount=1, or use ReadWriteMany storage." (int .Values.replicaCount)) }}
 {{- end }}

@@ -120,7 +120,7 @@ Kubernetes API.
 | `postgres.ssl` | `false` | `DB_SSL`. |
 | `postgres.poolMax` | `""` | `DB_POOL_MAX`. Empty = server default (10). |
 | `persistence.enabled` | `true` | Mount a PVC at `/data`. Off = emptyDir: nests are lost with the pod. |
-| `persistence.existingClaim` | `""` | Use this PVC. Set `accessMode` to its real mode. |
+| `persistence.existingClaim` | `""` | Use this PVC. Set `accessMode` to its real mode (on install/upgrade the chart also reads the claim and refuses `replicaCount > 1` unless it is ReadWriteMany). |
 | `persistence.storageClass` | `""` | StorageClass. Empty = cluster default; `-` = none. |
 | `persistence.accessMode` | `ReadWriteOnce` | `ReadWriteOnce`, `ReadWriteOncePod` or `ReadWriteMany`. |
 | `persistence.size` | `10Gi` | Requested size. |
