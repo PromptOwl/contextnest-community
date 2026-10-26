@@ -56,7 +56,8 @@ does the SQLite database unless Postgres is configured. So:
 - Upgrading from a volume written by the old root image: run
   `chown -R 1000:1000` on it once (the pod's `fsGroup` covers group access on
   most volume types, but not every driver applies it). If it can't write, the
-  server refuses to start and logs which path and the `chown` to run.
+  server refuses to start and logs which path and the `chown` to run (a single
+unwritable nest directory is logged as a warning instead).
 
 ## Secrets
 
@@ -74,6 +75,12 @@ helm install cn deploy/helm/contextnest-community \
 ```
 
 `secrets.*`, `postgres.url` and `postgres.password` are fine for trying it out.
+
+A change to the chart's own ConfigMap or Secret rolls the pod (checksum
+annotations). A change inside a Secret you manage (`existingSecret`,
+`postgres.existingSecret`, `postgres.passwordSecret`) does not: run
+`kubectl rollout restart deployment/<release>-contextnest-community`, or set a
+`podAnnotations` entry that changes with it (or use a reloader controller).
 
 ## Security
 

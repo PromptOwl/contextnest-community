@@ -52,6 +52,7 @@ refuses replicas-no-volume "ReadWriteMany" --set replicaCount=2 --set postgres.u
 refuses bad-access-mode "persistence.accessMode must be" --set persistence.accessMode=ReadOnlyMany
 refuses url-and-secret "not both" --set postgres.url=postgres://u:p@db/x --set postgres.existingSecret=db
 refuses secret-in-configmap "config.env.DATABASE_URL is a secret" --set config.env.DATABASE_URL=postgres://u:p@db/x
+refuses secret-suffix-in-configmap "config.env.GITHUB_TOKEN is a secret" --set config.env.GITHUB_TOKEN=ghp_x
 refuses reserved-in-configmap "config.env.DATA_ROOT is set by the chart" --set config.env.DATA_ROOT=/elsewhere
 
 # Defaults: one pod, Recreate, PVC, non-root, read-only rootfs, /health probes.
@@ -97,6 +98,19 @@ has ingress "secretName: nest-tls"
 has ingress "ingressClassName: nginx"
 has ingress "kind: ServiceAccount"
 has ingress 'TELEMETRY_ENABLED: "true"'
+
+# Discrete Postgres with an inline password: it goes into the chart Secret.
+render discrete-inline-password --set postgres.host=db --set postgres.user=u --set postgres.database=d --set postgres.password=pw
+has discrete-inline-password "DB_PASSWORD:"
+has discrete-inline-password 'DB_HOST: "db"'
+lacks discrete-inline-password "secretKeyRef"
+
+# No persistence: emptyDir, no PVC, still one pod.
+render no-persistence --set persistence.enabled=false
+has no-persistence "emptyDir: {}"
+has no-persistence "type: Recreate"
+lacks no-persistence "kind: PersistentVolumeClaim"
+lacks no-persistence "persistentVolumeClaim:"
 
 # Existing secrets alone must not leak an inline value into a chart Secret.
 render existing-secret-ignores-inline --set existingSecret=env --set secrets.promptowlKey=pk_x

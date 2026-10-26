@@ -107,7 +107,7 @@ in Postgres AND the volume is ReadWriteMany (both pods see the same files).
 {{- if has $k $reserved }}
 {{- fail (printf "config.env.%s is set by the chart itself. Use its dedicated value instead (config.authMode, config.publicBaseUrl, config.trustedProxies, config.nestStorageRoot, postgres.*); PORT and DATA_ROOT are fixed at 3838 and /data." $k) }}
 {{- end }}
-{{- if has $k $secretNames }}
+{{- if or (has $k $secretNames) (regexMatch "(_SECRET|_TOKEN|_PASSWORD|_API_KEY)$" $k) }}
 {{- fail (printf "config.env.%s is a secret, and config.env is rendered into a plain ConfigMap. Put it under secrets.env (or in existingSecret) instead." $k) }}
 {{- end }}
 {{- end }}
