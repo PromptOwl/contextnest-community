@@ -37,17 +37,23 @@ function code(err: unknown): string {
  * the DB driver, or a failed write deep inside a nest. Checked once at boot
  * (index.ts), never per request.
  *
- * For each directory: it's created if missing and must be writable; with
- * `children`, so must its first MAX_CHILDREN entries, since a top-level-only
- * chown leaves root-owned nests behind. Best effort: it reads permission bits
- * (and EROFS), not ACLs or quotas, and doesn't walk inside each nest. For a file: its directory must be writable
- * (SQLite creates -wal/-journal files beside it), and so must the file and its
- * -wal/-shm/-journal companions when they exist.
+ * Fatal (throws): a directory that can't be created or written; for a file,
+ * its directory (SQLite creates -wal/-journal files beside it), the file and
+ * its -wal/-shm/-journal companions when they exist.
+ *
+ * Warning (returned, the server still boots): with `children`, any of the
+ * first MAX_CHILDREN entries that isn't writable — a top-level-only chown
+ * leaves root-owned nests behind, but one odd entry (a deliberately read-only
+ * nest, a stray file) shouldn't stop the whole server.
+ *
+ * Best effort: it reads permission bits (and EROFS), not ACLs or quotas, and
+ * doesn't walk inside each nest.
  */
-export function assertWritable(checks: WritableCheck[]): void {
-  const problems: string[] = [];
-  const note = (label: string, path: string, err: unknown) =>
-    problems.push(`${label} ${path} is not writable (${code(err)})`);
+export function assertWritable(checks: WritableCheck[]): string | null {
+  const fatal: string[] = [];
+  const warn: string[] = [];
+  const note = (into: string[], label: string, path: string, err: unknown) =>
+    into.push(`${label} ${path} is not writable (${code(err)})`);
 
   for (const { label, path, file, children } of checks) {
     const dir = file ? dirname(path) : path;
@@ -55,7 +61,7 @@ export function assertWritable(checks: WritableCheck[]): void {
       mkdirSync(dir, { recursive: true });
       accessSync(dir, constants.W_OK);
     } catch (err) {
-      note(label, dir, err);
+      note(fatal, label, dir, err);
       continue;
     }
     if (file) {
@@ -64,7 +70,7 @@ export function assertWritable(checks: WritableCheck[]): void {
         try {
           accessSync(f, constants.W_OK);
         } catch (err) {
-          note(label, f, err);
+          note(fatal, label, f, err);
         }
       }
       continue;
@@ -74,7 +80,7 @@ export function assertWritable(checks: WritableCheck[]): void {
     try {
       entries = readdirSync(dir);
     } catch (err) {
-      note(label, dir, err);
+      note(fatal, label, dir, err);
       continue;
     }
     for (const name of entries.slice(0, MAX_CHILDREN)) {
@@ -82,24 +88,29 @@ export function assertWritable(checks: WritableCheck[]): void {
       try {
         accessSync(child, constants.W_OK);
       } catch (err) {
-        if (code(err) !== "ENOENT") note(label, child, err);
+        if (code(err) !== "ENOENT") note(warn, label, child, err);
       }
     }
   }
-  if (problems.length === 0) return;
+  if (fatal.length > 0) {
+    throw new Error(explain("The server can't write its data directory", fatal));
+  }
+  return warn.length > 0
+    ? explain("Some nests can't be written, so edits to them will fail", warn)
+    : null;
+}
 
+function explain(headline: string, problems: string[]): string {
   const unique = [...new Set(problems)];
   const listed = unique.slice(0, MAX_LISTED).map((p) => `  ${p}`);
   if (unique.length > MAX_LISTED) listed.push(`  …and ${unique.length - MAX_LISTED} more`);
   const uid = typeof process.getuid === "function" ? process.getuid() : "?";
   const gid = typeof process.getgid === "function" ? process.getgid() : "?";
-  throw new Error(
-    [
-      `The server can't write its data directory, running as uid ${uid} gid ${gid}:`,
-      ...listed,
-      `Give that user ownership, e.g. \`chown -R ${uid}:${gid} <dir>\`. The container image runs as`,
-      "1000:1000; a volume written by an older image that ran as root needs this once. On Kubernetes",
-      "set podSecurityContext.fsGroup. See CONFIGURATION.md → Docker.",
-    ].join("\n"),
-  );
+  return [
+    `${headline}, running as uid ${uid} gid ${gid}:`,
+    ...listed,
+    `Give that user ownership, e.g. \`chown -R ${uid}:${gid} <dir>\`. The container image runs as`,
+    "1000:1000; a volume written by an older image that ran as root needs this once. On Kubernetes",
+    "set podSecurityContext.fsGroup. See CONFIGURATION.md → Docker.",
+  ].join("\n");
 }

@@ -41,13 +41,14 @@ async function main() {
 
   // Refuse to boot, with the chown fix, on a data directory this user can't
   // write (e.g. a volume left root-owned by an older image that ran as root).
-  assertWritable([
+  const dataDirWarning = assertWritable([
     { label: "DATA_ROOT", path: config.DATA_ROOT },
     { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },
     ...(config.DB_DRIVER === "sqlite"
       ? [{ label: "DATABASE_PATH", path: config.DATABASE_PATH, file: true }]
       : []),
   ]);
+  if (dataDirWarning) console.warn(`\n  ⚠️  ${dataDirWarning.replace(/\n/g, "\n     ")}\n`);
 
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.

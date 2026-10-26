@@ -42,13 +42,16 @@ describe("assertWritable (boot check for the data directory)", () => {
     );
   });
 
-  it.skipIf(asRoot)("refuses a writable directory whose child is read-only (top-level-only chown)", () => {
+  it("returns null when everything is writable", () => {
+    expect(assertWritable([{ label: "NEST_STORAGE_ROOT", path: join(base, "nests"), children: true }])).toBeNull();
+  });
+
+  it.skipIf(asRoot)("warns, without refusing to boot, on a read-only nest under a writable root", () => {
     const nest = join(base, "nests", "abc");
     mkdirSync(nest, { recursive: true });
     lock(nest);
-    expect(() =>
-      assertWritable([{ label: "NEST_STORAGE_ROOT", path: join(base, "nests"), children: true }]),
-    ).toThrow(new RegExp(`NEST_STORAGE_ROOT ${nest} is not writable`));
+    const warning = assertWritable([{ label: "NEST_STORAGE_ROOT", path: join(base, "nests"), children: true }]);
+    expect(warning).toMatch(new RegExp(`NEST_STORAGE_ROOT ${nest} is not writable[\\s\\S]*chown -R`));
   });
 
   it.skipIf(asRoot)("ignores read-only entries in a directory checked without children (a mounted access.yaml)", () => {
@@ -98,9 +101,7 @@ describe("assertWritable (boot check for the data directory)", () => {
       lock(d);
     }
     // 60 unwritable nests, 50 checked, 5 listed: "…and 45 more".
-    expect(() => assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toThrow(
-      /…and 45 more/,
-    );
+    expect(assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toMatch(/…and 45 more/);
   });
 
   it.skipIf(asRoot)("lists at most five paths and summarises the rest", () => {
@@ -110,8 +111,6 @@ describe("assertWritable (boot check for the data directory)", () => {
       mkdirSync(d, { recursive: true });
       lock(d);
     }
-    expect(() => assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toThrow(
-      /…and 2 more/,
-    );
+    expect(assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toMatch(/…and 2 more/);
   });
 });
