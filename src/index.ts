@@ -33,10 +33,21 @@ import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
+import { assertWritable } from "./shared/data-dir-check.js";
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
   parseTrustedProxies(config.TRUSTED_PROXIES);
+
+  // Refuse to boot, with the chown fix, on a data directory this user can't
+  // write (e.g. a volume left root-owned by an image from before 2.3.0).
+  assertWritable([
+    { label: "DATA_ROOT", path: config.DATA_ROOT },
+    { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT },
+    ...(config.DB_DRIVER === "sqlite"
+      ? [{ label: "DATABASE_PATH", path: config.DATABASE_PATH, file: true }]
+      : []),
+  ]);
 
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
