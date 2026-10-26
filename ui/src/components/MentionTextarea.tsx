@@ -211,7 +211,9 @@ export function CommentBody({
     [body, members],
   );
   return (
-    <div className={cn("whitespace-pre-wrap", className)}>
+    // `anywhere`, not `break-word`: it also lowers the min-content width, so a
+    // long URL or token can't widen a flex/grid parent past the panel.
+    <div className={cn("whitespace-pre-wrap [overflow-wrap:anywhere]", className)}>
       {segments.map((seg, i) =>
         seg.kind === "text" ? (
           <span key={i}>{seg.text}</span>
