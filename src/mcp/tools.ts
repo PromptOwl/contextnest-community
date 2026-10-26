@@ -2299,7 +2299,14 @@ async function runTool(
             : r.status === 403
               ? "UNAUTHORIZED_ACTION"
               : "VALIDATION_FAILED";
-        return toolError(msg, code, conflict ? { conflict: true } : undefined);
+        // Machine-readable twins of the REST body, so an agent can branch on
+        // the cause without parsing text: the cap's `visibility_restricted`,
+        // the acknowledgement prompt, or a state conflict.
+        const extra: Record<string, unknown> = {};
+        if (r.code) extra.reason = r.code;
+        if (r.requires_acknowledgement) extra.requires_acknowledgement = true;
+        if (conflict) extra.conflict = true;
+        return toolError(msg, code, Object.keys(extra).length ? extra : undefined);
       }
       return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
     }

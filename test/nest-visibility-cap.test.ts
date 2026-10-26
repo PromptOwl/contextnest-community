@@ -364,3 +364,36 @@ describe("GWT 8 — ordering and who sees the MCP tool", () => {
     expect(await visibilityNow()).toBe("org");
   });
 });
+
+describe("GWT 9 — machine-readable MCP refusals and headless ordering", () => {
+  const callRaw = async (args: Record<string, unknown>, key: string) =>
+    (await mcp("tools/call", { name: "context_set_visibility", arguments: args }, key))?.result
+      ?.structuredContent ?? {};
+
+  it("the cap refusal carries reason: visibility_restricted, like REST's code", async () => {
+    process.env.NEST_PUBLIC_VISIBILITY = "admins";
+    const sc = await callRaw({ visibility: "public", acknowledge: true }, owner.apiKey);
+    expect(sc.code).toBe("UNAUTHORIZED_ACTION");
+    expect(sc.reason).toBe("visibility_restricted");
+  });
+
+  it("a missing acknowledgement is flagged requires_acknowledgement, not just VALIDATION_FAILED", async () => {
+    const sc = await callRaw({ visibility: "public" }, owner.apiKey);
+    expect(sc.requires_acknowledgement).toBe(true);
+    expect(sc.conflict).toBeUndefined();
+  });
+
+  it("headless nest + capped tier: the cap 403 comes first; uncapped, the headless 409", async () => {
+    const on = await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: true }, owner.apiKey);
+    expect(on.status).toBe(200);
+    try {
+      process.env.NEST_PUBLIC_VISIBILITY = "admins";
+      expect((await setVisibility("public", owner.apiKey)).status).toBe(403);
+      delete process.env.NEST_PUBLIC_VISIBILITY;
+      expect((await setVisibility("public", owner.apiKey)).status).toBe(409);
+    } finally {
+      await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: false }, owner.apiKey);
+    }
+    expect(await visibilityNow()).toBe("private");
+  });
+});
