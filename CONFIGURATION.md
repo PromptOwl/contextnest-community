@@ -582,16 +582,17 @@ Terminate TLS at the proxy and set `HOST=127.0.0.1` and `TRUSTED_PROXIES=loopbac
 
 ### Docker
 
-The image (`ghcr.io/promptowl/contextnest-community:<version>`, published on every release, or `docker build .`) sets `DATA_ROOT=/data` and `PORT=3838`, and runs as the non-root user uid/gid 1000, which owns `/data`. Mount a volume there: `docker run -p 3838:3838 -v contextnest-data:/data …`. A bind mount, or a volume written by an image from before 2.3.0 (which ran as root), must be writable by uid 1000: run `chown -R 1000:1000` on it once. If it isn't, the server refuses to start and logs each path it can't write and the `chown` to run. The server writes only to `/data` and `/tmp`, so `--read-only --tmpfs /tmp` works. On Cloud Run, a Cloud Storage volume is owned by root unless it's mounted with `mount-options="uid=1000;gid=1000"`.
+The image (`ghcr.io/promptowl/contextnest-community:<version>`, published on every release, or `docker build .`) sets `DATA_ROOT=/data` and `PORT=3838`, and runs as the non-root user uid/gid 1000, which owns `/data`. Mount a volume there: `docker run -p 3838:3838 -v contextnest-data:/data …`. A bind mount, or a volume written by an image from before 2.3.0 (which ran as root), must be writable by uid 1000: run `chown -R 1000:1000` on it once. If it isn't, the server refuses to start and logs each path it can't write and the `chown` to run. It checks `DATA_ROOT`, the directory holding the SQLite file (and the file and its `-wal`/`-shm` files), `NEST_STORAGE_ROOT`, and each nest directory directly under it. The server writes only to `/data` and `/tmp`, so `--read-only --tmpfs /tmp` works. On Cloud Run, a Cloud Storage volume is owned by root unless it's mounted with `mount-options="uid=1000;gid=1000"`.
 
 ### Kubernetes (Helm)
 
 The chart in `deploy/helm/contextnest-community` runs the image as one Deployment with a PersistentVolumeClaim at `/data`. Its [README](./deploy/helm/contextnest-community/README.md) has the full values table.
 
 ```bash
+kubectl create secret generic contextnest-env --from-literal=PROMPTOWL_KEY=pk_...
 helm install cn deploy/helm/contextnest-community \
   --set config.publicBaseUrl=https://nest.example.com \
-  --set secrets.promptowlKey=pk_...
+  --set existingSecret=contextnest-env
 ```
 
 - Settings map to the env vars on this page: `config.*` and `config.env` go into a ConfigMap, and `secrets.*` and `secrets.env` into a Secret. Use `existingSecret` to supply your own Secret, keyed by env var name.
