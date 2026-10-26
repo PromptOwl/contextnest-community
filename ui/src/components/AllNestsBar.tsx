@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Globe2, Copy, MessageSquareText, Lock, KeyRound } from "lucide-react";
+import { Globe2, MessageSquareText, Lock, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,7 +8,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   nestSummary,
   serverMcpUrl,
@@ -89,14 +89,12 @@ export function AllNestsBar({
               </p>
               <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
                 <code className="min-w-0 flex-1 truncate text-xs">{mcp}</code>
-                <Button
+                <CopyButton
+                  text={mcp}
                   variant="ghost"
-                  size="sm"
                   aria-label="Copy endpoint"
-                  onClick={() => copyTextWithToast(mcp, "Endpoint copied")}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </Button>
+                  toastMessage="Endpoint copied"
+                />
               </div>
             </div>
 
@@ -137,15 +135,13 @@ export function AllNestsBar({
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed">
                 {prompt}
               </pre>
-              <Button
-                variant="outline"
-                size="sm"
+              <CopyButton
+                text={prompt}
                 className="mt-2"
-                onClick={() => copyTextWithToast(prompt, "Prompt copied")}
-              >
-                <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
-                Copy "chat with all my nests"
-              </Button>
+                icon={MessageSquareText}
+                label={'Copy "chat with all my nests"'}
+                toastMessage="Prompt copied"
+              />
             </div>
 
             <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">

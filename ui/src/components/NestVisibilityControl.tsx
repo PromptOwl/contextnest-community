@@ -20,8 +20,13 @@
  * tiers are worded to say who they reach. The dialog also shows the nest's
  * description — that is all a stranger discovering the nest will see beside
  * its name — and offers to add one when it is empty (CU-wdqcq02mek).
+ *
+ * A server admin can restrict widening to Public or Organization to server
+ * admins (/health nest_public_visibility / nest_org_visibility). A blocked
+ * tier is shown disabled with the reason; the server refuses it regardless.
  */
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -56,6 +61,8 @@ import {
   visibilityNeedsAcknowledgement,
   visibilityTierHint,
   visibilityConfirmCopy,
+  visibilityMenuOptions,
+  settleVisibilityChange,
 } from "../lib/visibility-confirm";
 import { OrgContributionsSetting } from "./OrgContribution";
 
@@ -66,16 +73,11 @@ interface Props {
   onError?: (message: string | null) => void;
   /** "card" (default): the explained control the Collaborators tab and Share
    *  dialog show. "compact": one small button for a top bar — the current
-   *  tier as its label, the three tiers in a menu. Same fetch, same apply,
+   *  tier as its label, the three tiers in a menu. "header": the same menu
+   *  behind the nest header's outlined badge button. Same fetch, same apply,
    *  same going-public acknowledgement. */
-  variant?: "card" | "compact";
+  variant?: "card" | "compact" | "header";
 }
-
-const TIERS: Array<{ value: api.NestVisibility; label: string }> = [
-  { value: "private", label: "Private" },
-  { value: "org", label: "Organization" },
-  { value: "public", label: "Public" },
-];
 
 export function NestVisibilityControl({
   nestId,
@@ -91,8 +93,14 @@ export function NestVisibilityControl({
   // for 'public', and for 'org' on a shared deployment. Holds the tier being
   // confirmed; null = closed.
   const [confirming, setConfirming] = useState<"org" | "public" | null>(null);
-  const { sharedDeployment } = useAuth();
+  const { sharedDeployment, nestPublicVisibility, nestOrgVisibility, isAdmin, authMode } =
+    useAuth();
   const ctx = { sharedDeployment };
+  const policy = {
+    publicBy: nestPublicVisibility,
+    orgBy: nestOrgVisibility,
+    isServerAdmin: isAdmin || authMode === "open",
+  };
   const qc = useQueryClient();
   // The description is what a discovering reader sees beside the name, so
   // the dialog shows it and lets an empty one be filled in on the spot.
@@ -114,36 +122,35 @@ export function NestVisibilityControl({
     if (serverVisibility) setVisibility(serverVisibility);
   }, [serverVisibility]);
 
+  // Every variant offers all three tiers (the header used to flip
+  // private <-> public only), with a capped tier disabled and explained.
+  // Measured from the server value, not the optimistic one, so a pending
+  // change can't unlock a tier.
+  const options = visibilityMenuOptions(serverVisibility ?? visibility, ctx, policy);
+
   const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
-    // Optimistic change, reverting to the PREVIOUS value on failure — never
-    // to a value derived from the target, which would show a green Globe for
-    // a nest that was never public. Same as NestView's applyVisibility.
+    // Optimistic change; settleVisibilityChange reverts to the PREVIOUS value
+    // on failure and otherwise takes the server's re-read answer verbatim.
     const prev = visibility;
     setVisibility(target);
     setSaving(true);
     onError?.(null);
-    try {
-      const result = await api.setNestVisibility(nestId, target, acknowledgePublic);
-      // The server re-reads and echoes the persisted row, so its answer is DB
-      // truth — take it verbatim rather than re-deriving it from `next`.
-      setVisibility(result.visibility || target);
-      if (result.visibility !== target) {
-        onError?.(
-          "Server did not accept the change. You may not have admin access to this nest.",
-        );
-        return;
-      }
-      onChanged();
-    } catch (err: any) {
-      setVisibility(prev);
-      onError?.(err?.message || "Failed to change visibility");
-    } finally {
-      setSaving(false);
-    }
+    const settled = await settleVisibilityChange(prev, target, () =>
+      api.setNestVisibility(nestId, target, acknowledgePublic),
+    );
+    setVisibility(settled.visibility);
+    setSaving(false);
+    if (settled.error) onError?.(settled.error);
+    else onChanged();
   };
 
   const choose = async (next: api.NestVisibility) => {
     if (next === visibility) return;
+    const blocked = options.find((o) => o.value === next);
+    if (blocked?.disabled) {
+      onError?.(blocked.hint);
+      return;
+    }
     // The value only changes once acknowledged. Private never needs it; the
     // rule for the other two lives in visibility-confirm.ts with the server.
     if (next !== "private" && visibilityNeedsAcknowledgement(next, ctx)) {
@@ -218,54 +225,73 @@ export function NestVisibilityControl({
     </AlertDialog>
   );
 
-  if (variant === "compact") {
+  if (variant === "compact" || variant === "header") {
     // Until the nest read lands the local state is the "private" default —
     // showing it would flash a Lock on a public nest. The read is the cached
     // one every nest screen shares, so this is a frame on a cold load only.
     if (!serverVisibility) return null;
     const Icon = isPublic ? Globe : isOrg ? Building2 : Lock;
-    const current = TIERS.find((t) => t.value === visibility) ?? TIERS[0];
-    const currentHint = visibilityTierHint(visibility, ctx);
+    const label = options.find((o) => o.value === visibility)?.label ?? "Private";
+    const title = `${label} — ${visibilityTierHint(visibility, ctx)}. Click to change.`;
+    const icon = saving ? (
+      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+    ) : (
+      <Icon
+        className={`h-3.5 w-3.5 ${variant === "compact" ? (isPublic ? "text-green-600" : isOrg ? "text-blue-600" : "") : ""}`}
+      />
+    );
     return (
       <>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              disabled={saving}
-              className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
-              title={`${current.label} — ${currentHint}. Click to change.`}
-              aria-label={`Nest visibility: ${current.label}`}
-              data-testid="nest-visibility-compact"
-            >
-              {saving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Icon
-                  className={`h-3.5 w-3.5 ${isPublic ? "text-green-600" : isOrg ? "text-blue-600" : ""}`}
-                />
-              )}
-              <span className="hidden sm:inline">{current.label}</span>
-              <ChevronDown className="h-3 w-3 opacity-60" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-64">
-            {TIERS.map((t) => (
-              <DropdownMenuItem
-                key={t.value}
-                onClick={() => void choose(t.value)}
-                className="flex items-start gap-2"
+            {variant === "header" ? (
+              // The nest header's outlined badge button (CU-wdqcpztgwk), now
+              // a menu of all three tiers instead of a private <-> public flip.
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                className={`shrink-0 h-7 gap-1.5 ${isPublic ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100" : ""}`}
+                title={title}
+                aria-label={`Nest visibility: ${label}`}
+                data-testid="nest-visibility-header"
               >
-                {t.value === visibility ? (
+                {icon}
+                {label}
+                <ChevronDown className="h-3 w-3 opacity-60" />
+              </Button>
+            ) : (
+              <button
+                type="button"
+                disabled={saving}
+                className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+                title={title}
+                aria-label={`Nest visibility: ${label}`}
+                data-testid="nest-visibility-compact"
+              >
+                {icon}
+                <span className="hidden sm:inline">{label}</span>
+                <ChevronDown className="h-3 w-3 opacity-60" />
+              </button>
+            )}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align={variant === "header" ? "start" : "end"} className="w-64">
+            {options.map((o) => (
+              <DropdownMenuItem
+                key={o.value}
+                onClick={() => void choose(o.value)}
+                disabled={o.disabled}
+                className="flex items-start gap-2"
+                data-testid={`nest-visibility-option-${o.value}`}
+              >
+                {o.value === visibility ? (
                   <Check className="mt-0.5 h-4 w-4 shrink-0" />
                 ) : (
                   <span className="w-4 shrink-0" />
                 )}
                 <span className="flex flex-col">
-                  <span className="text-sm">{t.label}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {visibilityTierHint(t.value, ctx)}
-                  </span>
+                  <span className="text-sm">{o.label}</span>
+                  <span className="text-xs text-muted-foreground">{o.hint}</span>
                 </span>
               </DropdownMenuItem>
             ))}
@@ -315,13 +341,22 @@ export function NestVisibilityControl({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="private">Private</SelectItem>
-              <SelectItem value="org">Organization</SelectItem>
-              <SelectItem value="public">Public</SelectItem>
+              {options.map((o) => (
+                <SelectItem key={o.value} value={o.value} disabled={o.disabled}>
+                  {o.label}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
       </div>
+      {options
+        .filter((o) => o.disabled)
+        .map((o) => (
+          <p key={o.value} className="text-xs text-muted-foreground">
+            {o.hint} Ask a server admin to change it.
+          </p>
+        ))}
 
       {/* CU-wdqcq05rz6: only meaningful on an org nest, and only an owner or
           admin may change it (the server enforces both). */}
