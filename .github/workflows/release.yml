@@ -69,7 +69,15 @@ jobs:
 
       - name: Read version
         id: version
-        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # `latest` moves only for a stable version, never for a prerelease
+          # (x.y.z-next.0). Releases ship from main only, so versions only rise.
+          case "$version" in
+            *-*) echo "latest=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "latest=true" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -92,7 +100,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/promptowl/contextnest-community:${{ steps.version.outputs.version }}
-            ghcr.io/promptowl/contextnest-community:latest
+            ${{ steps.version.outputs.latest == 'true' && 'ghcr.io/promptowl/contextnest-community:latest' || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
