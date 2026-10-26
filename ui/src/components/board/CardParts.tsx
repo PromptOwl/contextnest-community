@@ -1,18 +1,17 @@
 /**
  * The small, editable pieces of a project-board card: priority, due date,
- * assignee, plus the column's "+ Add task" composer and the governed-move
- * warning. Logic lives in lib/board-tasks; these only render and report.
+ * assignee, plus the governed-move warning. Logic lives in lib/board-tasks;
+ * these only render and report. (New tasks: CreateTaskDialog.)
  *
  * Borrowed patterns, on purpose: Linear's priority bars and avatar slot
- * (bottom-right), Trello's red overdue chip and add-card-at-the-bottom
- * composer (Enter adds and stays open, Esc closes), ClickUp's click-a-field-
+ * (bottom-right), Trello's red overdue chip, ClickUp's click-a-field-
  * to-set-it-in-place.
  *
  * Every control sits inside a clickable card, and React bubbles events out of
  * portals along the component tree — so each one stops its clicks, or picking
  * a menu item would also open the document.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Ban,
   Bot,
@@ -425,72 +424,6 @@ export function SubItemChip({
         </DropdownMenuContent>
       </DropdownMenu>
     </Isolate>
-  );
-}
-
-// ── "+ Add task" composer ───────────────────────────────────────────────────
-
-/**
- * Trello's add-a-card: a title box at the bottom of the column. Enter creates
- * and keeps the box open for the next one; Escape (or blurring it empty)
- * closes it.
- */
-export function AddCardComposer({
-  placeholder,
-  onSubmit,
-  onClose,
-}: {
-  placeholder: string;
-  onSubmit: (title: string) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [saving, setSaving] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => ref.current?.focus(), []);
-  const submit = async () => {
-    const t = title.trim();
-    if (!t || saving) return;
-    setSaving(true);
-    try {
-      await onSubmit(t);
-      setTitle("");
-    } finally {
-      setSaving(false);
-      ref.current?.focus();
-    }
-  };
-  return (
-    <div className="rounded-md border border-primary/60 bg-card p-1.5 shadow-sm">
-      <Input
-        ref={ref}
-        value={title}
-        disabled={saving}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            void submit();
-          } else if (e.key === "Escape") {
-            onClose();
-          }
-        }}
-        onBlur={() => {
-          if (!title.trim() && !saving) onClose();
-        }}
-        placeholder={placeholder}
-        className="h-8 rounded-sm border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-      />
-      <div className="mt-1 flex items-center gap-1">
-        <Button size="sm" className="h-7" disabled={!title.trim() || saving} onMouseDown={(e) => e.preventDefault()} onClick={() => void submit()}>
-          Add task
-        </Button>
-        <Button size="sm" variant="ghost" className="h-7" onMouseDown={(e) => e.preventDefault()} onClick={onClose} title="Close (Esc)">
-          <X className="h-3.5 w-3.5" />
-        </Button>
-        <span className="ml-auto pr-1 text-[10px] text-muted-foreground">↵ to add</span>
-      </div>
-    </div>
   );
 }
 
