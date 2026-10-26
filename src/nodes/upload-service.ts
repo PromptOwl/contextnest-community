@@ -278,9 +278,14 @@ function filenameFromUrl(raw: string): string {
  * Bytes from a JSON upload body: exactly one of `content_base64` (with a
  * `filename`, whose extension decides the type) or `url` (filename optional —
  * the URL's own file name is used). Type and size are refused before any
- * bytes are fetched or decoded wherever they can be.
+ * bytes are fetched or decoded wherever they can be; `beforeBytes` runs the
+ * caller's own refusals for the kind at that point too.
  */
-export async function resolveUpload(src: UploadSource, route: UploadRoute): Promise<ResolvedUpload> {
+export async function resolveUpload(
+  src: UploadSource,
+  route: UploadRoute,
+  beforeBytes?: (kind: UploadKind) => Promise<void>,
+): Promise<ResolvedUpload> {
   const b64 = typeof src.content_base64 === "string" && src.content_base64.length > 0 ? src.content_base64 : null;
   const url = typeof src.url === "string" && src.url.trim() ? src.url.trim() : null;
   if (src.content_base64 !== undefined && typeof src.content_base64 !== "string") {
@@ -303,6 +308,7 @@ export async function resolveUpload(src: UploadSource, route: UploadRoute): Prom
     );
   }
   const kind = kindFor(filename, route);
+  await beforeBytes?.(kind);
   const bytes = b64 ? decodeBase64(b64, kind) : await fetchUpload(url!, kind);
   if (bytes.length === 0) throw new ValidationError("The file is empty.");
   return { bytes, filename, kind };

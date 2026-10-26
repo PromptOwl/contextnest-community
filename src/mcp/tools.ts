@@ -2046,8 +2046,16 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
   try {
     // Fetch/decode first (outside any lock — a URL can take a while); the
     // type and size refusals inside happen before bytes are fetched or
-    // decoded wherever they can.
-    const upload = await uploads.resolveUpload(args, args.as === "asset" ? "asset" : "any");
+    // decoded wherever they can — and so does the agent-write hold, as on REST.
+    const upload = await uploads.resolveUpload(args, args.as === "asset" ? "asset" : "any", async (kind) => {
+      if (kind !== "pdf" && kind !== "office") return;
+      await uploads.assertDocumentUploadNotGated({
+        nestId,
+        userId,
+        keyId: ctx.apiKeyId ?? null,
+        agentSurface: true,
+      });
+    });
     const isDocument = upload.kind === "pdf" || upload.kind === "office";
     if (args.as === "document" && !isDocument) {
       return toolError(
@@ -2062,12 +2070,6 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
         data: { kind: upload.kind, ...asset },
       };
     }
-    await uploads.assertDocumentUploadNotGated({
-      nestId,
-      userId,
-      keyId: ctx.apiKeyId ?? null,
-      agentSurface: true,
-    });
     const fields = {
       ...(args.title?.trim() ? { title: args.title.trim() } : {}),
       ...(args.folder?.trim() ? { folder: args.folder.trim() } : {}),

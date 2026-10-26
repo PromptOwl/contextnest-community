@@ -364,6 +364,11 @@ describe("agent-write hold", () => {
       const doc = await callTool(owner.apiKey, "context_upload", { filename: "held.pdf", content_base64: b64(textPdf()) });
       expect(doc.isError).toBe(true);
       expect(doc.text).toMatch(/holds agent writes/);
+      // Refused before the URL is fetched, as on REST.
+      const fetchSpy = await serveUrl(textPdf());
+      const byUrl = await callTool(owner.apiKey, "context_upload", { url: "https://files.example/held.pdf" });
+      expect(byUrl.text).toMatch(/holds agent writes/);
+      expect(fetchSpy).not.toHaveBeenCalled();
       const rest = await jsonRequest(
         app,
         "POST",

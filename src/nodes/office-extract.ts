@@ -96,7 +96,10 @@ function localName(qname: string): string {
   return i === -1 ? qname : qname.slice(i + 1);
 }
 
-const ATTR = /([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+// Sticky, from the end of the tag name: one attempt per attribute, and the
+// first miss ends the tag. A global regex retried at every offset, which is
+// quadratic on a long run with no `=` (a 1 MB tag zips to ~1 KB).
+const ATTR = /\s+([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
 
 /**
  * Parse one XML part into a light tree. Throws OfficeFileError on a DTD,
@@ -357,9 +360,11 @@ function resolvePartPath(baseDir: string, target: string): string {
 
 // ─── Markdown helpers ──────────────────────────────────────────────────────
 
-/** Keep extracted text from being read as markdown block syntax or HTML. */
+/** Keep extracted text from being read as markdown block syntax, HTML, or a
+ *  link, image or wikilink (`[` — backslashes first, so `\[` can't unescape). */
 function escapeLine(s: string): string {
   return s
+    .replace(/[\\[]/g, "\\$&")
     .replace(/<(?=[A-Za-z/!?])/g, "\\<")
     .replace(/^(\s*)(#{1,6}\s|>|[-+*]\s|\d+[.)]\s|```|~~~)/, "$1\\$2");
 }

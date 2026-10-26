@@ -77,6 +77,12 @@ describe("docx → markdown", () => {
     expect(md).toContain("\\# not a heading, \\<script>alert(1)\\</script>");
   });
 
+  it("keeps inline links, images and wikilinks as text", async () => {
+    const doc = await buildDocx([{ p: "![px](https://t.example/p.png) [[Other]] \\[x](u)" }]);
+    const md = (await extractOffice(doc, "docx")).markdown;
+    expect(md).toBe("!\\[px](https://t.example/p.png) \\[\\[Other]] \\\\\\[x](u)");
+  });
+
   it("skips deleted tracked changes and field codes", async () => {
     const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
     const doc = await buildDocx([], {
@@ -137,6 +143,13 @@ describe("refusals", () => {
   it("refuses a package with more entries than the cap", async () => {
     const many = await manyEntriesDocx(OFFICE_MAX_ENTRIES + 1);
     await expect(extractOffice(many, "docx")).rejects.toThrow(/too many parts/);
+  });
+
+  it("parses a tag with a huge attribute-like run in linear time", () => {
+    const start = Date.now();
+    const el = parseXml(`<a ${"x".repeat(1024 * 1024)}/>`);
+    expect(el.attrs).toEqual({});
+    expect(Date.now() - start).toBeLessThan(1000);
   });
 
   it("refuses malformed XML", async () => {
