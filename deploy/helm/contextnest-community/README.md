@@ -38,14 +38,36 @@ does the SQLite database unless Postgres is configured. So:
   without both: SQLite can't be shared between pods, and pods on separate
   volumes would each see different nests. With both set, the strategy is
   `RollingUpdate`.
+- ReadWriteMany is necessary for several pods, not sufficient: the pods write
+  the same nest files concurrently, so the storage needs working POSIX file
+  locking and close-to-open consistency (NFSv4 with locking, EFS, Filestore,
+  Azure Files over NFS). Storage without file locking (such as Cloud Storage
+  FUSE or s3-style FUSE mounts) is single-writer: keep one pod there.
 - On network storage set `config.env.DRIFT_SCAN_INTERVAL_MS: "0"`, as the
-  periodic scan for external edits is slow there. Storage without file locking
-  (such as Cloud Storage FUSE) is single-writer only: keep one pod.
+  periodic scan for external edits is slow there.
 - The PVC carries `helm.sh/resource-policy: keep`, so `helm uninstall` leaves
   your nests in place. Delete the PVC yourself to remove them.
 - Upgrading from a volume written by the old root image: run
   `chown -R 1000:1000` on it once (the pod's `fsGroup` covers group access on
-  most volume types, but not every driver applies it).
+  most volume types, but not every driver applies it). If it can't write, the
+  server refuses to start and logs which path and the `chown` to run.
+
+## Secrets
+
+Values passed with `--set` or a values file are stored in the Helm release
+history (a Secret in the release namespace) along with the rest of the values.
+For production, create the Secret yourself (or with External Secrets / Sealed
+Secrets) and point the chart at it:
+
+```bash
+kubectl create secret generic contextnest-env \
+  --from-literal=PROMPTOWL_KEY=pk_... --from-literal=SECRETS_KEY="$(openssl rand -hex 32)"
+kubectl create secret generic contextnest-db --from-literal=DATABASE_URL=postgres://...
+helm install cn deploy/helm/contextnest-community \
+  --set existingSecret=contextnest-env --set postgres.existingSecret=contextnest-db
+```
+
+`secrets.*`, `postgres.url` and `postgres.password` are fine for trying it out.
 
 ## Security
 

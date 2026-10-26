@@ -37,7 +37,8 @@ config:
   env: {}
 
 # -- Sensitive settings, rendered into a Secret. Ignored when existingSecret
-# is set.
+# is set. These are kept in the Helm release history: for production prefer
+# existingSecret (see the README).
 secrets:
   # -- PromptOwl license key (pk_...). Without one the server runs on the
   # Free tier (up to 10 users). Can also be installed from the browser.
@@ -91,7 +92,8 @@ persistence:
   # -- Empty = the cluster's default StorageClass.
   storageClass: ""
   # -- ReadWriteOnce (default, single pod) or ReadWriteMany (needed for
-  # replicaCount > 1, together with Postgres).
+  # replicaCount > 1, together with Postgres). RWX storage must also support
+  # file locking (NFSv4, EFS, Filestore); FUSE object-store mounts don't.
   accessMode: ReadWriteOnce
   size: 10Gi
   annotations: {}
