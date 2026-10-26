@@ -8,6 +8,8 @@
 #        waits for Ready, checks /health, deletes the pod and confirms a nest
 #        survived (ci/kind-smoke.sh). Before that, checks the image runs as
 #        uid 1000 and refuses a root-owned /data with the chown fix.
+# arm64: builds the image for linux/arm64 (QEMU, no push), so a break in the
+#        second platform the release publishes shows up here, not at release.
 #
 # Images and actions are pinned by digest / commit SHA.
 
@@ -114,3 +116,26 @@ jobs:
           kubectl get all,pvc -o wide || true
           kubectl describe pods || true
           kubectl logs -l app.kubernetes.io/instance=cn --tail=200 || true
+
+  arm64:
+    name: Image builds for arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,scope=arm64,mode=max
