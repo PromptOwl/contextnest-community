@@ -108,8 +108,13 @@ footer.foot a{color:var(--muted)}
 `;
 }
 
-/** Nav filter + "Copy page" (fetches the page's own .md). Static, so its CSP hash is fixed. */
-const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){fetch(b.getAttribute('data-copy')).then(function(r){return r.text()}).then(function(t){return navigator.clipboard.writeText(t)}).then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
+/**
+ * Nav filter + "Copy page" (fetches the page's own .md). Static, so its CSP hash is fixed.
+ * Safari only lets a clipboard write start inside the click, so the write is
+ * opened at once with a ClipboardItem that waits on the fetch; writing after
+ * the fetch resolves is the fallback for browsers without ClipboardItem.
+ */
+const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){var c=navigator.clipboard,u=b.getAttribute('data-copy');function md(){return fetch(u).then(function(r){if(!r.ok)throw r.status;return r.text()})}function late(){return md().then(function(t){return c.writeText(t)})}var p;try{p=c.write([new ClipboardItem({'text/plain':md().then(function(t){return new Blob([t],{type:'text/plain'})})})]).catch(late)}catch(e){p=late()}p.then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
 
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s).digest("base64")}'`;
 

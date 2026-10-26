@@ -76,7 +76,6 @@ import {
   GitCompare,
   ChevronDown,
   Check,
-  Copy,
   Star,
   Megaphone,
   Undo2,
@@ -148,6 +147,7 @@ import { displayNameFor } from "../lib/person-name";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -537,12 +537,6 @@ export function DocumentEditor({
   const serverOrigin =
     typeof window !== "undefined" ? window.location.origin : "";
   const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
-  const [copiedRunnables, setCopiedRunnables] = useState(false);
-  const copyRunnablesUrl = async () => {
-    if (!(await copyTextWithToast(runnablesUrl))) return;
-    setCopiedRunnables(true);
-    setTimeout(() => setCopiedRunnables(false), 1500);
-  };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
   // select-to-comment and painted highlights are reachable without TipTap
@@ -3563,19 +3557,12 @@ export function DocumentEditor({
                       <span className="text-xs font-medium text-muted-foreground">
                         Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
                       </span>
-                      <Button
+                      <CopyButton
+                        text={runnablesUrl}
                         variant="ghost"
-                        size="sm"
                         className="h-6 px-2 shrink-0"
-                        onClick={copyRunnablesUrl}
                         title="Copy URL"
-                      >
-                        {copiedRunnables ? (
-                          <Check className="h-3 w-3 text-green-600" />
-                        ) : (
-                          <Copy className="h-3 w-3" />
-                        )}
-                      </Button>
+                      />
                     </div>
                     <code className="block text-[11px] font-mono break-all text-foreground/80">
                       GET {runnablesUrl}
