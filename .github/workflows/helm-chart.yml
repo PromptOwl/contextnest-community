@@ -8,8 +8,9 @@
 #        waits for Ready, checks /health, deletes the pod and confirms a nest
 #        survived (ci/kind-smoke.sh). Before that, checks the image runs as
 #        uid 1000 and refuses a root-owned /data with the chown fix.
-# arm64: builds the image for linux/arm64 (QEMU, no push), so a break in the
-#        second platform the release publishes shows up here, not at release.
+# arm64: builds the image for linux/arm64 (QEMU, no push) and boots it until
+#        /health answers, so a break in the second platform the release
+#        publishes (e.g. a native module) shows up here, not at release.
 #
 # Images and actions are pinned by digest / commit SHA.
 
@@ -22,6 +23,9 @@ on:
       - "deploy/helm/**"
       - "Dockerfile"
       - ".github/workflows/helm-chart.yml"
+      # the boot check the root-owned-volume step exercises
+      - "src/index.ts"
+      - "src/shared/data-dir-check.ts"
 
 permissions:
   contents: read
@@ -137,5 +141,19 @@ jobs:
           context: .
           platforms: linux/arm64
           push: false
+          load: true
+          tags: contextnest-community:arm64
           cache-from: type=gha,scope=arm64
           cache-to: type=gha,scope=arm64,mode=max
+
+      - name: Boot it under QEMU and check /health
+        run: |
+          set -eu
+          cid=$(docker run -d --platform linux/arm64 contextnest-community:arm64)
+          for i in $(seq 1 60); do
+            if docker exec "$cid" node -e "fetch('http://127.0.0.1:3838/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              echo "arm64 /health ok"; docker rm -f "$cid" > /dev/null; exit 0
+            fi
+            sleep 5
+          done
+          docker logs "$cid" | tail -50; docker rm -f "$cid" > /dev/null; exit 1
