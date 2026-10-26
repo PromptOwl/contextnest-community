@@ -6,7 +6,8 @@
 #        alpine/helm image, so the same command works on a laptop.
 # kind:  builds the image from this PR, installs the chart on a kind cluster,
 #        waits for Ready, checks /health, deletes the pod and confirms a nest
-#        survived (ci/kind-smoke.sh).
+#        survived (ci/kind-smoke.sh). Before that, checks the image runs as
+#        uid 1000 and refuses a root-owned /data with the chown fix.
 #
 # Images and actions are pinned by digest / commit SHA.
 
@@ -66,6 +67,27 @@ jobs:
 
       - name: Build image
         run: docker build -t contextnest-community:ci .
+
+      - name: Image runs as uid 1000 and explains a root-owned /data
+        run: |
+          set -eu
+          [ "$(docker run --rm --entrypoint id contextnest-community:ci -u)" = 1000 ]
+          # A volume left root-owned by an older image. The file keeps it
+          # non-empty: Docker re-copies the image's /data (owned by 1000) into
+          # an empty volume on every mount.
+          docker volume create rootowned
+          docker run --rm --user 0 -v rootowned:/data --entrypoint sh contextnest-community:ci \
+            -c 'touch /data/community.db && chown -R 0:0 /data && chmod 755 /data'
+          cid=$(docker run -d -v rootowned:/data contextnest-community:ci)
+          code=$(timeout 60 docker wait "$cid" || echo running)
+          docker logs "$cid" > boot.log 2>&1
+          docker rm -f "$cid" > /dev/null
+          docker volume rm rootowned > /dev/null
+          if [ "$code" = 0 ] || [ "$code" = running ]; then
+            echo "expected the server to refuse a root-owned /data (got: $code)"; cat boot.log; exit 1
+          fi
+          grep -q "DATA_ROOT /data is not writable" boot.log
+          grep -q "chown -R 1000:1000" boot.log
 
       - name: Create kind cluster
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
