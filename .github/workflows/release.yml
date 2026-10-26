@@ -3,6 +3,20 @@ name: Release
 on:
   push:
     branches: [main]
+  # Recovery only: (re)build and push the container image for a release that
+  # is already tagged, e.g. when the image job failed after npm published. It
+  # never runs the npm release job.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to build the image for (its git tag v<version> must exist), e.g. 2.3.0"
+        required: true
+        type: string
+      latest:
+        description: "Also move the latest tag (only for the newest stable release)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -13,6 +27,7 @@ permissions:
 jobs:
   release:
     name: Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.changesets.outputs.published }}
@@ -50,12 +65,17 @@ jobs:
 
   # Publishes the self-hosted container image to GHCR, only on a run where
   # changesets actually published a new version to npm (not on the runs that
-  # just open or update the release PR). Tags: the package.json version and
-  # `latest`. Used by the Helm chart in deploy/helm/contextnest-community.
+  # just open or update the release PR), or on a manual recovery dispatch.
+  # Tags: the package.json version and, for a stable version, `latest`. Used by
+  # the Helm chart in deploy/helm/contextnest-community.
   image:
     name: Container image
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: >-
+      !cancelled() && (
+        (github.event_name == 'push' && needs.release.outputs.published == 'true') ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -65,19 +85,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          # The commit this run published, or the release tag on a dispatch.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.sha }}
 
       - name: Read version
         id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_LATEST: ${{ inputs.latest }}
         run: |
           version=$(node -p 'require("./package.json").version')
+          if [ "$EVENT" = workflow_dispatch ] && [ "$version" != "$INPUT_VERSION" ]; then
+            echo "::error::tag v$INPUT_VERSION has package.json version $version"; exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # `latest` moves only for a stable version, never for a prerelease
-          # (x.y.z-next.0). Releases ship from main only, so versions only rise.
-          case "$version" in
-            *-*) echo "latest=false" >> "$GITHUB_OUTPUT" ;;
-            *)   echo "latest=true" >> "$GITHUB_OUTPUT" ;;
-          esac
+          # (x.y.z-next.0). Releases ship from main only, so on a release run
+          # versions only rise; a recovery dispatch moves it only when asked.
+          latest=true
+          case "$version" in *-*) latest=false ;; esac
+          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_LATEST" != true ]; then latest=false; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          # The chart's default image tag is its appVersion: flag drift here.
+          app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/contextnest-community/Chart.yaml 2>/dev/null || true)
+          if [ -n "$app" ] && [ "$app" != "$version" ]; then
+            echo "::warning::deploy/helm/contextnest-community/Chart.yaml appVersion is $app but this release is $version; bump it so the chart's default image tag exists."
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
