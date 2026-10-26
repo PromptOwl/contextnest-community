@@ -481,6 +481,9 @@ export interface NodeResponse extends TaskFields {
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** The Office file a document was extracted from (`metadata.original`):
+   *  served at /nests/:nestId/originals/:file. Absent on every other node. */
+  original?: OriginalFile;
   /** Blocking relations from nodes that aren't done yet (src/nodes/
    *  relations.ts). Absent when nothing open blocks this node. */
   open_blockers?: number;
@@ -532,6 +535,33 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
     ? [TASK_NODE_TYPE]
     : []),
 ]);
+
+/**
+ * An uploaded Office file kept beside the nest (`<nest>/.originals/<file>`)
+ * and bound to the document extracted from it. `file` is the server-minted
+ * `<uuid>.<kind>` name; `sha256` is checked before the file is served.
+ */
+export interface OriginalFile {
+  file: string;
+  filename: string;
+  kind: "pptx" | "docx";
+  bytes: number;
+  sha256: string;
+}
+
+/** Server-minted original names only — the traversal defense for the route. */
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+
+export function isOriginalFile(v: unknown): v is OriginalFile {
+  const o = v as OriginalFile | null | undefined;
+  return (
+    !!o &&
+    typeof o === "object" &&
+    typeof o.file === "string" &&
+    ORIGINAL_FILE_NAME.test(o.file) &&
+    typeof o.sha256 === "string"
+  );
+}
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
 export const PDF_NODE_TYPE = "pdf";
@@ -668,6 +698,9 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     prime: documentPrimeFlag(fm.metadata),
     always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...(isOriginalFile((fm.metadata as any)?.original)
+      ? { original: (fm.metadata as any).original as OriginalFile }
+      : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
@@ -1613,6 +1646,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** The uploaded Office file this document's text was extracted from
+   *  (office-service.ts). Stored as `metadata.original`, so the binding is
+   *  part of every version's hash. */
+  original?: OriginalFile;
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
@@ -1991,6 +2028,7 @@ async function createNodeOnce(
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
+      ...(input.original ? { original: input.original } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));

@@ -92,6 +92,7 @@ import { isInitializeRequest, serverConnectInstructions } from "./connect-instru
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",
@@ -312,6 +313,7 @@ const SERVER_NEST_TOOLS = [
   "context_comments",
   "context_versions",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",

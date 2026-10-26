@@ -1063,6 +1063,17 @@ export const config = {
   },
 
   /**
+   * Max .pptx/.docx upload size in bytes (POST /nests/:id/nodes/office), the
+   * file as uploaded (compressed). Default 25 MB, for the PDF cap's reasons;
+   * what it may inflate to is capped separately (office-extract.ts). Read per
+   * request. Override via OFFICE_MAX_MB.
+   */
+  get OFFICE_MAX_BYTES() {
+    const mb = parseInt(process.env.OFFICE_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
+
+  /**
    * File operations one import keeps in flight (engine `limits.ioConcurrency`).
    * Unset leaves the engine default (32). Raise it on a network mount (gcsfuse).
    */
