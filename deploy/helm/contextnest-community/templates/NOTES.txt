@@ -21,6 +21,13 @@ Install a PromptOwl license key (pk_...) from the browser License Setup page,
 or via secrets.promptowlKey / existingSecret (PROMPTOWL_KEY).
 {{- end }}
 
+{{- if and (not .Values.existingSecret) (or .Values.secrets.promptowlKey .Values.secrets.secretsKey .Values.secrets.env .Values.postgres.url .Values.postgres.password) }}
+
+Note: secrets were passed as chart values, so they are also stored in the Helm
+release history. For production, put them in a Secret you manage and use
+existingSecret / postgres.existingSecret (see the chart README).
+{{- end }}
+
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence.enabled=false. Every nest is lost when the pod restarts.
