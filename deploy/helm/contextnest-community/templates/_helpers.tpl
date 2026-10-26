@@ -102,7 +102,11 @@ in Postgres AND the volume is ReadWriteMany (both pods see the same files).
 {{- fail (printf "persistence.accessMode must be ReadWriteOnce, ReadWriteOncePod or ReadWriteMany (got %q)." .Values.persistence.accessMode) }}
 {{- end }}
 {{- $secretNames := list "PROMPTOWL_KEY" "SECRETS_KEY" "DATABASE_URL" "DB_PASSWORD" "OIDC_CLIENT_SECRET" "MCP_SIGNING_SECRET" "SMTP_URL" "ANTHROPIC_API_KEY" "SES_SECRET_ACCESS_KEY" "SLACK_WEBHOOK_URL" "MSTEAMS_WEBHOOK_URL" "OFFICIAL_COMMUNITY_SSO_SECRET" "PROMPTOWL_BYPASS_SECRET" "SITE_DOMAIN_CHECK_TOKEN" }}
+{{- $reserved := list "PORT" "DATA_ROOT" "AUTH_MODE" "PUBLIC_BASE_URL" "TRUSTED_PROXIES" "NEST_STORAGE_ROOT" "DB_DRIVER" "DB_HOST" "DB_PORT" "DB_USER" "DB_NAME" "DB_SSL" "DB_POOL_MAX" }}
 {{- range $k, $_ := .Values.config.env }}
+{{- if has $k $reserved }}
+{{- fail (printf "config.env.%s is set by the chart itself. Use its dedicated value instead (config.authMode, config.publicBaseUrl, config.trustedProxies, config.nestStorageRoot, postgres.*); PORT and DATA_ROOT are fixed at 3838 and /data." $k) }}
+{{- end }}
 {{- if has $k $secretNames }}
 {{- fail (printf "config.env.%s is a secret, and config.env is rendered into a plain ConfigMap. Put it under secrets.env (or in existingSecret) instead." $k) }}
 {{- end }}

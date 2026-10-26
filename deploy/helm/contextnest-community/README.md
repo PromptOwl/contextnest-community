@@ -22,8 +22,8 @@ curl http://127.0.0.1:3838/health
 
 The chart's `appVersion` is the server release it was written for and is the
 default image tag. Set `image.tag` to run another release. Images are published
-from release 2.3.0 on: installing from a checkout before that release ships
-needs an image you built (`docker build .`) and `image.repository`/`image.tag`
+from the first release that includes this chart: until it ships, install with
+an image you built (`docker build .`) and `image.repository`/`image.tag`
 pointing at it.
 
 Every server setting is an environment variable, documented in
@@ -97,7 +97,7 @@ Kubernetes API.
 | `config.publicBaseUrl` | `""` | `PUBLIC_BASE_URL`, the external URL. Set it with OIDC, emailed publish links or citations. |
 | `config.trustedProxies` | `private` | `TRUSTED_PROXIES`: peers whose `X-Forwarded-*` headers count. `private` covers an in-cluster ingress controller. |
 | `config.nestStorageRoot` | `""` | `NEST_STORAGE_ROOT`. Empty = `/data/nests`. |
-| `config.env` | `{}` | Any other non-secret env vars (ConfigMap). |
+| `config.env` | `{}` | Any other non-secret env vars (ConfigMap). Keys the chart sets itself and known secret names are refused. |
 | `secrets.promptowlKey` | `""` | `PROMPTOWL_KEY`, the PromptOwl license key. Without one the server runs on the Free tier. |
 | `secrets.secretsKey` | `""` | `SECRETS_KEY`, the master key for stored credentials. Don't change it once set. |
 | `secrets.env` | `{}` | Any other sensitive env vars, e.g. `OIDC_CLIENT_SECRET`, `SMTP_URL`, `MCP_SIGNING_SECRET`. |

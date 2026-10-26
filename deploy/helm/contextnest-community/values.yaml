@@ -33,8 +33,10 @@ config:
   # (on the data volume).
   nestStorageRoot: ""
   # -- Any other non-secret env vars, e.g. TELEMETRY_ENABLED: "true",
-  # DRIFT_SCAN_INTERVAL_MS: "0" (do this on network storage). Known secret
-  # names (PROMPTOWL_KEY, DATABASE_URL, ...) are refused here: use secrets.env.
+  # DRIFT_SCAN_INTERVAL_MS: "0" (do this on network storage). Refused here:
+  # keys the chart sets itself (PORT, DATA_ROOT, AUTH_MODE, DB_*, ...) and
+  # known secret names (PROMPTOWL_KEY, DATABASE_URL, ...; a best-effort list).
+  # Put secrets in secrets.env.
   env: {}
 
 # -- Sensitive settings, rendered into a Secret. Ignored when existingSecret

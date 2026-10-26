@@ -52,6 +52,7 @@ refuses replicas-no-volume "ReadWriteMany" --set replicaCount=2 --set postgres.u
 refuses bad-access-mode "persistence.accessMode must be" --set persistence.accessMode=ReadOnlyMany
 refuses url-and-secret "not both" --set postgres.url=postgres://u:p@db/x --set postgres.existingSecret=db
 refuses secret-in-configmap "config.env.DATABASE_URL is a secret" --set config.env.DATABASE_URL=postgres://u:p@db/x
+refuses reserved-in-configmap "config.env.DATA_ROOT is set by the chart" --set config.env.DATA_ROOT=/elsewhere
 
 # Defaults: one pod, Recreate, PVC, non-root, read-only rootfs, /health probes.
 render default
