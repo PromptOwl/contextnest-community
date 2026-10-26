@@ -318,6 +318,7 @@ export function AnnotationsPanel({
         (replyFor === t.id ? (
           <div className="mt-2">
             <MentionTextarea
+              formatting
               members={members}
               value={replyText}
               onValueChange={setReplyText}
@@ -444,6 +445,7 @@ export function AnnotationsPanel({
               </p>
             ))}
           <MentionTextarea
+            formatting
             ref={composerRef}
             members={members}
             value={commenting ? draft : ""}
