@@ -98,6 +98,7 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
+import { TaskAssignee } from "./board/TaskAssignee";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -373,6 +374,7 @@ export function DocumentEditor({
   // Saved by NodeFieldsPanel on their own, outside the body's Save.
   const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
   const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
+  const [assignee, setAssignee] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -1160,6 +1162,7 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
+      setAssignee((node as any)?.assignee ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -3310,6 +3313,23 @@ export function DocumentEditor({
                       </span>
                     )}
                   </div>
+                )}
+
+                {/* Assignee — tasks only, the board card's picker (saved on pick). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskAssignee
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    assignee={assignee}
+                    people={roster?.people ?? []}
+                    me={currentEmail}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setAssignee(n?.assignee ?? undefined);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
                 )}
 
                 {/* Relations — tasks only: blocks / blocked by / related /

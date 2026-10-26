@@ -261,16 +261,19 @@ export function AssigneeMenu({
   me,
   editable,
   onChange,
+  showName,
 }: {
   assignee?: string;
   people: Person[];
   me?: string;
   editable: boolean;
   onChange: (email: string | null, member?: boolean) => void;
+  /** Name beside the avatar, always visible ("Unassigned" when empty) — the task view. */
+  showName?: boolean;
 }) {
   const [q, setQ] = useState("");
   const current = assignee ? people.find((p) => p.email.toLowerCase() === assignee) : undefined;
-  const face = assignee ? (
+  const avatar = assignee ? (
     <span title={`Assigned to ${current?.name ? `${current.name} (${assignee})` : assignee}`}>
       <Avatar email={assignee} />
     </span>
@@ -279,7 +282,17 @@ export function AssigneeMenu({
       <UserRound className="h-3.5 w-3.5" />
     </span>
   );
-  if (!editable) return assignee ? face : null;
+  const face = showName ? (
+    <span className="inline-flex items-center gap-1.5 text-sm">
+      {avatar}
+      <span className={assignee ? "" : "text-muted-foreground"}>
+        {assignee ? current?.name || assignee : "Unassigned"}
+      </span>
+    </span>
+  ) : (
+    avatar
+  );
+  if (!editable) return assignee || showName ? face : null;
   // Me first, then the roster alphabetically — the ClickUp/Linear ordering.
   const needle = q.trim().toLowerCase();
   const list = people
@@ -298,7 +311,7 @@ export function AssigneeMenu({
     <Isolate>
       <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
         <DropdownMenuTrigger
-          className={`rounded-full ${assignee ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
+          className={`rounded-full ${assignee || showName ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
           title={assignee ? undefined : "Assign"}
         >
           {face}
