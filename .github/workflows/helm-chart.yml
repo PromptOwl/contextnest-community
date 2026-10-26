@@ -1,0 +1,94 @@
+# helm-chart.yml — checks for the Kubernetes chart in deploy/helm/contextnest-community.
+#
+# lint:  helm lint, helm template over the value sets in ci/ (including the
+#        replica guard, which must refuse unsafe configs), and kubeconform
+#        schema validation of every render. Runs ci/test.sh in a pinned
+#        alpine/helm image, so the same command works on a laptop.
+# kind:  builds the image from this PR, installs the chart on a kind cluster,
+#        waits for Ready, checks /health, deletes the pod and confirms a nest
+#        survived (ci/kind-smoke.sh).
+#
+# Images and actions are pinned by digest / commit SHA.
+
+name: Helm chart
+
+on:
+  pull_request:
+    branches: [ "development", "main" ]
+    paths:
+      - "deploy/helm/**"
+      - "Dockerfile"
+      - ".github/workflows/helm-chart.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-chart-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # alpine/helm:3.17.1
+  HELM_IMAGE: alpine/helm@sha256:e8d29e13b8218a8cb7b117a10a5210922474a74467bf70b6f3f1f7d9c1818ab0
+  # ghcr.io/yannh/kubeconform:v0.6.7
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform@sha256:0925177fb05b44ce18574076141b5c3d83235e1904d3f952182ac99ddc45762c
+
+jobs:
+  lint:
+    name: Lint, template, kubeconform
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: helm lint + template + replica guard
+        run: |
+          mkdir -p "$RUNNER_TEMP/rendered"
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/rendered:/out" -w /repo \
+            --entrypoint sh "$HELM_IMAGE" deploy/helm/contextnest-community/ci/test.sh /out
+
+      - name: kubeconform
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$RUNNER_TEMP/rendered:/out:ro" \
+            "$KUBECONFORM_IMAGE" -strict -summary /out
+
+  kind:
+    name: kind install smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build image
+        run: docker build -t contextnest-community:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          cluster_name: chart-ci
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.17.1
+
+      - name: Install chart and check it
+        env:
+          IMAGE: contextnest-community:ci
+        run: |
+          kind load docker-image "$IMAGE" --name chart-ci
+          sh deploy/helm/contextnest-community/ci/kind-smoke.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all,pvc -o wide || true
+          kubectl describe pods || true
+          kubectl logs -l app.kubernetes.io/instance=cn --tail=200 || true
