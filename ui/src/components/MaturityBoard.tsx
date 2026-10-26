@@ -58,6 +58,7 @@ import {
   withoutPattern,
   newCardPlacement,
   planMove,
+  optimisticMove,
   resolveConfig,
   buildLanes,
   laneFields,
@@ -805,7 +806,7 @@ export function MaturityBoard({
         });
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
         // The caller opens the new task — refresh the board behind it, don't wait.
-        void load();
+        void load({ silent: true });
         return res?.node?.id as string | undefined;
       } catch (e: any) {
         toast.error(e?.message || "Couldn't add the task");
@@ -828,6 +829,10 @@ export function MaturityBoard({
       extra: CardFields = {},
     ) => {
       const hasExtra = Object.keys(extra).length > 0;
+      // Move the card now; put it back if the server refuses.
+      const prev = nodes.find((n) => n.id === id);
+      const moved = prev && (plan || hasExtra) ? optimisticMove(prev, plan, extra) : null;
+      if (moved) setNodes((ns) => ns.map((n) => (n.id === id ? moved : n)));
       setBusy(true);
       try {
         let rankId = id;
@@ -866,8 +871,12 @@ export function MaturityBoard({
           );
         }
         if (place && activeBoard) await rankCard(place.col, rankId, place.before);
-        await load();
+        // Server truth (a folder move's real id, computed fields) — no spinner.
+        void load({ silent: true });
       } catch (e: any) {
+        if (prev && moved) setNodes((ns) => ns.map((n) => (n.id === moved.id ? prev : n)));
+        // Half a move may have landed (folder moved, lane field refused) — resync.
+        void load({ silent: true });
         toast.error(e?.message || "Move failed");
       } finally {
         setBusy(false);
