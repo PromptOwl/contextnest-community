@@ -202,7 +202,7 @@ interface DocumentEditorProps {
    *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
-  onSaved?: (savedNodeId: string) => void;
+  onSaved?: (savedNodeId: string, info?: { publishedDraft?: boolean }) => void;
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
@@ -1675,7 +1675,11 @@ export function DocumentEditor({
     }
   };
 
-  const handleSave = () => runSave((savedId) => onSaved?.(savedId));
+  const handleSave = () => {
+    // Read before the save: a draft this save publishes (the caller may leave the page).
+    const publishedDraft = !isNew && status === "draft" && outcome === "publish";
+    return runSave((savedId) => onSaved?.(savedId, { publishedDraft }));
+  };
 
   // Clear the "Saved" hint the moment the doc is edited again.
   useEffect(() => {
