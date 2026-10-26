@@ -756,7 +756,7 @@ export function MaturityBoard({
       if (!placement) return;
       const { content, ...details } = task;
       try {
-        await api.createNode(nestId, {
+        const res = await api.createNode(nestId, {
           // The create route requires a body; a task's notes may start empty.
           content: content.trim() ? content : "\n",
           type: typeTaskEnabled ? "task" : "document",
@@ -804,7 +804,9 @@ export function MaturityBoard({
           ...details,
         });
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        await load();
+        // The caller opens the new task — refresh the board behind it, don't wait.
+        void load();
+        return res?.node?.id as string | undefined;
       } catch (e: any) {
         toast.error(e?.message || "Couldn't add the task");
         throw e;
@@ -1589,8 +1591,9 @@ export function MaturityBoard({
             people={members}
             me={me}
             onSubmit={async (task) => {
-              await createCard(col.key, task, addingIn.parent, addingIn.lane);
+              const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
               setAddingIn(null);
+              if (id) onOpenDocument(id);
             }}
             onClose={() => setAddingIn(null)}
           />
