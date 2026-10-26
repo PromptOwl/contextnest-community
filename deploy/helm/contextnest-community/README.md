@@ -8,17 +8,23 @@ an optional Ingress and ServiceAccount. The image is
 ## Install
 
 ```bash
-helm install cn deploy/helm/contextnest-community \
-  --namespace contextnest --create-namespace \
+kubectl create namespace contextnest
+kubectl -n contextnest create secret generic contextnest-env \
+  --from-literal=PROMPTOWL_KEY=pk_...   # optional: the Free tier runs without one
+
+helm install cn deploy/helm/contextnest-community --namespace contextnest \
   --set config.publicBaseUrl=https://nest.example.com \
-  --set secrets.promptowlKey=pk_...
+  --set existingSecret=contextnest-env
 
 kubectl -n contextnest port-forward svc/cn-contextnest-community 3838:3838
 curl http://127.0.0.1:3838/health
 ```
 
-The chart's `appVersion` is the server release it was tested against and is the
-default image tag. Set `image.tag` to run another release.
+The chart's `appVersion` is the server release it was written for and is the
+default image tag. Set `image.tag` to run another release. Images are published
+from release 2.3.0 on: installing from a checkout before that release ships
+needs an image you built (`docker build .`) and `image.repository`/`image.tag`
+pointing at it.
 
 Every server setting is an environment variable, documented in
 [CONFIGURATION.md](../../../CONFIGURATION.md). The common ones have values below.

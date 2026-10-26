@@ -51,6 +51,7 @@ refuses replicas-rwx-sqlite "needs an external Postgres" --set replicaCount=3 --
 refuses replicas-no-volume "ReadWriteMany" --set replicaCount=2 --set postgres.url=postgres://u:p@db/x --set persistence.enabled=false --set persistence.accessMode=ReadWriteMany
 refuses bad-access-mode "persistence.accessMode must be" --set persistence.accessMode=ReadOnlyMany
 refuses url-and-secret "not both" --set postgres.url=postgres://u:p@db/x --set postgres.existingSecret=db
+refuses secret-in-configmap "config.env.DATABASE_URL is a secret" --set config.env.DATABASE_URL=postgres://u:p@db/x
 
 # Defaults: one pod, Recreate, PVC, non-root, read-only rootfs, /health probes.
 render default

@@ -101,6 +101,12 @@ in Postgres AND the volume is ReadWriteMany (both pods see the same files).
 {{- if not (has .Values.persistence.accessMode (list "ReadWriteOnce" "ReadWriteMany" "ReadWriteOncePod")) }}
 {{- fail (printf "persistence.accessMode must be ReadWriteOnce, ReadWriteOncePod or ReadWriteMany (got %q)." .Values.persistence.accessMode) }}
 {{- end }}
+{{- $secretNames := list "PROMPTOWL_KEY" "SECRETS_KEY" "DATABASE_URL" "DB_PASSWORD" "OIDC_CLIENT_SECRET" "MCP_SIGNING_SECRET" "SMTP_URL" "ANTHROPIC_API_KEY" "SES_SECRET_ACCESS_KEY" "SLACK_WEBHOOK_URL" "MSTEAMS_WEBHOOK_URL" "OFFICIAL_COMMUNITY_SSO_SECRET" "PROMPTOWL_BYPASS_SECRET" "SITE_DOMAIN_CHECK_TOKEN" }}
+{{- range $k, $_ := .Values.config.env }}
+{{- if has $k $secretNames }}
+{{- fail (printf "config.env.%s is a secret, and config.env is rendered into a plain ConfigMap. Put it under secrets.env (or in existingSecret) instead." $k) }}
+{{- end }}
+{{- end }}
 {{- if and .Values.postgres.url .Values.postgres.existingSecret }}
 {{- fail "Set postgres.url or postgres.existingSecret, not both." }}
 {{- end }}

@@ -33,7 +33,8 @@ config:
   # (on the data volume).
   nestStorageRoot: ""
   # -- Any other non-secret env vars, e.g. TELEMETRY_ENABLED: "true",
-  # DRIFT_SCAN_INTERVAL_MS: "0" (do this on network storage).
+  # DRIFT_SCAN_INTERVAL_MS: "0" (do this on network storage). Known secret
+  # names (PROMPTOWL_KEY, DATABASE_URL, ...) are refused here: use secrets.env.
   env: {}
 
 # -- Sensitive settings, rendered into a Secret. Ignored when existingSecret
