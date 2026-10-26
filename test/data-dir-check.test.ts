@@ -4,8 +4,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { assertWritable, DataDirError } from "../src/shared/data-dir-check.js";
 
-// Root ignores permission bits, so the refusal cases only mean something as non-root.
+// Root ignores permission bits, and on Windows chmod can't make a directory
+// read-only, so the refusal cases only mean something as non-root on POSIX.
 const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+const noPerms = asRoot || process.platform === "win32";
 
 describe("assertWritable (boot check for the data directory)", () => {
   let base: string;
@@ -33,7 +35,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     ).not.toThrow();
   });
 
-  it.skipIf(asRoot)("refuses a read-only directory and names the path and the chown fix", () => {
+  it.skipIf(noPerms)("refuses a read-only directory and names the path and the chown fix", () => {
     const dir = join(base, "data");
     mkdirSync(dir);
     lock(dir);
@@ -47,7 +49,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     expect(assertWritable([{ label: "NEST_STORAGE_ROOT", path: join(base, "nests"), children: true }])).toBeNull();
   });
 
-  it.skipIf(asRoot)("warns, without refusing to boot, on a read-only nest under a writable root", () => {
+  it.skipIf(noPerms)("warns, without refusing to boot, on a read-only nest under a writable root", () => {
     const nest = join(base, "nests", "abc");
     mkdirSync(nest, { recursive: true });
     lock(nest);
@@ -55,7 +57,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     expect(warning).toMatch(new RegExp(`NEST_STORAGE_ROOT ${nest} is not writable[\\s\\S]*chown -R`));
   });
 
-  it.skipIf(asRoot)("ignores read-only entries in a directory checked without children (a mounted access.yaml)", () => {
+  it.skipIf(noPerms)("ignores read-only entries in a directory checked without children (a mounted access.yaml)", () => {
     const dir = join(base, "data");
     mkdirSync(dir);
     const access = join(dir, "access.yaml");
@@ -64,7 +66,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     expect(() => assertWritable([{ label: "DATA_ROOT", path: dir }])).not.toThrow();
   });
 
-  it.skipIf(asRoot)("refuses a root-owned SQLite -wal file beside a writable database", () => {
+  it.skipIf(noPerms)("refuses a root-owned SQLite -wal file beside a writable database", () => {
     const db = join(base, "community.db");
     writeFileSync(db, "");
     writeFileSync(`${db}-wal`, "");
@@ -74,7 +76,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     );
   });
 
-  it.skipIf(asRoot)("refuses a database file the user can't write", () => {
+  it.skipIf(noPerms)("refuses a database file the user can't write", () => {
     const db = join(base, "community.db");
     writeFileSync(db, "");
     lock(db, 0o444);
@@ -83,7 +85,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     );
   });
 
-  it.skipIf(asRoot)("refuses a writable database file in a read-only directory (SQLite needs -wal beside it)", () => {
+  it.skipIf(noPerms)("refuses a writable database file in a read-only directory (SQLite needs -wal beside it)", () => {
     const dir = join(base, "db");
     mkdirSync(dir);
     const db = join(dir, "community.db");
@@ -94,7 +96,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     );
   });
 
-  it.skipIf(asRoot)("checks at most 50 children, so boot cost doesn't grow with the nest count", () => {
+  it.skipIf(noPerms)("checks at most 50 children, so boot cost doesn't grow with the nest count", () => {
     const root = join(base, "nests");
     for (let i = 0; i < 60; i++) {
       const d = join(root, `n${i}`);
@@ -105,7 +107,7 @@ describe("assertWritable (boot check for the data directory)", () => {
     expect(assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toMatch(/…and 45 more/);
   });
 
-  it.skipIf(asRoot)("lists at most five paths and summarises the rest", () => {
+  it.skipIf(noPerms)("lists at most five paths and summarises the rest", () => {
     const root = join(base, "nests");
     for (let i = 0; i < 7; i++) {
       const d = join(root, `n${i}`);
