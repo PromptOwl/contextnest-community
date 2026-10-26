@@ -12,7 +12,7 @@ const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "D
 import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
-import { shouldReturnToNestOnSave } from "./lib/document-save-nav";
+import { saveDestination } from "./lib/document-save-nav";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { LicenseBanner } from "./components/LicenseNotice";
@@ -132,8 +132,8 @@ type View =
       /** Open with this comment thread focused (activity-feed deep link;
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
-      /** The review queue this doc was opened from. Back, approve and reject
-       *  return there, so a reviewer goes straight to the next item. */
+      /** The view this doc was opened from (review queue, Board, other nest
+       *  views). Back, approve, reject and publishing a draft return there. */
       returnTo?: View;
     }
   | { page: "docs" }
@@ -1746,13 +1746,15 @@ export default function App() {
               }}
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
               onOpenNestSettings={() => openNest({ openSettings: true })}
-              onSaved={() => {
-                // A fresh "new" doc has nowhere to stay open on, so land back
-                // on the nest; saving an EXISTING document must leave the
-                // view (and URL) pointed at that same document — otherwise
-                // the app shows Overview while ?doc=<id> still names the doc
-                // (CU-wdqcq02cxe), a mismatch only a reload used to fix.
-                if (shouldReturnToNestOnSave(doc.nodeId)) openNest();
+              onSaved={(_id, info) => {
+                // New doc → the nest; a published draft → where it was opened
+                // from (Board, review queue); otherwise stay (see saveDestination).
+                const dest = saveDestination(doc.nodeId, {
+                  publishedDraft: info?.publishedDraft,
+                  hasReturnTo: !!doc.returnTo,
+                });
+                if (dest === "nest") openNest();
+                else if (dest === "return") setView(doc.returnTo!);
               }}
               onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
                 // Cycle handling: never duplicate target in chain.
@@ -1836,7 +1838,8 @@ export default function App() {
             isAnonOwned: v.isAnonOwned,
             isArchived: v.isArchived,
             openDocument: (nodeId: string) =>
-              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned }),
+              // returnTo: Back, and publishing a draft, come back to this view (the Board).
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, returnTo: v }),
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,

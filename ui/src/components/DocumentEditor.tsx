@@ -23,6 +23,7 @@ import {
   newTags,
   normalizeTagInput,
   tagKey,
+  tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -98,6 +99,7 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
+import { TaskAssignee } from "./board/TaskAssignee";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -200,7 +202,7 @@ interface DocumentEditorProps {
    *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
-  onSaved?: (savedNodeId: string) => void;
+  onSaved?: (savedNodeId: string, info?: { publishedDraft?: boolean }) => void;
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
@@ -373,6 +375,7 @@ export function DocumentEditor({
   // Saved by NodeFieldsPanel on their own, outside the body's Save.
   const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
   const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
+  const [assignee, setAssignee] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -1160,6 +1163,7 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
+      setAssignee((node as any)?.assignee ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -1492,8 +1496,14 @@ export function DocumentEditor({
     };
   }, [tagInput, tags]);
 
-  const addTag = useCallback(() => {
-    const { tags: accepted, notes } = tagPreview;
+  // Nest tag vocabulary for the tag field's suggestions (cached reference read).
+  const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
+  const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
+
+  // `picked` is a suggestion chosen from the list — already a valid nest tag.
+  const addTag = useCallback((picked?: string) => {
+    const { tags: accepted, notes } =
+      picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
     // A paste commits several tags at once, and one transient toast per
     // rewrite is unreadable — stack them into a single summary and leave the
     // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
@@ -1665,7 +1675,11 @@ export function DocumentEditor({
     }
   };
 
-  const handleSave = () => runSave((savedId) => onSaved?.(savedId));
+  const handleSave = () => {
+    // Read before the save: a draft this save publishes (the caller may leave the page).
+    const publishedDraft = !isNew && status === "draft" && outcome === "publish";
+    return runSave((savedId) => onSaved?.(savedId, { publishedDraft }));
+  };
 
   // Clear the "Saved" hint the moment the doc is edited again.
   useEffect(() => {
@@ -3120,7 +3134,15 @@ export function DocumentEditor({
                       {canEditContent && !fieldsDisabled && (
                         <input
                           value={tagInput}
-                          onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                          onChange={(e) => {
+                            // Picking a datalist suggestion arrives as a replacement — add it straight away.
+                            if ((e.nativeEvent as InputEvent).inputType === "insertReplacementText") {
+                              addTag(e.target.value);
+                              return;
+                            }
+                            setTagInput(clampTagInput(e.target.value));
+                          }}
+                          list="document-editor-tag-suggestions"
                           onKeyDown={(e) => {
                             // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                             if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -3139,6 +3161,13 @@ export function DocumentEditor({
                           className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
                           data-testid="document-editor-tag-input"
                         />
+                      )}
+                      {canEditContent && !fieldsDisabled && (
+                        <datalist id="document-editor-tag-suggestions">
+                          {suggestedTags.map((t) => (
+                            <option key={t} value={t} />
+                          ))}
+                        </datalist>
                       )}
                       {tags.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
@@ -3310,6 +3339,23 @@ export function DocumentEditor({
                       </span>
                     )}
                   </div>
+                )}
+
+                {/* Assignee — tasks only, the board card's picker (saved on pick). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskAssignee
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    assignee={assignee}
+                    people={roster?.people ?? []}
+                    me={currentEmail}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setAssignee(n?.assignee ?? undefined);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
                 )}
 
                 {/* Relations — tasks only: blocks / blocked by / related /
