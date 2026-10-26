@@ -40,10 +40,10 @@ async function main() {
   parseTrustedProxies(config.TRUSTED_PROXIES);
 
   // Refuse to boot, with the chown fix, on a data directory this user can't
-  // write (e.g. a volume left root-owned by an image from before 2.3.0).
+  // write (e.g. a volume left root-owned by an older image that ran as root).
   assertWritable([
     { label: "DATA_ROOT", path: config.DATA_ROOT },
-    { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT },
+    { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },
     ...(config.DB_DRIVER === "sqlite"
       ? [{ label: "DATABASE_PATH", path: config.DATABASE_PATH, file: true }]
       : []),
