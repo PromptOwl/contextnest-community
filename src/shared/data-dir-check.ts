@@ -3,6 +3,13 @@ import { dirname, join } from "path";
 
 /** How many unwritable paths to list before summarising the rest. */
 const MAX_LISTED = 5;
+/**
+ * How many entries of a `children` directory to check. Each is one access()
+ * call, a network round trip on FUSE/NFS storage, so boot cost stays bounded
+ * however many nests there are. A volume chowned at the top only is caught by
+ * the first few nests.
+ */
+const MAX_CHILDREN = 50;
 
 export interface WritableCheck {
   label: string;
@@ -31,8 +38,9 @@ function code(err: unknown): string {
  * (index.ts), never per request.
  *
  * For each directory: it's created if missing and must be writable; with
- * `children`, so must its immediate entries, since a top-level-only chown
- * leaves root-owned nests behind. For a file: its directory must be writable
+ * `children`, so must its first MAX_CHILDREN entries, since a top-level-only
+ * chown leaves root-owned nests behind. Best effort: it reads permission bits
+ * (and EROFS), not ACLs or quotas, and doesn't walk inside each nest. For a file: its directory must be writable
  * (SQLite creates -wal/-journal files beside it), and so must the file and its
  * -wal/-shm/-journal companions when they exist.
  */
@@ -69,7 +77,7 @@ export function assertWritable(checks: WritableCheck[]): void {
       note(label, dir, err);
       continue;
     }
-    for (const name of entries) {
+    for (const name of entries.slice(0, MAX_CHILDREN)) {
       const child = join(dir, name);
       try {
         accessSync(child, constants.W_OK);

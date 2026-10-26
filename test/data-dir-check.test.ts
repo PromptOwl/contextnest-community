@@ -90,6 +90,19 @@ describe("assertWritable (boot check for the data directory)", () => {
     );
   });
 
+  it.skipIf(asRoot)("checks at most 50 children, so boot cost doesn't grow with the nest count", () => {
+    const root = join(base, "nests");
+    for (let i = 0; i < 60; i++) {
+      const d = join(root, `n${i}`);
+      mkdirSync(d, { recursive: true });
+      lock(d);
+    }
+    // 60 unwritable nests, 50 checked, 5 listed: "…and 45 more".
+    expect(() => assertWritable([{ label: "NEST_STORAGE_ROOT", path: root, children: true }])).toThrow(
+      /…and 45 more/,
+    );
+  });
+
   it.skipIf(asRoot)("lists at most five paths and summarises the rest", () => {
     const root = join(base, "nests");
     for (let i = 0; i < 7; i++) {
