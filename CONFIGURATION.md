@@ -51,6 +51,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `NODE_EXTRA_CA_CERTS` | _(unset)_ | Path to a PEM bundle of extra root CAs — needed when a TLS-inspecting proxy re-signs outbound traffic with a corporate CA. Read by Node at process start only, so set it in the process environment. Startup logs the path, or warns if the file is missing or the value came from `.env`. |
 | `DATA_ROOT` | `./data` (relative to cwd) | Root directory for SQLite DB + nest filesystem vaults. Set to an absolute path in production so it's independent of where you `cd`'d from. |
 | `DATABASE_PATH` | `$DATA_ROOT/community.db` | Override the SQLite file location explicitly. (SQLite backend only.) |
+| `SKIP_DATA_DIR_CHECK` | _(unset)_ | `1` skips the boot check that `DATA_ROOT`, `NEST_STORAGE_ROOT` and the SQLite file are writable by the user running the server. Without it, an unwritable path stops the server at boot with the `chown` to run. Use it only where permission bits don't reflect real write access (some ACL, NFS or FUSE setups). See [Docker](#docker). |
 | `NEST_STORAGE_ROOT` | `$DATA_ROOT/nests` | Root directory for nest vault files (markdown + version history). Override to store nests separately from the DB — e.g. point it at a Cloud Storage (GCS) volume mount on Cloud Run (`/mnt/nests`) while the SQLite DB stays on `DATA_ROOT` off the mount. **Moving existing nests:** the app does not relocate files — copy `$DATA_ROOT/nests/*` to the new root (e.g. `gsutil rsync`) before switching, or existing nests will appear empty (DB rows present, files missing). On a GCS mount, also set `DRIFT_SCAN_INTERVAL_MS=0` to avoid constant FUSE scans, and run a single instance (GCS FUSE has no file locking — concurrent writers lose data). |
 | `DB_DRIVER` | `sqlite` | Database backend: `sqlite` (default) or `postgres`. When unset, the server infers `postgres` if `DATABASE_URL` or `CLOUD_SQL_CONNECTION_NAME` is set, else `sqlite`. Existing deployments need no change — they stay on SQLite. See [Database backends](#database-backends). |
 | `DATABASE_URL` | `""` | PostgreSQL connection string for a TCP connection, e.g. `postgres://user:pass@host:5432/dbname`. Setting it selects the Postgres backend (unless `DB_DRIVER=sqlite`). |
@@ -582,6 +583,29 @@ npm start
 ```
 
 Terminate TLS at the proxy and set `HOST=127.0.0.1` and `TRUSTED_PROXIES=loopback` so only the proxy can reach the server and only its forwarded headers count. Details in [Reverse proxies](#reverse-proxies).
+
+### Docker
+
+The image (`ghcr.io/promptowl/contextnest-community:<version>`, published on every release, or `docker build .`) sets `DATA_ROOT=/data` and `PORT=3838`, and runs as the non-root user uid/gid 1000, which owns `/data`. Mount a volume there: `docker run -p 3838:3838 -v contextnest-data:/data …`. A bind mount, or a volume written by an earlier image (which ran as root), must be writable by uid 1000: run `chown -R 1000:1000` on it once. If it isn't, the server refuses to start and logs each path it can't write and the `chown` to run. It checks `DATA_ROOT`, the directory holding the SQLite file (and the file and its `-wal`/`-shm` files), and `NEST_STORAGE_ROOT`. Up to 50 nest directories under `NEST_STORAGE_ROOT` (in the order the filesystem lists them) are checked too, but an unwritable nest only logs a warning. The check runs at every boot, outside Docker too (`npx` and bare-metal installs included): the user running the server must be able to write these paths. It reads permission bits, so on storage where those don't match what the server can really write, set `SKIP_DATA_DIR_CHECK=1` to skip it. The server writes only to `/data` and `/tmp`, so `--read-only --tmpfs /tmp` works. On Cloud Run, a Cloud Storage volume is owned by root unless it's mounted with `mount-options="uid=1000;gid=1000"`.
+
+### Kubernetes (Helm)
+
+The chart in `deploy/helm/contextnest-community` runs the image as one Deployment with a PersistentVolumeClaim at `/data`. Its [README](./deploy/helm/contextnest-community/README.md) has the full values table.
+
+```bash
+kubectl create secret generic contextnest-env --from-literal=PROMPTOWL_KEY=pk_...
+helm install cn deploy/helm/contextnest-community \
+  --set config.publicBaseUrl=https://nest.example.com \
+  --set existingSecret=contextnest-env
+```
+
+- Settings map to the env vars on this page: `config.*` and `config.env` go into a ConfigMap, and `secrets.*` and `secrets.env` into a Secret. Use `existingSecret` to supply your own Secret, keyed by env var name.
+- External Postgres: `postgres.url`, `postgres.existingSecret`, or `postgres.host` with `user`, `database` and `password` or `passwordSecret`. Any of them sets `DB_DRIVER=postgres`.
+- **One pod by default.** Nests are files under `/data` and SQLite is a single file, so the default is `replicaCount: 1`, a ReadWriteOnce volume and the `Recreate` strategy. The chart refuses `replicaCount > 1` unless Postgres is configured and `persistence.accessMode` is `ReadWriteMany`. ReadWriteMany storage must also support file locking (NFSv4, EFS, Filestore). Storage without it (such as Cloud Storage FUSE) is single-writer: keep one pod there.
+- Secrets set through values are kept in the Helm release history. For production, use `existingSecret` and `postgres.existingSecret`.
+- Probes use `GET /health`. The startup probe allows 10 minutes for the [first-boot upgrade passes](#first-boot-upgrade-passes).
+- The pod runs as uid 1000 with `runAsNonRoot`, `fsGroup: 1000` and a read-only root filesystem (`/tmp` is an emptyDir).
+- Behind an ingress controller, `config.trustedProxies` defaults to `private`, and `config.publicBaseUrl` should be set to the external URL.
 
 ### Reverse proxies
 

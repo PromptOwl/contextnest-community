@@ -1,0 +1,13 @@
+# Discrete DB_* settings, password from an existing Secret; chart-managed secrets.
+postgres:
+  host: postgres.db.svc
+  user: contextnest
+  database: contextnest
+  passwordSecret:
+    name: contextnest-db
+    key: password
+secrets:
+  promptowlKey: pk_test_123
+  secretsKey: a-long-random-string
+  env:
+    OIDC_CLIENT_SECRET: oidc-secret

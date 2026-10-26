@@ -37,6 +37,16 @@ npx @promptowl/contextnest-community
 
 The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
 
+### Docker and Kubernetes
+
+Each release also publishes a container image, `ghcr.io/promptowl/contextnest-community:<version>` (and `:latest`). It runs as a non-root user (uid 1000) and keeps everything under `/data`:
+
+```bash
+docker run -p 3838:3838 -v contextnest-data:/data ghcr.io/promptowl/contextnest-community:latest
+```
+
+For Kubernetes, use the Helm chart in [`deploy/helm/contextnest-community`](./deploy/helm/contextnest-community/README.md): `helm install cn deploy/helm/contextnest-community`. See [CONFIGURATION.md → Kubernetes (Helm)](./CONFIGURATION.md#kubernetes-helm).
+
 ## License setup
 
 ContextNest Community Edition requires a PromptOwl Community License key (`pk_...`). Getting and activating one:
