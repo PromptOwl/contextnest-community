@@ -1016,6 +1016,8 @@ export interface ConnectedApp {
   redirectOrigin: string | null;
   connectedAt: string;
   lastUsedAt: string | null;
+  /** Its sign-in ran out; it has to be reconnected from the app itself. */
+  expired: boolean;
 }
 
 export async function listConnectedApps() {
