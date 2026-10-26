@@ -23,6 +23,7 @@ import {
   newTags,
   normalizeTagInput,
   tagKey,
+  tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -1495,8 +1496,14 @@ export function DocumentEditor({
     };
   }, [tagInput, tags]);
 
-  const addTag = useCallback(() => {
-    const { tags: accepted, notes } = tagPreview;
+  // Nest tag vocabulary for the tag field's suggestions (cached reference read).
+  const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
+  const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
+
+  // `picked` is a suggestion chosen from the list — already a valid nest tag.
+  const addTag = useCallback((picked?: string) => {
+    const { tags: accepted, notes } =
+      picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
     // A paste commits several tags at once, and one transient toast per
     // rewrite is unreadable — stack them into a single summary and leave the
     // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
@@ -3123,7 +3130,15 @@ export function DocumentEditor({
                       {canEditContent && !fieldsDisabled && (
                         <input
                           value={tagInput}
-                          onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                          onChange={(e) => {
+                            // Picking a datalist suggestion arrives as a replacement — add it straight away.
+                            if ((e.nativeEvent as InputEvent).inputType === "insertReplacementText") {
+                              addTag(e.target.value);
+                              return;
+                            }
+                            setTagInput(clampTagInput(e.target.value));
+                          }}
+                          list="document-editor-tag-suggestions"
                           onKeyDown={(e) => {
                             // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                             if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -3142,6 +3157,13 @@ export function DocumentEditor({
                           className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
                           data-testid="document-editor-tag-input"
                         />
+                      )}
+                      {canEditContent && !fieldsDisabled && (
+                        <datalist id="document-editor-tag-suggestions">
+                          {suggestedTags.map((t) => (
+                            <option key={t} value={t} />
+                          ))}
+                        </datalist>
                       )}
                       {tags.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
