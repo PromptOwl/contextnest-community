@@ -728,7 +728,7 @@ export const config = {
   /**
    * Hootie in the nest: the assistant side panel on every page of the UI and
    * its POST /nests/:id/chat route. Default OFF (since 1.28, CU-wdqcq03ewc):
-   * an admin opts in from Settings → General (hootie_enabled) or the deploy
+   * an admin opts in from Server settings → Hootie (hootie_enabled) or the deploy
    * sets HOOTIE_ENABLED=true. Off → the route 404s and the launcher is
    * hidden. Answering additionally needs a model key (PromptOwl's gateway from
    * the licence, or an own-provider key); without one the route answers 503,
