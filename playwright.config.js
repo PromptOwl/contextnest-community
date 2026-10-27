@@ -191,6 +191,14 @@ const testRun = [
     enabled: true,
     independent: true, // Imports its own nests from run-time fixtures
   },
+  {
+    // Nest page → Archive (CN-ARCH-001 … CN-ARCH-010). Serial: the cases
+    // archive, restore and request archives of the nests they create.
+    file: 'archive/nest_archive.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -274,7 +282,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -556,6 +564,17 @@ export default defineConfig({
           name: 'import-folder',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/import-folder/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'archive',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/archive/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

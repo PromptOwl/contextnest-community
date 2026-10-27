@@ -38,6 +38,7 @@ import HowItWorksPage from '../page_factory/app/how_it_works_page.js';
 import AccountPage from '../page_factory/app/account_page.js';
 import SidebarRailPage from '../page_factory/app/sidebar_rail_page.js';
 import ImportFolderPage from '../page_factory/app/import_folder_page.js';
+import NestArchivePage from '../page_factory/app/nest_archive_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -59,6 +60,9 @@ import TeammatesApi from './teammates_api.js';
 
 // REST helper used to read and remove what an Import Folder run created
 import ImportFolderApi from './import_folder_api.js';
+
+// REST helper used to arrange Nest archive preconditions (nests, links, requests)
+import NestArchiveApi from './nest_archive_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -330,6 +334,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get importFolderApi() {
         if (!this._importFolderApi) this._importFolderApi = new ImportFolderApi(this.page);
         return this._importFolderApi;
+      },
+
+      // Nest page → archive, read-only archived nest, archive requests
+      get nestArchivePage() {
+        return new NestArchivePage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest archive suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestArchiveApi() {
+        if (!this._nestArchiveApi) this._nestArchiveApi = new NestArchiveApi(this.page);
+        return this._nestArchiveApi;
       },
 
       /**
