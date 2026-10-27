@@ -1184,7 +1184,8 @@ Optional query params, applied before the per-node enrichment:
     "type": "document",
     "tags": ["#api"],
     "status": "draft" | "pending_review" | "approved" | "rejected",
-    "version": 1,
+    "version": 3,
+    "approvedVersion": 2,
     "author": "creator@x.com",
     "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
@@ -1194,6 +1195,7 @@ Optional query params, applied before the per-node enrichment:
   }]
 }
 ```
+- `approvedVersion` — the published version agents are served, or `null` when none is. It can sit below `version` while a newer version is in review or sent back: the row above has v3 pending and v2 live. Not sent on the `approved_only` view, where `version` already is the approved one.
 - `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
 - `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
@@ -2388,12 +2390,14 @@ One call for everything a nest overview needs to describe the *whole* nest, what
     "tags": { "#api": 7 },
     "types": { "document": 40, "agent": 2 },
     "statuses": { "approved": 30, "draft": 12 },
+    "aiReady": 31,
     "authors": ["a@x.com"],
     "editedLast7d": 5,
     "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
   }
 }
 ```
+`aiReady` counts documents with a published version agents are served, whatever the status of their latest version — so it can exceed `statuses.approved`: a document with v2 published and v3 in review counts once here and once under `pending_review`.
 
 ### POST `/nests/:nestId/reindex` (write+)
 Force-rebuild the nest's document index from the vault, and return how many documents were indexed: `{ "indexed": 42 }`.
