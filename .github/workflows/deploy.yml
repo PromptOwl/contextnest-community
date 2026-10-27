@@ -1,0 +1,99 @@
+# Deploy to Cloud Run.
+#   - dev: a push to `development` (i.e. a merged PR) or a manual run builds the image,
+#     pushes it to Artifact Registry and rolls `dev` to it.
+#   - prod: manual run only, no build. Deploys the release image the Release workflow pushed to
+#     ghcr.io/promptowl/contextnest-community:<version>. Cloud Run can't pull from ghcr.io, so it
+#     pulls through the `ghcr` Artifact Registry remote repository (a read-only proxy of ghcr.io).
+#
+# Env vars are deliberately NOT managed here. `gcloud run deploy --image` keeps
+# the service's existing env vars, secrets, volumes, Cloud SQL and VPC settings,
+# so edit them on the Cloud Run service itself and they survive every deploy.
+#
+# Create two GitHub Environments, `Development` and `Prod` (Settings -> Environments). Add
+# required reviewers on `Prod` to gate production deploys. On each environment set:
+#   GCP_SA_KEY         secret: the deployer service account's JSON key, raw or base64 (the auth action decodes base64 itself)
+#   GCP_PROJECT        GCP project id of the environment
+#   CLOUD_RUN_SERVICE  Cloud Run service name (e.g. community-nest-dev / community-nest-prod)
+# Optional: GCP_REGION (default us-central1), AR_REPO (default cloud-run-source-deploy on dev, ghcr on prod).
+
+name: Deploy (Cloud Run)
+
+on:
+  push:
+    branches: [development, Hiren-F/cloud-deply-workflow]  # TEMP: test trigger, remove before merge
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+      ref:
+        description: "dev only: branch, tag or SHA to build (blank = the branch selected above)"
+        type: string
+        required: false
+      version:
+        description: "prod only: released version to deploy, e.g. 2.4.0 (blank = latest)"
+        type: string
+        required: false
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'Prod' || 'Development' }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment || 'dev' }}
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      AR_REPO: ${{ vars.AR_REPO || (inputs.environment == 'prod' && 'ghcr' || 'cloud-run-source-deploy') }}
+    steps:
+      - if: env.ENVIRONMENT == 'dev'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Compute image name
+        id: img
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$ENVIRONMENT" = prod ]; then
+            echo "image=$REGION-docker.pkg.dev/$PROJECT/$AR_REPO/promptowl/contextnest-community:${VERSION:-latest}" >> "$GITHUB_OUTPUT"
+          else
+            repo="$REGION-docker.pkg.dev/$PROJECT/$AR_REPO/$SERVICE"
+            echo "repo=$repo" >> "$GITHUB_OUTPUT"
+            echo "image=$repo:dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - if: env.ENVIRONMENT == 'dev'
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        if: env.ENVIRONMENT == 'dev'
+        env:
+          REPO: ${{ steps.img.outputs.repo }}
+          IMAGE: ${{ steps.img.outputs.image }}
+        run: |
+          docker build --platform linux/amd64 -t "$IMAGE" -t "$REPO:latest" .
+          docker push "$IMAGE"
+          docker push "$REPO:latest"
+
+      - name: Deploy to Cloud Run (image only; config stays as set on the service)
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+        run: gcloud run deploy "$SERVICE" --image="$IMAGE" --project="$PROJECT" --region="$REGION"
