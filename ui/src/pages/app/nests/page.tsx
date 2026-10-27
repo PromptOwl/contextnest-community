@@ -434,12 +434,12 @@ export default function NestsPage() {
             <ClientHint
               icon={<Bot className="h-4 w-4" />}
               title="Hootie"
-              desc="Settings → Vault → Remote Server → paste URL"
+              desc="PromptOwl's AI assistant. In Hootie, open Settings → ContextNest Vault → Remote Server and paste the URL above."
             />
             <ClientHint
               icon={<Monitor className="h-4 w-4" />}
               title="Claude Desktop"
-              desc="Add MCP endpoint per nest via Connect button"
+              desc="Open a nest and click Connect in its sidebar to get that nest's MCP endpoint."
             />
           </div>
         </CardContent>
@@ -1581,7 +1581,7 @@ function ClientHint({
       <div className="text-muted-foreground mt-0.5">{icon}</div>
       <div className="min-w-0">
         <div className="font-medium text-foreground">{title}</div>
-        <div className={`text-muted-foreground ${mono ? "font-mono text-[10px]" : ""} truncate`}>
+        <div className={`text-muted-foreground ${mono ? "font-mono text-[10px] break-all" : ""}`}>
           {desc}
         </div>
       </div>
