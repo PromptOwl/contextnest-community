@@ -3380,6 +3380,10 @@ export async function moveNode(
     const newDerived = derivedIdOf(newId);
     const db = getDb();
     await db.transaction(async (tx) => {
+      // No document at the destination (checked above), so any rows there are
+      // orphans — same as create, clear them or the repoint trips UNIQUE.
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, newDerived);
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
       await tx.run(
