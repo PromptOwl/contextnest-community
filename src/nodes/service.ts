@@ -465,6 +465,8 @@ export interface NodeResponse extends TaskFields {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** The published version agents are served, null if none. Lists only. */
+  approvedVersion?: number | null;
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
@@ -1191,10 +1193,10 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayStatuses, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions
     ? [null, null]
     : await Promise.all([
-        versions.getDisplayStatuses(nestId),
+        versions.getDisplayState(nestId),
         // From the DB, not a vault walk. The disk truth behind it is
         // reconciled by the index rebuild and kept current by the stage /
         // approve / reject paths.
@@ -1259,8 +1261,9 @@ export async function listNodesForCaller(
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = displayStatuses?.get(r.id) ?? "draft";
+        r.status = displayState?.statuses.get(r.id) ?? "draft";
       }
+      r.approvedVersion = displayState?.approved.get(r.id) ?? null;
       return r;
     })
   );
@@ -1478,6 +1481,9 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a published version agents are served, whatever the
+   *  status of their latest version. */
+  aiReady: number;
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
@@ -1550,11 +1556,13 @@ export async function nestCensus(
     [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
   );
 
-  const statusMap = await versions.getDisplayStatuses(nestId);
+  const { statuses: statusMap, approved } = await versions.getDisplayState(nestId);
   const statuses: Record<string, number> = {};
+  let aiReady = 0;
   for (const d of visible) {
     const st = statusMap.get(d.id) ?? "draft";
     statuses[st] = (statuses[st] || 0) + 1;
+    if (approved.has(d.id)) aiReady++;
   }
 
   const authorship = await resolveAuthorship(
@@ -1593,6 +1601,7 @@ export async function nestCensus(
     tags,
     types,
     statuses,
+    aiReady,
     authors,
     editedLast7d,
     recent,

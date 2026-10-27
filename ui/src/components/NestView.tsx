@@ -882,10 +882,11 @@ export function NestView({
   const stats = {
     total: census?.total ?? nodes.length,
     pending: census?.statuses?.pending_review ?? 0,
-    // "published" is the engine's terminal post-approve status (approve writes
-    // 'published'; no-steward creates auto-publish) — both mean AI-visible,
-    // so the AI Ready card counts them together.
+    // Documents with a live published version — one whose newer version is in
+    // review or sent back is still served to agents. The status sum is the
+    // fallback for an older server.
     approved:
+      census?.aiReady ??
       (census?.statuses?.approved ?? 0) + (census?.statuses?.published ?? 0),
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,

@@ -1853,6 +1853,8 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a live published version, whatever their latest status. */
+  aiReady?: number;
   authors: string[];
   editedLast7d: number;
   recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
