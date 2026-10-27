@@ -117,7 +117,8 @@ describe("regression: plain table body edits", () => {
     const r = await jsonRequest(app, "PATCH", `/nests/${govNest}/nodes/${tGov}`, { content: T_CSV.replace("r1,lead", "r1,won") }, editor.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     expect(r.data.node.status).toBe("draft");
-    const approved = await jsonRequest(app, "GET", `/nests/${govNest}/nodes/${tGov}?approved=true`, undefined, owner.apiKey);
+    const approved = await jsonRequest(app, "GET", `/nests/${govNest}/nodes/${tGov}?approved_only=1`, undefined, owner.apiKey);
     expect(approved.status).toBe(200);
+    expect(approved.data.node.content.trimEnd()).toBe(T_CSV);
   });
 });
