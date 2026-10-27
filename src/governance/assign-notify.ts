@@ -6,7 +6,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { insertNotification } from "../notify/inbox.js";
+import { insertNotification, personLabel } from "../notify/inbox.js";
 
 export async function notifyAssigned(params: {
   nestId: string;
@@ -25,7 +25,7 @@ export async function notifyAssigned(params: {
         userEmail: assignee,
         kind: "assigned",
         subjectId: nodeId,
-        message: `${actorEmail} assigned you "${title}"`,
+        message: `${await personLabel(actorEmail)} assigned you "${title}"`,
       },
       { from: actorEmail, nodeId },
     );
