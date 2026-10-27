@@ -226,6 +226,11 @@ const nodeKey = (view: View): string | null => {
   return null;
 };
 
+// One Back stop per page (path) and per node on it; a tab or filter change in
+// the query string stays a replace.
+const historyKey = (path: string, view: View): string =>
+  `${path}|${nodeKey(view) ?? ""}`;
+
 // Runs the ?sso_error toast exactly once per page load (survives React
 // StrictMode's dev double-mount). Resets naturally on the next full navigation.
 let ssoErrorHandled = false;
@@ -684,11 +689,13 @@ export default function App() {
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    const key = nodeKey(view);
+    const key = historyKey(path, view);
     if (next !== current) {
       // `view` rides as the entry's state so the popstate handler below can
       // restore it without re-deriving it from the URL.
-      if (historyWriteMode(lastNodeKeyRef.current, key) === "push") {
+      const state = window.history.state;
+      const onAppEntry = !!state && typeof state === "object" && "page" in state;
+      if (historyWriteMode(lastNodeKeyRef.current, key, onAppEntry) === "push") {
         window.history.pushState(view, "", next);
       } else {
         window.history.replaceState(view, "", next);
@@ -706,7 +713,7 @@ export default function App() {
     const onPopState = (e: PopStateEvent) => {
       const state = e.state as View | null;
       if (state && typeof state === "object" && "page" in state) {
-        lastNodeKeyRef.current = nodeKey(state);
+        lastNodeKeyRef.current = historyKey(window.location.pathname, state);
         setViewNow(state);
       }
     };

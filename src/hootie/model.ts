@@ -155,14 +155,14 @@ export function describeModelError(
   }
   // LiteLLM answers 400 for a model name it doesn't serve.
   if (detail.includes("no healthy deployments") || detail.includes("invalid model name")) {
-    return `No model named "${model}" is available on this key. A server admin can pick one under Settings → General.`;
+    return `No model named "${model}" is available on this key. A server admin can pick one under Server settings → Hootie.`;
   }
   switch (e?.status) {
     case 401:
     case 403:
-      return `${provider} rejected this server's API key. A server admin can replace it under Settings → General.`;
+      return `${provider} rejected this server's API key. A server admin can replace it under Server settings → Hootie.`;
     case 404:
-      return `No model named "${model}" is available on this key. A server admin can pick one under Settings → General.`;
+      return `No model named "${model}" is available on this key. A server admin can pick one under Server settings → Hootie.`;
     case 413:
       return "That question plus the documents behind it are too large for one request. Try asking something narrower.";
     case 429:

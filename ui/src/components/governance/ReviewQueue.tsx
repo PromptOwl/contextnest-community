@@ -212,11 +212,11 @@ export function ReviewQueue({
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="text-lg">
-                {feedMode ? "Activity" : "Review Queue"}
+                {feedMode ? "From others — awaiting your review" : "Review Queue"}
               </CardTitle>
               <CardDescription>
                 {feedMode
-                  ? "Changes awaiting approval and new comments"
+                  ? "Changes other people submitted for your approval, and new comments"
                   : "Documents awaiting your approval"}
               </CardDescription>
             </div>

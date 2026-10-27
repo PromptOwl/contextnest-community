@@ -1407,6 +1407,18 @@ export function DocumentsTab({
                               {nodePill.label}
                             </span>
                           )}
+                          {/* A newer version in review / sent back still
+                              leaves the published one live — lead with it. */}
+                          {node.approvedVersion && node.status !== "published" && node.status !== "approved" && (
+                            <LifecycleStatusBadge
+                              status="published"
+                              approvedVersion={node.approvedVersion}
+                              currentVersion={node.version}
+                              size="sm"
+                              className="shrink-0 whitespace-nowrap"
+                              title={`v${node.approvedVersion} is published and served to agents`}
+                            />
+                          )}
                           <LifecycleStatusBadge
                             status={(node.status as DocumentLifecycleStatus) || "draft"}
                             size="sm"
