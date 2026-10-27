@@ -305,6 +305,9 @@ export async function getHealth() {
     email_configured?: boolean;
     /** Who may create nests; "admins" hides the create CTAs from everyone else. */
     nest_creation?: "admins" | "everyone";
+    /** Who may widen a nest to public / org; "admins" = server admins only. */
+    nest_public_visibility?: "owners" | "admins";
+    nest_org_visibility?: "owners" | "admins";
     suspended_reason?: string;
   }>("/health");
 }
@@ -401,6 +404,10 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   nest_creation: "admins" | "everyone";
+  /** Who may widen a nest to public / org (default owners). Narrowing is
+   *  always allowed; server admins are never restricted. */
+  nest_public_visibility: "owners" | "admins";
+  nest_org_visibility: "owners" | "admins";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
@@ -1016,6 +1023,8 @@ export interface ConnectedApp {
   redirectOrigin: string | null;
   connectedAt: string;
   lastUsedAt: string | null;
+  /** Its sign-in ran out; it has to be reconnected from the app itself. */
+  expired: boolean;
 }
 
 export async function listConnectedApps() {
@@ -2035,6 +2044,31 @@ export async function createPdfNode(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `PDF upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
+ * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * server extracts the slides/text into the body and keeps the original file
+ * as a download linked from it.
+ */
+export async function createOfficeNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[] } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/office`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
   return data as { node: any; version: number; stewards?: any[] };
 }
 

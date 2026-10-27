@@ -359,6 +359,7 @@ function StreamComments({
       )}
       <div className="space-y-2">
         <MentionTextarea
+          formatting
           members={members}
           value={text}
           onValueChange={setText}

@@ -119,6 +119,7 @@ import {
 import { logTaskInteraction } from "../nodes/task-log.js";
 import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
@@ -131,6 +132,7 @@ import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
+import { setNestVisibility } from "../nests/visibility-service.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -490,6 +492,8 @@ export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
+  // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
+  "context_set_visibility",
   "context_systems",
   "context_instructions_update",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
@@ -857,6 +861,51 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["title", "content"],
+    },
+  },
+  {
+    name: "context_upload",
+    // NOT an engine operation: it fronts this server's own upload routes
+    // (src/nodes/upload-service.ts — the asset store, POST /nodes/pdf and
+    // POST /nodes/office) so an agent can attach a file without multipart.
+    // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
+    description:
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx or .docx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, or the Word document's headings, lists and tables) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filename: {
+          type: "string",
+          description:
+            'File name with its extension, e.g. "q3-deck.pptx" — the extension decides where the file goes. Required with content_base64; with url, defaults to the URL\'s file name.',
+        },
+        content_base64: {
+          type: "string",
+          description: "The file's bytes, base64-encoded (a data: URL prefix is accepted). Use this OR url.",
+        },
+        url: {
+          type: "string",
+          description: "An https:// URL the server downloads the file from. Use this OR content_base64.",
+        },
+        title: {
+          type: "string",
+          description: "Documents only: the document title (default: the file name without its extension).",
+        },
+        folder: {
+          type: "string",
+          description: 'Documents only: folder path under nodes/ (e.g. "gtm/decks").',
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Documents only: tags for the new document.",
+        },
+        as: {
+          type: "string",
+          description:
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx). A file of the other kind is refused rather than rerouted.',
+        },
+      },
     },
   },
   {
@@ -1536,6 +1585,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_set_visibility",
+    description:
+      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        visibility: {
+          type: "string",
+          enum: ["private", "org", "public"],
+          description: "The new tier.",
+        },
+        acknowledge: {
+          type: "boolean",
+          description: "The user confirmed who the nest will reach (needed to widen to public, and to org on a shared server).",
+        },
+      },
+      required: ["visibility"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -1942,6 +2011,113 @@ async function resolveTargetNode(
   return matches[0] ?? `Node not found: ${args.title}`;
 }
 
+/**
+ * context_upload — the MCP face of src/nodes/upload-service.ts. Same type
+ * allowlist, caps, URL fence and write paths as the REST upload routes; the
+ * gates REST gets from its middleware are applied here: the create gate (the
+ * /mcp middleware admits read-tier callers), and for documents the agent-write
+ * hold, which can't queue a binary and so refuses instead.
+ */
+async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+    return writeRefusal(ctx, "You don't have permission to upload files to this nest.", {
+      type: "nest",
+      id: nestId,
+    });
+  }
+  if (args.as !== undefined && args.as !== "asset" && args.as !== "document") {
+    return toolError('as must be "asset" or "document".', "VALIDATION_FAILED");
+  }
+  if (args.tags !== undefined && !(Array.isArray(args.tags) && args.tags.every((t: unknown) => typeof t === "string"))) {
+    return toolError("tags must be a list of strings.", "VALIDATION_FAILED");
+  }
+  for (const k of ["title", "folder"] as const) {
+    if (args[k] !== undefined && typeof args[k] !== "string") {
+      return toolError(`${k} must be a string.`, "VALIDATION_FAILED");
+    }
+  }
+  const refusal = (err: unknown): ToolResult => {
+    if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+    if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
+    if (err instanceof AppError && err.statusCode < 500) return toolError(err.message, "VALIDATION_FAILED");
+    throw err;
+  };
+  try {
+    // Fetch/decode first (outside any lock — a URL can take a while); the
+    // type and size refusals inside happen before bytes are fetched or
+    // decoded wherever they can — and so does the agent-write hold, as on REST.
+    const upload = await uploads.resolveUpload(args, args.as === "asset" ? "asset" : "any", async (kind) => {
+      if (kind !== "pdf" && kind !== "office") return;
+      await uploads.assertDocumentUploadNotGated({
+        nestId,
+        userId,
+        keyId: ctx.apiKeyId ?? null,
+        agentSurface: true,
+      });
+    });
+    const isDocument = upload.kind === "pdf" || upload.kind === "office";
+    if (args.as === "document" && !isDocument) {
+      return toolError(
+        `"${upload.filename}" is ${upload.kind === "image" ? "an image" : "a video"}, which uploads as an asset, not a document. Leave out as, or pass as: "asset".`,
+        "VALIDATION_FAILED",
+      );
+    }
+    if (!isDocument) {
+      const asset = await uploads.storeAsset(nestId, upload);
+      return {
+        text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
+        data: { kind: upload.kind, ...asset },
+      };
+    }
+    const fields = {
+      ...(args.title?.trim() ? { title: args.title.trim() } : {}),
+      ...(args.folder?.trim() ? { folder: args.folder.trim() } : {}),
+      ...(args.tags ? { tags: args.tags as string[] } : {}),
+    };
+    const title = fields.title || uploads.titleFromUploadFilename(upload.filename);
+    // Same rule and lock as context_create: a title already used anywhere in
+    // the vault would be unreachable for the title-addressed tools.
+    return await withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+      const wanted = title.toLowerCase();
+      const twin = (await storage.discoverDocuments()).find(
+        (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+      );
+      if (twin) {
+        return toolError(
+          `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — pass a different title.`,
+          "DOCUMENT_ALREADY_EXISTS",
+        );
+      }
+      const saved =
+        upload.kind === "pdf"
+          ? await uploads.savePdfUpload(nestId, upload, fields, userEmail, ctx.client)
+          : await uploads.saveOfficeUpload(nestId, upload, fields, userEmail, ctx.client);
+      const { node, version } = saved;
+      const docTitle = String(node.frontmatter.title ?? title);
+      return {
+        text:
+          `Created ${upload.kind === "pdf" ? "PDF" : "document"}: **${docTitle}** (${node.id}) from ${upload.filename} — status: ${node.frontmatter.status}` +
+          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : "."),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: docTitle,
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          markdown: `[[${docTitle}]]`,
+          ...(saved.original
+            ? { original: { ...saved.original, url: `/nests/${nestId}/originals/${saved.original.file}` } }
+            : {}),
+        },
+      };
+    });
+  } catch (err) {
+    return refusal(err);
+  }
+}
+
 /** Service result → MCP tool result (prose + structuredContent). */
 function serviceToTool<T extends object>(
   r: { ok: true } & T | { ok: false; status: number; error: string },
@@ -2250,6 +2426,43 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_set_visibility": {
+      const refused = await nestAdminRefusal(ctx);
+      if (refused) return refused;
+      const r = await setNestVisibility(
+        nestId,
+        ctx.userId,
+        args.visibility,
+        args.acknowledge === true,
+      );
+      if (!r.ok) {
+        // Same refusal as REST; the acknowledgement case carries the warning
+        // the agent should put to the user before retrying with acknowledge.
+        // The other 409s (headless, a concurrent change) are state conflicts,
+        // flagged as such so an agent re-reads instead of re-sending blindly.
+        const conflict = r.status === 409 && !r.requires_acknowledgement;
+        const msg = r.requires_acknowledgement
+          ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.`
+          : conflict
+            ? `${r.error} Re-read the nest (context_overview) before trying again.`
+            : r.error;
+        const code =
+          r.status === 404
+            ? "DOCUMENT_NOT_FOUND"
+            : r.status === 403
+              ? "UNAUTHORIZED_ACTION"
+              : "VALIDATION_FAILED";
+        // Machine-readable twins of the REST body, so an agent can branch on
+        // the cause without parsing text: the cap's `visibility_restricted`,
+        // the acknowledgement prompt, or a state conflict.
+        const extra: Record<string, unknown> = {};
+        if (r.code) extra.reason = r.code;
+        if (r.requires_acknowledgement) extra.requires_acknowledgement = true;
+        if (conflict) extra.conflict = true;
+        return toolError(msg, code, Object.keys(extra).length ? extra : undefined);
+      }
+      return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
+    }
     case "context_systems":
       return runSystemsTool(args, ctx);
 
@@ -3224,6 +3437,9 @@ async function runTool(
         };
       });
     }
+
+    case "context_upload":
+      return runUploadTool(args, ctx);
 
     case "context_update": {
       const node = await resolveTargetNode(storage, args);

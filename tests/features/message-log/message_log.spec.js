@@ -724,14 +724,16 @@ test.describe('Message log', () => {
   test('CN-MSG-026: the Access log records searches, opened messages and Access log views', async ({ primary_user }) => {
     await asAdmin(primary_user);
     const { messageLogPage: ml } = primary_user;
-    const { body } = await ml.gotoAndRead();
+    await ml.gotoAndRead();
     const term = `qa-access-${Date.now().toString(36)}`;
     await ml.nextRead(() => ml.search.fill(term), { where: (q) => q.q === term });
     await ml.waitIdle();
     await ml.nextRead(() => ml.search.fill(''), { where: (q) => q.q === null });
     await ml.waitIdle();
-    const opened = body.messages[0].id;
-    await ml.openRow(0);
+    // The message actually opened: on a busy server a newer message can top the
+    // list between the first read and the click.
+    const opened = (await ml.openRow(0)).body?.message?.id;
+    expect(opened, 'the opened message has an id').toBeTruthy();
     await primary_user.page.keyboard.press('Escape');
 
     const views = await ml.openAccessLog();

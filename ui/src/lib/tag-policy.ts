@@ -56,6 +56,12 @@ export function newTags(existing: string[], candidates: string[]): string[] {
  * mixed case) has to key the same as the bare, lowercased form the normalizer
  * produces — otherwise "#bug" and "bug" land on one document as two tags.
  */
+/** The nest's tags to suggest in a tag field: its vocabulary minus the ones already applied. */
+export function tagSuggestions(all: string[], applied: string[]): string[] {
+  const have = new Set(applied.map(tagKey));
+  return all.filter((t) => !have.has(tagKey(t)));
+}
+
 export function tagKey(tag: string): string {
   return normalizeTagInput(tag).tag ?? tag.trim().toLowerCase();
 }

@@ -514,6 +514,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
+| Document uploads — MCP `context_upload` (pdf/pptx/docx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
 | `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
@@ -603,6 +604,14 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
   }
   ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
+- **Server cap on widening.** A server admin can restrict who may widen a nest to each tier: `NEST_PUBLIC_VISIBILITY` and `NEST_ORG_VISIBILITY` (or the `/admin/settings` fields `nest_public_visibility` / `nest_org_visibility`), each `owners` (default — anyone with the nest's admin tier) or `admins` (server admins only: the license admin or a superadmin). With `admins`, a caller who isn't a server admin gets `403` when the change would **widen** the nest to that tier — checked before the acknowledgement, so they are never asked to confirm a change they can't make:
+  ```json
+  {
+    "error": "Only a server admin can make nests public on this server (Server settings → \"Who can make nests public\"). Ask a server admin to publish it.",
+    "code": "visibility_restricted"
+  }
+  ```
+  Narrowing is never capped (`public` → `org`, anything → `private`), though on a shared deployment `public` → `org` still needs the org acknowledgement. Re-sending the current tier changes nothing but needs the same acknowledgement as widening to it. A `409` without `requires_acknowledgement` means the nest changed while saving (or is headless): re-read it and retry. Nests already at a restricted tier stay there. `GET /health` reports both as `nest_public_visibility` / `nest_org_visibility` so a client can disable the blocked tiers. Open mode (`AUTH_MODE=open`) is unaffected: every caller is the anonymous user and administers everything, so the cap has no one to restrict. Per-document public links (`/p/<slug>`) are a separate surface and are not covered. The MCP twin `context_set_visibility` (§9) applies the same rules; its `acknowledge` must be the boolean `true`, as in REST.
 
 ### Headless publishing (API-only nests) (owner / admin)
 Publish a **private** nest API-only and mint read-only access keys for it (what a key can reach is [above](#headless-access-keys-api-only-nests)).
@@ -1293,7 +1302,7 @@ A node with a pending review is frozen — `423` — for callers who can't clear
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
 ### POST `/nests/:nestId/nodes/pdf`
-Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Or the JSON body from [Uploading files](#uploading-files) with the same fields (`tags` as an array or a comma-separated string). Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
 
@@ -1309,17 +1318,34 @@ The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?a
 
 Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
 
+### POST `/nests/:nestId/nodes/office`
+Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The text is extracted into the document body:
+- **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
+- **docx** — headings (`Title`, `Heading 1…6` or an outline level) as `#` headings, paragraphs, bulleted and numbered lists, and tables as markdown tables. Deleted tracked changes and field codes are left out.
+
+The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned; re-uploading creates a new document.
+
+- `400` — no `file`; not `.pptx`/`.docx` (legacy `.ppt`/`.doc` and macro-enabled `.pptm`/`.docm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped (only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- Returns `201` `{ node, version, stewards? }`.
+
+### GET `/nests/:nestId/originals/:file`
+The original file behind an Office document. Read permission, and the caller must be able to read the document that binds it (the same gate as `GET /nodes/:nodeId`, so a public reader needs an approved version). Only server-minted `<uuid>.pptx` / `<uuid>.docx` names are accepted; a name that isn't bound to a document the caller can read is a `404`. The bytes are verified against the recorded sha256 before they are served.
+
+Headers: the Office `Content-Type`, `Content-Disposition: attachment` (always — never inline), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). The link survives a move of the document, since it names the file, not the node.
+
 ### POST `/nests/:nestId/assets`
-Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
+Upload of an image or video referenced from documents: multipart (field `file`), or the JSON body described in [Uploading files](#uploading-files). Write permission.
 
 Supported types and per-type size caps:
 
 | Type | Extensions | Max size |
 |------|-----------|----------|
 | Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB |
-| Video | `mp4`, `webm` | 100 MB |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) |
 
-SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
+SVG is deliberately not accepted (stored-XSS surface). An unsupported type or a file over its cap is a `400` that names the allowed types and caps. Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
 
 ### GET `/nests/:nestId/assets/:file`
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
@@ -1335,6 +1361,37 @@ Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_
 - `DELETE` (write) → the fresh `GET` shape. `404` unless the relation touches `:nodeId`.
 
 Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
+
+---
+
+## Uploading files
+
+Three routes take files, by what the file becomes. One allowlist and one set of caps covers all of them and the MCP `context_upload` tool:
+
+| File | Extensions | Max size | Route | Becomes |
+|---|---|---|---|---|
+| Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB | `POST /nests/:id/assets` | an asset; reference it with the returned `markdown` |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) | `POST /nests/:id/assets` | an asset; the returned `markdown` is its URL on its own line |
+| PDF | `pdf` (judged by its `%PDF-` bytes on the PDF route) | 25 MB (`PDF_MAX_MB`) | `POST /nests/:id/nodes/pdf` | a governed `pdf` document with its text extracted |
+| PowerPoint / Word | `pptx`, `docx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
+
+SVG, HTML, executables, legacy `.ppt`/`.doc` and everything else are refused with a `400` listing the types above. Document uploads are governed exactly like `POST /nodes` (a draft in a governed nest).
+
+**Multipart or JSON.** Each route takes multipart (field `file`, plus the route's other fields) or, with `Content-Type: application/json`, a body naming the bytes so a script never has to build multipart:
+
+```json
+{ "filename": "q3-deck.pptx", "content_base64": "UEsDBBQABgAIAAAAIQ…", "title": "Q3 deck", "folder": "decks", "tags": ["q3"] }
+```
+```json
+{ "url": "https://files.example.com/q3-deck.pptx", "folder": "decks" }
+```
+
+- Send exactly one of `content_base64` or `url`. `filename` is required with `content_base64` — its extension decides the type — and defaults to the URL's file name with `url`. A `data:…;base64,` prefix and line breaks in the base64 are accepted.
+- `content_base64` is refused on its decoded size before it is decoded. It travels inside the request, so the route's request ceiling (its file cap plus 1 MB) applies to the base64 text, which is a third larger than the file: base64 reaches about three quarters of the cap — use `url` or multipart for files near it.
+- `url` is fetched by the server: `https://` only, no credentials in the URL, and the host's addresses are checked when the connection is opened — loopback, private (RFC 1918, CGNAT, IPv6 ULA), link-local and cloud-metadata addresses are refused, including a public name that resolves to one, with no second lookup to rebind. Redirects are not followed (`400` — pass the final URL). The download is refused when its `Content-Length` is over the cap and torn down when the body passes it, before anything is buffered; it times out after 120 seconds. Not routed through `HTTPS_PROXY`, so the address check can't be bypassed by the proxy's resolver.
+- On a nest that holds agent writes (`require_push_confirmation`), a **document** upload from an API key is refused with `403` — a pending push carries markdown, not a file — unless the key is always-allowed. Session-cookie uploads from the web app and asset uploads are not affected.
+
+**MCP: `context_upload`.** `{ filename?, content_base64? | url?, title?, folder?, tags?, as? }`, write tier (the same create check as `context_create`; a read-only key or a viewer gets `UNAUTHORIZED_ACTION`). Routed by extension through the same service as the routes above: an image or video comes back as `{ kind, file, url, markdown }`; a PDF or Office file creates the governed document and comes back as `{ kind, id, title, type, version, status, markdown: "[[Title]]", original? }`. `as: "asset" | "document"` is an optional check that refuses a file of the other kind. Like `context_create`, a title already used anywhere in the nest is refused, and on a nest that holds agent writes a document upload is refused (assets still upload). The base64 rides in the MCP request, which is capped at `MAX_BODY_BYTES` (default 10 MB, about 7.5 MB of file) — use `url` for anything bigger. Also on the server-level `/mcp` endpoint (with `nest`).
 
 ---
 
@@ -2590,11 +2647,12 @@ Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a revi
 
 **Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
-**Headless publishing and systems** (nest owner/admin only, and **advertised only to them** in `tools/list` — a viewer, an editor, a read-only key, a headless access key or a system key never sees them, and a direct call is refused by the same service layer the REST routes use):
+**Headless publishing, visibility and systems** (nest owner/admin only, and **advertised only to them** in `tools/list` — a viewer, an editor, a read-only key, a headless access key or a system key never sees them, and a direct call is refused by the same service layer the REST routes use):
 - `context_headless` — `action`: `status` (on/off, keys, `shared_with`) | `enable` | `disable` | `create_key` (`label`; returns the token once) | `revoke_key` (`key_id`). Mirrors `/nests/:id/headless` (§2).
+- `context_set_visibility` — `visibility` (`private` | `org` | `public`), `acknowledge` (boolean, the `acknowledge_public` of REST). Mirrors `PATCH /nests/:id/visibility` (§2): same acknowledgement rule, same server cap (`nest_public_visibility` / `nest_org_visibility`), same headless refusal. A refusal is a tool error — `UNAUTHORIZED_ACTION` for the cap, `VALIDATION_FAILED` for a missing acknowledgement (its text carries the warning to put to the user). Refusals also carry machine-readable fields in `structuredContent`: `reason: "visibility_restricted"` for the cap, `requires_acknowledgement: true`, or `conflict: true` (headless, or a concurrent change — re-read the nest first).
 - `context_systems` — `action`: `list` (systems in this nest) | `create` (`name`, `capability`, `nest_ids` — defaults to this nest) | `rotate` / `revoke` (`system_id`) | `add_nest` / `remove_nest` (`system_id`, `nest_id`). Mirrors `/systems` (§3c).
 
-Both return the REST payload as `structuredContent`.
+All three return the REST payload as `structuredContent`.
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 

@@ -58,6 +58,7 @@ import {
   withoutPattern,
   newCardPlacement,
   planMove,
+  optimisticMove,
   resolveConfig,
   buildLanes,
   laneFields,
@@ -86,7 +87,6 @@ import {
 } from "../lib/board-tasks";
 import { timeAgo } from "./nest/node-display";
 import {
-  AddCardComposer,
   AssigneeMenu,
   Avatar,
   BlockedBadge,
@@ -99,6 +99,7 @@ import {
   SubItemChip,
   TypeIcon,
 } from "./board/CardParts";
+import { CreateTaskDialog, type NewTask } from "./board/CreateTaskDialog";
 import { BoardListView } from "./board/BoardListView";
 import { TagColumnInput } from "./board/TagColumnInput";
 import {
@@ -751,14 +752,14 @@ export function MaturityBoard({
   // ── "+ Add task" ──
   const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   const createCard = useCallback(
-    async (colKey: string, title: string, parent?: string, laneKey?: string) => {
+    async (colKey: string, task: NewTask, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
       if (!placement) return;
+      const { content, ...details } = task;
       try {
-        await api.createNode(nestId, {
-          title,
-          // The create route requires a body; a task's notes start empty.
-          content: "\n",
+        const res = await api.createNode(nestId, {
+          // The create route requires a body; a task's notes may start empty.
+          content: content.trim() ? content : "\n",
           type: typeTaskEnabled ? "task" : "document",
           ...placement,
           // The board's tag filter too, or the new card would be filtered
@@ -800,9 +801,13 @@ export function MaturityBoard({
           ...(assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
             ? { assignee: [...assigneeFilter][0] }
             : {}),
+          // Title plus what the dialog set — a picked assignee/priority wins.
+          ...details,
         });
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        await load();
+        // The caller opens the new task — refresh the board behind it, don't wait.
+        void load({ silent: true });
+        return res?.node?.id as string | undefined;
       } catch (e: any) {
         toast.error(e?.message || "Couldn't add the task");
         throw e;
@@ -824,6 +829,10 @@ export function MaturityBoard({
       extra: CardFields = {},
     ) => {
       const hasExtra = Object.keys(extra).length > 0;
+      // Move the card now; put it back if the server refuses.
+      const prev = nodes.find((n) => n.id === id);
+      const moved = prev && (plan || hasExtra) ? optimisticMove(prev, plan, extra) : null;
+      if (moved) setNodes((ns) => ns.map((n) => (n.id === id ? moved : n)));
       setBusy(true);
       try {
         let rankId = id;
@@ -862,8 +871,12 @@ export function MaturityBoard({
           );
         }
         if (place && activeBoard) await rankCard(place.col, rankId, place.before);
-        await load();
+        // Server truth (a folder move's real id, computed fields) — no spinner.
+        void load({ silent: true });
       } catch (e: any) {
+        if (prev && moved) setNodes((ns) => ns.map((n) => (n.id === moved.id ? prev : n)));
+        // Half a move may have landed (folder moved, lane field refused) — resync.
+        void load({ silent: true });
         toast.error(e?.message || "Move failed");
       } finally {
         setBusy(false);
@@ -1572,14 +1585,25 @@ export function MaturityBoard({
           </div>
         )}
         {addingIn?.cell === cell && (
-          <AddCardComposer
-            key={addingIn.parent ?? "top"}
-            placeholder={
-              addingIn.parent
-                ? `Sub-item of “${nodes.find((x) => x.id === addingIn.parent)?.title ?? "task"}”…`
-                : "Task title…"
+          <CreateTaskDialog
+            parentTitle={
+              addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
             }
-            onSubmit={(title) => createCard(col.key, title, addingIn.parent, addingIn.lane)}
+            initial={{
+              assignee:
+                newCardPlacement(col.key, effectiveConfig)?.assignee ??
+                (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
+                  ? [...assigneeFilter][0]
+                  : undefined),
+              priority: newCardPlacement(col.key, effectiveConfig)?.priority,
+            }}
+            people={members}
+            me={me}
+            onSubmit={async (task) => {
+              const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
+              setAddingIn(null);
+              if (id) onOpenDocument(id);
+            }}
             onClose={() => setAddingIn(null)}
           />
         )}

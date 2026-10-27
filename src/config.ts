@@ -535,6 +535,27 @@ export const config = {
     return process.env.SHARED_DEPLOYMENT === "true";
   },
   /**
+   * Who may widen a nest to Public. "owners" (default): anyone who
+   * administers the nest — today's behaviour, still behind the
+   * acknowledgement. "admins": server admins only, so an owner can't publish
+   * by accident. Narrowing is never restricted, and nests already public stay
+   * public. Enforced in nests/visibility-service.ts for REST and MCP alike;
+   * superadmin-editable via /admin/settings.
+   */
+  get NEST_PUBLIC_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_PUBLIC_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /** Who may widen a nest to Organization — same values and rules as
+   *  NEST_PUBLIC_VISIBILITY. On a SHARED_DEPLOYMENT 'org' reaches every
+   *  customer on the server, which is why it has its own switch. */
+  get NEST_ORG_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_ORG_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /**
    * MCP OAuth authorization server. Default OFF, and off means the surface
    * does not exist: `/.well-known/*` keeps 404ing and `/mcp` answers
    * unauthenticated callers exactly as it did before.
@@ -1038,6 +1059,17 @@ export const config = {
    */
   get PDF_MAX_BYTES() {
     const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
+
+  /**
+   * Max .pptx/.docx upload size in bytes (POST /nests/:id/nodes/office), the
+   * file as uploaded (compressed). Default 25 MB, for the PDF cap's reasons;
+   * what it may inflate to is capped separately (office-extract.ts). Read per
+   * request. Override via OFFICE_MAX_MB.
+   */
+  get OFFICE_MAX_BYTES() {
+    const mb = parseInt(process.env.OFFICE_MAX_MB || "25", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
 

@@ -34,8 +34,6 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Copy,
-  Check,
   Monitor,
   Bot,
   AlertCircle,
@@ -53,7 +51,7 @@ import {
   Pencil,
 } from "lucide-react";
 import * as api from "../lib/api";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useApiKeys } from "../lib/queries";
 import { keyCapability, nestOnlyKeyLabel } from "../lib/api-key-scope";
@@ -259,30 +257,20 @@ export function ConnectModal({
               paste, all-purpose.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                onClick={() =>
-                  copyTextWithToast(
-                    nestChatPrompt(nestName),
-                    "Chat prompt copied",
-                  )
-                }
-              >
-                <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
-                Chat with this nest
-              </Button>
-              <Button
-                size="sm"
-                onClick={() =>
-                  copyTextWithToast(
-                    nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner),
-                    "Setup prompt copied",
-                  )
-                }
-              >
-                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                Set up an agent
-              </Button>
+              <CopyButton
+                text={nestChatPrompt(nestName)}
+                variant="default"
+                icon={MessageSquareText}
+                label="Chat with this nest"
+                toastMessage="Chat prompt copied"
+              />
+              <CopyButton
+                text={nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner)}
+                variant="default"
+                icon={Sparkles}
+                label="Set up an agent"
+                toastMessage="Setup prompt copied"
+              />
             </div>
           </div>
           {showLoginBanner && (
@@ -950,7 +938,7 @@ export function ConnectModal({
               <code className="flex-1 bg-muted px-2 py-1 rounded text-[11px] font-mono truncate">
                 {nestId}
               </code>
-              <CopyButton value={nestId} />
+              <CopyButton text={nestId} variant="ghost" className="h-6 px-2" />
             </div>
           </div>
           </>
@@ -1077,12 +1065,6 @@ export function KeyRevealModal({
    *  URL it works with. */
   scopedTo?: { nestName: string; mcpUrl: string };
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(apiKey))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
   const downloadEnv = () => {
     const serverUrl =
       typeof window !== "undefined"
@@ -1128,13 +1110,7 @@ export function KeyRevealModal({
             <code className="flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
               {apiKey}
             </code>
-            <Button size="sm" variant="outline" onClick={copy}>
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </Button>
+            <CopyButton text={apiKey} />
           </div>
           <Button
             variant="outline"
@@ -1185,7 +1161,7 @@ function Snippet({
         <span className="text-xs font-medium text-muted-foreground truncate">
           {label}
         </span>
-        <CopyButton value={value} />
+        <CopyButton text={value} variant="ghost" className="h-6 px-2" />
       </div>
       <pre
         className={`${
@@ -1199,23 +1175,5 @@ function Snippet({
         {value}
       </pre>
     </div>
-  );
-}
-
-function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(value))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <Button variant="ghost" size="sm" className="h-6 px-2" onClick={copy}>
-      {copied ? (
-        <Check className="h-3 w-3 text-green-600" />
-      ) : (
-        <Copy className="h-3 w-3" />
-      )}
-    </Button>
   );
 }

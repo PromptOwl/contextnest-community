@@ -1,13 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { shouldReturnToNestOnSave } from "./document-save-nav";
+import { saveDestination } from "./document-save-nav";
 
-describe("shouldReturnToNestOnSave", () => {
+describe("saveDestination", () => {
   it("returns to the nest when a brand-new document is created", () => {
-    expect(shouldReturnToNestOnSave("new")).toBe(true);
+    expect(saveDestination("new")).toBe("nest");
+    expect(saveDestination("new", { publishedDraft: true, hasReturnTo: true })).toBe("nest");
   });
 
   it("stays in the editor when an existing document is saved", () => {
-    expect(shouldReturnToNestOnSave("nodes/some-doc")).toBe(false);
-    expect(shouldReturnToNestOnSave("abc-123")).toBe(false);
+    expect(saveDestination("nodes/some-doc")).toBe("stay");
+    expect(saveDestination("abc-123", { hasReturnTo: true })).toBe("stay");
+  });
+
+  it("publishing a draft goes back to where it was opened from (the Board)", () => {
+    expect(saveDestination("nodes/task", { publishedDraft: true, hasReturnTo: true })).toBe("return");
+  });
+
+  it("publishing a draft with nowhere to return to stays", () => {
+    expect(saveDestination("nodes/task", { publishedDraft: true })).toBe("stay");
   });
 });
