@@ -199,6 +199,26 @@ describe("MCP context_upload", () => {
     expect(read.data.node.content).toContain("## Sheet: Budget\n\n| Line | Amount |\n| --- | --- |\n| Travel | 1200 |");
   });
 
+  it("node_id makes an Office upload a new version of that document", async () => {
+    const first = await callTool(editor.apiKey, "context_upload", {
+      filename: "Ops Deck.pptx",
+      content_base64: b64(await buildPptx([{ title: "Ops", bullets: ["Old plan"] }])),
+    });
+    const again = await callTool(editor.apiKey, "context_upload", {
+      filename: "Ops Deck.pptx",
+      content_base64: b64(await buildPptx([{ title: "Ops", bullets: ["New plan"] }])),
+      node_id: first.data.id,
+    });
+    expect(again.isError).toBe(false);
+    expect(again.data.id).toBe(first.data.id);
+    expect(again.data.version).toBe(first.data.version + 1);
+    expect(again.data.original.file).not.toBe(first.data.original.file);
+    const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${first.data.id}`, undefined, owner.apiKey);
+    expect(read.data.node.content).toContain("New plan");
+    const png = await callTool(editor.apiKey, "context_upload", { filename: "x.png", content_base64: PNG_B64, node_id: first.data.id });
+    expect(png.isError).toBe(true);
+  });
+
   it("refuses a title already used in the nest, like context_create", async () => {
     const deck = await buildPptx([{ title: "Again" }]);
     const out = await callTool(editor.apiKey, "context_upload", { filename: "Kickoff Deck.pptx", content_base64: b64(deck) });

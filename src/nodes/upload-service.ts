@@ -42,7 +42,7 @@ import { isPushAllowlisted } from "../nests/push-confirmation-service.js";
 import { nestRequiresPushConfirmation } from "../nests/service.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import { createNode, updateNode, PDF_NODE_TYPE, type OriginalFile } from "./service.js";
-import { createOfficeDocument } from "./office-service.js";
+import { createOfficeDocument, replaceOfficeDocument } from "./office-service.js";
 
 // ─── Types and caps ────────────────────────────────────────────────────────
 
@@ -434,9 +434,11 @@ export function titleFromUploadFilename(name: string): string {
 export interface SavedDocument {
   node: ContextNode;
   version: number;
-  /** False when a pdf upload replaced an existing pdf node. */
+  /** False when an upload replaced an existing node's file. */
   created: boolean;
   original?: OriginalFile;
+  /** Things the caller should know, e.g. hand edits a re-upload replaced. */
+  warnings?: string[];
 }
 
 /**
@@ -492,7 +494,7 @@ export async function savePdfUpload(
   return { node, version, created: true };
 }
 
-/** A .pptx/.docx/.xlsx upload: always a new document. */
+/** A .pptx/.docx/.xlsx upload: a new document, or (`nodeId`) a new version of the one it came from. */
 export async function saveOfficeUpload(
   nestId: string,
   upload: ResolvedUpload,
@@ -500,10 +502,25 @@ export async function saveOfficeUpload(
   userEmail: string,
   client?: ClientMetadata,
 ): Promise<SavedDocument> {
-  if (fields.nodeId) {
-    throw new ValidationError("An Office upload always creates a new document; nodeId is not supported.");
-  }
   if (upload.bytes.length > config.OFFICE_MAX_BYTES) throw tooLargeError("office", upload.bytes.length);
+  if (fields.nodeId) {
+    // Body field, not a path param: checked here before it becomes a path.
+    assertSafeNodeId(fields.nodeId);
+    const replaced = await replaceOfficeDocument(
+      nestId,
+      fields.nodeId,
+      {
+        bytes: upload.bytes,
+        filename: upload.filename,
+        ...(fields.title ? { title: fields.title } : {}),
+        ...(fields.tags ? { tags: fields.tags } : {}),
+        ...(fields.changeNote ? { changeNote: fields.changeNote } : {}),
+        ...(client ? { client } : {}),
+      },
+      userEmail,
+    );
+    return { node: replaced.node, version: replaced.version, created: false, original: replaced.original, warnings: replaced.warnings };
+  }
   const made = await createOfficeDocument(
     nestId,
     {

@@ -551,6 +551,8 @@ export interface OriginalFile {
   kind: "pptx" | "docx" | "xlsx";
   bytes: number;
   sha256: string;
+  /** Hash of the body this file produced, to tell hand edits apart on re-upload. */
+  body_sha256?: string;
 }
 
 /** Server-minted original names only — the traversal defense for the route. */
@@ -1687,6 +1689,10 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   prime?: boolean | null;
   /** Document-scope always-include flag. `null` clears it back to the tags. */
   alwaysInclude?: boolean | null;
+  /** A re-uploaded Office file (office-service.ts): the new `metadata.original`,
+   *  and every earlier one, so each version's file stays downloadable. */
+  original?: OriginalFile;
+  previousOriginals?: OriginalFile[];
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -2921,6 +2927,11 @@ export async function updateNode(
           ...(opInput.metadata as object),
           always_include: patch.alwaysInclude,
         };
+      }
+      if (patch.original) {
+        const files = { original: patch.original, previous_originals: patch.previousOriginals ?? [] };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: { ...(node.frontmatter.metadata as any), ...files } } };
+        opInput.metadata = { ...(opInput.metadata as object), ...files };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(

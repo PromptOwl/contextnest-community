@@ -81,8 +81,9 @@ officeNodeRoutes.post(
         node: toNodeResponse(saved.node),
         version: saved.version,
         stewards: await stewardsFor(nestId, saved.node.id),
+        ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
       },
-      201,
+      saved.created ? 201 : 200,
     );
   },
 );

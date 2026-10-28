@@ -940,6 +940,11 @@ export const TOOL_DEFINITIONS = [
           description:
             'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx, xlsx). A file of the other kind is refused rather than rerouted.',
         },
+        node_id: {
+          type: "string",
+          description:
+            "Office files only: the id of the document an earlier .pptx/.docx/.xlsx upload created. The file becomes that document's new version (same kind of file required) instead of a new document; the earlier file stays downloadable from its version. In a governed nest it lands as a draft for review.",
+        },
       },
     },
   },
@@ -2103,11 +2108,40 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
         "VALIDATION_FAILED",
       );
     }
+    if (args.node_id && upload.kind !== "office") {
+      return toolError("node_id replaces an Office document's file; it only works with a .pptx, .docx or .xlsx.", "VALIDATION_FAILED");
+    }
     if (!isDocument) {
       const asset = await uploads.storeAsset(nestId, upload);
       return {
         text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
         data: { kind: upload.kind, ...asset },
+      };
+    }
+    if (args.node_id) {
+      const saved = await uploads.saveOfficeUpload(
+        nestId,
+        upload,
+        { nodeId: String(args.node_id), ...(args.title?.trim() ? { title: args.title.trim() } : {}), ...(args.tags ? { tags: args.tags as string[] } : {}) },
+        userEmail,
+        ctx.client,
+      );
+      const { node, version } = saved;
+      const url = `/nests/${nestId}/originals/${saved.original!.file}`;
+      return {
+        text:
+          `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: String(node.frontmatter.title ?? ""),
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          original: { ...saved.original, url },
+          ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
+        },
       };
     }
     const fields = {
