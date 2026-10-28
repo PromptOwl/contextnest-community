@@ -141,8 +141,8 @@ Kubernetes API.
 | `podSecurityContext` | uid/gid 1000, `runAsNonRoot`, `fsGroup: 1000`, RuntimeDefault seccomp | Pod security context. |
 | `securityContext` | read-only root, no privilege escalation, drop ALL | Container security context. |
 | `resources` | requests 100m / 256Mi, limit 1Gi memory | Container resources. |
-| `startupProbe` | `/health`, up to 10 minutes | Covers first-boot upgrade passes on large vaults. |
-| `livenessProbe` / `readinessProbe` | `/health` | Health probes. |
+| `startupProbe` | `/livez`, up to 10 minutes | Covers first-boot upgrade passes on large vaults. |
+| `livenessProbe` / `readinessProbe` | `/livez` / `/readyz` | Liveness answers while the process is up; readiness also needs the database and nest storage, so an outage takes the pod out of rotation without restarting it. |
 | `nodeSelector` / `tolerations` / `affinity` | empty | Scheduling. |
 | `extraVolumes` / `extraVolumeMounts` | `[]` | e.g. a CA bundle for `NODE_EXTRA_CA_CERTS` or `DB_SSL_CA`. |
 

@@ -55,7 +55,7 @@ refuses secret-in-configmap "config.env.DATABASE_URL is a secret" --set config.e
 refuses secret-suffix-in-configmap "config.env.GITHUB_TOKEN is a secret" --set config.env.GITHUB_TOKEN=ghp_x
 refuses reserved-in-configmap "config.env.DATA_ROOT is set by the chart" --set config.env.DATA_ROOT=/elsewhere
 
-# Defaults: one pod, Recreate, PVC, non-root, read-only rootfs, /health probes.
+# Defaults: one pod, Recreate, PVC, non-root, read-only rootfs, /livez + /readyz probes.
 render default
 has default "type: Recreate"
 has default "replicas: 1"
@@ -63,7 +63,8 @@ has default "kind: PersistentVolumeClaim"
 has default "runAsNonRoot: true"
 has default "fsGroup: 1000"
 has default "readOnlyRootFilesystem: true"
-has default "path: /health"
+has default "path: /livez"
+has default "path: /readyz"
 has default 'DATA_ROOT: "/data"'
 lacks default "kind: Secret"
 lacks default "kind: Ingress"

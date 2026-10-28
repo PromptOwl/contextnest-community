@@ -794,6 +794,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // Kubernetes-style probes (public). Liveness is "the process answers";
+  // readiness also needs the database and nest storage, so an outage takes the
+  // pod out of rotation without restarting it.
+  app.get("/livez", (c) => c.json({ status: "ok" }));
+  app.get("/readyz", async (c) => {
+    const { readiness } = await import("./ops/status.js");
+    const { ready, checks } = await readiness();
+    return c.json({ status: ready ? "ok" : "unavailable", checks }, ready ? 200 : 503);
+  });
+
   // Admin-features gate: teammate management is blocked until a valid
   // license is installed, unless the server is within the Free tier.
   // Login/register/device/promptowl/admin-status stay public so users can

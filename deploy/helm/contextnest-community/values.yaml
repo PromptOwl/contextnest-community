@@ -165,20 +165,20 @@ resources:
 # a one-shot pass over every document before the server listens.
 startupProbe:
   httpGet:
-    path: /health
+    path: /livez
     port: http
   periodSeconds: 5
   failureThreshold: 120
 livenessProbe:
   httpGet:
-    path: /health
+    path: /livez
     port: http
   periodSeconds: 20
   timeoutSeconds: 5
   failureThreshold: 3
 readinessProbe:
   httpGet:
-    path: /health
+    path: /readyz
     port: http
   periodSeconds: 10
   timeoutSeconds: 5

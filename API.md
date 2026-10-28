@@ -2753,6 +2753,9 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 
 Experimental features: `experimental` — one boolean per switch, e.g. `{ "doc_pins": false }` (`EXPERIMENTAL_DOC_PINS`, superadmin-switchable as `experimental_doc_pins` on `/admin/settings`). Off → that feature's routes `404` and its UI stays hidden.
 
+### GET `/livez` and GET `/readyz` (no auth)
+Orchestrator probes. `/livez` answers `200 { "status": "ok" }` whenever the process does. `/readyz` also checks that the database answers and nest storage is writable: `200 { "status": "ok", "checks": { "db": true, "storage": true } }`, or `503 { "status": "unavailable", "checks": { … } }` naming the failed check. Point liveness at `/livez` and readiness at `/readyz` (the Helm chart does), so a database outage takes the pod out of rotation without restarting it.
+
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 

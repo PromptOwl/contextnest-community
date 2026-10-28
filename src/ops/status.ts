@@ -350,6 +350,15 @@ async function diskChecks(): Promise<StatusCheck[]> {
   return checks;
 }
 
+/** What /readyz gates on: the database answers and nest storage is writable.
+ *  Same checks as the status page; states only, so it is safe to serve publicly. */
+export async function readiness(): Promise<{ ready: boolean; checks: { db: boolean; storage: boolean } }> {
+  const all = [...(await databaseChecks()), ...(await diskChecks())];
+  const ok = (id: string) => all.find((c) => c.id === id)?.state !== "red";
+  const checks = { db: ok("db"), storage: ok("storage") };
+  return { ready: checks.db && checks.storage, checks };
+}
+
 function licenseCheck(now: number): StatusCheck {
   const lic = getCurrentLicense();
   const last = getLastLicenseCheck();
