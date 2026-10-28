@@ -19,6 +19,7 @@ import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
@@ -371,9 +372,13 @@ nodeRoutes.post("/", async (c) => {
 
   // Resolve stewards for the response
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
+  // A table with :ref columns reports refs that name no readable node. Never
+  // blocks: the write above already landed. Absent for everything else.
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -862,10 +867,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     },
     authorEmail,
   );
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });
 

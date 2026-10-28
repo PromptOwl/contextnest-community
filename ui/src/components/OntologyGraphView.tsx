@@ -43,6 +43,22 @@ interface GLink {
   source: string | GNode;
   target: string | GNode;
   kind: "link" | "tag" | "steward" | "structure";
+  /** Typed link (a table :ref column) and the rows behind it. */
+  type?: string;
+  rows?: string[];
+  rowCount?: number;
+  refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
+}
+
+/** Hover label for a typed link: "account · r1, r3 · billing · r2 (+48 more)". */
+function typedLinkLabel(l: GLink): string {
+  const parts = l.refs ?? (l.type ? [{ type: l.type, rows: l.rows ?? [], rowCount: l.rowCount ?? 0 }] : []);
+  return parts
+    .map((p) => {
+      const more = p.rowCount > p.rows.length ? ` (+${p.rowCount - p.rows.length} more)` : "";
+      return `${p.type}${p.rows.length ? ` · ${p.rows.join(", ")}` : ""}${more}`;
+    })
+    .join("\n");
 }
 
 const COLORS: Record<Kind, string> = {
@@ -557,7 +573,9 @@ export function OntologyGraphView({
                           stroke={linkStroke(l.kind)}
                           strokeWidth={(inHood && neighborhood ? 1.6 : 1) / view.k}
                           opacity={inHood ? 1 : 0.15}
-                        />
+                        >
+                          {l.type && <title>{typedLinkLabel(l)}</title>}
+                        </line>
                       );
                     })}
                   </g>

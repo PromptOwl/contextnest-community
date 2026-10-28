@@ -3495,7 +3495,16 @@ export interface GraphNode {
 
 export interface NestGraph {
   nodes: GraphNode[];
-  links: Array<{ source: string; target: string }>;
+  /** `type`/`rows`/`rowCount` (and `refs` when several columns point at the
+   *  same target) only on typed edges — a table's :ref columns. */
+  links: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    rows?: string[];
+    rowCount?: number;
+    refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
+  }>;
   stewards: Array<{
     /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
     id: string;

@@ -66,6 +66,7 @@ import {
   type InstructionsRevision,
 } from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
+import { tableRefProse, tableRefReport } from "../tables/refs.js";
 import {
   addComment,
   createThread,
@@ -3460,8 +3461,9 @@ async function runTool(
         }
         const { node, version } = made;
         const created = settableTaskFields(node.frontmatter.metadata);
+        const tableRefs = await tableRefReport(nestId, node, ctx.userId, ctx.userEmail);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -3470,6 +3472,7 @@ async function runTool(
             status: node.frontmatter.status,
             checkpoint: null,
             ...created,
+            ...(tableRefs ? { table_refs: tableRefs } : {}),
           },
         };
       });
@@ -3538,8 +3541,9 @@ async function runTool(
       }
       const { node: updated, version } = result;
       const fields = settableTaskFields(updated.frontmatter.metadata);
+      const tableRefs = await tableRefReport(nestId, updated, ctx.userId, ctx.userEmail);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
@@ -3547,6 +3551,7 @@ async function runTool(
           status: updated.frontmatter.status,
           checkpoint: null,
           ...fields,
+          ...(tableRefs ? { table_refs: tableRefs } : {}),
         },
       };
     }
