@@ -352,6 +352,9 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
+  // Nest meta + settings have landed: enough for the document tree, which
+  // need not wait on the review/deletion queues that initialLoad covers.
+  const [shellReady, setShellReady] = useState(false);
   // The change open in the Review tab's pane. Mirrored into ?review= so a
   // review can be linked and survives a refresh (CU-wdqcq05mhk).
   const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
@@ -472,15 +475,22 @@ export function NestView({
       // Re-expanding a folder already on screen is not a reason to re-read
       // it; only an explicit refresh (a mutation) is.
       if (!opts.refresh && loadedFolders.current.has(folder)) return;
-      setLoadingFolders((prev) => new Set(prev).add(folder));
-      try {
-        const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
+      const apply = (res: { nodes: any[] }) => {
         loadedFolders.current.add(folder);
         setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
         ]);
+      };
+      const query = reads.folderNodes(nestId, folder);
+      // Paint the cached level at once and refresh behind it; a stale entry
+      // used to block the tree on the network. A mutation refresh skips this.
+      const cached = opts.refresh ? undefined : qc.getQueryData(query.queryKey);
+      if (cached) apply(cached);
+      else setLoadingFolders((prev) => new Set(prev).add(folder));
+      try {
+        apply(await qc.fetchQuery(query));
       } catch (e: any) {
         console.error("[NestView] listFolderNodes failed", nestId, folder, e);
         toast.error(e?.message || "Failed to load folder");
@@ -498,6 +508,12 @@ export function NestView({
   /** The nest-wide shape. Describes the whole nest whatever level is open,
    *  so it is read once per nest rather than once per folder expanded. */
   const fetchCensus = useCallback(async () => {
+    // Same paint-then-refresh as fetchLevel.
+    const cached = qc.getQueryData(reads.census(nestId).queryKey);
+    if (cached) {
+      setCensus(cached.census);
+      setCensusSettled(true);
+    }
     try {
       const { census: fresh } = await qc.fetchQuery(reads.census(nestId));
       setCensus(fresh);
@@ -562,32 +578,33 @@ export function NestView({
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [, queueData, deletionData, settingsData] =
+    // The reads below go through the shared cache (same keys and invalidation
+    // as the hook-based screens) so returning from a document paints from
+    // memory instead of re-fetching. Read imperatively rather than via hooks to
+    // keep each call's own error fallback — a failing node list must still let
+    // the settings response apply, per the note above.
+    // The queues are started now but awaited last: the tree needs only the
+    // nest meta and settings, so they no longer hold it back (shellReady).
+    const queueRead = grantOnly
+      ? empty({ requests: [], total: 0 })
+      : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
+        console.error("[NestView] getReviewQueue failed", nestId, e);
+        toast.error(e?.message || "Failed to load review queue");
+        return { requests: [], total: 0 };
+      });
+    // Pending AND declined in one call: pending drives the admin queue,
+    // declined is how the person who asked learns the verdict.
+    const deletionRead = grantOnly
+      ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
+      : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
+        console.error("[NestView] getDeletionRequests failed", nestId, e);
+        return { requests: [] as api.DeletionRequest[], total: 0 };
+      });
+    const [, settingsData] =
       await Promise.all([
-        // The five reads below go through the shared cache (same keys and
-        // invalidation as the hook-based screens) so returning from a document
-        // paints from memory instead of re-fetching. Read imperatively rather
-        // than via hooks to keep each call's own error fallback — a failing
-        // node list must still let the settings response apply, per the note
-        // above.
         // Documents come from the folder levels currently on screen, not one
         // whole-nest listing — see fetchLevel.
         reloadLevels(),
-        grantOnly
-          ? empty({ requests: [], total: 0 })
-          : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-            console.error("[NestView] getReviewQueue failed", nestId, e);
-            toast.error(e?.message || "Failed to load review queue");
-            return { requests: [], total: 0 };
-          }),
-        // Pending AND declined in one call: pending drives the admin queue,
-        // declined is how the person who asked learns the verdict.
-        grantOnly
-          ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
-          : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-            console.error("[NestView] getDeletionRequests failed", nestId, e);
-            return { requests: [] as api.DeletionRequest[], total: 0 };
-          }),
         grantOnly
           ? empty({
             stewardship_enabled: false,
@@ -607,8 +624,6 @@ export function NestView({
             };
           }),
       ]);
-    setReviewQueue(queueData.requests);
-    setDeletionRequests(deletionData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
@@ -636,6 +651,10 @@ export function NestView({
     }
     setRoles(nestMeta?.roles ?? []);
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
+    setShellReady(true);
+    const [queueData, deletionData] = await Promise.all([queueRead, deletionRead]);
+    setReviewQueue(queueData.requests);
+    setDeletionRequests(deletionData.requests);
     setLoading(false);
     setInitialLoad(false);
   }, [nestId, qc, reloadLevels]);
@@ -1910,7 +1929,7 @@ export function NestView({
           <OrgContributorPanel nestId={nestId} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <OverviewTab
-              initialLoad={initialLoad || !censusSettled}
+              initialLoad={!shellReady || !censusSettled}
               stats={stats}
               recentlyEdited={recentlyEdited}
               recentlyEditedCount={recentlyEditedCount}
@@ -1962,7 +1981,7 @@ export function NestView({
               onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
               initialTags={initialTags}
-              initialLoad={initialLoad}
+              initialLoad={!shellReady}
               loading={loading}
               nodes={nodes}
               census={census}
