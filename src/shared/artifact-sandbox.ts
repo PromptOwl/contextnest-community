@@ -27,6 +27,18 @@ export const ARTIFACT_SANDBOX_CSP = [
 ].join("; ");
 
 /**
+ * The same policy with `allow-popups` removed — for frames that carry nest
+ * data (the html blocks of a §1.12 view). Every other directive is kept, so
+ * `default-src 'none'` and `connect-src 'none'` still close the network; a
+ * popup is one more channel such a frame has no business opening. Derived
+ * from ARTIFACT_SANDBOX_CSP so the two can never drift apart.
+ */
+export const ARTIFACT_SANDBOX_CSP_NO_POPUPS = ARTIFACT_SANDBOX_CSP.replace(
+  " allow-popups",
+  "",
+);
+
+/**
  * Merge a `frame-ancestors` directive into an existing CSP header value.
  *
  * The global clickjacking guard (see app.ts) runs on every response, including
@@ -44,11 +56,21 @@ export function mergeFrameAncestors(
   return `${existing}; ${directive}`;
 }
 
-/** Apply the artifact sandbox trio: strict CSP + nosniff + no referrer. */
-export function applyArtifactSandboxHeaders(c: {
-  header: (name: string, value: string) => void;
-}): void {
-  c.header("Content-Security-Policy", ARTIFACT_SANDBOX_CSP);
+/**
+ * Apply the artifact sandbox trio: strict CSP + nosniff + no referrer.
+ * `{ popups: false }` swaps in ARTIFACT_SANDBOX_CSP_NO_POPUPS; called with no
+ * options it behaves exactly as it always has.
+ */
+export function applyArtifactSandboxHeaders(
+  c: {
+    header: (name: string, value: string) => void;
+  },
+  opts: { popups?: boolean } = {},
+): void {
+  c.header(
+    "Content-Security-Policy",
+    opts.popups === false ? ARTIFACT_SANDBOX_CSP_NO_POPUPS : ARTIFACT_SANDBOX_CSP,
+  );
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
 }

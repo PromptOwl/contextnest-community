@@ -88,6 +88,11 @@ export interface AuthContextValue {
    *  PromptOwl-hosted deployment). The nest visibility picker confirms before
    *  'Organization' and words its tiers by it. Default false. */
   sharedDeployment: boolean;
+  /** From /health — who may widen a nest to public / org ("admins" = server
+   *  admins only). The visibility pickers disable a blocked tier with the
+   *  reason; the server refuses it regardless. Default owners. */
+  nestPublicVisibility: "owners" | "admins";
+  nestOrgVisibility: "owners" | "admins";
   /** Public feature flag from /health — sub-agent (nested) runs. Gated
    *  separately from the plane; when off the UI hides the "spawn sub-agent"
    *  option exactly when the API would reject a parent_run_id (400). */
@@ -120,6 +125,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   // disables), so the picker doesn't flicker types away while /health loads.
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [sharedDeployment, setSharedDeployment] = useState(false);
+  const [nestPublicVisibility, setNestPublicVisibility] = useState<"owners" | "admins">("owners");
+  const [nestOrgVisibility, setNestOrgVisibility] = useState<"owners" | "admins">("owners");
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
   const [mcpOauthEnabled, setMcpOauthEnabled] = useState(false);
   const [typeTaskEnabled, setTypeTaskEnabled] = useState(false);
@@ -173,6 +180,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
+      setNestPublicVisibility(h.nest_public_visibility === "admins" ? "admins" : "owners");
+      setNestOrgVisibility(h.nest_org_visibility === "admins" ? "admins" : "owners");
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
       if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
       if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -222,6 +231,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
+        setNestPublicVisibility(h.nest_public_visibility === "admins" ? "admins" : "owners");
+        setNestOrgVisibility(h.nest_org_visibility === "admins" ? "admins" : "owners");
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
         // Product analytics, if the operator configured a PostHog project.
         // No-op when the server sends no key (unset, or telemetry switched off).
@@ -407,6 +418,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         hootieBrand,
         runnerKeyConfigured,
         sharedDeployment,
+        nestPublicVisibility,
+        nestOrgVisibility,
         subagentRunsEnabled,
         subagentMaxDepth,
         subagentMaxChildren,

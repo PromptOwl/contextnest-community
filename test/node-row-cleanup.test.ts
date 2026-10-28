@@ -167,6 +167,41 @@ describe("node row cleanup", () => {
     expect(moved.node_versions).toBeGreaterThan(0);
   });
 
+  it("moves onto an id whose document is gone but whose rows are not", async () => {
+    const create = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Landing Doc", content: "# Land" },
+      alice.apiKey,
+    );
+    expect(create.status).toBe(201);
+    // Orphan rows at the destination, as a file removed outside the app leaves.
+    await getDb().run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status)
+       VALUES (?, ?, 1, 'stale', ?, 'published')`,
+      [nestId, "nodes/archive/landing-doc", alice.email],
+    );
+    await seedRows("nodes/archive/landing-doc");
+
+    const move = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/landing-doc/move`,
+      { folder: "archive" },
+      alice.apiKey,
+    );
+    expect(move.status).toBe(200);
+    const landed = await rowCounts("nodes/archive/landing-doc");
+    expect(landed.comments).toBe(0);
+    expect(landed.watchers).toBe(0);
+    const hashes = (await getDb().all(
+      "SELECT content_hash FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, "nodes/archive/landing-doc"],
+    )) as Array<{ content_hash: string }>;
+    expect(hashes.map((r) => r.content_hash)).not.toContain("stale");
+  });
+
   it("leaves nothing behind on delete, so a recreated id inherits nothing", async () => {
     const create = await jsonRequest(
       app,

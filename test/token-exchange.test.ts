@@ -144,6 +144,14 @@ describe("POST /auth/token-exchange", () => {
       headers: { Authorization: `Bearer ${data.access_token}` },
     });
     expect(idx.status).toBe(200);
+
+    // The IdP vouched for the address (CU-wdqcq05rz6).
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT email_verified_at FROM users WHERE email = ?",
+      ["user@example.com"],
+    )) as { email_verified_at: string | null };
+    expect(row.email_verified_at).toBeTruthy();
   });
 
   it("404 when the feature flag is off", async () => {

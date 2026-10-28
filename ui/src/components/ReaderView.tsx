@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, Search, X } from "lucide-react";
+import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import { PdfDocumentPanel } from "./PdfDocumentPanel";
@@ -225,7 +226,7 @@ export function ReaderView({
             }
             title={n.title || n.id}
           >
-            <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <NodeTypeGlyph type={n.type} className="h-3.5 w-3.5" />
             <span className="truncate">{n.title || n.id}</span>
           </button>
         );
@@ -311,7 +312,7 @@ export function ReaderView({
                           (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
                         }
                       >
-                        <FileText className="mt-[3px] h-3.5 w-3.5 shrink-0 opacity-70" />
+                        <NodeTypeGlyph type={n.type} className="mt-[3px] h-3.5 w-3.5" />
                         <span className="min-w-0">
                           <span className="block truncate">{n.title || n.id}</span>
                           {where && <span className="block truncate text-[11px] font-normal text-muted-foreground/70">{where}</span>}

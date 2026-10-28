@@ -73,7 +73,7 @@ Add a row here whenever you add a `data-testid` to the UI.
 
 | Test ID | Element |
 |---|---|
-| `workflows-agents-tab` | Workflows → Agents tab (shown when `/health` says `metacognition_enabled`) — `ui/src/components/WorkflowsView.tsx` |
+| `workflows-agents-tab` | Workflows → Agents tab (shown when `/health` says `metacognition_enabled` and the caller owns or administers the nest) — `ui/src/components/WorkflowsView.tsx` |
 | `metacognition-panel` | The Agents panel |
 | `metacognition-agent-row` | One configured agent: persona, scope, last run |
 | `metacognition-run-now` | Run now button on a row |

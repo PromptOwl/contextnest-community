@@ -9,12 +9,10 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  Check,
   ChevronRight,
   CircleCheck,
   CircleMinus,
   CircleX,
-  Copy,
   Loader2,
   RefreshCw,
   TriangleAlert,
@@ -22,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   getServerStatus,
   runEgressCheck,
@@ -52,27 +50,6 @@ function StateIcon({ state, className = "h-4 w-4" }: { state: CheckState | "ok" 
   return <CircleMinus className={`${className} text-muted-foreground`} aria-label="Not in use" />;
 }
 
-/** Copy button that flips to "Copied" briefly. */
-function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
-  const [done, setDone] = useState(false);
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      className="h-7 shrink-0 px-2 text-xs"
-      onClick={async () => {
-        if (!(await copyTextWithToast(text))) return;
-        setDone(true);
-        setTimeout(() => setDone(false), 1500);
-      }}
-    >
-      {done ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      <span className="ml-1.5">{done ? "Copied" : label}</span>
-    </Button>
-  );
-}
-
 /** A labelled, copyable value — for things an admin pastes into another console. */
 function CopyValue({ label, value }: { label: string; value: string }) {
   return (
@@ -81,7 +58,7 @@ function CopyValue({ label, value }: { label: string; value: string }) {
       <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-xs" title={value}>
         {value}
       </code>
-      <CopyButton text={value} />
+      <CopyButton text={value} label="Copy" className="h-7 shrink-0 px-2" />
     </div>
   );
 }
@@ -91,7 +68,7 @@ function Snippet({ title, code }: { title: string; code: string }) {
     <div className="rounded-md border">
       <div className="flex items-center justify-between border-b bg-muted/40 px-3 py-1.5">
         <span className="text-xs font-medium">{title}</span>
-        <CopyButton text={code} />
+        <CopyButton text={code} label="Copy" className="h-7 shrink-0 px-2" />
       </div>
       <pre className="overflow-x-auto px-3 py-2 text-xs leading-relaxed">{code}</pre>
     </div>
@@ -355,7 +332,7 @@ function ReachabilityCard({ report }: { report: StatusReport }) {
             </table>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <CopyButton text={allowlist} label="Copy allowlist" />
+            <CopyButton text={allowlist} label="Copy allowlist" className="h-7 shrink-0 px-2" />
             {egress.result?.proxy && <span className="text-xs text-muted-foreground">HTTPS tested through {egress.result.proxy}</span>}
             {egress.result?.proxyProblem && (
               <span className="text-xs text-amber-700 dark:text-amber-400">Egress proxy set but not in use: {egress.result.proxyProblem}</span>

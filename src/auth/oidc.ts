@@ -26,6 +26,7 @@ import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { idpVouchesForEmail, markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -492,6 +493,11 @@ oidcRoutes.get("/callback", async (c) => {
     } catch (err) {
       console.error("[oidc] department upsert failed (login continues):", err);
     }
+
+    // Record it only when the token actually vouches for the address (see
+    // idpVouchesForEmail): sign-in tolerates an absent claim, a domain match
+    // on a shared server does not.
+    if (idpVouchesForEmail(claims)) await markEmailVerified(user.id, "oidc");
 
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the

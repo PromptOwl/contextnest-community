@@ -15,12 +15,14 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  viewMetaSchema,
   TITLE_MAX_LENGTH,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
+import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { withIoStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
@@ -51,7 +53,11 @@ import {
   nestReviewsPrimeOnly,
   nestCreatorIsReviewer,
 } from "../nests/service.js";
-import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
+import {
+  isPrimeDocument,
+  documentPrimeFlag,
+  documentAlwaysIncludeFlag,
+} from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
 import {
@@ -461,6 +467,8 @@ export interface NodeResponse extends TaskFields {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** The published version agents are served, null if none. Lists only. */
+  approvedVersion?: number | null;
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
@@ -471,9 +479,15 @@ export interface NodeResponse extends TaskFields {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
+   *  doc inherits from the nest's `always_include_tags`. */
+  always_include?: boolean;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** The Office file a document was extracted from (`metadata.original`):
+   *  served at /nests/:nestId/originals/:file. Absent on every other node. */
+  original?: OriginalFile;
   /** Blocking relations from nodes that aren't done yet (src/nodes/
    *  relations.ts). Absent when nothing open blocks this node. */
   open_blockers?: number;
@@ -525,6 +539,33 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
     ? [TASK_NODE_TYPE]
     : []),
 ]);
+
+/**
+ * An uploaded Office file kept beside the nest (`<nest>/.originals/<file>`)
+ * and bound to the document extracted from it. `file` is the server-minted
+ * `<uuid>.<kind>` name; `sha256` is checked before the file is served.
+ */
+export interface OriginalFile {
+  file: string;
+  filename: string;
+  kind: "pptx" | "docx";
+  bytes: number;
+  sha256: string;
+}
+
+/** Server-minted original names only — the traversal defense for the route. */
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+
+export function isOriginalFile(v: unknown): v is OriginalFile {
+  const o = v as OriginalFile | null | undefined;
+  return (
+    !!o &&
+    typeof o === "object" &&
+    typeof o.file === "string" &&
+    ORIGINAL_FILE_NAME.test(o.file) &&
+    typeof o.sha256 === "string"
+  );
+}
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
 export const PDF_NODE_TYPE = "pdf";
@@ -659,7 +700,11 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     model:
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...(isOriginalFile((fm.metadata as any)?.original)
+      ? { original: (fm.metadata as any).original as OriginalFile }
+      : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
@@ -1150,10 +1195,10 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayStatuses, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions
     ? [null, null]
     : await Promise.all([
-        versions.getDisplayStatuses(nestId),
+        versions.getDisplayState(nestId),
         // From the DB, not a vault walk. The disk truth behind it is
         // reconciled by the index rebuild and kept current by the stage /
         // approve / reject paths.
@@ -1218,8 +1263,9 @@ export async function listNodesForCaller(
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = displayStatuses?.get(r.id) ?? "draft";
+        r.status = displayState?.statuses.get(r.id) ?? "draft";
       }
+      r.approvedVersion = displayState?.approved.get(r.id) ?? null;
       return r;
     })
   );
@@ -1437,6 +1483,9 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a published version agents are served, whatever the
+   *  status of their latest version. */
+  aiReady: number;
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
@@ -1509,11 +1558,13 @@ export async function nestCensus(
     [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
   );
 
-  const statusMap = await versions.getDisplayStatuses(nestId);
+  const { statuses: statusMap, approved } = await versions.getDisplayState(nestId);
   const statuses: Record<string, number> = {};
+  let aiReady = 0;
   for (const d of visible) {
     const st = statusMap.get(d.id) ?? "draft";
     statuses[st] = (statuses[st] || 0) + 1;
+    if (approved.has(d.id)) aiReady++;
   }
 
   const authorship = await resolveAuthorship(
@@ -1552,6 +1603,7 @@ export async function nestCensus(
     tags,
     types,
     statuses,
+    aiReady,
     authors,
     editedLast7d,
     recent,
@@ -1595,6 +1647,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Document-scope always-include flag — see `isAlwaysIncludeDocument`.
+   *  Owner/admin only, like `prime`. */
+  alwaysInclude?: boolean;
   /** Caller attribution recorded on the version this create seals (§9.4).
    *  Optional everywhere — an unattributed write is a valid write. */
   client?: ClientMetadata;
@@ -1602,9 +1657,16 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** The uploaded Office file this document's text was extracted from
+   *  (office-service.ts). Stored as `metadata.original`, so the binding is
+   *  part of every version's hash. */
+  original?: OriginalFile;
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** The `view:` block of a type: view node (§1.12) — validated against the
+   *  engine's view schema, refused on any other type. */
+  view?: unknown;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1623,6 +1685,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Document-scope always-include flag. `null` clears it back to the tags. */
+  alwaysInclude?: boolean | null;
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1635,6 +1699,33 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   /** Custom field values to set, field key → value; `null` clears one. Merged
    *  into the stored map — keys left out are untouched. */
   fields?: FieldsPatch;
+  /** Replacement `view:` block (§1.12), for a node that is or is becoming
+   *  type: view. Replaces the block wholesale; validated like create. */
+  view?: unknown;
+}
+
+/**
+ * Validate a `view:` block with the engine's own schema (§13 rules 30–36) and
+ * the type it is meant for. The engine re-validates on write; checking here
+ * turns its refusal into a 400 that names the rule, before any governance
+ * work, on every surface (REST, MCP, a held write's replay).
+ */
+export function assertViewBlock(view: unknown, type: string): void {
+  if (type !== "view") {
+    throw new ValidationError(
+      `A view block is only valid on type: view (§13 rule 31), and this node is type: "${type}". Pass type: "view" in the same call, or drop the view parameter.`,
+    );
+  }
+  if (view === null || typeof view !== "object" || Array.isArray(view)) {
+    throw new ValidationError("view must be an object: { blocks: [...] } (§1.12)");
+  }
+  const parsed = viewMetaSchema.safeParse(view);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) =>
+      i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message,
+    );
+    throw new ValidationError(`Invalid view block — ${issues.join("; ")}`);
+  }
 }
 
 /**
@@ -1734,12 +1825,13 @@ async function actorAutoPublishes(
  */
 async function assertMayFlagPrime(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  what = "prime flag",
 ): Promise<void> {
   const roles = await resolveUserRoles(nestId, userEmail);
   if (!roles.includes("owner") && !roles.includes("admin")) {
     throw new ForbiddenError(
-      "Only the nest owner or an admin can change a document's prime flag."
+      `Only the nest owner or an admin can change a document's ${what}.`
     );
   }
 }
@@ -1900,6 +1992,7 @@ async function createNodeOnce(
   if (input.pdf && requestedType !== PDF_NODE_TYPE) {
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
+  if (input.view !== undefined) assertViewBlock(input.view, requestedType);
 
   assertModelId(input.model);
   for (const field of ["schedule", "model"] as const) {
@@ -1933,6 +2026,9 @@ async function createNodeOnce(
         `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
       );
     }
+    // A view's page and frames are served at <view>/view/…: neither may be
+    // taken by another node, nor a view placed where one already is.
+    await assertNoViewCollision(storage, id, requestedType);
 
     // Rows can outlive their document when a file goes missing outside the app
     // — deleteNode's purge never runs because the delete 404s first. Those rows
@@ -1962,12 +2058,22 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    // Always-include pushes this document to every agent entering the nest,
+    // so flagging it is a governance act too (CU-wdqcq05rn0).
+    if (input.alwaysInclude !== undefined) {
+      if (typeof input.alwaysInclude !== "boolean") {
+        throw new ValidationError("always_include must be true or false");
+      }
+      await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+    }
     const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
+      ...(input.original ? { original: input.original } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
@@ -2084,6 +2190,7 @@ async function createNodeOnce(
                 : {}),
               ...(tags.length ? { tags } : {}),
               ...(input.status ? { status: input.status } : {}),
+              ...(input.view !== undefined ? { view: input.view } : {}),
               metadata,
               publish: published,
               ...(publishNote ? { note: publishNote } : {}),
@@ -2236,6 +2343,49 @@ async function stageImportedFilesInner(
     return !segs.includes("_suggestions") && !segs.includes(".context");
   });
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
+  // View addresses (see views/collision.ts): a document arriving at a view's
+  // <view>/view/… address, or a view arriving over an occupied one, is refused
+  // like any other unusable file — named, with the reason.
+  const viewRefusals: Array<{ path: string; why: string }> = [];
+  {
+    const idOf = (path: string) => path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.md$/i, "");
+    const docsIn = carried
+      .filter((f) => /\.md$/i.test(String(f.path)) && !String(f.path).split(/[\\/]/).some((seg) => seg.startsWith(".")))
+      .map((f) => {
+        const id = idOf(String(f.path));
+        let type = "document";
+        try {
+          type = String(parseDocument(`${id}.md`, String(f.content ?? ""), id).frontmatter.type || "document");
+        } catch {
+          /* unparseable: the engine reports it */
+        }
+        return { id, type, path: String(f.path) };
+      });
+    if (docsIn.some((d) => d.type === "view" || /(^|\/)view(\/|$)/.test(d.id))) {
+      const { storage } = await engineCache.get(nestId);
+      const existing = (await storage.discoverDocuments({ includeRetired: true } as any)).map((d) => ({
+        id: d.id,
+        type: String(d.frontmatter.type || "document"),
+      }));
+      const refused = batchViewCollisions(docsIn, existing);
+      for (const d of docsIn) {
+        const why = refused.get(d.id);
+        if (why) viewRefusals.push({ path: d.path, why });
+      }
+    }
+  }
+  if (viewRefusals.length) {
+    const drop = new Set(viewRefusals.map((r) => r.path));
+    for (let i = carried.length - 1; i >= 0; i--) if (drop.has(String(carried[i].path))) carried.splice(i, 1);
+    if (!carried.length) {
+      return {
+        written: 0,
+        rejected: viewRefusals.map((r) => r.path),
+        problems: viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+        warnings: [],
+      };
+    }
+  }
   const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
@@ -2251,7 +2401,10 @@ async function stageImportedFilesInner(
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
-  const rejected = (result.failed ?? []).map((f) => f.id ?? "(unnamed)");
+  const rejected = [
+    ...viewRefusals.map((r) => r.path),
+    ...(result.failed ?? []).map((f) => f.id ?? "(unnamed)"),
+  ];
   if (rejected.length) {
     console.warn(
       `[import] ${rejected.length} file(s) rejected:`,
@@ -2259,9 +2412,12 @@ async function stageImportedFilesInner(
     );
   }
   // The reason travels too, as a readable `path: reason` line for the user.
-  const problems = (result.failed ?? []).map((f) =>
-    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
-  );
+  const problems = [
+    ...viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+    ...(result.failed ?? []).map((f) =>
+      f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+    ),
+  ];
   return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
@@ -2684,6 +2840,7 @@ export async function updateNode(
       // node is becoming, as create does.
       if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
         assertAcceptedType(patch.type);
+        if (patch.type === "view") await assertNoViewCollision(storage, nodeId, "view");
         // A skill node is invalid without a skill block and this surface has
         // no field for one — default the trigger from the title, as create
         // does. The engine requires the block in the same call as the re-type.
@@ -2701,6 +2858,12 @@ export async function updateNode(
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
+      }
+      if (patch.view !== undefined) {
+        // Validated against the type the node is becoming, as create does.
+        assertViewBlock(patch.view, String(node.frontmatter.type || "document"));
+        node = { ...node, frontmatter: { ...node.frontmatter, view: patch.view as any } };
+        opInput.view = patch.view;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
@@ -2744,6 +2907,20 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.alwaysInclude !== undefined) {
+        if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {
+          throw new ValidationError("always_include must be true, false or null");
+        }
+        await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.alwaysInclude === null) delete metadata.always_include;
+        else metadata.always_include = patch.alwaysInclude;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          always_include: patch.alwaysInclude,
+        };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
@@ -3249,6 +3426,12 @@ export async function moveNode(
       // Fail closed: only a missing document leaves the destination free.
       if (!(err instanceof DocumentNotFoundError)) throw err;
     }
+    await assertNoViewCollision(
+      storage,
+      newId,
+      String(node.frontmatter.type || "document"),
+      new Set([nodeId]),
+    );
 
     const moved: ContextNode = {
       ...node,
@@ -3266,6 +3449,13 @@ export async function moveNode(
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
     // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
+    // No document at the destination (checked above), so any rows there are
+    // orphans — same as create, clear them or the repoint trips UNIQUE. Before
+    // the write: its index write-through creates fresh rows at newId.
+    await getDb().transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
+    });
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
@@ -3701,6 +3891,20 @@ export async function moveFolder(
   const taken = new Set(all);
   const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
   if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+  // View addresses (see views/collision.ts), checked for every node BEFORE
+  // the first one moves, so a refusal never leaves the folder half-moved.
+  {
+    const leaving = new Set(targets);
+    for (const id of targets) {
+      const doc = await storage.readDocument(id);
+      await assertNoViewCollision(
+        storage,
+        `nodes/${destOf(id)}/${id.split("/").pop()}`,
+        String(doc.frontmatter.type || "document"),
+        leaving,
+      );
+    }
+  }
 
   // Sequential, like deleteFolder: a failure names how far it got, and what
   // moved stays coherent (each move is atomic).

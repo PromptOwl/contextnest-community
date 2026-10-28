@@ -15,10 +15,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check, KeyRound, Eye, EyeOff } from "lucide-react";
+import { Shield, AlertCircle, Loader2, ExternalLink, KeyRound, Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import type { ClaimBlocked } from "../lib/api";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
@@ -38,7 +38,6 @@ export function AdminLoginModal({
   const [error, setError] = useState<string | null>(null);
   const [deviceUrl, setDeviceUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [claimBlocked, setClaimBlocked] = useState<{
     info: ClaimBlocked;
@@ -72,13 +71,6 @@ export function AdminLoginModal({
       cancelled = true;
     };
   }, []);
-
-  const copyCode = async () => {
-    if (!deviceCode) return;
-    if (!(await copyTextWithToast(deviceCode))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
   const handlePromptOwl = async () => {
     setError(null);
@@ -284,13 +276,7 @@ export function AdminLoginModal({
                       <code className="flex-1 bg-background border rounded px-2 py-1.5 text-xs font-mono break-all">
                         {deviceCode}
                       </code>
-                      <Button size="sm" variant="outline" onClick={copyCode}>
-                        {copied ? (
-                          <Check className="h-3.5 w-3.5 text-green-600" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </Button>
+                      <CopyButton text={deviceCode} />
                     </div>
                   )}
                 </div>

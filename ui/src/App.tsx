@@ -12,7 +12,7 @@ const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "D
 import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
-import { shouldReturnToNestOnSave } from "./lib/document-save-nav";
+import { saveDestination } from "./lib/document-save-nav";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { LicenseBanner } from "./components/LicenseNotice";
@@ -132,8 +132,8 @@ type View =
       /** Open with this comment thread focused (activity-feed deep link;
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
-      /** The review queue this doc was opened from. Back, approve and reject
-       *  return there, so a reviewer goes straight to the next item. */
+      /** The view this doc was opened from (review queue, Board, other nest
+       *  views). Back, approve, reject and publishing a draft return there. */
       returnTo?: View;
     }
   | { page: "docs" }
@@ -225,6 +225,11 @@ const nodeKey = (view: View): string | null => {
     return `${view.nestId}/${view.readerDoc}`;
   return null;
 };
+
+// One Back stop per page (path) and per node on it; a tab or filter change in
+// the query string stays a replace.
+const historyKey = (path: string, view: View): string =>
+  `${path}|${nodeKey(view) ?? ""}`;
 
 // Runs the ?sso_error toast exactly once per page load (survives React
 // StrictMode's dev double-mount). Resets naturally on the next full navigation.
@@ -684,11 +689,13 @@ export default function App() {
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    const key = nodeKey(view);
+    const key = historyKey(path, view);
     if (next !== current) {
       // `view` rides as the entry's state so the popstate handler below can
       // restore it without re-deriving it from the URL.
-      if (historyWriteMode(lastNodeKeyRef.current, key) === "push") {
+      const state = window.history.state;
+      const onAppEntry = !!state && typeof state === "object" && "page" in state;
+      if (historyWriteMode(lastNodeKeyRef.current, key, onAppEntry) === "push") {
         window.history.pushState(view, "", next);
       } else {
         window.history.replaceState(view, "", next);
@@ -706,7 +713,7 @@ export default function App() {
     const onPopState = (e: PopStateEvent) => {
       const state = e.state as View | null;
       if (state && typeof state === "object" && "page" in state) {
-        lastNodeKeyRef.current = nodeKey(state);
+        lastNodeKeyRef.current = historyKey(window.location.pathname, state);
         setViewNow(state);
       }
     };
@@ -1746,13 +1753,15 @@ export default function App() {
               }}
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
               onOpenNestSettings={() => openNest({ openSettings: true })}
-              onSaved={() => {
-                // A fresh "new" doc has nowhere to stay open on, so land back
-                // on the nest; saving an EXISTING document must leave the
-                // view (and URL) pointed at that same document — otherwise
-                // the app shows Overview while ?doc=<id> still names the doc
-                // (CU-wdqcq02cxe), a mismatch only a reload used to fix.
-                if (shouldReturnToNestOnSave(doc.nodeId)) openNest();
+              onSaved={(_id, info) => {
+                // New doc → the nest; a published draft → where it was opened
+                // from (Board, review queue); otherwise stay (see saveDestination).
+                const dest = saveDestination(doc.nodeId, {
+                  publishedDraft: info?.publishedDraft,
+                  hasReturnTo: !!doc.returnTo,
+                });
+                if (dest === "nest") openNest();
+                else if (dest === "return") setView(doc.returnTo!);
               }}
               onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
                 // Cycle handling: never duplicate target in chain.
@@ -1836,7 +1845,8 @@ export default function App() {
             isAnonOwned: v.isAnonOwned,
             isArchived: v.isArchived,
             openDocument: (nodeId: string) =>
-              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned }),
+              // returnTo: Back, and publishing a draft, come back to this view (the Board).
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, returnTo: v }),
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,

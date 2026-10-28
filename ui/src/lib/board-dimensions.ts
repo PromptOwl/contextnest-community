@@ -606,6 +606,45 @@ export type MovePlan =
   | { kind: "unsupported"; reason: string };
 
 /**
+ * The card as it will look once `plan` (plus a lane change's `extra` fields)
+ * lands — shown right away on drop, so the card moves before the server
+ * answers. A folder move guesses the new id; the background reload corrects it.
+ */
+export function optimisticMove(
+  node: BoardNode,
+  plan: MovePlan | null,
+  extra: { fields?: Record<string, unknown>; [k: string]: unknown } = {},
+): BoardNode {
+  const next: BoardNode = { ...node };
+  const custom: Record<string, unknown> = {};
+  if (plan?.kind === "move-folder") {
+    const slug = node.id.slice(node.id.lastIndexOf("/") + 1);
+    next.id = plan.folder && plan.folder !== UNCATEGORIZED ? `nodes/${plan.folder}/${slug}` : `nodes/${slug}`;
+  } else if (plan?.kind === "retag") {
+    next.tags = plan.tags;
+  } else if (plan?.kind === "set-fields") {
+    Object.assign(next, plan.fields);
+  } else if (plan?.kind === "set-custom") {
+    Object.assign(custom, plan.fields);
+  }
+  const { fields: extraFields, ...extraTop } = extra;
+  Object.assign(next, extraTop);
+  Object.assign(custom, extraFields ?? {});
+  for (const k of ["assignee", "priority", "due", "parent"] as const) {
+    if ((next as any)[k] === null) delete (next as any)[k];
+  }
+  if (Object.keys(custom).length > 0) {
+    const fields = { ...(node.fields ?? {}) };
+    for (const [k, v] of Object.entries(custom)) {
+      if (v === null) delete fields[k];
+      else fields[k] = v;
+    }
+    next.fields = fields;
+  }
+  return next;
+}
+
+/**
  * What moving `node` into column `targetKey` requires. Pure — the caller runs
  * the actual write. A move into the node's current column is a no-op and
  * reported as unsupported so the UI skips a pointless request.

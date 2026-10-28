@@ -3,6 +3,27 @@ name: Release
 on:
   push:
     branches: [main]
+  # Recovery only: (re)build and push the container image for a release that
+  # is already tagged, e.g. when the image job failed after npm published. It
+  # never runs the npm release job, only runs when started from main, and
+  # refuses to replace an image tag that already exists unless `overwrite` is
+  # set (a rebuild isn't byte-identical: base image and npm resolve afresh).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to build the image for, e.g. 2.3.0. Its tag v<version> must exist and include the non-root Dockerfile (2.3.0 or later)"
+        required: true
+        type: string
+      latest:
+        description: "Also move the latest tag (only for the newest stable release)"
+        required: false
+        type: boolean
+        default: false
+      overwrite:
+        description: "Replace the image if this version's tag already exists in GHCR"
+        required: false
+        type: boolean
+        default: false
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -13,7 +34,10 @@ permissions:
 jobs:
   release:
     name: Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,3 +69,104 @@ jobs:
           # this, npm publishes unauthenticated and the registry masks the
           # rejection as a 404 on the PUT.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Publishes the self-hosted container image to GHCR, only on a run where
+  # changesets actually published a new version to npm (not on the runs that
+  # just open or update the release PR), or on a manual recovery dispatch.
+  # Tags: the package.json version and, for a stable version, `latest`. Used by
+  # the Helm chart in deploy/helm/contextnest-community.
+  image:
+    name: Container image
+    needs: release
+    # !cancelled(): on a dispatch the release job is skipped, and a plain
+    # `needs` would skip this job too. On a push, a failed release job leaves
+    # `published` empty, so nothing is pushed.
+    if: >-
+      !cancelled() && (
+        (github.event_name == 'push' && needs.release.outputs.published == 'true') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The commit this run published, or the release tag on a dispatch.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.sha }}
+
+      - name: Read version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_LATEST: ${{ inputs.latest }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "$EVENT" = workflow_dispatch ] && [ "$version" != "$INPUT_VERSION" ]; then
+            echo "::error::tag v$INPUT_VERSION has package.json version $version"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The commit actually built (the tag's commit on a dispatch).
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # `latest` moves only for a stable version, never for a prerelease
+          # (x.y.z-next.0). Releases ship from main only, so on a release run
+          # versions only rise; a recovery dispatch moves it only when asked.
+          latest=true
+          case "$version" in *-*) latest=false ;; esac
+          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_LATEST" != true ]; then latest=false; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          # The chart's default image tag is its appVersion: flag drift here.
+          # (npm has already published, so this warns rather than fails.)
+          chart=deploy/helm/contextnest-community/Chart.yaml
+          if [ -f "$chart" ]; then
+            app=$(grep -E '^appVersion:' "$chart" | head -n 1 | sed -E 's/^appVersion:[[:space:]]*//; s/[[:space:]]+#.*$//; s/["'"'"']//g; s/[[:space:]]*$//' || true)
+            if [ -z "$app" ]; then
+              echo "::warning::could not read appVersion from $chart"
+            elif [ "$app" != "$version" ]; then
+              echo "::warning::$chart appVersion is $app but this release is $version; bump it so the chart's default image tag exists."
+            fi
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to replace a published image (recovery run)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ghcr.io/promptowl/contextnest-community:${{ steps.version.outputs.version }}
+          OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1 && [ "$OVERWRITE" != true ]; then
+            echo "::error::$IMAGE already exists. Re-run with overwrite to replace it."; exit 1
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/promptowl/contextnest-community:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.latest == 'true' && 'ghcr.io/promptowl/contextnest-community:latest' || '' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.version.outputs.revision }}
+            org.opencontainers.image.title=contextnest-community
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
