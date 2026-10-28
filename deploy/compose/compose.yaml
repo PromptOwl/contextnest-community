@@ -1,0 +1,68 @@
+# Production bundle for one VM: ContextNest Community + PostgreSQL + Caddy
+# (automatic HTTPS). Copy .env.example to .env, fill it in, then:
+#   docker compose up -d
+# See README.md in this folder for upgrades and backups.
+name: contextnest
+
+services:
+  community:
+    image: ${CONTEXTNEST_IMAGE:-ghcr.io/promptowl/contextnest-community}:${CONTEXTNEST_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://contextnest:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/contextnest
+      PUBLIC_BASE_URL: https://${CONTEXTNEST_HOST:?set CONTEXTNEST_HOST in .env}
+      # Only Caddy, on the compose network, may set X-Forwarded-For / -Proto.
+      TRUSTED_PROXIES: private
+    volumes:
+      - data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The image has no curl; node is there. /readyz also checks the database and nest storage.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3838/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # The first boot after some upgrades runs a pass over every document before listening.
+      start_period: 10m
+      start_interval: 5s
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: contextnest
+      POSTGRES_DB: contextnest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "contextnest", "-d", "contextnest"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      CONTEXTNEST_HOST: ${CONTEXTNEST_HOST}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - community
+
+volumes:
+  data:
+  pgdata:
+  caddy_data:
+  caddy_config:
