@@ -17,6 +17,8 @@ import { taskFieldsOf } from "./task-fields.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { extractTableRefs, parseTable } from "../tables/service.js";
+import { makeRefResolver } from "../tables/refs.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
 
@@ -30,6 +32,11 @@ export interface GraphNode {
 export interface GraphLink {
   source: string;
   target: string;
+  /** Typed edges only: a table `:ref` column's name (e.g. "account"). Absent
+   *  on wikilink, contextnest://, parent and shared-tag edges. */
+  type?: string;
+  /** Typed edges only: the row keys whose ref cell points at `target`. */
+  rows?: string[];
 }
 
 export interface GraphSteward {
@@ -189,6 +196,39 @@ export async function buildNestGraph(
 
   const allLinks: GraphLink[] = [];
   const seen = new Set<string>();
+  // Table `:ref` columns are typed edges: one per (table, target, column),
+  // carrying the row keys. Resolved over `accessible` only, so a target the
+  // caller can't read draws no edge and its title never reaches them. Runs
+  // BEFORE the wikilink pass and claims the pair's dedupe key, so a ref cell's
+  // `[[AGA]]` doesn't also draw an untyped duplicate of the same edge.
+  const resolveRef = makeRefResolver(accessible);
+  for (const d of accessible) {
+    if ((d.frontmatter as { type?: string })?.type !== "table") continue;
+    let refs: ReturnType<typeof extractTableRefs>;
+    try {
+      refs = extractTableRefs(parseTable(d.body || ""));
+    } catch {
+      continue; // an unparseable table still gets its plain wikilink edges below
+    }
+    // Row sets, not Array#includes: a 10k-row table pointing at one account
+    // must not dedupe quadratically. Insertion (row) order is kept.
+    const typed = new Map<string, { link: GraphLink; rows: Set<string> }>();
+    for (const r of refs) {
+      const targetId = resolveRef(r.target);
+      if (!targetId || targetId === d.id) continue;
+      const tkey = `${targetId}\u0000${r.column}`;
+      let entry = typed.get(tkey);
+      if (!entry) {
+        entry = { link: { source: d.id, target: targetId, type: r.column }, rows: new Set() };
+        typed.set(tkey, entry);
+        seen.add(`${d.id}->${targetId}`);
+      }
+      entry.rows.add(r.row);
+    }
+    for (const { link, rows } of typed.values()) {
+      allLinks.push({ ...link, rows: [...rows] });
+    }
+  }
   for (const d of accessible) {
     for (const raw of extractWikiTargets(d.body || "")) {
       const norm = raw.toLowerCase().trim();

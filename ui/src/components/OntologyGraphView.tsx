@@ -43,6 +43,9 @@ interface GLink {
   source: string | GNode;
   target: string | GNode;
   kind: "link" | "tag" | "steward" | "structure";
+  /** Typed link (a table :ref column) and the rows behind it. */
+  type?: string;
+  rows?: string[];
 }
 
 const COLORS: Record<Kind, string> = {
@@ -557,7 +560,11 @@ export function OntologyGraphView({
                           stroke={linkStroke(l.kind)}
                           strokeWidth={(inHood && neighborhood ? 1.6 : 1) / view.k}
                           opacity={inHood ? 1 : 0.15}
-                        />
+                        >
+                          {l.type && (
+                            <title>{`${l.type}${l.rows?.length ? ` · ${l.rows.join(", ")}` : ""}`}</title>
+                          )}
+                        </line>
                       );
                     })}
                   </g>

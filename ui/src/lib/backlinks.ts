@@ -9,12 +9,30 @@
  * checkExists uses.
  */
 
+import { extractTableRefs } from "./table-refs";
+
 const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
 export interface BacklinkNode {
   id: string;
   title: string;
   content?: string;
+  /** Node type; a `table` node's `:ref` cells are typed links. */
+  type?: string;
+}
+
+/** A table's typed links to the target: the column (edge type) and the row
+ *  keys whose ref cell points here. */
+export interface BacklinkRef {
+  column: string;
+  rows: string[];
+}
+
+export interface Backlink {
+  id: string;
+  title: string;
+  /** Only on a table whose `:ref` cells point here. */
+  refs?: BacklinkRef[];
 }
 
 function bareSlug(idOrTarget: string): string {
@@ -153,7 +171,7 @@ export function staleAliasLinks(
 export function findBacklinks(
   nodes: BacklinkNode[],
   target: { id: string; title: string },
-): Array<{ id: string; title: string }> {
+): Backlink[] {
   const targetId = target.id.toLowerCase();
   const targetTitle = (target.title ?? "").toLowerCase();
   const targetSlug = bareSlug(target.id).toLowerCase();
@@ -167,13 +185,32 @@ export function findBacklinks(
     );
   };
 
-  const out: Array<{ id: string; title: string }> = [];
+  const out: Backlink[] = [];
   for (const node of nodes) {
     if (node.id.toLowerCase() === targetId) continue;
+    // A table's :ref cells link by [[…]] OR a bare id, typed by column.
+    const refs: BacklinkRef[] = [];
+    if (node.type === "table") {
+      for (const r of extractTableRefs(node.content ?? "")) {
+        if (!matches(r.target)) continue;
+        let group = refs.find((g) => g.column === r.column);
+        if (!group) refs.push((group = { column: r.column, rows: [] }));
+        if (!group.rows.includes(r.row)) group.rows.push(r.row);
+      }
+    }
+    if (refs.length) {
+      out.push({ id: node.id, title: node.title, refs });
+      continue;
+    }
     const targets = extractWikiLinkTargets(node.content ?? "");
     if (targets.some(matches)) out.push({ id: node.id, title: node.title });
   }
   return out;
+}
+
+/** "account · r1, r3" — one label per edge type, for the backlinks panel. */
+export function backlinkRefLabels(b: Backlink): string[] {
+  return (b.refs ?? []).map((r) => `${r.column} · ${r.rows.join(", ")}`);
 }
 
 /** Delete-confirm warning for docs that link here; "" when none. */

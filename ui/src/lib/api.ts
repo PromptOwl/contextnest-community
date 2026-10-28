@@ -3481,7 +3481,8 @@ export interface GraphNode {
 
 export interface NestGraph {
   nodes: GraphNode[];
-  links: Array<{ source: string; target: string }>;
+  /** `type`/`rows` only on typed edges (a table's :ref column). */
+  links: Array<{ source: string; target: string; type?: string; rows?: string[] }>;
   stewards: Array<{
     /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
     id: string;

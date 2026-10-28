@@ -1225,7 +1225,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `fields` — custom field values, `{ "severity": "high", "estimate": 3 }`. Validated against the nest's definitions: an unknown key, a field that doesn't apply to this node type, a value of the wrong shape, or a computed field → `400` naming the field. Defaults fill fields left out; a required field still empty after that → `400`.
 - Auto-syncs tag index for steward resolution.
 
-Response (201): `{ "node": { ... }, "stewards": [...] }`.
+Response (201): `{ "node": { ... }, "stewards": [...] }`. A `table` node with a `:ref` column also gets `table_refs: { "total": 3, "unresolved": [{ "column": "account", "row": "r3", "target": "Nope" }] }` — the non-empty ref cells and those naming no node the writer can read (see [Table `:ref` columns](#table-ref-columns--rows-linked-into-the-graph)). Absent for every other node, and for a table body that doesn't parse.
 
 **`202` on a gated nest.** If the nest has `require_push_confirmation` on and this call arrived on a **non-whitelisted API key**, nothing is created: the document is held and the response is the `202 pending_confirmation` body documented under [Push Confirmation Gate](#push-confirmation-gate). A session-cookie caller (a person in the web UI) is never held. Poll `poll_url` for the outcome; the document exists only once `status` reads `applied`.
 
@@ -1293,6 +1293,8 @@ Requires nest write permission.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 - `always_include` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope always-include flag, `null` clears it back to `always_include_tags`. An always-include document is prime, so an edit that makes it always-include is gated the same way — and until that version is approved, nothing new is injected.
 - `fields` — custom field values to set, merged into the stored ones (keys left out are untouched; `null` clears one; clearing a required field → `400`). Same validation as create. A value change seals a version like any edit; a `fields`-only PATCH that changes nothing seals none.
+
+Response: `{ "node": { ... }, "version": 4 }`, plus `table_refs` for a `table` node with a `:ref` column (same shape as create). MCP `context_create` / `context_update` return the same `table_refs` in their structured result and name unresolved refs in the prose.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -2311,6 +2313,23 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 ```
 Same operation over MCP: `context_table_query`.
 
+#### Table `:ref` columns — rows linked into the graph
+
+Header directives are colon-suffixed: `:key`, `:number`, `:date`, `:text` and `:ref` (combine as `deal:key:ref`). A `:ref` column links each row to a node:
+
+```csv
+id:key,account:ref,owner:ref,amount:number
+r1,[[AGA]],[[nodes/people/jane|Jane]],10
+r2,,,20
+r3,nodes/aga,,30
+```
+
+- A cell holds `[[Title]]`, `[[path|label]]` (the label is ignored) or a bare node id. Empty means no link. One ref per cell.
+- **Edges.** Every non-empty ref cell is a typed edge from the table to the target: the edge type is the column name (`account`), attributed to the row key (the first `:key` column's value, or `row N` — the 1-based data-row number — when the table has no key or the key cell is blank). They appear in `GET /graph` (`links[].type` / `rows`) and in the target's backlinks in the web app ("Pipeline · account · r1, r3").
+- **Resolution** is the graph's wikilink rule — exact node id, then title (case-insensitive), then bare slug — over the documents **the caller can read**. A target the caller can't read behaves exactly like a missing one: no edge, no title, no query match.
+- **Query.** `=` and `!=` on a ref column compare the resolved target, so `where account = [[AGA]]`, `where account = [[nodes/aga]]` and `where account = nodes/aga` all return the rows that point at AGA however the cell spells it. A value that resolves to nothing compares by its written target (case-insensitive). `contains` and the ordering operators compare the raw cell text, as on any text column.
+- **Unresolved refs never block a save.** They are reported — see `table_refs` on node create/update.
+
 ### POST `/nests/:nestId/chat`
 Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the server's own model gateway when one is set (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, every model goes there as named), else the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
@@ -2422,6 +2441,7 @@ Response `NestGraph`:
 ```
 
 Notes:
+- **Typed links** — a link from a `table` node's `:ref` column carries `"type": "<column>"` and `"rows": ["r1", "r3"]` (the row keys pointing at that target), one link per table, target and column: `{ "source": "nodes/pipeline", "target": "nodes/aga", "type": "account", "rows": ["r1"] }`. Every other link has neither field. A pair joined by a typed link gets no extra untyped link for the same `[[…]]` text.
 - **Identity masking** — steward `id`/`label` are the real email only for **write+** callers (same rule as the collaborators roster, so a public/read tier can't enumerate member emails). Sub-write callers get an opaque `"s1"` id and a `"Steward 1"` label; `bottlenecks[].label` follows suit.
 - **Roster gating** — `stewards`/`stewardEdges` are empty for public/anonymous readers and when the nest has stewardship disabled.
 - **Draw cap** — `nodes`/`links` are capped at 150 (highest-degree kept) with `truncated: true` and `totalNodes` set; `signals` are still computed over the full set so the gap numbers stay accurate.

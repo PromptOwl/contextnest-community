@@ -144,7 +144,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
@@ -943,7 +943,7 @@ export function DocumentEditor({
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
-    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+    Array<{ id: string; title: string; content?: string; tags?: string[]; type?: string }>
   >([]);
   // The nest's folders, including any holding no document. Same cached census
   // the nest views read, so this costs no extra request in practice.
@@ -978,6 +978,7 @@ export function DocumentEditor({
               title: string;
               content?: string;
               tags?: string[];
+              type?: string;
             }>,
           );
         }
@@ -4037,6 +4038,13 @@ export function DocumentEditor({
                           }
                         >
                           {b.title}
+                          {/* A table's :ref rows: "Pipeline · account · r1". */}
+                          {backlinkRefLabels(b).map((label) => (
+                            <span key={label} className="text-muted-foreground">
+                              {" · "}
+                              {label}
+                            </span>
+                          ))}
                         </button>
                       ))}
                     </div>
