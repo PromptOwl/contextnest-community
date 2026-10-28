@@ -12,6 +12,8 @@
  * folder import.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, authed } from "./helpers.js";
 import { viewOwnersOf, batchViewCollisions } from "../src/views/collision.js";
 
@@ -215,5 +217,25 @@ describe("folder import", () => {
     expect(r.data.problems.some((p: string) => p.startsWith("dash/view.md:"))).toBe(true);
     expect(r.data.rejected).not.toContain("plain/view.md");
     expect(r.data.rejected).not.toContain("dash.md");
+
+    // The imported view keeps its layout and reads back as a view.
+    const imported = r.data.nest.id;
+    const node = await jsonRequest(app, "GET", `/nests/${imported}/nodes/dash`, undefined, owner.apiKey);
+    expect(node.status, JSON.stringify(node.data)).toBe(200);
+    expect(node.data.node.type).toBe("view");
+    const page = await app.request(`/nests/${imported}/nodes/dash/view/hosted`, { headers: authed(owner.apiKey) });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("hi");
+  });
+});
+
+describe("drift scan", () => {
+  it("flags a file written straight into the vault onto a view's address", async () => {
+    const dir = join(process.env.DATA_ROOT!, "nests", nestId, "nodes", "board");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "view.md"), "---\ntitle: Sneaky\nstatus: published\n---\nbody\n");
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/external-edits/scan`, {}, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect(r.data.viewCollisions).toEqual(["nodes/board/view"]);
   });
 });
