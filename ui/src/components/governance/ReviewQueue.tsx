@@ -29,6 +29,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { parseServerDate } from "@/lib/dates";
 import { showPriorityBadge } from "../../lib/review-pane";
+import { displayNameFor } from "../../lib/person-name";
 
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
@@ -48,6 +49,9 @@ export interface ReviewRequest {
   canReview?: boolean;
   /** Set when an agent run filed this proposal: links to its trace. */
   runId?: string;
+  /** The requester reaches this nest only through its org-contributions
+   *  setting — not someone the reviewer added (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
 }
 
 /** A comment event from the nest activity feed (new thread or reply) —
@@ -85,6 +89,8 @@ interface ReviewQueueProps {
   onToggleSelect?: (nodeId: string) => void;
   /** The change open in the review pane, highlighted in the list. */
   activeNodeId?: string | null;
+  /** Nest roster, so comment rows show a name instead of the email. */
+  people?: Array<{ email: string; name: string | null }>;
 }
 
 const priorityConfig: Record<
@@ -124,6 +130,7 @@ export function ReviewQueue({
   selectedNodeIds,
   onToggleSelect,
   activeNodeId,
+  people,
 }: ReviewQueueProps) {
   // Feed mode (comments provided, even if empty): interleave change rows and
   // comment rows newest-first. Legacy mode keeps the server's priority order
@@ -205,11 +212,11 @@ export function ReviewQueue({
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="text-lg">
-                {feedMode ? "Activity" : "Review Queue"}
+                {feedMode ? "From others — awaiting your review" : "Review Queue"}
               </CardTitle>
               <CardDescription>
                 {feedMode
-                  ? "Changes awaiting approval and new comments"
+                  ? "Changes other people submitted for your approval, and new comments"
                   : "Documents awaiting your approval"}
               </CardDescription>
             </div>
@@ -273,13 +280,13 @@ export function ReviewQueue({
                         )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1" title={c.author}>
                           <Avatar className="h-4 w-4">
                             <AvatarFallback className="text-[8px]">
-                              {c.author[0]?.toUpperCase() || "?"}
+                              {displayNameFor(c.author, people)[0]?.toUpperCase() || "?"}
                             </AvatarFallback>
                           </Avatar>
-                          <span>{c.author}</span>
+                          <span>{displayNameFor(c.author, people)}</span>
                         </div>
                         <span>•</span>
                         <Clock className="h-3 w-3" />
@@ -347,6 +354,16 @@ export function ReviewQueue({
                           </AvatarFallback>
                         </Avatar>
                         <span>{request.requestedBy}</span>
+                        {request.requestedByOrgContributor && (
+                          <Badge
+                            variant="outline"
+                            className="ml-1 h-4 px-1 text-[10px] font-normal"
+                            title="Suggested through this nest's org-contributions setting. This person wasn't added to the nest."
+                            data-testid="review-org-contributor"
+                          >
+                            org contributor (not a collaborator)
+                          </Badge>
+                        )}
                       </div>
                       {request.runId && (
                         <>

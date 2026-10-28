@@ -321,10 +321,11 @@ describe("MCP parity: workflow_runs_list { agent_stats: true }", () => {
     expect(mcp).toEqual(rest);
   });
 
-  it("goes through the same gate: write tier, a real agent, valid window", async () => {
+  it("goes through the same gate: owner/admin, a real agent, valid window", async () => {
     const asReader = await mcpTool(reader.apiKey, "workflow_runs_list", { agent: AGENT, agent_stats: true });
     expect(asReader.error !== undefined || asReader.isError).toBe(true);
-    expect(asReader.text + (asReader.error?.message ?? "")).toMatch(/write access/);
+    // Owner/admin only (CU-wdqcq05rqq), like the REST stats route.
+    expect(asReader.text + (asReader.error?.message ?? "")).toMatch(/owner or an admin/);
 
     const notAgent = await mcpTool(owner.apiKey, "workflow_runs_list", { agent: "nodes/gtm/pricing", agent_stats: true });
     expect(notAgent.error !== undefined || notAgent.isError).toBe(true);

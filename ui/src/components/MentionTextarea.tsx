@@ -18,6 +18,10 @@ import {
   type MentionMember,
 } from "./MarkdownEditor/picker-match";
 import { applyMentionPick, mentionSegments } from "../lib/comment-mentions";
+import { applyFormat, mentionsToLinks, type CommentFormat } from "../lib/comment-format";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Bold, Heading, List, ListOrdered } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../auth/AuthContext";
 
@@ -31,13 +35,22 @@ export interface MentionTextareaProps
   /** The nest's people. Empty (or still loading) → the box is a plain
    *  textarea, never a popup with nothing in it. */
   members: MentionMember[];
+  /** Comment boxes: a markdown toolbar, and formatted paste kept as markdown. */
+  formatting?: boolean;
 }
+
+const FORMATS: Array<{ kind: CommentFormat; label: string; Icon: typeof Bold }> = [
+  { kind: "bold", label: "Bold", Icon: Bold },
+  { kind: "heading", label: "Heading", Icon: Heading },
+  { kind: "bullet", label: "Bulleted list", Icon: List },
+  { kind: "numbered", label: "Numbered list", Icon: ListOrdered },
+];
 
 export const MentionTextarea = forwardRef<
   HTMLTextAreaElement,
   MentionTextareaProps
 >(function MentionTextarea(
-  { value, onValueChange, members, className, onKeyDown, ...rest },
+  { value, onValueChange, members, className, onKeyDown, formatting, ...rest },
   forwardedRef,
 ) {
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -94,8 +107,46 @@ export const MentionTextarea = forwardRef<
 
   const showList = !!trigger && results.length > 0;
 
+  // Replace the selection with `next`, then restore the caret/selection a frame later.
+  const commit = (next: { value: string; start: number; end: number }) => {
+    const el = innerRef.current;
+    onValueChange(next.value);
+    requestAnimationFrame(() => {
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.start, next.end);
+      setCaret(next.end);
+    });
+  };
+
+  const format = (kind: CommentFormat) => {
+    const el = innerRef.current;
+    if (!el) return;
+    commit(applyFormat(value, el.selectionStart ?? value.length, el.selectionEnd ?? value.length, kind));
+  };
+
   return (
     <div className="relative">
+      {formatting && !rest.readOnly && (
+        <div className="mb-1 flex gap-0.5" role="toolbar" aria-label="Formatting">
+          {FORMATS.map(({ kind, label, Icon }) => (
+            <button
+              key={kind}
+              type="button"
+              title={label}
+              aria-label={label}
+              // Mouse-down: keep the textarea's focus and selection.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                format(kind);
+              }}
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <Icon className="h-3.5 w-3.5" />
+            </button>
+          ))}
+        </div>
+      )}
       <textarea
         {...rest}
         ref={setRefs}
@@ -114,6 +165,23 @@ export const MentionTextarea = forwardRef<
         // click. Deferred a frame: on paste the value hasn't been applied yet.
         onPaste={(e) => {
           const el = e.currentTarget;
+          const html = formatting ? e.clipboardData.getData("text/html") : "";
+          if (html) {
+            // Formatted paste → markdown, so headings/bold/lists survive.
+            e.preventDefault();
+            const plain = e.clipboardData.getData("text/plain");
+            const start = el.selectionStart ?? el.value.length;
+            const end = el.selectionEnd ?? start;
+            void import("../lib/html-to-markdown")
+              .then(({ htmlToMarkdown }) => htmlToMarkdown(html))
+              .catch(() => "")
+              .then((md) => {
+                const text = md || plain;
+                const at = start + text.length;
+                commit({ value: el.value.slice(0, start) + text + el.value.slice(end), start: at, end: at });
+              });
+            return;
+          }
           requestAnimationFrame(() => setCaret(el.selectionStart ?? 0));
         }}
         onClick={(e) =>
@@ -210,29 +278,47 @@ export function CommentBody({
     () => mentionSegments(body, members),
     [body, members],
   );
+  const markdown = useMemo(() => mentionsToLinks(segments), [segments]);
   return (
-    <div className={cn("whitespace-pre-wrap", className)}>
-      {segments.map((seg, i) =>
-        seg.kind === "text" ? (
-          <span key={i}>{seg.text}</span>
-        ) : (
-          <span
-            key={i}
-            className={
-              seg.resolved
-                ? "rounded bg-primary/10 px-0.5 font-medium text-primary"
-                : "rounded bg-muted px-0.5 text-muted-foreground line-through decoration-dotted"
-            }
-            title={
-              seg.resolved
-                ? seg.name
-                : `No member named "${seg.name}" in this nest`
-            }
-          >
-            {seg.text}
-          </span>
-        ),
+    // Markdown, like a document. `anywhere`, not `break-word`: it also lowers
+    // the min-content width, so a long URL can't widen the panel. Paragraphs
+    // keep single line breaks, so plain-text comments read as they were typed.
+    <div
+      className={cn(
+        "prose prose-sm dark:prose-invert max-w-none [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap",
+        className,
       )}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children }) => {
+            const i = /^#mention-(\d+)$/.exec(href ?? "")?.[1];
+            const seg = i === undefined ? undefined : segments[Number(i)];
+            if (seg?.kind !== "mention") {
+              return (
+                <a href={href} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              );
+            }
+            return (
+              <span
+                className={
+                  seg.resolved
+                    ? "rounded bg-primary/10 px-0.5 font-medium text-primary"
+                    : "rounded bg-muted px-0.5 text-muted-foreground line-through decoration-dotted"
+                }
+                title={seg.resolved ? seg.name : `No member named "${seg.name}" in this nest`}
+              >
+                {seg.text}
+              </span>
+            );
+          },
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
     </div>
   );
 }

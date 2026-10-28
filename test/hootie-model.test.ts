@@ -172,3 +172,12 @@ describe("streamAnswer — logs", () => {
     }
   });
 });
+
+describe("describeModelError — where to fix it", () => {
+  it("points admins at the Server settings tab that holds the model and key", async () => {
+    const { describeModelError } = await load();
+    for (const status of [401, 404]) {
+      expect(describeModelError({ status }, { model: "gpt-4" })).toContain("Server settings → Hootie");
+    }
+  });
+});

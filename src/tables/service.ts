@@ -17,6 +17,11 @@
  *              otherwise string compare)
  *   :date    — values compare as ISO dates
  *   :text    — explicit default
+ *   :ref     — each cell links the row to a node: `[[Title]]`,
+ *              `[[path|label]]` or a bare node id (empty = no link). The
+ *              column name is the edge type and the row key attributes it
+ *              (see extractTableRefs); `=`/`!=` compare the RESOLVED target,
+ *              so `[[AGA]]`, `[[nodes/aga]]` and `nodes/aga` are one value.
  *
  * The query grammar is deliberately tiny (SQL/Cypher feel, no joins, no OR):
  *
@@ -37,6 +42,9 @@ export interface Column {
   name: string;
   type: ColumnType;
   key: boolean;
+  /** Set (true) only on `:ref` columns, so a ref-less table parses to the
+   *  exact shape it always had. */
+  ref?: true;
 }
 
 export interface ParsedTable {
@@ -75,7 +83,7 @@ function splitCsvLine(line: string): string[] {
   return out.map((s) => s.trim());
 }
 
-const DIRECTIVES = new Set(["key", "number", "date", "text"]);
+const DIRECTIVES = new Set(["key", "number", "date", "text", "ref"]);
 
 export function parseTable(body: string): ParsedTable {
   const lines = body
@@ -90,6 +98,7 @@ export function parseTable(body: string): ParsedTable {
     if (!name) throw new ValidationError("empty column name in header");
     let type: ColumnType = "text";
     let key = false;
+    let ref = false;
     for (const d of parts.slice(1)) {
       const dl = d.toLowerCase();
       if (!DIRECTIVES.has(dl)) {
@@ -98,9 +107,10 @@ export function parseTable(body: string): ParsedTable {
         );
       }
       if (dl === "key") key = true;
+      else if (dl === "ref") ref = true;
       else type = dl as ColumnType;
     }
-    return { name, type, key };
+    return ref ? { name, type, key, ref: true } : { name, type, key };
   });
 
   const rows = lines.slice(1).map((l) => {
@@ -111,6 +121,77 @@ export function parseTable(body: string): ParsedTable {
   });
   return { columns, rows };
 }
+
+// ─── Refs ────────────────────────────────────────────────────────────────
+
+const REF_CELL_RE = /^\[\[([^\]|]*)(?:\|[^\]]*)?\]\]$/;
+
+/**
+ * The target a ref cell names: the inside of `[[Title]]` / `[[path|label]]`
+ * (label dropped), or the trimmed cell itself (a bare node id). Null for an
+ * empty cell — a row may leave a ref blank.
+ */
+export function parseRefTarget(cell: string): string | null {
+  return parseRef(cell)?.target ?? null;
+}
+
+/**
+ * parseRefTarget plus the form it was written in. `bare` (no `[[…]]`) means
+ * "a node id": it resolves by exact id ONLY, never by title or slug — a
+ * dangling `nodes/clients/aga` must not attach to an unrelated
+ * `nodes/prospects/aga` (the same rule graph-service applies to
+ * contextnest:// ids).
+ */
+export function parseRef(cell: string): { target: string; bare: boolean } | null {
+  const v = (cell ?? "").trim();
+  if (!v) return null;
+  const m = REF_CELL_RE.exec(v);
+  const target = (m ? m[1] : v).trim();
+  return target ? { target, bare: !m } : null;
+}
+
+/** One ref cell: the edge type (column), the row it belongs to, the target. */
+export interface TableRef {
+  column: string;
+  /** The row's `:key` value, or `row N` (1-based) when it has none. */
+  row: string;
+  target: string;
+  /** Written as a bare id (no `[[…]]`): resolve by exact id only. */
+  bare?: true;
+}
+
+/**
+ * Every non-empty ref cell, in row then column order. A row is named by its
+ * first `:key` column; without one (or with a blank key) it is `row N`, its
+ * 1-based position among the data rows.
+ */
+export function extractTableRefs(table: ParsedTable): TableRef[] {
+  const refCols = table.columns
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.ref);
+  if (!refCols.length) return [];
+  const keyIdx = table.columns.findIndex((c) => c.key);
+  const out: TableRef[] = [];
+  table.rows.forEach((r, n) => {
+    const key = keyIdx >= 0 ? (r[keyIdx] ?? "").trim() : "";
+    const row = key || `row ${n + 1}`;
+    for (const { c, i } of refCols) {
+      const ref = parseRef(r[i] ?? "");
+      if (!ref) continue;
+      out.push(
+        ref.bare
+          ? { column: c.name, row, target: ref.target, bare: true }
+          : { column: c.name, row, target: ref.target },
+      );
+    }
+  });
+  return out;
+}
+
+/** Resolves a ref target to a node id, or null when it names no node the
+ *  caller can see. `bare` targets (written without `[[…]]`) match by exact
+ *  id only. */
+export type RefResolver = (target: string, bare: boolean) => string | null;
 
 // ─── Query ───────────────────────────────────────────────────────────────
 
@@ -181,7 +262,25 @@ export function parseQuery(q: string): TableQuery {
   return out;
 }
 
-function compare(cell: string, cond: Condition, type: ColumnType): boolean {
+/** A ref value's identity: the node it resolves to, else its written target
+ *  (case-folded), so an unresolved ref still equals the same spelling. */
+function refIdentity(raw: string, resolve?: RefResolver): string {
+  const ref = parseRef(raw);
+  if (!ref) return "";
+  const id = resolve?.(ref.target, ref.bare);
+  return id ? `id:${id}` : `raw:${ref.target.toLowerCase()}`;
+}
+
+function compare(
+  cell: string,
+  cond: Condition,
+  type: ColumnType,
+  ref: RefMatch | null,
+): boolean {
+  if (ref && (cond.op === "=" || cond.op === "!=")) {
+    const same = refIdentity(cell, ref.resolve) === ref.value;
+    return cond.op === "=" ? same : !same;
+  }
   if (cond.op === "contains") {
     return cell.toLowerCase().includes(cond.value.toLowerCase());
   }
@@ -216,9 +315,20 @@ export interface QueryResult {
   total: number; // table row count
 }
 
+interface RefMatch {
+  value: string;
+  resolve?: RefResolver;
+}
+
 /** Evaluate a query against a parsed table. Row order is source order —
- *  stable by construction, which is what makes results replayable. */
-export function runQuery(table: ParsedTable, query: TableQuery): QueryResult {
+ *  stable by construction, which is what makes results replayable.
+ *  `resolveRef` lets `=`/`!=` on a `:ref` column compare resolved targets;
+ *  without it they compare the written targets. */
+export function runQuery(
+  table: ParsedTable,
+  query: TableQuery,
+  resolveRef?: RefResolver,
+): QueryResult {
   const colIndex = new Map(table.columns.map((c, i) => [c.name.toLowerCase(), i]));
   const resolve = (name: string): number => {
     const i = colIndex.get(name.toLowerCase());
@@ -230,13 +340,17 @@ export function runQuery(table: ParsedTable, query: TableQuery): QueryResult {
     return i;
   };
 
-  const conds = query.where.map((c) => ({
-    ...c,
-    idx: resolve(c.column),
-    type: table.columns[resolve(c.column)].type,
-  }));
+  const conds = query.where.map((c) => {
+    const idx = resolve(c.column);
+    const col = table.columns[idx];
+    // The condition's own identity is computed once, not per row.
+    const ref: RefMatch | null = col.ref
+      ? { value: refIdentity(c.value, resolveRef), resolve: resolveRef }
+      : null;
+    return { ...c, idx, type: col.type, ref };
+  });
   let rows = table.rows.filter((r) =>
-    conds.every((c) => compare(r[c.idx], c, c.type)),
+    conds.every((c) => compare(r[c.idx], c, c.type, c.ref)),
   );
   const matched = rows.length;
   if (query.limit !== null) rows = rows.slice(0, query.limit);

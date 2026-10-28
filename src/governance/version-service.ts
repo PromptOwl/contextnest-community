@@ -583,6 +583,15 @@ export async function getDisplayStatus(
 export async function getDisplayStatuses(
   nestId: string,
 ): Promise<Map<string, DisplayStatus>> {
+  return (await getDisplayState(nestId)).statuses;
+}
+
+/** getDisplayStatuses plus the live (approved) version per node, which the same
+ *  queries already read — a row whose newer version is in review or sent back
+ *  is still serving this one. */
+export async function getDisplayState(
+  nestId: string,
+): Promise<{ statuses: Map<string, DisplayStatus>; approved: Map<string, number> }> {
   const db = getDb();
   const [pendingRows, currentRows, approvedRows] = await Promise.all([
     db.all(
@@ -622,7 +631,7 @@ export async function getDisplayStatuses(
       ),
     );
   }
-  return statuses;
+  return { statuses, approved };
 }
 
 // ─── My Drafts ──────────────────────────────────────────────────────────

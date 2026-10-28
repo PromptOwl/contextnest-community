@@ -1,31 +1,25 @@
 /**
  * The small, editable pieces of a project-board card: priority, due date,
- * assignee, plus the column's "+ Add task" composer and the governed-move
- * warning. Logic lives in lib/board-tasks; these only render and report.
+ * assignee, plus the governed-move warning. Logic lives in lib/board-tasks;
+ * these only render and report. (New tasks: CreateTaskDialog.)
  *
  * Borrowed patterns, on purpose: Linear's priority bars and avatar slot
- * (bottom-right), Trello's red overdue chip and add-card-at-the-bottom
- * composer (Enter adds and stays open, Esc closes), ClickUp's click-a-field-
+ * (bottom-right), Trello's red overdue chip, ClickUp's click-a-field-
  * to-set-it-in-place.
  *
  * Every control sits inside a clickable card, and React bubbles events out of
  * portals along the component tree — so each one stops its clicks, or picking
  * a menu item would also open the document.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Ban,
-  Bot,
   CalendarDays,
-  Database,
-  FileText,
-  FileType,
-  ListTodo,
   ListTree,
   UserRound,
   X,
-  Zap,
 } from "lucide-react";
+import { NodeTypeGlyph } from "../nest/NodeTypeIcon";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -78,13 +72,7 @@ function Isolate({ children }: { children: ReactNode }) {
 
 /** A node's type, as a small coloured glyph (cards and list rows). */
 export function TypeIcon({ type }: { type: string }) {
-  const cls = "h-3.5 w-3.5 shrink-0";
-  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
-  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
-  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
-  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
-  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
-  return <FileText className={`${cls} text-muted-foreground`} />;
+  return <NodeTypeGlyph type={type} className="h-3.5 w-3.5" />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
@@ -123,6 +111,25 @@ export function PriorityIcon({ priority }: { priority?: string }) {
   );
 }
 
+const PRIORITY_TONES: Record<string, string> = {
+  urgent: "bg-orange-500/15 text-orange-700 dark:text-orange-300",
+  high: "bg-red-500/10 text-red-700 dark:text-red-300",
+  medium: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  low: "bg-muted text-muted-foreground",
+};
+
+/** A set priority as a tinted pill: its bars plus the label. */
+export function PriorityBadge({ priority }: { priority: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium ${PRIORITY_TONES[priority] ?? PRIORITY_TONES.low}`}
+    >
+      <PriorityIcon priority={priority} />
+      {PRIORITY_LABELS[priority as Priority] ?? priority}
+    </span>
+  );
+}
+
 export function PriorityMenu({
   value,
   editable,
@@ -132,13 +139,13 @@ export function PriorityMenu({
   editable: boolean;
   onChange: (p: Priority | null) => void;
 }) {
-  const icon = <PriorityIcon priority={value} />;
+  const icon = value ? <PriorityBadge priority={value} /> : <PriorityIcon />;
   if (!editable) return value ? <span title={PRIORITY_LABELS[value as Priority]}>{icon}</span> : null;
   return (
     <Isolate>
       <DropdownMenu>
         <DropdownMenuTrigger
-          className={`rounded p-0.5 hover:bg-muted ${value ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
+          className={`rounded hover:bg-muted ${value ? "" : "p-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
           title={value ? `Priority: ${PRIORITY_LABELS[value as Priority]}` : "Set priority"}
         >
           {icon}
@@ -261,16 +268,19 @@ export function AssigneeMenu({
   me,
   editable,
   onChange,
+  showName,
 }: {
   assignee?: string;
   people: Person[];
   me?: string;
   editable: boolean;
   onChange: (email: string | null, member?: boolean) => void;
+  /** Name beside the avatar, always visible ("Unassigned" when empty) — the task view. */
+  showName?: boolean;
 }) {
   const [q, setQ] = useState("");
   const current = assignee ? people.find((p) => p.email.toLowerCase() === assignee) : undefined;
-  const face = assignee ? (
+  const avatar = assignee ? (
     <span title={`Assigned to ${current?.name ? `${current.name} (${assignee})` : assignee}`}>
       <Avatar email={assignee} />
     </span>
@@ -279,7 +289,17 @@ export function AssigneeMenu({
       <UserRound className="h-3.5 w-3.5" />
     </span>
   );
-  if (!editable) return assignee ? face : null;
+  const face = showName ? (
+    <span className="inline-flex items-center gap-1.5 text-sm">
+      {avatar}
+      <span className={assignee ? "" : "text-muted-foreground"}>
+        {assignee ? current?.name || assignee : "Unassigned"}
+      </span>
+    </span>
+  ) : (
+    avatar
+  );
+  if (!editable) return assignee || showName ? face : null;
   // Me first, then the roster alphabetically — the ClickUp/Linear ordering.
   const needle = q.trim().toLowerCase();
   const list = people
@@ -298,7 +318,7 @@ export function AssigneeMenu({
     <Isolate>
       <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
         <DropdownMenuTrigger
-          className={`rounded-full ${assignee ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
+          className={`rounded-full ${assignee || showName ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
           title={assignee ? undefined : "Assign"}
         >
           {face}
@@ -412,72 +432,6 @@ export function SubItemChip({
         </DropdownMenuContent>
       </DropdownMenu>
     </Isolate>
-  );
-}
-
-// ── "+ Add task" composer ───────────────────────────────────────────────────
-
-/**
- * Trello's add-a-card: a title box at the bottom of the column. Enter creates
- * and keeps the box open for the next one; Escape (or blurring it empty)
- * closes it.
- */
-export function AddCardComposer({
-  placeholder,
-  onSubmit,
-  onClose,
-}: {
-  placeholder: string;
-  onSubmit: (title: string) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [saving, setSaving] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => ref.current?.focus(), []);
-  const submit = async () => {
-    const t = title.trim();
-    if (!t || saving) return;
-    setSaving(true);
-    try {
-      await onSubmit(t);
-      setTitle("");
-    } finally {
-      setSaving(false);
-      ref.current?.focus();
-    }
-  };
-  return (
-    <div className="rounded-md border border-primary/60 bg-card p-1.5 shadow-sm">
-      <Input
-        ref={ref}
-        value={title}
-        disabled={saving}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            void submit();
-          } else if (e.key === "Escape") {
-            onClose();
-          }
-        }}
-        onBlur={() => {
-          if (!title.trim() && !saving) onClose();
-        }}
-        placeholder={placeholder}
-        className="h-8 rounded-sm border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-      />
-      <div className="mt-1 flex items-center gap-1">
-        <Button size="sm" className="h-7" disabled={!title.trim() || saving} onMouseDown={(e) => e.preventDefault()} onClick={() => void submit()}>
-          Add task
-        </Button>
-        <Button size="sm" variant="ghost" className="h-7" onMouseDown={(e) => e.preventDefault()} onClick={onClose} title="Close (Esc)">
-          <X className="h-3.5 w-3.5" />
-        </Button>
-        <span className="ml-auto pr-1 text-[10px] text-muted-foreground">↵ to add</span>
-      </div>
-    </div>
   );
 }
 

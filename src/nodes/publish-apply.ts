@@ -38,8 +38,11 @@ export interface PublishDoc {
   schedule?: string;
   model?: string;
   prime?: boolean;
+  alwaysInclude?: boolean;
   /** Custom field values — validated on replay, like any create. */
   fields?: Record<string, unknown>;
+  /** A type: view node's `view:` block (§1.12) — validated on replay. */
+  view?: unknown;
 }
 
 export interface PublishPayload {
@@ -166,7 +169,9 @@ export async function applyPublish(
           schedule: doc.schedule,
           model: doc.model,
           prime: doc.prime,
+          alwaysInclude: doc.alwaysInclude,
           ...(doc.fields !== undefined ? { fields: doc.fields } : {}),
+          ...(doc.view !== undefined ? { view: doc.view } : {}),
         },
         authorEmail,
       );
