@@ -1,8 +1,3 @@
-{
-	# Let's Encrypt account email (optional; used for expiry notices).
-	email {$ACME_EMAIL}
-}
-
 # Caddy gets and renews the certificate for this name on its own. MCP's
 # streamed responses pass through without extra settings.
 {$CONTEXTNEST_HOST} {
