@@ -150,6 +150,7 @@ import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { CopyButton } from "@/components/ui/copy-button";
+import { ViewNodePage } from "./ViewNodePage";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -2340,29 +2341,9 @@ export function DocumentEditor({
   }
 
   // View nodes (§1.12) are a server-rendered layout over other nodes, not
-  // markdown — show the rendered page, sized like the artifact viewer. No
-  // `sandbox` attribute on purpose: the page must keep the app origin so the
-  // sandboxed frames it embeds load with the session cookie. It runs no script
-  // (server CSP `script-src 'none'`) and every byte of it is server-escaped.
-  // Views are authored via REST, MCP or the vault in v1 — no editor here.
+  // markdown. Views are authored via REST, MCP or the vault in v1 — no editor here.
   if (!isNew && !loading && nodeType === "view") {
-    return (
-      <div className="flex min-h-full flex-col gap-2 p-2 sm:p-3" data-testid="view-page">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-2" />
-            Back
-          </Button>
-          <h1 className="truncate text-base font-semibold">{title || nodeId}</h1>
-        </div>
-        <iframe
-          src={api.viewPageUrl(nestId, nodeId, null)}
-          title={title || nodeId}
-          className="w-full flex-1 min-h-[70vh] rounded-lg border bg-white"
-          data-testid="view-page-frame"
-        />
-      </div>
-    );
+    return <ViewNodePage nestId={nestId} nodeId={nodeId} title={title} onBack={onBack} />;
   }
 
   return (
