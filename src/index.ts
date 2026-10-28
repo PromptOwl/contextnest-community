@@ -34,6 +34,9 @@ import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } f
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 import { assertWritable, DataDirError } from "./shared/data-dir-check.js";
+import { installJsonLogs } from "./shared/json-logs.js";
+
+if (config.LOG_FORMAT === "json") installJsonLogs();
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.

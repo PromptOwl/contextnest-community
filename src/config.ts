@@ -95,6 +95,11 @@ export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
   },
+  /** "json" prints one JSON object per log line (for log shippers); anything
+   *  else keeps plain console output. */
+  get LOG_FORMAT(): "text" | "json" {
+    return process.env.LOG_FORMAT?.trim().toLowerCase() === "json" ? "json" : "text";
+  },
   /**
    * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
    * proxy traffic. Unset = every interface (Node's default, unchanged).
