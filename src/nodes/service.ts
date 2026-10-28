@@ -3449,6 +3449,13 @@ export async function moveNode(
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
     // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
+    // No document at the destination (checked above), so any rows there are
+    // orphans — same as create, clear them or the repoint trips UNIQUE. Before
+    // the write: its index write-through creates fresh rows at newId.
+    await getDb().transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
+    });
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
@@ -3488,10 +3495,6 @@ export async function moveNode(
     const newDerived = derivedIdOf(newId);
     const db = getDb();
     await db.transaction(async (tx) => {
-      // No document at the destination (checked above), so any rows there are
-      // orphans — same as create, clear them or the repoint trips UNIQUE.
-      await purgeNodeKeyedRows(tx, nestId, newId);
-      await purgeNodeKeyedRows(tx, nestId, newDerived);
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
       await tx.run(
