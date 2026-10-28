@@ -1941,7 +1941,6 @@ export function NestView({
               onOpenDocument={onOpenDocument}
               onOpenFolder={openFolderInDocuments}
               nestName={editableName}
-              loadedFolders={loadedFolderPaths}
               loadingFolders={loadingFolders}
               onExpandFolder={fetchLevel}
               description={nestDescription}
