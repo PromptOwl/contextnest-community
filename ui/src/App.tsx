@@ -1613,6 +1613,8 @@ export default function App() {
         })()}
         {view.page === "nest" && (
           <NestView
+            // One mount per nest: filters, folder scope and selection belong to the nest they were set on.
+            key={view.nestId}
             nestId={view.nestId}
             nestName={view.nestName}
             isOwner={view.isOwner}
