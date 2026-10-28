@@ -397,7 +397,7 @@ export function MaturityBoard({
     api
       .listBoards(nestId)
       .then(({ boards }) => !cancelled && setBoards(boards))
-      .catch(() => {});
+      .catch(() => { });
     return () => {
       cancelled = true;
     };
@@ -709,17 +709,17 @@ export function MaturityBoard({
             ns.map((n) =>
               n.id === id
                 ? {
-                    ...n,
-                    status: r.status ?? n.status,
-                    assignee: r.assignee,
-                    assigned_at: r.assigned_at,
-                    due: r.due,
-                    priority: r.priority,
-                    parent: r.parent,
-                    fields: r.fields,
-                    status_since: r.status_since ?? n.status_since,
-                    updated_at: r.updated_at ?? n.updated_at,
-                  }
+                  ...n,
+                  status: r.status ?? n.status,
+                  assignee: r.assignee,
+                  assigned_at: r.assigned_at,
+                  due: r.due,
+                  priority: r.priority,
+                  parent: r.parent,
+                  fields: r.fields,
+                  status_since: r.status_since ?? n.status_since,
+                  updated_at: r.updated_at ?? n.updated_at,
+                }
                 : n,
             ),
           );
@@ -766,13 +766,13 @@ export function MaturityBoard({
           // straight off the board it was added to.
           ...((config.filterTags ?? []).length > 0
             ? {
-                tags: [
-                  ...new Set([
-                    ...(placement.tags ?? []),
-                    ...(config.filterTags ?? []).map((t) => `#${t}`),
-                  ]),
-                ],
-              }
+              tags: [
+                ...new Set([
+                  ...(placement.tags ?? []),
+                  ...(config.filterTags ?? []).map((t) => `#${t}`),
+                ]),
+              ],
+            }
             : {}),
           // Added inside a swimlane: it belongs to that lane.
           ...(config.swimlane && laneKey !== undefined
@@ -911,16 +911,16 @@ export function MaturityBoard({
             ? laneField.type === "time_in_status"
               ? {}
               : {
-                  // Keep a multi-select card's other options; swap the lane's.
-                  fields: {
-                    [laneField.key]: fieldValueForMove(
-                      laneField,
-                      node.fields?.[laneField.key],
-                      laneKey,
-                      currentLane,
-                    ),
-                  },
-                }
+                // Keep a multi-select card's other options; swap the lane's.
+                fields: {
+                  [laneField.key]: fieldValueForMove(
+                    laneField,
+                    node.fields?.[laneField.key],
+                    laneKey,
+                    currentLane,
+                  ),
+                },
+              }
             : laneFields(lane, laneKey)
           : {};
       const laneChange = Object.keys(extra).length > 0;
@@ -1101,8 +1101,8 @@ export function MaturityBoard({
         effectiveConfig.dimension === "folder"
           ? slugifyFolderPath(value)
           : // Tag column keys are the bare value; "#doing" and "doing" are the
-            // same column (board-dimensions strips the stored "#").
-            value.trim().replace(/^#/, "");
+          // same column (board-dimensions strips the stored "#").
+          value.trim().replace(/^#/, "");
       if (effectiveConfig.dimension === "assignee") {
         const email = value.trim().toLowerCase();
         if (!members.some((p) => p.email.toLowerCase() === email)) {
@@ -1303,9 +1303,8 @@ export function MaturityBoard({
       effectiveConfig.dimension === "tag" && doneTags.includes(col.key.toLowerCase());
     return (
       <div
-        className={`group/header flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${
-          col.key !== UNCATEGORIZED ? "cursor-grab active:cursor-grabbing" : ""
-        } ${colDropTarget === col.key ? "bg-primary/10" : ""}`}
+        className={`group/header flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${col.key !== UNCATEGORIZED ? "cursor-grab active:cursor-grabbing" : ""
+          } ${colDropTarget === col.key ? "bg-primary/10" : ""}`}
         draggable={col.key !== UNCATEGORIZED}
         onDragStart={(e) => {
           if (col.key === UNCATEGORIZED) return;
@@ -1335,9 +1334,8 @@ export function MaturityBoard({
           )}
           {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
           <span
-            className={`min-w-0 text-sm font-medium truncate ${
-              capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
-            } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
+            className={`min-w-0 text-sm font-medium truncate ${capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
+              } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
           >
             {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED
               ? personLabel(col.key)
@@ -1353,11 +1351,10 @@ export function MaturityBoard({
             <button
               type="button"
               onClick={() => void toggleDoneColumn(col.key)}
-              className={`rounded p-0.5 hover:bg-muted ${
-                isDone
-                  ? "text-emerald-600"
-                  : "text-muted-foreground/50 opacity-0 group-hover/header:opacity-100 hover:text-foreground"
-              }`}
+              className={`rounded p-0.5 hover:bg-muted ${isDone
+                ? "text-emerald-600"
+                : "text-muted-foreground/50 opacity-0 group-hover/header:opacity-100 hover:text-foreground"
+                }`}
               title={
                 isDone
                   ? "Done column — moving a task here completes it. Click to unmark."
@@ -1399,9 +1396,8 @@ export function MaturityBoard({
       <button
         type="button"
         onClick={() => setAddingIn({ cell, col: col.key, lane: laneKey })}
-        className={`flex items-center gap-1.5 px-3 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded-b-lg ${
-          laneKey !== undefined ? "py-1.5 opacity-60 hover:opacity-100" : "py-2 border-t border-border"
-        }`}
+        className={`flex items-center gap-1.5 px-3 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded-b-lg ${laneKey !== undefined ? "py-1.5 opacity-60 hover:opacity-100" : "py-2 border-t border-border"
+          }`}
       >
         <Plus className="h-3.5 w-3.5" /> Add task
       </button>
@@ -1447,9 +1443,8 @@ export function MaturityBoard({
                   setDropBefore(null);
                 }}
                 onClick={() => onOpenDocument(n.id)}
-                className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${
-                  dragId === n.id ? "opacity-50" : ""
-                } ${busy ? "pointer-events-none" : ""}`}
+                className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${dragId === n.id ? "opacity-50" : ""
+                  } ${busy ? "pointer-events-none" : ""}`}
               >
                 {/* A sub-item names its parent, as ClickUp does. Redundant
                     inside its parent's own swimlane, so hidden there. */}
@@ -1507,71 +1502,83 @@ export function MaturityBoard({
                   ));
                   return <div className="mt-1.5 flex flex-wrap gap-1 pl-5">{chips}</div>;
                 })()}
-                {/* Footer, Linear-style: priority · due · sub-items · last
-                    touched on the left, assignee on the right. */}
-                <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
-                  <PriorityMenu
-                    value={n.priority}
-                    editable={canEditDocs}
-                    onChange={(priority) => patchFields(n.id, { priority })}
-                  />
-                  <BlockedBadge count={openBlockers(n)} />
-                  {!completed && (
+                {/* Footer, Linear-style: set priority · due · sub-items · last
+                    touched on the left; the hover-only "set" controls for
+                    empty fields, then the assignee, on the right — so an
+                    invisible placeholder never pushes the timestamp inward. */}
+                {(() => {
+                  const priorityCtl = (
+                    <PriorityMenu
+                      value={n.priority}
+                      editable={canEditDocs}
+                      onChange={(priority) => patchFields(n.id, { priority })}
+                    />
+                  );
+                  const dueCtl = !completed && (
                     <DueChip
                       due={n.due}
                       today={today}
                       editable={canEditDocs}
                       onChange={(due) => patchFields(n.id, { due })}
                     />
-                  )}
-                  <SubItemChip
-                    items={kids}
-                    done={kids.filter((k) => !!k.completed_at).length}
-                    onOpen={onOpenDocument}
-                  />
-                  {/* Last touched — the first thing to give way on a crowded
+                  );
+                  return (
+                    <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
+                      {n.priority && priorityCtl}
+                      <BlockedBadge count={openBlockers(n)} />
+                      {n.due && dueCtl}
+                      <SubItemChip
+                        items={kids}
+                        done={kids.filter((k) => !!k.completed_at).length}
+                        onOpen={onOpenDocument}
+                      />
+                      {/* Last touched — the first thing to give way on a crowded
                       card: a zero-width lead lets the label wrap onto a clipped
                       second line, so it disappears whole instead of as "j…". */}
-                  {(n.updated_at || n.created_at) && (
-                    <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
-                      <span aria-hidden className="h-4 w-0" />
-                      <span
-                        className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
-                        title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
-                      >
-                        {completed && n.completed_at
-                          ? `done ${timeAgo(n.completed_at)}`
-                          : timeAgo((n.updated_at || n.created_at)!)}
+                      {(n.updated_at || n.created_at) && (
+                        <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
+                          <span aria-hidden className="h-4 w-0" />
+                          <span
+                            className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
+                            title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
+                          >
+                            {completed && n.completed_at
+                              ? `done ${timeAgo(n.completed_at)}`
+                              : timeAgo((n.updated_at || n.created_at)!)}
+                          </span>
+                        </span>
+                      )}
+                      <span className="ml-auto flex shrink-0 items-center gap-1">
+                        {!n.priority && priorityCtl}
+                        {!n.due && dueCtl}
+                        {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAddingIn({ cell, col: col.key, lane: laneKey, parent: n.id });
+                            }}
+                            className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+                            title="Add a sub-item"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <AssigneeMenu
+                          assignee={n.assignee}
+                          people={people}
+                          me={me}
+                          editable={canEditDocs}
+                          onChange={(assignee, member) =>
+                            assignee && member === false
+                              ? setPendingShare({ id: n.id, email: assignee })
+                              : patchFields(n.id, { assignee })
+                          }
+                        />
                       </span>
-                    </span>
-                  )}
-                  <span className="ml-auto flex shrink-0 items-center gap-1">
-                    {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAddingIn({ cell, col: col.key, lane: laneKey, parent: n.id });
-                        }}
-                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
-                        title="Add a sub-item"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    <AssigneeMenu
-                      assignee={n.assignee}
-                      people={people}
-                      me={me}
-                      editable={canEditDocs}
-                      onChange={(assignee, member) =>
-                        assignee && member === false
-                          ? setPendingShare({ id: n.id, email: assignee })
-                          : patchFields(n.id, { assignee })
-                      }
-                    />
-                  </span>
-                </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           );
@@ -1650,39 +1657,39 @@ export function MaturityBoard({
           {/* Swimlanes: sub-group the columns into rows (Linear/Jira). The
               list has no lanes — its sections are the columns. */}
           {viewMode === "board" && (<>
-          <label className="text-sm text-muted-foreground">Lanes</label>
-          <select
-            value={
-              config.swimlane === "field"
-                ? `${FIELD_PREFIX}${config.swimlaneField ?? ""}`
-                : (config.swimlane ?? "")
-            }
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v.startsWith(FIELD_PREFIX)) {
-                updateConfig({ swimlane: "field", swimlaneField: v.slice(FIELD_PREFIX.length) });
-              } else {
-                updateConfig({ swimlane: (v || undefined) as SwimlaneKind | undefined });
+            <label className="text-sm text-muted-foreground">Lanes</label>
+            <select
+              value={
+                config.swimlane === "field"
+                  ? `${FIELD_PREFIX}${config.swimlaneField ?? ""}`
+                  : (config.swimlane ?? "")
               }
-            }}
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-          >
-            <option value="">None</option>
-            {config.dimension !== "assignee" && <option value="assignee">Assignee</option>}
-            {config.dimension !== "priority" && <option value="priority">Priority</option>}
-            <option value="parent">Parent</option>
-            {groupableFields.some((d) => !(config.dimension === "field" && d.key === config.fieldKey)) && (
-              <optgroup label="Fields">
-                {groupableFields
-                  .filter((d) => !(config.dimension === "field" && d.key === config.fieldKey))
-                  .map((d) => (
-                    <option key={d.key} value={`${FIELD_PREFIX}${d.key}`}>
-                      {d.label}
-                    </option>
-                  ))}
-              </optgroup>
-            )}
-          </select>
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v.startsWith(FIELD_PREFIX)) {
+                  updateConfig({ swimlane: "field", swimlaneField: v.slice(FIELD_PREFIX.length) });
+                } else {
+                  updateConfig({ swimlane: (v || undefined) as SwimlaneKind | undefined });
+                }
+              }}
+              className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+            >
+              <option value="">None</option>
+              {config.dimension !== "assignee" && <option value="assignee">Assignee</option>}
+              {config.dimension !== "priority" && <option value="priority">Priority</option>}
+              <option value="parent">Parent</option>
+              {groupableFields.some((d) => !(config.dimension === "field" && d.key === config.fieldKey)) && (
+                <optgroup label="Fields">
+                  {groupableFields
+                    .filter((d) => !(config.dimension === "field" && d.key === config.fieldKey))
+                    .map((d) => (
+                      <option key={d.key} value={`${FIELD_PREFIX}${d.key}`}>
+                        {d.label}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+            </select>
           </>)}
           {config.dimension === "tag" && (
             <Input
@@ -1726,43 +1733,43 @@ export function MaturityBoard({
           {(effectiveConfig.dimension === "folder" ||
             effectiveConfig.dimension === "assignee") &&
             canEditDocs && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void addColumn(newColumn);
-              }}
-              className="flex items-center gap-1"
-            >
-              <Input
-                value={newColumn}
-                onChange={(e) => setNewColumn(e.target.value)}
-                placeholder={
-                  config.dimension === "assignee" ? "add person…" : "new folder…"
-                }
-                list={config.dimension === "assignee" ? "board-people" : undefined}
-                className="h-8 w-32"
-                title="Add a folder column — drag a card into it to file the document there (nest with parent/child)"
-              />
-              {config.dimension === "assignee" && (
-                <datalist id="board-people">
-                  {members.map((p) => (
-                    <option key={p.email} value={p.email}>
-                      {p.name ?? p.email}
-                    </option>
-                  ))}
-                </datalist>
-              )}
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={!newColumn.trim()}
-                title="Add folder column"
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void addColumn(newColumn);
+                }}
+                className="flex items-center gap-1"
               >
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
-            </form>
-          )}
+                <Input
+                  value={newColumn}
+                  onChange={(e) => setNewColumn(e.target.value)}
+                  placeholder={
+                    config.dimension === "assignee" ? "add person…" : "new folder…"
+                  }
+                  list={config.dimension === "assignee" ? "board-people" : undefined}
+                  className="h-8 w-32"
+                  title="Add a folder column — drag a card into it to file the document there (nest with parent/child)"
+                />
+                {config.dimension === "assignee" && (
+                  <datalist id="board-people">
+                    {members.map((p) => (
+                      <option key={p.email} value={p.email}>
+                        {p.name ?? p.email}
+                      </option>
+                    ))}
+                  </datalist>
+                )}
+                <Button
+                  type="submit"
+                  variant="outline"
+                  size="sm"
+                  disabled={!newColumn.trim()}
+                  title="Add folder column"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </form>
+            )}
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
@@ -1806,9 +1813,8 @@ export function MaturityBoard({
             return (
               <div
                 key={b.id}
-                className={`flex items-center -mb-px border-b-2 ${
-                  active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
+                className={`flex items-center -mb-px border-b-2 ${active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
               >
                 <button
                   type="button"
@@ -1870,141 +1876,141 @@ export function MaturityBoard({
       )}
 
       {viewMode === "board" && (
-      <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
-        {config.dimension === "status" ? (
-          <>
-            <li>
-              Status is{" "}
-              <span className="font-medium text-foreground">read-only</span>{" "}
-              here — move a doc through review in the document view.
-            </li>
-            <li>
-              Switch to{" "}
-              <span className="font-medium text-foreground">Folder</span> for a
-              draggable board.
-            </li>
-            <li>Drag a column header to reorder.</li>
-          </>
-        ) : config.dimension === "tag" ? (
-          <>
-            <li>
-              Grouped by{" "}
-              <span className="font-medium text-foreground">
+        <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+          {config.dimension === "status" ? (
+            <>
+              <li>
+                Status is{" "}
+                <span className="font-medium text-foreground">read-only</span>{" "}
+                here — move a doc through review in the document view.
+              </li>
+              <li>
+                Switch to{" "}
+                <span className="font-medium text-foreground">Folder</span> for a
+                draggable board.
+              </li>
+              <li>Drag a column header to reorder.</li>
+            </>
+          ) : config.dimension === "tag" ? (
+            <>
+              <li>
+                Grouped by{" "}
+                <span className="font-medium text-foreground">
+                  {config.tagNamespace?.trim()
+                    ? `${config.tagNamespace.trim().split(":")[0]}:`
+                    : "tag"}
+                </span>
                 {config.tagNamespace?.trim()
-                  ? `${config.tagNamespace.trim().split(":")[0]}:`
-                  : "tag"}
-              </span>
-              {config.tagNamespace?.trim()
-                ? " — only documents carrying one show up."
-                : " — one column per tag, so a document with several tags appears in each."}
-            </li>
-            <li>
-              {config.tagNamespace?.trim()
-                ? "Clear the box to group by every tag."
-                : "Type a namespace (e.g. stage) to group by stage: values only."}
-            </li>
-            <li>
-              {canEditDocs ? (
-                <>
-                  <span className="font-medium text-foreground">
-                    Drag a card
-                  </span>{" "}
-                  between columns to swap its tag; drag a header to reorder.
-                </>
-              ) : (
-                <>
-                  You have{" "}
-                  <span className="font-medium text-foreground">read-only</span>{" "}
-                  access, so cards can't be retagged. Drag a header to reorder.
-                </>
+                  ? " — only documents carrying one show up."
+                  : " — one column per tag, so a document with several tags appears in each."}
+              </li>
+              <li>
+                {config.tagNamespace?.trim()
+                  ? "Clear the box to group by every tag."
+                  : "Type a namespace (e.g. stage) to group by stage: values only."}
+              </li>
+              <li>
+                {canEditDocs ? (
+                  <>
+                    <span className="font-medium text-foreground">
+                      Drag a card
+                    </span>{" "}
+                    between columns to swap its tag; drag a header to reorder.
+                  </>
+                ) : (
+                  <>
+                    You have{" "}
+                    <span className="font-medium text-foreground">read-only</span>{" "}
+                    access, so cards can't be retagged. Drag a header to reorder.
+                  </>
+                )}
+              </li>
+              <li>
+                <span className="font-medium text-foreground">+</span> to add a
+                column, <span className="font-medium text-foreground">×</span> to
+                remove one. A pattern like{" "}
+                <code className="font-medium text-foreground">status*</code> adds a
+                column for every matching tag, new ones included.
+              </li>
+            </>
+          ) : config.dimension === "field" ? (
+            <>
+              <li>
+                One column per{" "}
+                <span className="font-medium text-foreground">
+                  {effectiveConfig.field?.label.toLowerCase() ?? "value"}
+                </span>
+                {effectiveConfig.field
+                  ? canEditDocs
+                    ? " — drag a card across to change it. Every change is a versioned edit."
+                    : "."
+                  : " — this field no longer exists; pick another grouping."}
+              </li>
+              <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+            </>
+          ) : isFieldDimension(config.dimension) ? (
+            <>
+              <li>
+                One column per{" "}
+                <span className="font-medium text-foreground">
+                  {config.dimension === "assignee" ? "person" : "priority"}
+                </span>
+                {canEditDocs
+                  ? config.dimension === "assignee"
+                    ? " — drag a card across to reassign it."
+                    : " — drag a card across to change its priority."
+                  : "."}
+              </li>
+              {config.dimension === "assignee" && canEditDocs && (
+                <li>Add a column for someone who has nothing assigned yet, above.</li>
               )}
-            </li>
-            <li>
-              <span className="font-medium text-foreground">+</span> to add a
-              column, <span className="font-medium text-foreground">×</span> to
-              remove one. A pattern like{" "}
-              <code className="font-medium text-foreground">status*</code> adds a
-              column for every matching tag, new ones included.
-            </li>
-          </>
-        ) : config.dimension === "field" ? (
-          <>
-            <li>
-              One column per{" "}
-              <span className="font-medium text-foreground">
-                {effectiveConfig.field?.label.toLowerCase() ?? "value"}
-              </span>
-              {effectiveConfig.field
-                ? canEditDocs
-                  ? " — drag a card across to change it. Every change is a versioned edit."
-                  : "."
-                : " — this field no longer exists; pick another grouping."}
-            </li>
-            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
-          </>
-        ) : isFieldDimension(config.dimension) ? (
-          <>
-            <li>
-              One column per{" "}
-              <span className="font-medium text-foreground">
-                {config.dimension === "assignee" ? "person" : "priority"}
-              </span>
-              {canEditDocs
-                ? config.dimension === "assignee"
-                  ? " — drag a card across to reassign it."
-                  : " — drag a card across to change its priority."
-                : "."}
-            </li>
-            {config.dimension === "assignee" && canEditDocs && (
-              <li>Add a column for someone who has nothing assigned yet, above.</li>
-            )}
-            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
-          </>
-        ) : !canEditDocs ? (
-          <>
-            <li>
-              You have{" "}
-              <span className="font-medium text-foreground">read-only</span>{" "}
-              access to this nest, so cards can't be moved.
-            </li>
-            <li>Ask the nest owner for write access to rearrange the board.</li>
-          </>
-        ) : columns.length < 2 ? (
-          // One column means every document sits in Root, so there is nothing
-          // to drag a card to yet — describe the step that unblocks that
-          // instead of an interaction the board can't offer.
-          <>
-            <li>
-              Every document is in{" "}
-              <span className="font-medium text-foreground">Root</span>. Type a
-              name in{" "}
-              <span className="font-medium text-foreground">new folder</span>{" "}
-              above to add a column.
-            </li>
-            <li>
-              Then <span className="font-medium text-foreground">drag a card</span>{" "}
-              into it — that files the document in the folder.
-            </li>
-          </>
-        ) : (
-          <>
-            <li>
-              <span className="font-medium text-foreground">Drag a card</span>{" "}
-              between columns to move it to that folder.
-            </li>
-            <li>
-              <span className="font-medium text-foreground">
-                Drag a column header
-              </span>{" "}
-              to reorder.
-            </li>
-            <li>
-              <span className="font-medium text-foreground">new folder</span>{" "}
-              creates an empty folder and its column.
-            </li>
-          </>
-        )}
-      </ul>
+              <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+            </>
+          ) : !canEditDocs ? (
+            <>
+              <li>
+                You have{" "}
+                <span className="font-medium text-foreground">read-only</span>{" "}
+                access to this nest, so cards can't be moved.
+              </li>
+              <li>Ask the nest owner for write access to rearrange the board.</li>
+            </>
+          ) : columns.length < 2 ? (
+            // One column means every document sits in Root, so there is nothing
+            // to drag a card to yet — describe the step that unblocks that
+            // instead of an interaction the board can't offer.
+            <>
+              <li>
+                Every document is in{" "}
+                <span className="font-medium text-foreground">Root</span>. Type a
+                name in{" "}
+                <span className="font-medium text-foreground">new folder</span>{" "}
+                above to add a column.
+              </li>
+              <li>
+                Then <span className="font-medium text-foreground">drag a card</span>{" "}
+                into it — that files the document in the folder.
+              </li>
+            </>
+          ) : (
+            <>
+              <li>
+                <span className="font-medium text-foreground">Drag a card</span>{" "}
+                between columns to move it to that folder.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">
+                  Drag a column header
+                </span>{" "}
+                to reorder.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">new folder</span>{" "}
+                creates an empty folder and its column.
+              </li>
+            </>
+          )}
+        </ul>
       )}
 
       {/* Project-board bar: tasks-only toggle + the person quick-filter
@@ -2106,13 +2112,12 @@ export function MaturityBoard({
                     type="button"
                     onClick={() => toggleAssignee(email)}
                     title={`${on ? "Showing" : "Show only"} ${email}${email === me ? " (me)" : ""}`}
-                    className={`rounded-full transition ${
-                      on
-                        ? "ring-2 ring-primary ring-offset-1 ring-offset-background z-10"
-                        : assigneeFilter.size > 0
-                          ? "opacity-50 hover:opacity-100"
-                          : "hover:z-10 hover:-translate-y-0.5"
-                    }`}
+                    className={`rounded-full transition ${on
+                      ? "ring-2 ring-primary ring-offset-1 ring-offset-background z-10"
+                      : assigneeFilter.size > 0
+                        ? "opacity-50 hover:opacity-100"
+                        : "hover:z-10 hover:-translate-y-0.5"
+                      }`}
                   >
                     <Avatar email={email} />
                   </button>
@@ -2185,11 +2190,10 @@ export function MaturityBoard({
               role="radio"
               aria-checked={viewMode === mode}
               onClick={() => setViewMode(mode)}
-              className={`inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${
-                viewMode === mode
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
+              className={`inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${viewMode === mode
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+                }`}
             >
               <Icon className="h-3.5 w-3.5" />
               {label}
@@ -2303,9 +2307,8 @@ export function MaturityBoard({
                             <div
                               key={col.key}
                               {...cellDropHandlers(col, lane.key)}
-                              className={`flex w-64 flex-shrink-0 flex-col rounded-lg border bg-muted/20 transition-colors ${
-                                dropCol === cell ? "border-primary ring-1 ring-primary" : "border-border"
-                              }`}
+                              className={`flex w-64 flex-shrink-0 flex-col rounded-lg border bg-muted/20 transition-colors ${dropCol === cell ? "border-primary ring-1 ring-primary" : "border-border"
+                                }`}
                             >
                               {renderCards(col, cards, lane.key)}
                               {renderAddButton(col, lane.key)}
@@ -2320,24 +2323,23 @@ export function MaturityBoard({
             </div>
           </div>
         ) : (
-        <div className="flex gap-3 overflow-x-auto pb-4">
-          {columns.map((col) => {
-            const cards = orderedByColumn[col.key] ?? [];
-            return (
-              <div
-                key={col.key}
-                {...cellDropHandlers(col)}
-                className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${
-                  dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-border"
-                }`}
-              >
-                {renderHeader(col, cards.length)}
-                {renderCards(col, cards)}
-                {renderAddButton(col)}
-              </div>
-            );
-          })}
-        </div>
+          <div className="flex gap-3 overflow-x-auto pb-4">
+            {columns.map((col) => {
+              const cards = orderedByColumn[col.key] ?? [];
+              return (
+                <div
+                  key={col.key}
+                  {...cellDropHandlers(col)}
+                  className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-border"
+                    }`}
+                >
+                  {renderHeader(col, cards.length)}
+                  {renderCards(col, cards)}
+                  {renderAddButton(col)}
+                </div>
+              );
+            })}
+          </div>
         )
       )}
 

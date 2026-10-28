@@ -14,17 +14,12 @@
 import { useState, type ReactNode } from "react";
 import {
   Ban,
-  Bot,
   CalendarDays,
-  Database,
-  FileText,
-  FileType,
-  ListTodo,
   ListTree,
   UserRound,
   X,
-  Zap,
 } from "lucide-react";
+import { NodeTypeGlyph } from "../nest/NodeTypeIcon";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,13 +72,7 @@ function Isolate({ children }: { children: ReactNode }) {
 
 /** A node's type, as a small coloured glyph (cards and list rows). */
 export function TypeIcon({ type }: { type: string }) {
-  const cls = "h-3.5 w-3.5 shrink-0";
-  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
-  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
-  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
-  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
-  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
-  return <FileText className={`${cls} text-muted-foreground`} />;
+  return <NodeTypeGlyph type={type} className="h-3.5 w-3.5" />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
@@ -122,6 +111,25 @@ export function PriorityIcon({ priority }: { priority?: string }) {
   );
 }
 
+const PRIORITY_TONES: Record<string, string> = {
+  urgent: "bg-orange-500/15 text-orange-700 dark:text-orange-300",
+  high: "bg-red-500/10 text-red-700 dark:text-red-300",
+  medium: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  low: "bg-muted text-muted-foreground",
+};
+
+/** A set priority as a tinted pill: its bars plus the label. */
+export function PriorityBadge({ priority }: { priority: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium ${PRIORITY_TONES[priority] ?? PRIORITY_TONES.low}`}
+    >
+      <PriorityIcon priority={priority} />
+      {PRIORITY_LABELS[priority as Priority] ?? priority}
+    </span>
+  );
+}
+
 export function PriorityMenu({
   value,
   editable,
@@ -131,13 +139,13 @@ export function PriorityMenu({
   editable: boolean;
   onChange: (p: Priority | null) => void;
 }) {
-  const icon = <PriorityIcon priority={value} />;
+  const icon = value ? <PriorityBadge priority={value} /> : <PriorityIcon />;
   if (!editable) return value ? <span title={PRIORITY_LABELS[value as Priority]}>{icon}</span> : null;
   return (
     <Isolate>
       <DropdownMenu>
         <DropdownMenuTrigger
-          className={`rounded p-0.5 hover:bg-muted ${value ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
+          className={`rounded hover:bg-muted ${value ? "" : "p-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
           title={value ? `Priority: ${PRIORITY_LABELS[value as Priority]}` : "Set priority"}
         >
           {icon}

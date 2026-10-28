@@ -55,6 +55,7 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import {
@@ -534,6 +535,38 @@ const TASK_FIELD_PROPERTIES = {
   },
 };
 
+/**
+ * The `view` argument of context_create / context_update (§1.12), taken from
+ * the engine's own operation descriptor rather than written out here — the
+ * engine owns the view block's shape (see the Engine Logic Boundary). Throws
+ * at module load when the engine lacks the operation or the property, so an
+ * engine downgrade fails loudly instead of silently dropping the argument
+ * (test/views-mcp-schema.test.ts).
+ */
+export function engineViewProperty(
+  op: "context_create" | "context_update",
+  api: Pick<typeof engineApi, "getOperation"> = engineApi,
+): Record<string, unknown> {
+  const desc = api.getOperation(op);
+  if (!desc) {
+    throw new Error(
+      `The engine has no "${op}" operation, so its view argument cannot be advertised over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  let props: Record<string, unknown> = {};
+  try {
+    props = (inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {};
+  } catch {
+    props = {};
+  }
+  if (!props.view) {
+    throw new Error(
+      `The engine's "${op}" operation has no view property (§1.12), so view nodes cannot be authored over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  return { view: props.view };
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
@@ -859,6 +892,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_create"),
       },
       required: ["title", "content"],
     },
@@ -964,6 +998,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_update"),
       },
       // Neither is required alone — one of them is (the engine catalog's
       // `.refine(id || title)`, which JSON Schema can't express here).
@@ -3384,6 +3419,7 @@ async function runTool(
                 scope: args.scope,
                 folder: args.folder,
                 ...(args.fields !== undefined ? { fields: args.fields } : {}),
+                ...(args.view !== undefined ? { view: args.view } : {}),
               },
             ],
           },
@@ -3412,6 +3448,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -3487,6 +3524,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
