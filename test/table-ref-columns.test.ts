@@ -96,7 +96,7 @@ describe(":ref directive — parse", () => {
     expect(extractTableRefs(parseTable(PIPELINE))).toEqual([
       { column: "account", row: "r1", target: "AGA" },
       { column: "account", row: "r3", target: "nodes/aga" },
-      { column: "account", row: "r4", target: "nodes/aga" },
+      { column: "account", row: "r4", target: "nodes/aga", bare: true },
       { column: "account", row: "r5", target: "Other Co" },
     ]);
   });
@@ -161,6 +161,7 @@ describe(":ref backlinks (UI)", () => {
 
   it("a bare-id ref cell alone (no [[…]]) is a backlink", () => {
     const nodes = [
+      { id: "nodes/aga", title: "AGA", content: "" },
       { id: "nodes/t", title: "T", content: "id:key,owner:ref\nx1,nodes/aga", type: "table" },
     ];
     expect(findBacklinks(nodes, { id: "nodes/aga", title: "AGA" })).toEqual([
@@ -206,8 +207,8 @@ describe(":ref columns over REST, MCP and the graph", () => {
     const fromTable = data.links.filter((l: any) => l.source === "nodes/pipeline");
     expect(fromTable).toEqual(
       expect.arrayContaining([
-        { source: "nodes/pipeline", target: "nodes/aga", type: "account", rows: ["r1", "r3", "r4"] },
-        { source: "nodes/pipeline", target: "nodes/other-co", type: "account", rows: ["r5"] },
+        { source: "nodes/pipeline", target: "nodes/aga", type: "account", rows: ["r1", "r3", "r4"], rowCount: 3 },
+        { source: "nodes/pipeline", target: "nodes/other-co", type: "account", rows: ["r5"], rowCount: 1 },
       ]),
     );
     expect(fromTable).toHaveLength(2);
@@ -377,5 +378,131 @@ describe(":ref columns never leak a target the reader can't see (AC6)", () => {
       total: 1,
       unresolved: [{ column: "account", row: "x1", target: "AGA" }],
     });
+  });
+});
+
+// ─── Review fixes (PR #481 code review) ──────────────────────────────────
+
+describe("review: a bare-id ref resolves by id only", () => {
+  it("a dangling path never falls back to an unrelated doc's slug or title", async () => {
+    const { makeRefResolver } = await import("../src/tables/refs.js");
+    const resolve = makeRefResolver([
+      { id: "nodes/prospects/aga", frontmatter: { title: "Prospect AGA" } as any },
+      { id: "nodes/clients/beta", frontmatter: { title: "nodes/clients/gone" } as any },
+    ]);
+    // Bare (unbracketed) — exact id only.
+    expect(resolve("nodes/clients/aga", true)).toBeNull();
+    expect(resolve("nodes/clients/gone", true)).toBeNull();
+    expect(resolve("nodes/prospects/aga", true)).toBe("nodes/prospects/aga");
+    // Bracketed — the wikilink rule (id, title, bare slug) still applies.
+    expect(resolve("nodes/clients/aga", false)).toBe("nodes/prospects/aga");
+    expect(resolve("Prospect AGA", false)).toBe("nodes/prospects/aga");
+  });
+
+  it("extractTableRefs marks bare cells", () => {
+    expect(extractTableRefs(parseTable("id:key,a:ref\nx,nodes/q\ny,[[Q]]"))).toEqual([
+      { column: "a", row: "x", target: "nodes/q", bare: true },
+      { column: "a", row: "y", target: "Q" },
+    ]);
+  });
+
+  it("the UI backlinks panel matches a bare cell by exact id only", () => {
+    const nodes = [
+      { id: "nodes/t", title: "T", content: "id:key,a:ref\nx,nodes/clients/aga", type: "table" },
+    ];
+    expect(findBacklinks(nodes, { id: "nodes/prospects/aga", title: "AGA" })).toEqual([]);
+  });
+});
+
+describe("review: UI backlinks resolve refs the way the server does", () => {
+  it("a [[Title]] ref belongs to the doc that title resolves to, not to a slug twin", () => {
+    const nodes = [
+      { id: "nodes/accounts/aga-corp", title: "AGA", content: "" },
+      { id: "nodes/old/aga", title: "Old", content: "" },
+      { id: "nodes/t", title: "T", content: "id:key,a:ref\nr1,[[AGA]]", type: "table" },
+    ];
+    // [[AGA]] resolves by title to aga-corp (title outranks slug).
+    expect(findBacklinks(nodes, { id: "nodes/accounts/aga-corp", title: "AGA" })[0]?.refs).toEqual([
+      { column: "a", rows: ["r1"] },
+    ]);
+    const old = findBacklinks(nodes, { id: "nodes/old/aga", title: "Old" });
+    expect(old.find((b) => b.id === "nodes/t")?.refs).toBeUndefined();
+  });
+
+  it("dedupes rows in linear time (10k rows at one target)", () => {
+    const body = ["id:key,a:ref", ...Array.from({ length: 10000 }, (_, i) => `r${i},[[AGA]]`)].join("\n");
+    const nodes = [
+      { id: "nodes/aga", title: "AGA", content: "" },
+      { id: "nodes/t", title: "T", content: body, type: "table" },
+    ];
+    const t0 = performance.now();
+    const out = findBacklinks(nodes, { id: "nodes/aga", title: "AGA" });
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(out[0].refs![0].rows).toHaveLength(10000);
+  });
+});
+
+describe("review: graph keeps one link per pair and bounds rows", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: User;
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@pair.test", "Owner");
+    nestId = (await jsonRequest(app, "POST", "/nests", { name: "Pairs" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "AGA", content: "x" }, owner.apiKey);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Two Cols", type: "table", content: "id:key,account:ref,billing:ref\nr1,[[AGA]],[[AGA]]\nr2,,[[AGA]]" },
+      owner.apiKey,
+    );
+    const big = ["id:key,account:ref", ...Array.from({ length: 500 }, (_, i) => `r${i},[[AGA]]`)].join("\n");
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Big", type: "table", content: big }, owner.apiKey);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("two ref columns at one target draw ONE link that names both", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const links = data.links.filter((l: any) => l.source === "nodes/two-cols");
+    expect(links).toEqual([
+      {
+        source: "nodes/two-cols",
+        target: "nodes/aga",
+        type: "account",
+        rows: ["r1"],
+        rowCount: 1,
+        refs: [
+          { type: "account", rows: ["r1"], rowCount: 1 },
+          { type: "billing", rows: ["r1", "r2"], rowCount: 2 },
+        ],
+      },
+    ]);
+  });
+
+  it("caps the row keys a link ships, with the full count alongside", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const link = data.links.find((l: any) => l.source === "nodes/big");
+    expect(link.rows).toHaveLength(50);
+    expect(link.rows[0]).toBe("r0");
+    expect(link.rowCount).toBe(500);
+  });
+});
+
+describe("review: approved-only readers can't probe unapproved titles", () => {
+  it("an approvedOnly query resolves by id/slug, never by working-copy title", async () => {
+    const { makeRefResolver } = await import("../src/tables/refs.js");
+    const resolve = makeRefResolver(
+      [{ id: "nodes/acme", frontmatter: { title: "Acme Acquisition Target" } as any }],
+      { titles: false },
+    );
+    expect(resolve("Acme Acquisition Target", false)).toBeNull();
+    expect(resolve("acme", false)).toBe("nodes/acme");
+    expect(resolve("nodes/acme", true)).toBe("nodes/acme");
   });
 });

@@ -9,7 +9,7 @@
  * checkExists uses.
  */
 
-import { extractTableRefs } from "./table-refs";
+import { extractTableRefs, makeRefResolver, type TableRef } from "./table-refs";
 
 const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
@@ -167,6 +167,20 @@ export function staleAliasLinks(
   return out;
 }
 
+/** Parsed refs per node object. The editor re-runs findBacklinks on every
+ *  title keystroke over the same cached node list, so a big table's CSV is
+ *  parsed once per fetch, not once per keystroke. Keyed on the content too,
+ *  in case a caller mutates a node in place. */
+const refCache = new WeakMap<object, { content: string; refs: TableRef[] }>();
+function tableRefsOf(node: BacklinkNode): TableRef[] {
+  const content = node.content ?? "";
+  const hit = refCache.get(node);
+  if (hit && hit.content === content) return hit.refs;
+  const refs = extractTableRefs(content);
+  refCache.set(node, { content, refs });
+  return refs;
+}
+
 /** Nodes (other than the target itself) whose content links to the target. */
 export function findBacklinks(
   nodes: BacklinkNode[],
@@ -185,18 +199,25 @@ export function findBacklinks(
     );
   };
 
+  // Ref cells resolve exactly as the server does (priority order, bare =
+  // exact id), so the panel never credits a ref the graph and query don't.
+  // Built lazily: a nest with no table pays nothing.
+  let resolveRef: ReturnType<typeof makeRefResolver> | null = null;
   const out: Backlink[] = [];
   for (const node of nodes) {
     if (node.id.toLowerCase() === targetId) continue;
     // A table's :ref cells link by [[…]] OR a bare id, typed by column.
     const refs: BacklinkRef[] = [];
     if (node.type === "table") {
-      for (const r of extractTableRefs(node.content ?? "")) {
-        if (!matches(r.target)) continue;
-        let group = refs.find((g) => g.column === r.column);
-        if (!group) refs.push((group = { column: r.column, rows: [] }));
-        if (!group.rows.includes(r.row)) group.rows.push(r.row);
+      resolveRef ??= makeRefResolver(nodes);
+      const groups = new Map<string, Set<string>>();
+      for (const r of tableRefsOf(node)) {
+        if (resolveRef(r.target, !!r.bare) !== target.id) continue;
+        let rows = groups.get(r.column);
+        if (!rows) groups.set(r.column, (rows = new Set()));
+        rows.add(r.row);
       }
+      for (const [column, rows] of groups) refs.push({ column, rows: [...rows] });
     }
     if (refs.length) {
       out.push({ id: node.id, title: node.title, refs });

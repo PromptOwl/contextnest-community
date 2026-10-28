@@ -2324,9 +2324,10 @@ r2,,,20
 r3,nodes/aga,,30
 ```
 
-- A cell holds `[[Title]]`, `[[path|label]]` (the label is ignored) or a bare node id. Empty means no link. One ref per cell.
+- A cell holds `[[Title]]`, `[[path|label]]` (the label is ignored) or a bare node id. Empty means no link. One ref per cell. A bare id matches by **exact id only** — a dangling `nodes/clients/aga` never falls back to another node's title or slug.
 - **Edges.** Every non-empty ref cell is a typed edge from the table to the target: the edge type is the column name (`account`), attributed to the row key (the first `:key` column's value, or `row N` — the 1-based data-row number — when the table has no key or the key cell is blank). They appear in `GET /graph` (`links[].type` / `rows`) and in the target's backlinks in the web app ("Pipeline · account · r1, r3").
-- **Resolution** is the graph's wikilink rule — exact node id, then title (case-insensitive), then bare slug — over the documents **the caller can read**. A target the caller can't read behaves exactly like a missing one: no edge, no title, no query match.
+- **Resolution** of a `[[…]]` ref is the graph's wikilink rule — exact node id, then title (case-insensitive), then bare slug — over the documents **the caller can read**. A target the caller can't read behaves exactly like a missing one: no edge, no title, no query match. In a table query the documents are also limited like the table lookup (published only unless `include_drafts`), and an approved-only reader (a public reader, or MCP on a governed nest) resolves by id/slug only — never by a working-copy title, which may be an unapproved rename.
+- **Replayability.** Rows of a ref-column `=`/`!=` query depend on the nest's documents (their titles, existence, and the caller's access) as well as the table's `version`: renaming the target or querying as someone who can't see it can change the answer at the same table version. Every other condition keeps "same query + same version = same rows".
 - **Query.** `=` and `!=` on a ref column compare the resolved target, so `where account = [[AGA]]`, `where account = [[nodes/aga]]` and `where account = nodes/aga` all return the rows that point at AGA however the cell spells it. A value that resolves to nothing compares by its written target (case-insensitive). `contains` and the ordering operators compare the raw cell text, as on any text column.
 - **Unresolved refs never block a save.** They are reported — see `table_refs` on node create/update.
 
@@ -2441,7 +2442,7 @@ Response `NestGraph`:
 ```
 
 Notes:
-- **Typed links** — a link from a `table` node's `:ref` column carries `"type": "<column>"` and `"rows": ["r1", "r3"]` (the row keys pointing at that target), one link per table, target and column: `{ "source": "nodes/pipeline", "target": "nodes/aga", "type": "account", "rows": ["r1"] }`. Every other link has neither field. A pair joined by a typed link gets no extra untyped link for the same `[[…]]` text.
+- **Typed links** — a link from a `table` node's `:ref` column carries `"type": "<column>"`, `"rows"` (the row keys pointing at that target, first 50 in row order) and `"rowCount"` (all of them): `{ "source": "nodes/pipeline", "target": "nodes/aga", "type": "account", "rows": ["r1"], "rowCount": 1 }`. Still one link per source/target pair: when several ref columns point at the same target, `type`/`rows` are the first column's and `refs: [{ "type", "rows", "rowCount" }, …]` lists every column. Every other link has none of these fields, and a pair joined by a typed link gets no extra untyped link for the same `[[…]]` text.
 - **Identity masking** — steward `id`/`label` are the real email only for **write+** callers (same rule as the collaborators roster, so a public/read tier can't enumerate member emails). Sub-write callers get an opaque `"s1"` id and a `"Steward 1"` label; `bottlenecks[].label` follows suit.
 - **Roster gating** — `stewards`/`stewardEdges` are empty for public/anonymous readers and when the nest has stewardship disabled.
 - **Draw cap** — `nodes`/`links` are capped at 150 (highest-degree kept) with `truncated: true` and `totalNodes` set; `signals` are still computed over the full set so the gap numbers stay accurate.

@@ -35,8 +35,14 @@ export interface GraphLink {
   /** Typed edges only: a table `:ref` column's name (e.g. "account"). Absent
    *  on wikilink, contextnest://, parent and shared-tag edges. */
   type?: string;
-  /** Typed edges only: the row keys whose ref cell points at `target`. */
+  /** Typed edges only: the row keys whose ref cell points at `target`
+   *  (first MAX_LINK_ROWS, in row order). */
   rows?: string[];
+  /** Typed edges only: how many rows point there (may exceed `rows.length`). */
+  rowCount?: number;
+  /** Typed edges only, and only when several ref columns point at the same
+   *  target: every column, the first of which is `type`/`rows`. */
+  refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
 }
 
 export interface GraphSteward {
@@ -98,15 +104,10 @@ export interface NestGraph {
  *  doc nodes; tags/stewards are bounded and added client-side on top. */
 const MAX_GRAPH_NODES = 150;
 
-const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+/** Row keys shipped per typed link; `rowCount` carries the full number. */
+const MAX_LINK_ROWS = 50;
 
-/** Bare slug of an engine id/target: the part after the last "/". Engine ids
- *  are `nodes/<slug>`; the editor inserts links as `[[<slug>|Title]]` (bare
- *  slug), so slug resolution is needed alongside id/title. */
-function bareSlug(idOrTarget: string): string {
-  const idx = idOrTarget.lastIndexOf("/");
-  return idx >= 0 ? idOrTarget.slice(idx + 1) : idOrTarget;
-}
+const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
 /** Extract the raw [[target]] strings (ignoring |display aliases) from a body. */
 export function extractWikiTargets(body: string): string[] {
@@ -173,20 +174,6 @@ export async function buildNestGraph(
   const accessible = await filterAccessible(nestId, userId, userEmail, docs);
 
   const idSet = new Set(accessible.map((d) => d.id));
-  const titleToId = new Map<string, string>();
-  // Bare-slug → id, so the editor's `[[<slug>|Title]]` link form resolves
-  // (mirrors the client's backlink resolution: id, title, OR bare slug).
-  const slugToId = new Map<string, string>();
-  for (const d of accessible) {
-    const t = (d.frontmatter?.title || "").toLowerCase().trim();
-    // First occurrence wins — duplicate case-folded titles are ambiguous, so
-    // don't let a later doc silently steal title-based incoming links (which
-    // would make the earlier doc look like a false orphan).
-    if (t && !titleToId.has(t)) titleToId.set(t, d.id);
-    const slug = bareSlug(d.id).toLowerCase();
-    if (slug && !slugToId.has(slug)) slugToId.set(slug, d.id);
-  }
-
   const allNodes: GraphNode[] = accessible.map((d) => ({
     id: d.id,
     title: d.frontmatter?.title || d.id,
@@ -196,12 +183,16 @@ export async function buildNestGraph(
 
   const allLinks: GraphLink[] = [];
   const seen = new Set<string>();
-  // Table `:ref` columns are typed edges: one per (table, target, column),
-  // carrying the row keys. Resolved over `accessible` only, so a target the
-  // caller can't read draws no edge and its title never reaches them. Runs
-  // BEFORE the wikilink pass and claims the pair's dedupe key, so a ref cell's
-  // `[[AGA]]` doesn't also draw an untyped duplicate of the same edge.
+  // One resolver for every body link below — the [[wikilink]] rule (id, then
+  // title, then bare slug) over `accessible` only. A target the caller can't
+  // read draws no edge and its title never reaches them.
   const resolveRef = makeRefResolver(accessible);
+
+  // Table `:ref` columns are typed edges. Still ONE link per (table, target)
+  // pair, like every other edge: `type`/`rows` describe the first ref column
+  // pointing there, and `refs` lists every column when more than one does.
+  // Runs BEFORE the wikilink pass and claims the pair's dedupe key, so a ref
+  // cell's `[[AGA]]` doesn't also draw an untyped duplicate.
   for (const d of accessible) {
     if ((d.frontmatter as { type?: string })?.type !== "table") continue;
     let refs: ReturnType<typeof extractTableRefs>;
@@ -210,33 +201,40 @@ export async function buildNestGraph(
     } catch {
       continue; // an unparseable table still gets its plain wikilink edges below
     }
-    // Row sets, not Array#includes: a 10k-row table pointing at one account
-    // must not dedupe quadratically. Insertion (row) order is kept.
-    const typed = new Map<string, { link: GraphLink; rows: Set<string> }>();
+    // target → column → row keys. Sets, not Array#includes: a 10k-row table
+    // pointing at one account must not dedupe quadratically.
+    const byTarget = new Map<string, Map<string, Set<string>>>();
     for (const r of refs) {
-      const targetId = resolveRef(r.target);
+      const targetId = resolveRef(r.target, !!r.bare);
       if (!targetId || targetId === d.id) continue;
-      const tkey = `${targetId}\u0000${r.column}`;
-      let entry = typed.get(tkey);
-      if (!entry) {
-        entry = { link: { source: d.id, target: targetId, type: r.column }, rows: new Set() };
-        typed.set(tkey, entry);
-        seen.add(`${d.id}->${targetId}`);
-      }
-      entry.rows.add(r.row);
+      let cols = byTarget.get(targetId);
+      if (!cols) byTarget.set(targetId, (cols = new Map()));
+      let rows = cols.get(r.column);
+      if (!rows) cols.set(r.column, (rows = new Set()));
+      rows.add(r.row);
     }
-    for (const { link, rows } of typed.values()) {
-      allLinks.push({ ...link, rows: [...rows] });
+    for (const [targetId, cols] of byTarget) {
+      const key = `${d.id}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const typed = [...cols].map(([type, rows]) => ({
+        type,
+        rows: [...rows].slice(0, MAX_LINK_ROWS),
+        rowCount: rows.size,
+      }));
+      allLinks.push({
+        source: d.id,
+        target: targetId,
+        ...typed[0],
+        ...(typed.length > 1 ? { refs: typed } : {}),
+      });
     }
   }
   for (const d of accessible) {
     for (const raw of extractWikiTargets(d.body || "")) {
-      const norm = raw.toLowerCase().trim();
       // Resolve by exact id, then title, then bare slug (the form the editor
       // actually writes) — matching the client's wiki-link resolution.
-      const targetId = idSet.has(raw)
-        ? raw
-        : titleToId.get(norm) ?? slugToId.get(bareSlug(raw).toLowerCase());
+      const targetId = resolveRef(raw, false);
       if (!targetId || targetId === d.id) continue;
       const key = `${d.id}->${targetId}`;
       if (seen.has(key)) continue;

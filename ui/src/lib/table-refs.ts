@@ -13,6 +13,8 @@ export interface TableRef {
   /** The row's `:key` value, or `row N` (1-based) when it has none. */
   row: string;
   target: string;
+  /** Written as a bare id (no `[[…]]`): matches by exact id only. */
+  bare?: true;
 }
 
 const DIRECTIVES = new Set(["key", "number", "date", "text", "ref"]);
@@ -49,13 +51,14 @@ function splitCsvLine(line: string): string[] {
   return out.map((s) => s.trim());
 }
 
-/** The target a ref cell names, or null for a blank cell. */
-export function parseRefTarget(cell: string): string | null {
+/** The target a ref cell names and whether it was written bare (no `[[…]]`),
+ *  or null for a blank cell. */
+export function parseRef(cell: string): { target: string; bare: boolean } | null {
   const v = (cell ?? "").trim();
   if (!v) return null;
   const m = REF_CELL_RE.exec(v);
   const target = (m ? m[1] : v).trim();
-  return target || null;
+  return target ? { target, bare: !m } : null;
 }
 
 /** Every non-empty ref cell of a table body, in row then column order. */
@@ -87,9 +90,47 @@ export function extractTableRefs(body: string): TableRef[] {
     const key = keyIdx >= 0 ? (cells[keyIdx] ?? "").trim() : "";
     const row = key || `row ${n + 1}`;
     for (const i of refIdx) {
-      const target = parseRefTarget(cells[i] ?? "");
-      if (target) out.push({ column: cols[i].name, row, target });
+      const ref = parseRef(cells[i] ?? "");
+      if (!ref) continue;
+      out.push(
+        ref.bare
+          ? { column: cols[i].name, row, target: ref.target, bare: true }
+          : { column: cols[i].name, row, target: ref.target },
+      );
     }
   });
   return out;
+}
+
+function bareSlug(idOrTarget: string): string {
+  const idx = idOrTarget.lastIndexOf("/");
+  return idx >= 0 ? idOrTarget.slice(idx + 1) : idOrTarget;
+}
+
+/**
+ * Same resolution as makeRefResolver in src/tables/refs.ts: a `[[…]]` target
+ * is an exact id, then a case-folded title (first node wins), then a bare
+ * slug (first node wins); a bare target is an exact id only. So the backlinks
+ * panel credits a ref to the one node the server's graph and query do.
+ */
+export function makeRefResolver(
+  nodes: Array<{ id: string; title?: string }>,
+): (target: string, bare: boolean) => string | null {
+  const ids = new Set<string>();
+  const byTitle = new Map<string, string>();
+  const bySlug = new Map<string, string>();
+  for (const n of nodes) {
+    ids.add(n.id);
+    const t = String(n.title ?? "").toLowerCase().trim();
+    if (t && !byTitle.has(t)) byTitle.set(t, n.id);
+    const slug = bareSlug(n.id).toLowerCase();
+    if (slug && !bySlug.has(slug)) bySlug.set(slug, n.id);
+  }
+  return (raw, bare) => {
+    const t = raw.trim();
+    if (!t) return null;
+    if (ids.has(t)) return t;
+    if (bare) return null;
+    return byTitle.get(t.toLowerCase()) ?? bySlug.get(bareSlug(t).toLowerCase()) ?? null;
+  };
 }

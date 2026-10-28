@@ -132,11 +132,22 @@ const REF_CELL_RE = /^\[\[([^\]|]*)(?:\|[^\]]*)?\]\]$/;
  * empty cell — a row may leave a ref blank.
  */
 export function parseRefTarget(cell: string): string | null {
+  return parseRef(cell)?.target ?? null;
+}
+
+/**
+ * parseRefTarget plus the form it was written in. `bare` (no `[[…]]`) means
+ * "a node id": it resolves by exact id ONLY, never by title or slug — a
+ * dangling `nodes/clients/aga` must not attach to an unrelated
+ * `nodes/prospects/aga` (the same rule graph-service applies to
+ * contextnest:// ids).
+ */
+export function parseRef(cell: string): { target: string; bare: boolean } | null {
   const v = (cell ?? "").trim();
   if (!v) return null;
   const m = REF_CELL_RE.exec(v);
   const target = (m ? m[1] : v).trim();
-  return target || null;
+  return target ? { target, bare: !m } : null;
 }
 
 /** One ref cell: the edge type (column), the row it belongs to, the target. */
@@ -145,6 +156,8 @@ export interface TableRef {
   /** The row's `:key` value, or `row N` (1-based) when it has none. */
   row: string;
   target: string;
+  /** Written as a bare id (no `[[…]]`): resolve by exact id only. */
+  bare?: true;
 }
 
 /**
@@ -163,16 +176,22 @@ export function extractTableRefs(table: ParsedTable): TableRef[] {
     const key = keyIdx >= 0 ? (r[keyIdx] ?? "").trim() : "";
     const row = key || `row ${n + 1}`;
     for (const { c, i } of refCols) {
-      const target = parseRefTarget(r[i] ?? "");
-      if (target) out.push({ column: c.name, row, target });
+      const ref = parseRef(r[i] ?? "");
+      if (!ref) continue;
+      out.push(
+        ref.bare
+          ? { column: c.name, row, target: ref.target, bare: true }
+          : { column: c.name, row, target: ref.target },
+      );
     }
   });
   return out;
 }
 
 /** Resolves a ref target to a node id, or null when it names no node the
- *  caller can see. */
-export type RefResolver = (target: string) => string | null;
+ *  caller can see. `bare` targets (written without `[[…]]`) match by exact
+ *  id only. */
+export type RefResolver = (target: string, bare: boolean) => string | null;
 
 // ─── Query ───────────────────────────────────────────────────────────────
 
@@ -246,10 +265,10 @@ export function parseQuery(q: string): TableQuery {
 /** A ref value's identity: the node it resolves to, else its written target
  *  (case-folded), so an unresolved ref still equals the same spelling. */
 function refIdentity(raw: string, resolve?: RefResolver): string {
-  const target = parseRefTarget(raw);
-  if (!target) return "";
-  const id = resolve?.(target);
-  return id ? `id:${id}` : `raw:${target.toLowerCase()}`;
+  const ref = parseRef(raw);
+  if (!ref) return "";
+  const id = resolve?.(ref.target, ref.bare);
+  return id ? `id:${id}` : `raw:${ref.target.toLowerCase()}`;
 }
 
 function compare(

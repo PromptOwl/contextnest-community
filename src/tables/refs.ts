@@ -26,10 +26,19 @@ function bareSlug(idOrTarget: string): string {
 }
 
 /**
- * Resolver over an already access-filtered document list. Same order as
- * buildNestGraph's wikilink pass: exact id, title, bare slug.
+ * Resolver over an already access-filtered document list. A `[[…]]` target
+ * follows buildNestGraph's wikilink rule — exact id, then case-folded title
+ * (first doc wins), then bare slug (first doc wins). A bare target is a node
+ * id and matches by exact id only.
+ *
+ * `titles: false` drops title matching: for approved-only callers, whose
+ * documents' working-copy titles may hold an unapproved rename.
  */
-export function makeRefResolver(docs: Array<Pick<ContextNode, "id" | "frontmatter">>): RefResolver {
+export function makeRefResolver(
+  docs: Array<Pick<ContextNode, "id" | "frontmatter">>,
+  opts: { titles?: boolean } = {},
+): RefResolver {
+  const useTitles = opts.titles !== false;
   const idSet = new Set<string>();
   const titleToId = new Map<string, string>();
   const slugToId = new Map<string, string>();
@@ -37,14 +46,15 @@ export function makeRefResolver(docs: Array<Pick<ContextNode, "id" | "frontmatte
     idSet.add(d.id);
     const t = String(d.frontmatter?.title ?? "").toLowerCase().trim();
     // First occurrence wins — a duplicate case-folded title is ambiguous.
-    if (t && !titleToId.has(t)) titleToId.set(t, d.id);
+    if (useTitles && t && !titleToId.has(t)) titleToId.set(t, d.id);
     const slug = bareSlug(d.id).toLowerCase();
     if (slug && !slugToId.has(slug)) slugToId.set(slug, d.id);
   }
-  return (raw: string) => {
+  return (raw: string, bare: boolean) => {
     const t = raw.trim();
     if (!t) return null;
     if (idSet.has(t)) return t;
+    if (bare) return null;
     return titleToId.get(t.toLowerCase()) ?? slugToId.get(bareSlug(t).toLowerCase()) ?? null;
   };
 }
@@ -54,12 +64,22 @@ export async function callerRefResolver(
   nestId: string,
   userId: string,
   userEmail: string,
+  opts: {
+    /** Approved-only reader: resolve by id/slug, never by working-copy title. */
+    approvedOnly?: boolean;
+    /** Only `status: published` docs, mirroring the table lookup's own rule. */
+    publishedOnly?: boolean;
+  } = {},
 ): Promise<RefResolver> {
   const { storage } = await engineCache.get(nestId);
   const docs = (await storage.discoverDocuments()).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
+    (d) =>
+      !isDerivedAnnotationsNode(d.id) &&
+      (!opts.publishedOnly || d.frontmatter.status === "published"),
   );
-  return makeRefResolver(await filterAccessible(nestId, userId, userEmail, docs));
+  return makeRefResolver(await filterAccessible(nestId, userId, userEmail, docs), {
+    titles: !opts.approvedOnly,
+  });
 }
 
 /** What a save reports about a table's refs. */
@@ -83,16 +103,24 @@ export async function tableRefReport(
   userEmail: string,
 ): Promise<TableRefReport | undefined> {
   if ((node.frontmatter?.type as string | undefined) !== "table") return undefined;
+  let parsed: ReturnType<typeof parseTable>;
   try {
-    const parsed = parseTable(node.body || "");
-    if (!parsed.columns.some((c) => c.ref)) return undefined;
+    parsed = parseTable(node.body || "");
+  } catch {
+    return undefined; // not a parseable table: nothing to report, as before
+  }
+  if (!parsed.columns.some((c) => c.ref)) return undefined;
+  try {
     const refs = extractTableRefs(parsed);
     const resolve = refs.length ? await callerRefResolver(nestId, userId, userEmail) : null;
     return {
       total: refs.length,
-      unresolved: resolve ? refs.filter((r) => !resolve(r.target)) : [],
+      unresolved: resolve ? refs.filter((r) => !resolve(r.target, !!r.bare)) : [],
     };
-  } catch {
+  } catch (err) {
+    // The write already landed; a failed lookup must not turn it into a 500.
+    // Logged so it isn't silently indistinguishable from "no ref column".
+    console.warn(`[tables] ref report failed for a table in nest ${nestId}:`, err);
     return undefined;
   }
 }
