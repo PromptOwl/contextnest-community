@@ -56,8 +56,11 @@ export function bypassNavGuard(run: () => void): void {
 export function historyWriteMode(
   prevNodeKey: string | null,
   nextNodeKey: string | null,
+  // False on a fresh load or DocumentEditor's parked leave-guard entry: reuse
+  // that entry instead of stacking a page on top of it.
+  onAppEntry = true,
 ): "push" | "replace" {
-  return prevNodeKey !== null && nextNodeKey !== null && nextNodeKey !== prevNodeKey
+  return onAppEntry && prevNodeKey !== null && nextNodeKey !== null && nextNodeKey !== prevNodeKey
     ? "push"
     : "replace";
 }

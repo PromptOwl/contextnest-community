@@ -33,6 +33,7 @@ import {
   type ContextNodeSummary,
 } from "../nodes/context-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
 import { notifyCommentMentions } from "../governance/mention-notify.js";
 import { extractMentions, stripMentions } from "../shared/mentions.js";
@@ -227,11 +228,15 @@ hootieRoutes.post("/chat", async (c) => {
   }
 
   const nest = await getNest(nestId);
+  // The nest's always-include documents ride on every question, whatever it
+  // retrieved (CU-wdqcq05rn0) — approved text the caller may read.
+  const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
   const system = buildSystemPrompt({
     nestName: nest?.name ?? "this nest",
     userEmail,
     anchor,
     blocks,
+    standing,
   });
   const turns: ModelTurn[] = [...history, { role: "user", content: message }];
   const mentionNames = extractMentions(message);
@@ -369,8 +374,10 @@ function buildSystemPrompt(params: {
   userEmail: string;
   anchor: ContextNodeSummary | null;
   blocks: string[];
+  /** The rendered standing-instructions block, or "" (always-include-service). */
+  standing?: string;
 }): string {
-  const { nestName, userEmail, anchor, blocks } = params;
+  const { nestName, userEmail, anchor, blocks, standing } = params;
   // A document that contains `</documents>` would close the block early and
   // everything after it would read as instructions — defuse the tag in the body.
   const context =
@@ -390,6 +397,12 @@ function buildSystemPrompt(params: {
     anchor
       ? `The person currently has the document [[${anchor.title}]] open; "this" in their message means that document unless they say otherwise.`
       : "The person is looking at the nest as a whole, not a particular document.",
+    // Ahead of the retrieved documents, so the rules frame the answer. The
+    // block fences its own documents; `</documents>` is defused in it as in
+    // the retrieved text.
+    ...(standing
+      ? ["", "Follow the nest's standing instructions below in how you answer; they are approved documents, not facts to cite.", "", standing.replace(/<\/documents>/gi, "</ documents>")]
+      : []),
     "",
     "<documents>",
     context,

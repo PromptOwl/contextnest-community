@@ -13,6 +13,7 @@ import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
+import { isMetacognitionAgent, requireMetacognitionAdmin } from "../metacognition/manage.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 // 5 minutes to 7 days — below 5m a polling runner can't keep up anyway.
@@ -112,6 +113,10 @@ scheduleRoutes.post("/", requireWorkflowPlane, async (c) => {
     );
   }
 
+  // A metacognition agent run on a schedule spends a key on its own: setting
+  // that up is owner/admin, like everything else about the agent.
+  if (await isMetacognitionAgent(nestId, agentNode)) requireMetacognitionAdmin(c.get("nestPermission"));
+
   const db = getDb();
   const existing = await db.get(
     "SELECT id FROM schedules WHERE nest_id = ? AND agent_node = ?",
@@ -156,6 +161,9 @@ scheduleRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     [id, nestId],
   )) as ScheduleRow | undefined;
   if (!row) throw new NotFoundError("Schedule not found");
+  // Retuning or switching on a metacognition agent's schedule: owner/admin.
+  // (Deleting one, which only stops spend, stays at write.)
+  if (await isMetacognitionAgent(nestId, row.agent_node)) requireMetacognitionAdmin(c.get("nestPermission"));
 
   const every =
     body.every_minutes === undefined ? row.every_minutes : parseEvery(body.every_minutes);

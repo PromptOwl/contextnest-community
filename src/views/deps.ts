@@ -38,7 +38,7 @@ export async function isSealedVersion(nestId: string, nodeId: string, version: n
 
 /** Env kill switch (S1): `CN_VIEW_DATA=off` withholds every frame's data. */
 export function viewDataKillSwitch(): boolean {
-  return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
+  return config.CN_VIEW_DATA_OFF;
 }
 
 /** A ref/binding → node id: a path or contextnest:// URI. Never a title. */
@@ -110,15 +110,14 @@ export function createViewDeps(): ViewDeps {
 
     async selectNodes(nestId, selector, p) {
       const { storage, versions: versionManager } = await engineCache.get(nestId);
-      let docs = (await storage.discoverDocuments()).filter(
-        (d) => isPublished(d) && !isForgotten(d),
-      );
+      const all = await storage.discoverDocuments();
+      let docs = all.filter((d) => isPublished(d) && !isForgotten(d));
       // An approved-only principal is entitled to approved VALUES, not just
       // approved ids: a live copy's `status: published` is a claim, not a
       // review. Evaluate and project over each node's approved version.
       if (p.some((x) => x.approvedOnly)) {
         const approved = await getApprovedVersions(nestId);
-        const live = (await storage.discoverDocuments()).filter((d) => !isForgotten(d) && !isRejected(d));
+        const live = all.filter((d) => !isForgotten(d) && !isRejected(d));
         const rebuilt: ContextNode[] = [];
         for (const d of live) {
           const v = approved.get(d.id);

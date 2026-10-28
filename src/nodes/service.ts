@@ -53,7 +53,11 @@ import {
   nestReviewsPrimeOnly,
   nestCreatorIsReviewer,
 } from "../nests/service.js";
-import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
+import {
+  isPrimeDocument,
+  documentPrimeFlag,
+  documentAlwaysIncludeFlag,
+} from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
 import {
@@ -463,6 +467,8 @@ export interface NodeResponse extends TaskFields {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** The published version agents are served, null if none. Lists only. */
+  approvedVersion?: number | null;
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
@@ -473,9 +479,15 @@ export interface NodeResponse extends TaskFields {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
+   *  doc inherits from the nest's `always_include_tags`. */
+  always_include?: boolean;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** The Office file a document was extracted from (`metadata.original`):
+   *  served at /nests/:nestId/originals/:file. Absent on every other node. */
+  original?: OriginalFile;
   /** Blocking relations from nodes that aren't done yet (src/nodes/
    *  relations.ts). Absent when nothing open blocks this node. */
   open_blockers?: number;
@@ -527,6 +539,33 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
     ? [TASK_NODE_TYPE]
     : []),
 ]);
+
+/**
+ * An uploaded Office file kept beside the nest (`<nest>/.originals/<file>`)
+ * and bound to the document extracted from it. `file` is the server-minted
+ * `<uuid>.<kind>` name; `sha256` is checked before the file is served.
+ */
+export interface OriginalFile {
+  file: string;
+  filename: string;
+  kind: "pptx" | "docx";
+  bytes: number;
+  sha256: string;
+}
+
+/** Server-minted original names only — the traversal defense for the route. */
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+
+export function isOriginalFile(v: unknown): v is OriginalFile {
+  const o = v as OriginalFile | null | undefined;
+  return (
+    !!o &&
+    typeof o === "object" &&
+    typeof o.file === "string" &&
+    ORIGINAL_FILE_NAME.test(o.file) &&
+    typeof o.sha256 === "string"
+  );
+}
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
 export const PDF_NODE_TYPE = "pdf";
@@ -661,7 +700,11 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     model:
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...(isOriginalFile((fm.metadata as any)?.original)
+      ? { original: (fm.metadata as any).original as OriginalFile }
+      : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
@@ -1152,10 +1195,10 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayStatuses, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions
     ? [null, null]
     : await Promise.all([
-        versions.getDisplayStatuses(nestId),
+        versions.getDisplayState(nestId),
         // From the DB, not a vault walk. The disk truth behind it is
         // reconciled by the index rebuild and kept current by the stage /
         // approve / reject paths.
@@ -1220,8 +1263,9 @@ export async function listNodesForCaller(
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = displayStatuses?.get(r.id) ?? "draft";
+        r.status = displayState?.statuses.get(r.id) ?? "draft";
       }
+      r.approvedVersion = displayState?.approved.get(r.id) ?? null;
       return r;
     })
   );
@@ -1439,6 +1483,9 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a published version agents are served, whatever the
+   *  status of their latest version. */
+  aiReady: number;
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
@@ -1511,11 +1558,13 @@ export async function nestCensus(
     [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
   );
 
-  const statusMap = await versions.getDisplayStatuses(nestId);
+  const { statuses: statusMap, approved } = await versions.getDisplayState(nestId);
   const statuses: Record<string, number> = {};
+  let aiReady = 0;
   for (const d of visible) {
     const st = statusMap.get(d.id) ?? "draft";
     statuses[st] = (statuses[st] || 0) + 1;
+    if (approved.has(d.id)) aiReady++;
   }
 
   const authorship = await resolveAuthorship(
@@ -1554,6 +1603,7 @@ export async function nestCensus(
     tags,
     types,
     statuses,
+    aiReady,
     authors,
     editedLast7d,
     recent,
@@ -1597,6 +1647,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Document-scope always-include flag — see `isAlwaysIncludeDocument`.
+   *  Owner/admin only, like `prime`. */
+  alwaysInclude?: boolean;
   /** Caller attribution recorded on the version this create seals (§9.4).
    *  Optional everywhere — an unattributed write is a valid write. */
   client?: ClientMetadata;
@@ -1604,6 +1657,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** The uploaded Office file this document's text was extracted from
+   *  (office-service.ts). Stored as `metadata.original`, so the binding is
+   *  part of every version's hash. */
+  original?: OriginalFile;
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
@@ -1617,6 +1674,9 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   append?: string;
   tags?: string[];
   title?: string;
+  /** Frontmatter one-line summary (the docs site's meta description). An
+   *  empty string removes it. */
+  description?: string;
   status?: string;
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
@@ -1625,6 +1685,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Document-scope always-include flag. `null` clears it back to the tags. */
+  alwaysInclude?: boolean | null;
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1763,12 +1825,13 @@ async function actorAutoPublishes(
  */
 async function assertMayFlagPrime(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  what = "prime flag",
 ): Promise<void> {
   const roles = await resolveUserRoles(nestId, userEmail);
   if (!roles.includes("owner") && !roles.includes("admin")) {
     throw new ForbiddenError(
-      "Only the nest owner or an admin can change a document's prime flag."
+      `Only the nest owner or an admin can change a document's ${what}.`
     );
   }
 }
@@ -1995,12 +2058,22 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    // Always-include pushes this document to every agent entering the nest,
+    // so flagging it is a governance act too (CU-wdqcq05rn0).
+    if (input.alwaysInclude !== undefined) {
+      if (typeof input.alwaysInclude !== "boolean") {
+        throw new ValidationError("always_include must be true or false");
+      }
+      await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+    }
     const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
+      ...(input.original ? { original: input.original } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
@@ -2601,6 +2674,20 @@ async function stagePdfImport(
   }
 }
 
+/** Longest frontmatter description accepted — a summary, not a second body. */
+export const MAX_DESCRIPTION_LENGTH = 500;
+
+/** A trimmed, single-line description, or a ValidationError saying why not. */
+function normalizeDescription(value: unknown): string {
+  if (typeof value !== "string") throw new ValidationError("description must be a string");
+  const description = value.trim();
+  if (/[\r\n]/.test(description)) throw new ValidationError("description must be a single line");
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new ValidationError(`description must be at most ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
+  return description;
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -2737,6 +2824,17 @@ export async function updateNode(
         };
         opInput.title = patch.title;
       }
+      if (patch.description !== undefined) {
+        const description = normalizeDescription(patch.description);
+        if (description !== (node.frontmatter.description ?? "")) {
+          const frontmatter: Record<string, unknown> = { ...node.frontmatter };
+          if (description) frontmatter.description = description;
+          else delete frontmatter.description;
+          node = { ...node, frontmatter: frontmatter as any };
+          // The engine stores it; an empty string removes the key.
+          opInput.description = description;
+        }
+      }
       // Re-type BEFORE the schedule gate below, so "turn this document into
       // an agent and schedule it" is one call — the gate reads the type the
       // node is becoming, as create does.
@@ -2809,6 +2907,20 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.alwaysInclude !== undefined) {
+        if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {
+          throw new ValidationError("always_include must be true, false or null");
+        }
+        await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.alwaysInclude === null) delete metadata.always_include;
+        else metadata.always_include = patch.alwaysInclude;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          always_include: patch.alwaysInclude,
+        };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
@@ -3337,6 +3449,13 @@ export async function moveNode(
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
     // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
+    // No document at the destination (checked above), so any rows there are
+    // orphans — same as create, clear them or the repoint trips UNIQUE. Before
+    // the write: its index write-through creates fresh rows at newId.
+    await getDb().transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
+    });
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the

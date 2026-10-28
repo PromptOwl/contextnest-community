@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
+import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
@@ -40,7 +40,7 @@ import {
   removeCommunitySite,
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/SearchableSelect";
@@ -122,6 +122,8 @@ const TABS: {
       "type_table_enabled",
       "telemetry_enabled",
       "nest_creation",
+      "nest_public_visibility",
+      "nest_org_visibility",
       "people_suggest_all_users",
       "shared_deployment",
       "oidc_enabled",
@@ -511,7 +513,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
-  const [copiedRedirect, setCopiedRedirect] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
@@ -1522,6 +1523,55 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            {/* Who may widen a nest past its roster. Owners (default) is
+                today's behaviour; server admins only stops an owner publishing
+                by accident. The server enforces it on REST and MCP; the
+                visibility pickers disable the tier and say why. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Globe2 className="h-4 w-4 text-muted-foreground" />
+                  Nest visibility
+                </CardTitle>
+                <CardDescription>
+                  Who can open a nest beyond the people added to it. Making a
+                  nest private is always allowed, and nests that are already
+                  public or organization-wide stay as they are. This covers
+                  whole nests only: single-document public links are separate.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {([
+                  ["nest_public_visibility", "Who can make nests public", "Public nests are readable by anyone on the internet with the URL."],
+                  ["nest_org_visibility", "Who can make nests organization-wide", draft.shared_deployment
+                    ? "Organization nests are readable by every account on this server — other organizations included."
+                    : "Organization nests are readable by everyone signed in to this server."],
+                ] as const).map(([field, label, hint], i) => (
+                  <div
+                    key={field}
+                    className={`flex items-start justify-between gap-4 ${i > 0 ? "pt-4 border-t" : ""}`}
+                  >
+                    <div className="pr-4">
+                      <div className="text-sm font-medium">{label}</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>
+                    </div>
+                    <Select
+                      value={draft[field] ?? "owners"}
+                      onValueChange={(v) => set({ [field]: v as "owners" | "admins" })}
+                    >
+                      <SelectTrigger className="h-8 w-[190px]" aria-label={label} data-testid={`settings-${field}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="owners">Nest owners</SelectItem>
+                        <SelectItem value="admins">Server admins only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+
             {/* Who the add-a-person pickers may offer. Default OFF, and the
                 copy says why in the admin's own terms: on a server shared by
                 unrelated customers this hands one customer's staff another
@@ -1685,25 +1735,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                           <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
                             {redirectUri}
                           </code>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              if (!(await copyTextWithToast(redirectUri))) return;
-                              setCopiedRedirect(true);
-                              setTimeout(() => setCopiedRedirect(false), 1500);
-                            }}
-                          >
-                            {copiedRedirect ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
-                            <span className="ml-1.5">
-                              {copiedRedirect ? "Copied" : "Copy"}
-                            </span>
-                          </Button>
+                          <CopyButton text={redirectUri} label="Copy" />
                         </div>
                       );
                     })()}

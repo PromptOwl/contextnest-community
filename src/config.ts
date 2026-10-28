@@ -202,6 +202,10 @@ export const config = {
   get PROMPTOWL_TEAMS_ENABLED(): boolean {
     return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
   },
+  /** View-data kill switch (§1.12): `off` withholds every view frame's data. */
+  get CN_VIEW_DATA_OFF(): boolean {
+    return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
+  },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
     return process.env.PROMPTOWL_BYPASS_SECRET || "";
@@ -535,6 +539,27 @@ export const config = {
     return process.env.SHARED_DEPLOYMENT === "true";
   },
   /**
+   * Who may widen a nest to Public. "owners" (default): anyone who
+   * administers the nest — today's behaviour, still behind the
+   * acknowledgement. "admins": server admins only, so an owner can't publish
+   * by accident. Narrowing is never restricted, and nests already public stay
+   * public. Enforced in nests/visibility-service.ts for REST and MCP alike;
+   * superadmin-editable via /admin/settings.
+   */
+  get NEST_PUBLIC_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_PUBLIC_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /** Who may widen a nest to Organization — same values and rules as
+   *  NEST_PUBLIC_VISIBILITY. On a SHARED_DEPLOYMENT 'org' reaches every
+   *  customer on the server, which is why it has its own switch. */
+  get NEST_ORG_VISIBILITY(): "owners" | "admins" {
+    return process.env.NEST_ORG_VISIBILITY?.trim().toLowerCase() === "admins"
+      ? "admins"
+      : "owners";
+  },
+  /**
    * MCP OAuth authorization server. Default OFF, and off means the surface
    * does not exist: `/.well-known/*` keeps 404ing and `/mcp` answers
    * unauthenticated callers exactly as it did before.
@@ -707,7 +732,7 @@ export const config = {
   /**
    * Hootie in the nest: the assistant side panel on every page of the UI and
    * its POST /nests/:id/chat route. Default OFF (since 1.28, CU-wdqcq03ewc):
-   * an admin opts in from Settings → General (hootie_enabled) or the deploy
+   * an admin opts in from Server settings → Hootie (hootie_enabled) or the deploy
    * sets HOOTIE_ENABLED=true. Off → the route 404s and the launcher is
    * hidden. Answering additionally needs a model key (PromptOwl's gateway from
    * the licence, or an own-provider key); without one the route answers 503,
@@ -793,6 +818,10 @@ export const config = {
   /** Manual/hook starts per metacognition agent per hour; bounds spend. */
   get METACOGNITION_STARTS_PER_HOUR(): number {
     return Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+  },
+  /** Notifications one metacognition agent may send in any 24 hours, across runs. */
+  get METACOGNITION_NOTIFY_PER_DAY(): number {
+    return Number(process.env.METACOGNITION_NOTIFY_PER_DAY) || 20;
   },
   /** How often a running metacognition agent checks for a person's cancel (ms). */
   get METACOGNITION_CANCEL_POLL_MS(): number {
@@ -1034,6 +1063,17 @@ export const config = {
    */
   get PDF_MAX_BYTES() {
     const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
+
+  /**
+   * Max .pptx/.docx upload size in bytes (POST /nests/:id/nodes/office), the
+   * file as uploaded (compressed). Default 25 MB, for the PDF cap's reasons;
+   * what it may inflate to is capped separately (office-extract.ts). Read per
+   * request. Override via OFFICE_MAX_MB.
+   */
+  get OFFICE_MAX_BYTES() {
+    const mb = parseInt(process.env.OFFICE_MAX_MB || "25", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
 

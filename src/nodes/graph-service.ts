@@ -12,10 +12,15 @@ import {
   type ContextNode,
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
-import { isDerivedAnnotationsNode } from "./service.js";
+import { bodyOnly, isDerivedAnnotationsNode } from "./service.js";
+import { getApprovedVersion } from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
+import { taskFieldsOf } from "./task-fields.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { extractTableRefs, parseTable } from "../tables/service.js";
+import { makeRefResolver } from "../tables/refs.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
 
@@ -29,6 +34,17 @@ export interface GraphNode {
 export interface GraphLink {
   source: string;
   target: string;
+  /** Typed edges only: a table `:ref` column's name (e.g. "account"). Absent
+   *  on wikilink, contextnest://, parent and shared-tag edges. */
+  type?: string;
+  /** Typed edges only: the row keys whose ref cell points at `target`
+   *  (first MAX_LINK_ROWS, in row order). */
+  rows?: string[];
+  /** Typed edges only: how many rows point there (may exceed `rows.length`). */
+  rowCount?: number;
+  /** Typed edges only, and only when several ref columns point at the same
+   *  target: every column, the first of which is `type`/`rows`. */
+  refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
 }
 
 export interface GraphSteward {
@@ -90,14 +106,20 @@ export interface NestGraph {
  *  doc nodes; tags/stewards are bounded and added client-side on top. */
 const MAX_GRAPH_NODES = 150;
 
+/** Row keys shipped per typed link; `rowCount` carries the full number. */
+const MAX_LINK_ROWS = 50;
+
 const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
-/** Bare slug of an engine id/target: the part after the last "/". Engine ids
- *  are `nodes/<slug>`; the editor inserts links as `[[<slug>|Title]]` (bare
- *  slug), so slug resolution is needed alongside id/title. */
-function bareSlug(idOrTarget: string): string {
-  const idx = idOrTarget.lastIndexOf("/");
-  return idx >= 0 ? idOrTarget.slice(idx + 1) : idOrTarget;
+/** The approved version's body, or null when the node was never approved. */
+async function approvedBody(
+  nestId: string,
+  versions: Parameters<typeof reconstructApproved>[0],
+  id: string,
+): Promise<string | null> {
+  const approved = await getApprovedVersion(nestId, id);
+  if (approved == null) return null;
+  return bodyOnly(id, (await reconstructApproved(versions, nestId, id, approved)).raw);
 }
 
 /** Extract the raw [[target]] strings (ignoring |display aliases) from a body. */
@@ -156,7 +178,7 @@ export async function buildNestGraph(
    *  public/read tier can't enumerate them via the graph. */
   canSeeIdentities: boolean,
 ): Promise<NestGraph> {
-  const { storage } = await engineCache.get(nestId);
+  const { storage, versions } = await engineCache.get(nestId);
   // Derived annotation projections are machine-maintained, so they are not
   // nodes of the ontology the graph draws.
   const docs: ContextNode[] = (await storage.discoverDocuments()).filter(
@@ -165,20 +187,6 @@ export async function buildNestGraph(
   const accessible = await filterAccessible(nestId, userId, userEmail, docs);
 
   const idSet = new Set(accessible.map((d) => d.id));
-  const titleToId = new Map<string, string>();
-  // Bare-slug → id, so the editor's `[[<slug>|Title]]` link form resolves
-  // (mirrors the client's backlink resolution: id, title, OR bare slug).
-  const slugToId = new Map<string, string>();
-  for (const d of accessible) {
-    const t = (d.frontmatter?.title || "").toLowerCase().trim();
-    // First occurrence wins — duplicate case-folded titles are ambiguous, so
-    // don't let a later doc silently steal title-based incoming links (which
-    // would make the earlier doc look like a false orphan).
-    if (t && !titleToId.has(t)) titleToId.set(t, d.id);
-    const slug = bareSlug(d.id).toLowerCase();
-    if (slug && !slugToId.has(slug)) slugToId.set(slug, d.id);
-  }
-
   const allNodes: GraphNode[] = accessible.map((d) => ({
     id: d.id,
     title: d.frontmatter?.title || d.id,
@@ -188,14 +196,66 @@ export async function buildNestGraph(
 
   const allLinks: GraphLink[] = [];
   const seen = new Set<string>();
+  // One resolver for every body link below — the [[wikilink]] rule (id, then
+  // title, then bare slug) over `accessible` only. A target the caller can't
+  // read draws no edge and its title never reaches them.
+  const resolveRef = makeRefResolver(accessible);
+
+  // Table `:ref` columns are typed edges. Still ONE link per (table, target)
+  // pair, like every other edge: `type`/`rows` describe the first ref column
+  // pointing there, and `refs` lists every column when more than one does.
+  // Runs BEFORE the wikilink pass and claims the pair's dedupe key, so a ref
+  // cell's `[[AGA]]` doesn't also draw an untyped duplicate.
+  // A public reader gets rows from the approved table only, resolved by
+  // id/slug — the same rule as table-query, so no draft row key leaks here.
+  const approvedOnly = await isPublicReader(nestId, userId);
+  const resolveTypedRef = approvedOnly
+    ? makeRefResolver(accessible, { titles: false })
+    : resolveRef;
+  for (const d of accessible) {
+    if ((d.frontmatter as { type?: string })?.type !== "table") continue;
+    let refs: ReturnType<typeof extractTableRefs>;
+    try {
+      const body = approvedOnly ? await approvedBody(nestId, versions, d.id) : d.body || "";
+      if (body == null) continue; // never approved: no typed edges for this reader
+      refs = extractTableRefs(parseTable(body));
+    } catch {
+      continue; // an unparseable table still gets its plain wikilink edges below
+    }
+    // target → column → row keys. Sets, not Array#includes: a 10k-row table
+    // pointing at one account must not dedupe quadratically.
+    const byTarget = new Map<string, Map<string, Set<string>>>();
+    for (const r of refs) {
+      const targetId = resolveTypedRef(r.target, !!r.bare);
+      if (!targetId || targetId === d.id) continue;
+      let cols = byTarget.get(targetId);
+      if (!cols) byTarget.set(targetId, (cols = new Map()));
+      let rows = cols.get(r.column);
+      if (!rows) cols.set(r.column, (rows = new Set()));
+      rows.add(r.row);
+    }
+    for (const [targetId, cols] of byTarget) {
+      const key = `${d.id}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const typed = [...cols].map(([type, rows]) => ({
+        type,
+        rows: [...rows].slice(0, MAX_LINK_ROWS),
+        rowCount: rows.size,
+      }));
+      allLinks.push({
+        source: d.id,
+        target: targetId,
+        ...typed[0],
+        ...(typed.length > 1 ? { refs: typed } : {}),
+      });
+    }
+  }
   for (const d of accessible) {
     for (const raw of extractWikiTargets(d.body || "")) {
-      const norm = raw.toLowerCase().trim();
       // Resolve by exact id, then title, then bare slug (the form the editor
       // actually writes) — matching the client's wiki-link resolution.
-      const targetId = idSet.has(raw)
-        ? raw
-        : titleToId.get(norm) ?? slugToId.get(bareSlug(raw).toLowerCase());
+      const targetId = resolveRef(raw, false);
       if (!targetId || targetId === d.id) continue;
       const key = `${d.id}->${targetId}`;
       if (seen.has(key)) continue;
@@ -214,6 +274,16 @@ export async function buildNestGraph(
       seen.add(key);
       allLinks.push({ source: d.id, target: targetId });
     }
+  }
+  // A Board sub-item's `parent` is a link to that parent (CU-wdqcq05rau); only
+  // drawn when the caller can see both ends.
+  for (const d of accessible) {
+    const parent = taskFieldsOf(d.frontmatter?.metadata).parent;
+    if (!parent || !idSet.has(parent) || parent === d.id) continue;
+    const key = `${d.id}->${parent}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    allLinks.push({ source: d.id, target: parent });
   }
 
   // Tag counts + tag→doc-ids index (the latter powers exact bottleneck share).

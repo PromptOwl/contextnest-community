@@ -97,6 +97,8 @@ export const HISTORICAL_MIGRATIONS = [
   "069_site_public_url_host",
   "070_instructions_revisions",
   "071_node_pins",
+  "073_nest_always_include_tags",
+  "074_org_contributions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1261,6 +1263,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
       ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
     CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
+  `);
+
+  // Migration 073 parity: which tags mark a document always-include.
+  await db.exec(
+    "ALTER TABLE nests ADD COLUMN IF NOT EXISTS always_include_tags TEXT NOT NULL DEFAULT 'always-include'",
+  );
+
+  // Migration 074 parity: org contributors (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_contributions TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_domains TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TEXT;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

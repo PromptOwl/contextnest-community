@@ -1,5 +1,14 @@
 # @promptowl/contextnest-community
 
+## 2.2.1
+
+### Patch Changes
+
+- a82aec2: Device login: `POST /auth/device/poll` now accepts `code` and `client_secret` in a JSON body, so the secret no longer has to appear in a URL where server and proxy logs can record it. The web app's PromptOwl sign-in now polls this way. `GET /auth/device/poll` with query parameters still works for older CLIs but is deprecated.
+- b0c4090: Public docs site rendering fixes (CU-wdqcq05raw). Bare filenames such as `CONTEXT.md` are no longer turned into `http://CONTEXT.md` links, and only URLs with a scheme are autolinked. Aliased wikilinks (`[[page|label]]`) now work inside table cells. HTML comments are removed from the HTML pages, the Markdown twins and `llms-full.txt`, but kept inside code. Tag hub pages get a readable title that keeps acronyms upper-case (`mcp` → "MCP") and a description that names the topic and counts its pages. A node's frontmatter `description` can now be set or cleared through REST `PATCH /nodes/:id` and MCP `context_update`. The anonymous `/nest/<id>` → `/d/<key>/` redirect now answers every anonymous GET and HEAD with a 301, including requests with no Accept header or `*/*` (plain curl, link checkers, AI fetchers), which used to get a 404. Signed-in users, `Authorization` callers, `?app=1`, and non-crawler clients whose Accept names JSON but not `text/html` still reach the app. Any other anonymous client, including one sending `*/*` or no Accept, is redirected.
+- 467fc72: Public docs site: the reader-mode home node now resolves on the static site (`/d/<key>/`) exactly as it does in the reader — by full node id or bare slug (`welcome` finds `nodes/docs/welcome`), case-insensitively. Before, the site matched the exact id only, so a slug or different-case `home_node` was ignored and the site could open on a different page than the reader. When several pages share the slug, both now pick the lowest node id.
+- 4548bdb: Document titles: the server now accepts titles up to 200 characters, the same limit as a local vault, so pushing a document with a 121–200 character title no longer fails. The API reference now documents `PATCH /nests/:nestId` for renaming a nest and changing or clearing its description.
+
 ## 2.2.0
 
 ### Minor Changes

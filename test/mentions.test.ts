@@ -110,7 +110,9 @@ describe("mention notifications", () => {
     );
     const rows = (await inbox(editor)).filter((n) => n.kind === "mention");
     expect(rows).toHaveLength(1);
-    expect(rows[0].message).toContain("owner@acme.com mentioned you");
+    // Named by display name, not raw email (as on the Teammates page).
+    expect(rows[0].message).toContain("Owner mentioned you");
+    expect(rows[0].message).not.toContain("owner@acme.com");
     expect(rows[0].message).toContain("Kickoff");
     expect(rows[0].node_id).toBe("nodes/kickoff");
   });

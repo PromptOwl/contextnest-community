@@ -33,10 +33,26 @@ import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
+import { assertWritable, DataDirError } from "./shared/data-dir-check.js";
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
   parseTrustedProxies(config.TRUSTED_PROXIES);
+
+  // Refuse to boot, with the chown fix, on a data directory this user can't
+  // write (e.g. a volume left root-owned by an older image that ran as root).
+  // SKIP_DATA_DIR_CHECK=1 is the escape hatch for storage where permission
+  // bits don't reflect what the server can actually write. Read from the
+  // process env directly, not `config`: this runs before the DB-backed
+  // settings overlay exists, and it is deploy-env only by design.
+  const dataDirWarning = process.env.SKIP_DATA_DIR_CHECK === "1" ? null : assertWritable([
+    { label: "DATA_ROOT", path: config.DATA_ROOT },
+    { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },
+    ...(config.DB_DRIVER === "sqlite"
+      ? [{ label: "DATABASE_PATH", path: config.DATABASE_PATH, file: true }]
+      : []),
+  ]);
+  if (dataDirWarning) console.warn(`\n  ⚠️  ${dataDirWarning.replace(/\n/g, "\n     ")}\n`);
 
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
@@ -189,7 +205,7 @@ async function main() {
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
   Auth:      ${authDesc}
   Telemetry: ${config.TELEMETRY_ENABLED ? "on" : "off"}
-  Hootie:    ${config.HOOTIE_ENABLED ? "on" : "off (default since 1.28 — enable in Settings → General or set HOOTIE_ENABLED=true)"}
+  Hootie:    ${config.HOOTIE_ENABLED ? "on" : "off (default since 1.28 — enable in Server settings → Hootie or set HOOTIE_ENABLED=true)"}
   ────────────────────────────────────
 
   To switch auth modes, set the AUTH_MODE env var:
@@ -253,6 +269,16 @@ ${config.AUTH_MODE === "key" ? `
         nest documents behind it, is written to the logs. Testing only.
     `);
   }
+  // The visibility caps fail open to `owners` on anything but `admins`, so a
+  // typo (`admin`) would silently leave publishing open — say so at boot.
+  for (const key of ["NEST_PUBLIC_VISIBILITY", "NEST_ORG_VISIBILITY"] as const) {
+    const raw = process.env[key]?.trim().toLowerCase();
+    if (raw && raw !== "owners" && raw !== "admins") {
+      console.warn(
+        `  ⚠️  ${key}=${process.env[key]} is not 'owners' or 'admins' — treated as 'owners' (nest owners can widen).`,
+      );
+    }
+  }
 
   // Parse DOCS_SITES now, so an entry for this server's own host warns at boot.
   void config.DOCS_SITES;
@@ -293,6 +319,8 @@ ${config.AUTH_MODE === "key" ? `
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  // An unusable data directory is an operator fix, not a bug: message only.
+  if (err instanceof DataDirError) console.error(`Fatal: ${err.message}`);
+  else console.error("Fatal:", err);
   process.exit(1);
 });

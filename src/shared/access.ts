@@ -7,6 +7,7 @@ import {
 } from "../governance/teams-service.js";
 import { teamRoleToPermission } from "../governance/roles.js";
 import { ANON_USER_ID } from "./constants.js";
+import { config } from "../config.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
 
@@ -91,6 +92,16 @@ export interface NestAccess {
    *  (CU-wdqcq0314u) — approved-content-only 'read' while the nest is
    *  published headless, nothing when it isn't. */
   isHeadlessReader: boolean;
+  /**
+   * The caller is an org contributor (CU-wdqcq05rz6): a person in the
+   * organization who may create documents and propose edits here, always as
+   * drafts that go to review. Deliberately NOT a permission level — the
+   * caller stays at `permission: 'read'`, so no `>= write` gate anywhere
+   * admits them. Only the create / propose paths read this flag, and they
+   * also require a person's own full credential (see
+   * governance/org-contribution.ts) — this row can't see the credential.
+   */
+  orgContributor: boolean;
 }
 
 const higher = (
@@ -119,6 +130,56 @@ export async function resolveNestAccess(
     rawPermission: access.permission,
     permission: capForArchive(access.permission, access.archived),
   };
+}
+
+/**
+ * Bare email domains from the stored `nests.org_domains` JSON. Anything that
+ * isn't a JSON array of strings reads as no domains — which on a shared
+ * deployment means nobody qualifies (fail closed), never everybody.
+ */
+export function parseOrgDomains(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((d): d is string => typeof d === "string" && d.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The domain of an email address: everything after the LAST '@', lowercased. */
+export function emailDomain(email: string | null | undefined): string | null {
+  if (!email) return null;
+  const at = email.lastIndexOf("@");
+  if (at < 1 || at === email.length - 1) return null;
+  return email.slice(at + 1).trim().toLowerCase();
+}
+
+/**
+ * Is this caller "in the organization" for an org nest's contribution setting?
+ *
+ * - Self-hosted with no domain list: any signed-in person — the same boundary
+ *   `org` visibility already uses (the deployment IS the organization).
+ * - A domain list (required on a shared deployment, optional otherwise): the
+ *   caller's domain must EQUAL one entry — `evil-acme.com` and
+ *   `eng.acme.com` are not `acme.com` — AND an identity provider must have
+ *   vouched for the address (`users.email_verified_at`). A password sign-up is
+ *   never verified here, so anyone could otherwise register as
+ *   `whoever@acme.com` and claim the domain.
+ * - Shared deployment with no domains: nobody. Every account on the server is
+ *   every customer, so an empty list must not fall back to "everyone".
+ */
+function inOrgForContributions(params: {
+  domains: string[];
+  email: string | null;
+  emailVerified: boolean;
+}): boolean {
+  if (params.domains.length === 0) return !config.SHARED_DEPLOYMENT;
+  if (!params.emailVerified) return false;
+  const domain = emailDomain(params.email);
+  return !!domain && params.domains.includes(domain);
 }
 
 /**
@@ -167,6 +228,9 @@ async function resolveNestAccessRaw(
                WHERE g.nest_id = n.id AND g.user_id = ?
                LIMIT 1) AS grant_hit,
             n.headless     AS headless,
+            n.org_contributions AS org_contributions,
+            n.org_domains  AS org_domains,
+            u.email_verified_at AS caller_email_verified_at,
             (SELECT 1 FROM headless_readers hr
                WHERE hr.nest_id = n.id AND hr.user_id = ?
                LIMIT 1) AS headless_hit
@@ -189,6 +253,9 @@ async function resolveNestAccessRaw(
         grant_hit: number | boolean | null;
         headless: number | null;
         headless_hit: number | boolean | null;
+        org_contributions: string | null;
+        org_domains: string | null;
+        caller_email_verified_at: string | null;
       }
     | undefined;
 
@@ -204,6 +271,7 @@ async function resolveNestAccessRaw(
     rawPermission: "none",
     isPublicReader: false,
     isHeadlessReader: false,
+    orgContributor: false,
     archived: false,
   };
   if (!row) return absent;
@@ -220,6 +288,9 @@ async function resolveNestAccessRaw(
     hasGrant: !!row.grant_hit,
     archived: !!row.archived_at,
     isHeadlessReader: false,
+    // Only ever set in the visibility branch at the bottom — every earlier
+    // return (owner, admin, team member, collaborator above read) holds more.
+    orgContributor: false,
   };
 
   // 0. A headless access key (CU-wdqcq0314u). Its service identity is never an
@@ -309,7 +380,29 @@ async function resolveNestAccessRaw(
   const isPublicReader =
     visibilityRead && !row.collab_permission && !base.isSteward;
 
-  return { ...base, permission: best, isPublicReader };
+  // Org contributor (CU-wdqcq05rz6): someone in the organization, on an org
+  // nest that opted in, who holds nothing above read. That includes a read
+  // collaborator / viewer steward / team viewer, on purpose: the setting says
+  // "anyone in the organization", and a viewer is in it. (They already see
+  // drafts; the review queue just doesn't label them "not a collaborator".) Every condition fails
+  // closed: a service identity (system, headless key, agent persona) is never
+  // a person in the org, an archived nest takes no writes, and the setting is
+  // inert unless the nest is 'org' right now — flipping it private or public
+  // leaves the stored value but admits nobody.
+  const orgContributor =
+    best === "read" &&
+    row.visibility === "org" &&
+    row.org_contributions === "drafts" &&
+    userId !== ANON_USER_ID &&
+    !row.caller_is_service &&
+    !row.archived_at &&
+    inOrgForContributions({
+      domains: parseOrgDomains(row.org_domains),
+      email: row.caller_email ?? null,
+      emailVerified: !!row.caller_email_verified_at,
+    });
+
+  return { ...base, permission: best, isPublicReader, orgContributor };
 }
 
 export async function resolveNestPermission(

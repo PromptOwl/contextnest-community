@@ -26,7 +26,6 @@ import {
   robotsTxt,
   sitemapIndex,
   legacySiteRedirect,
-  isCrawler,
   siteDomainCheck,
 } from "./site/routes.js";
 import { siteSettingsRoutes } from "./site/settings-routes.js";
@@ -48,7 +47,9 @@ import {
   discoverForSearch,
   titleScore,
 } from "./nodes/search.js";
-import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
+import { resolveCallerEmail, filterAccessible, canReadNode } from "./governance/access-guard.js";
+import { assertSoleNodePatchRoute, credentialMayContribute } from "./governance/org-contribution.js";
+import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
@@ -96,6 +97,13 @@ import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
 import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
+import {
+  officeNodeRoutes,
+  originalRoutes,
+  OFFICE_UPLOAD_PATH,
+  officeMaxRequestBytes,
+  officeTooLargeMessage,
+} from "./nodes/office-routes.js";
 import {
   pdfNodeRoutes,
   PDF_UPLOAD_PATH,
@@ -619,19 +627,24 @@ export function createApp(): Hono<AuthEnv> {
       const len = parseInt(lenStr, 10);
       const isPost = c.req.method === "POST";
       const isPdf = isPost && PDF_UPLOAD_PATH.test(c.req.path);
+      const isOffice = isPost && OFFICE_UPLOAD_PATH.test(c.req.path);
       const cap =
         isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
           : isPdf
             ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
-            : config.MAX_BODY_BYTES;
+            : isOffice
+              ? Math.max(config.MAX_BODY_BYTES, officeMaxRequestBytes())
+              : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            // A PDF gets the same message as the route's own gates.
+            // A PDF or Office file gets the same message as its route's own gates.
             error: isPdf
               ? pdfTooLargeMessage(len)
-              : `Request body too large (${len} bytes, max ${cap})`,
+              : isOffice
+                ? officeTooLargeMessage(len)
+                : `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
@@ -697,6 +710,10 @@ export function createApp(): Hono<AuthEnv> {
       // Who may create nests (admins | everyone) — the Nests page hides the
       // create buttons from non-admins when it's admins-only.
       nest_creation: config.NEST_CREATION,
+      // Who may widen a nest to public / org (owners | admins) — the
+      // visibility pickers disable an admins-only tier for everyone else.
+      nest_public_visibility: config.NEST_PUBLIC_VISIBILITY,
+      nest_org_visibility: config.NEST_ORG_VISIBILITY,
       // Product analytics for the SPA. The PostHog project key is a public
       // client key, but it only ships while usage telemetry is on — one switch
       // covers everything this server sends outward.
@@ -1013,6 +1030,8 @@ export function createApp(): Hono<AuthEnv> {
     // Enterprise identity providers allowed (licence feature sso). Google is on every plan.
     sso_available: hasEntitlement("sso"),
     nest_creation: config.NEST_CREATION,
+    nest_public_visibility: config.NEST_PUBLIC_VISIBILITY,
+    nest_org_visibility: config.NEST_ORG_VISIBILITY,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
@@ -1600,6 +1619,18 @@ export function createApp(): Hono<AuthEnv> {
       if (v !== "admins" && v !== "everyone")
         addError("nest_creation", "Nest creation must be admins or everyone.");
       else pending.push({ name: "NEST_CREATION", value: v });
+    }
+    // Who may widen a nest to public / org. "owners" is the default and
+    // persists as null (unset), like the other default-off switches.
+    for (const [field, name, label] of [
+      ["nest_public_visibility", "NEST_PUBLIC_VISIBILITY", "Who can make nests public"],
+      ["nest_org_visibility", "NEST_ORG_VISIBILITY", "Who can make nests organization-wide"],
+    ] as const) {
+      if (!(field in body)) continue;
+      const v = String(body[field] ?? "").trim().toLowerCase();
+      if (v !== "owners" && v !== "admins")
+        addError(field, `${label} must be owners or admins.`);
+      else pending.push({ name, value: v === "admins" ? "admins" : null });
     }
     if ("people_suggest_all_users" in body) {
       pending.push({
@@ -3434,9 +3465,11 @@ export function createApp(): Hono<AuthEnv> {
         );
       } else if (
         c.req.method === "POST" &&
-        // POST /nodes (create) and POST /nodes/pdf (PDF upload — a create, or
-        // a new version of a pdf node) share the nest-scope editor rule.
-        (parts.length === 2 || (parts.length === 3 && parts[2] === "pdf"))
+        // POST /nodes (create), POST /nodes/pdf (PDF upload — a create, or
+        // a new version of a pdf node) and POST /nodes/office (an Office
+        // upload, always a create) share the nest-scope editor rule.
+        (parts.length === 2 ||
+          (parts.length === 3 && (parts[2] === "pdf" || parts[2] === "office")))
       ) {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
         const resolved = await resolveStewardsForNode(nestId, "");
@@ -3460,8 +3493,32 @@ export function createApp(): Hono<AuthEnv> {
         : 0;
     const effectiveLevel = Math.max(permissionLevel(permission), grantLevel);
 
+    // Org contributor (CU-wdqcq05rz6): a person in the organization who holds
+    // only READ here may still create a document (POST /nodes) or propose an
+    // edit (PATCH /nodes/:id) on an org nest that opted in — and nothing else.
+    // Their permission is NOT raised (nestPermission stays 'read', so every
+    // other gate refuses them as before); the two handlers see
+    // `orgContribution` and route the write through governance/org-contribution
+    // (always a draft, always to review). Exact routes only: the node update is
+    // the ONLY PATCH under /nodes (test/org-contributors.test.ts pins the route
+    // table), and POST with exactly two segments is the create.
+    const isContributionRoute =
+      parts[1] === "nodes" &&
+      ((c.req.method === "POST" && parts.length === 2) ||
+        (c.req.method === "PATCH" && parts.length >= 3));
+    const orgContribution =
+      isContributionRoute &&
+      required === "write" &&
+      !stewardEditorBypass &&
+      permission === "read" &&
+      effectiveLevel < permissionLevel("write") &&
+      access.orgContributor &&
+      credentialMayContribute(c);
+    c.set("orgContribution", orgContribution);
+
     if (
       !stewardEditorBypass &&
+      !orgContribution &&
       effectiveLevel < permissionLevel(required)
     ) {
       // The archive cap is what refused this, not the caller's standing —
@@ -3538,6 +3595,23 @@ export function createApp(): Hono<AuthEnv> {
   // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
   nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
     assertSafeNodeId(c.req.param("nodeId")!);
+    return next();
+  });
+
+  // A browser opening a node's API URL (a pasted or agent-written link) gets
+  // the app's document page, not raw JSON. Such links often drop the `nodes/`
+  // id prefix, so that form is tried too. Anything else falls through (CU-wdqcq05rah).
+  nestsApp.get("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    if (c.req.header("Sec-Fetch-Dest") !== "document" || new URL(c.req.url).search) return next();
+    const nestId = c.req.param("nestId")!;
+    const raw = c.req.param("nodeId")!;
+    const userEmail = await resolveCallerEmail(c.get("userId"));
+    const { storage } = await engineCache.get(nestId);
+    for (const id of raw.startsWith("nodes/") ? [raw] : [raw, `nodes/${raw}`]) {
+      if (!(await canReadNode(nestId, id, c.get("userId"), userEmail))) continue;
+      const found = await storage.readDocument(id).then(() => true, () => false);
+      if (found) return c.redirect(`/nest/${encodeURIComponent(nestId)}?${new URLSearchParams({ doc: id })}`, 302);
+    }
     return next();
   });
 
@@ -3662,6 +3736,8 @@ export function createApp(): Hono<AuthEnv> {
   //      /rows suffix must beat nodeRoutes' greedy catch-all; no other router
   //      has a POST …/rows.
   nestsApp.route("/:nestId/nodes", tableRowRoutes);
+  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
@@ -3686,6 +3762,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
+  nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
@@ -3698,6 +3775,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
+  nestsApp.route("/:nestId/originals", originalRoutes);
   nestsApp.route("/:nestId/systems", nestSystemRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
@@ -3767,13 +3845,13 @@ export function createApp(): Hono<AuthEnv> {
     "*",
     async (c, next) => {
       const navigation = isDocumentNavigation(c);
-      // An anonymous visitor to a docs-site nest's app URL gets the page. So
-      // does a crawler, which often sends `Accept: */*` or no Accept at all:
-      // without this, links already out there lose their value to it.
-      if (navigation || isCrawler(c)) {
-        const moved = await legacySiteRedirect(c);
-        if (moved) return moved;
-      }
+      // An anonymous GET or HEAD of a docs-site nest's app URL gets the page,
+      // whatever it Accepts: link checkers, AI fetchers and plain curl send
+      // `*/*` or no Accept at all, and a 404 there made every link already out
+      // there look dead. legacySiteRedirect keeps API clients, signed-in
+      // users and `?app=1` on the app.
+      const moved = await legacySiteRedirect(c);
+      if (moved) return moved;
       if (!navigation) return c.json({ error: "Not found" }, 404);
       return next();
     },
@@ -3904,6 +3982,10 @@ export function createApp(): Hono<AuthEnv> {
       500,
     );
   });
+
+  // Fail closed: the org-contributor admission above assumes the node update
+  // is the only PATCH under /nodes (see assertSoleNodePatchRoute).
+  assertSoleNodePatchRoute(app.routes);
 
   return app;
 }
