@@ -10,6 +10,7 @@
  */
 import MarkdownIt from "markdown-it";
 import type { ResolvedBlock } from "./core.js";
+import { WRITE_BRIDGE_JS } from "./write.js";
 
 // `html: false` escapes raw HTML in markdown; links keep markdown-it's own
 // scheme validation (no javascript:, vbscript:, file:, data: other than images).
@@ -46,12 +47,12 @@ const PAGE_CSS = `
   code{background:#f5f5f4;border-radius:4px;padding:.1em .3em}
 `;
 
-function shell(title: string, main: string): string {
+function shell(title: string, main: string, tail = ""): string {
   return (
     `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<title>${esc(title)}</title><style>${PAGE_CSS}</style></head>` +
-    `<body><main>${main}</main></body></html>`
+    `<body><main>${main}</main>${tail}</body></html>`
   );
 }
 
@@ -86,7 +87,7 @@ function tableHtml(columns: string[], rows: Record<string, unknown>[]): string {
 
 const truncatedNote = '<p class="cn-meta cn-truncated">Showing the first part only.</p>';
 
-function blockHtml(b: ResolvedBlock, frameUrl: (blockId: string) => string): string {
+function blockHtml(b: ResolvedBlock, frameUrl: (blockId: string) => string, addressable = false): string {
   if (!b.ok) {
     switch (b.kind) {
       // An md block that cannot be served renders nothing: missing, denied,
@@ -122,6 +123,9 @@ function blockHtml(b: ResolvedBlock, frameUrl: (blockId: string) => string): str
       // origin, and its response carries the matching CSP sandbox.
       return (
         `<div class="cn-block"><iframe sandbox="allow-scripts allow-modals" src="${esc(frameUrl(b.id))}"` +
+        // The write bridge finds a message's frame by this attribute (view
+        // write-back); present only on pages that carry the bridge.
+        (addressable ? ` data-cn-block="${esc(b.id)}"` : "") +
         ` class="cn-frame" title="Embedded page" loading="lazy" referrerpolicy="no-referrer"></iframe></div>`
       );
   }
@@ -137,17 +141,26 @@ export function renderViewPage(r: {
   truncated?: boolean;
   /** The stored layout failed the engine's view schema; no block is served. */
   invalidLayout?: boolean;
+  /** View write-back: the bridge's config JSON (already escaped for a
+   *  <script> element, see write.ts). When set, frames carry their block id
+   *  and the page ends with the config and the bridge; the route must serve
+   *  it under withWriteBridge(VIEW_PAGE_CSP). Unset, the page is unchanged. */
+  writeConfigJson?: string;
 }): string {
   const parts = [`<h1>${esc(r.title)}</h1>`];
   if (r.intro.trim()) parts.push(`<div class="cn-intro">${markdown.render(r.intro)}</div>`);
   if (r.invalidLayout) parts.push(placeholder("This view's layout could not be read."));
-  for (const b of r.blocks) parts.push(blockHtml(b, r.frameUrl));
+  const writes = r.writeConfigJson !== undefined;
+  for (const b of r.blocks) parts.push(blockHtml(b, r.frameUrl, writes));
   if (r.truncated) {
     parts.push(
       `<aside class="cn-block cn-callout cn-info">${esc("This view has more blocks than can be shown; only the first ones are displayed.")}</aside>`,
     );
   }
-  return shell(r.title, parts.join(""));
+  const tail = writes
+    ? `<script type="application/json" id="cn-write-config">${r.writeConfigJson}</script><script>${WRITE_BRIDGE_JS}</script>`
+    : "";
+  return shell(r.title, parts.join(""), tail);
 }
 
 /** The `/p` rendering of a published view: its own intro, and one neutral

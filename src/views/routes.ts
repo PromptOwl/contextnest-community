@@ -43,7 +43,18 @@ import {
   resolveBlocks,
   serializeNestData,
   type Principal,
+  type ResolvedBlock,
 } from "./core.js";
+import {
+  declaredWriteTo,
+  decideWriteTrust,
+  rowsUrl,
+  viewWritesKillSwitch,
+  withWriteBridge,
+  writeConfigJson,
+  writeTargets,
+  type WriteFrames,
+} from "./write.js";
 import { renderViewPage } from "./render.js";
 import {
   authorInfos,
@@ -192,6 +203,49 @@ async function loadServedView(c: any, tail: string): Promise<Gate> {
   return { served: { nestId, viewId, viewer, layout, served, viewApproved, pinned } };
 }
 
+/**
+ * View write-back: for each html block of the served layout that declares
+ * `write_to`, the targets the viewer's page may write through (write.ts).
+ * Empty — so the page carries no script — unless the served layout is an
+ * approved version, no kill switch is on, the viewer is a member (not a
+ * visibility-only reader), and the block passes decideWriteTrust. Whether
+ * the viewer may write a given table is the rows endpoint's call, per request.
+ */
+async function writeFramesFor(s: Served, blocks: ResolvedBlock[]): Promise<WriteFrames> {
+  if (!s.layout.meta || !s.viewApproved || s.served == null || s.viewer.approvedOnly) return {};
+  const killSwitch = viewDataKillSwitch() || viewWritesKillSwitch();
+  if (killSwitch) return {};
+  const declared = declaredWriteTo(s.layout.meta);
+  if (declared.size === 0) return {};
+  const frames: WriteFrames = {};
+  let viewAuthors: string[] | null | undefined;
+  for (const b of blocks) {
+    if (!b.ok || b.kind !== "html") continue;
+    const writeTo = declared.get(b.id);
+    if (!writeTo) continue;
+    const targets = writeTargets(writeTo, blocks);
+    if (Object.keys(targets).length === 0) continue;
+    // The frame serves the artifact's approved version (readArtifact), so
+    // that version's chain is the code that would ask for the write.
+    const artVersion = await getApprovedVersion(s.nestId, b.artifactId);
+    if (viewAuthors === undefined) viewAuthors = await listVersionAuthors(s.nestId, s.viewId, s.served);
+    const artAuthors = artVersion != null ? await listVersionAuthors(s.nestId, b.artifactId, artVersion) : null;
+    const authorsIncomplete = viewAuthors === null || artAuthors === null;
+    const trust = decideWriteTrust({
+      killSwitch,
+      viewApproved: s.viewApproved,
+      artifactApproved: artVersion != null,
+      authors: authorsIncomplete ? [] : await authorInfos(s.nestId, [...viewAuthors!, ...artAuthors!]),
+      authorsIncomplete,
+    });
+    if (!trust.ok) continue;
+    frames[b.id] = Object.fromEntries(
+      Object.entries(targets).map(([dataBlock, tableId]) => [dataBlock, rowsUrl(s.nestId, tableId)]),
+    );
+  }
+  return frames;
+}
+
 function viewerHeaders(c: any, served: number | null) {
   c.header("Cache-Control", "private, no-store");
   if (served != null) c.header("X-View-Snapshot", String(served));
@@ -206,6 +260,8 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
   const deps = createViewDeps();
   const blocks = s.layout.meta ? await resolveBlocks(s.layout.meta, s.nestId, [s.viewer], deps) : [];
   const q = s.pinned !== undefined ? `?v=${s.pinned}` : "";
+  const writeFrames = await writeFramesFor(s, blocks);
+  const writes = Object.keys(writeFrames).length > 0;
   const html = renderViewPage({
     title: s.layout.title,
     intro: s.layout.body,
@@ -214,8 +270,9 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
       `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}`,
     truncated: !!s.layout.meta && s.layout.meta.blocks.length > CAPS.MAX_BLOCKS,
     invalidLayout: !s.layout.meta,
+    ...(writes ? { writeConfigJson: writeConfigJson(writeFrames) } : {}),
   });
-  c.header("Content-Security-Policy", VIEW_PAGE_CSP);
+  c.header("Content-Security-Policy", writes ? withWriteBridge(VIEW_PAGE_CSP) : VIEW_PAGE_CSP);
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
   viewerHeaders(c, s.served);
