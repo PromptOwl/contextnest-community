@@ -1085,7 +1085,7 @@ export const config = {
   },
 
   /**
-   * Max .pptx/.docx upload size in bytes (POST /nests/:id/nodes/office), the
+   * Max .pptx/.docx/.xlsx upload size in bytes (POST /nests/:id/nodes/office), the
    * file as uploaded (compressed). Default 25 MB, for the PDF cap's reasons;
    * what it may inflate to is capped separately (office-extract.ts). Read per
    * request. Override via OFFICE_MAX_MB.

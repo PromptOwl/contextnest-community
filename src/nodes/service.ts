@@ -548,13 +548,13 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 export interface OriginalFile {
   file: string;
   filename: string;
-  kind: "pptx" | "docx";
+  kind: "pptx" | "docx" | "xlsx";
   bytes: number;
   sha256: string;
 }
 
 /** Server-minted original names only — the traversal defense for the route. */
-export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx|xlsx)$/;
 
 export function isOriginalFile(v: unknown): v is OriginalFile {
   const o = v as OriginalFile | null | undefined;

@@ -905,7 +905,7 @@ export const TOOL_DEFINITIONS = [
     // POST /nodes/office) so an agent can attach a file without multipart.
     // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
     description:
-      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx or .docx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, or the Word document's headings, lists and tables) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx, .docx or .xlsx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, the Word document's headings, lists and tables, or a table per spreadsheet sheet) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -938,7 +938,7 @@ export const TOOL_DEFINITIONS = [
         as: {
           type: "string",
           description:
-            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx). A file of the other kind is refused rather than rerouted.',
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx, xlsx). A file of the other kind is refused rather than rerouted.',
         },
       },
     },

@@ -26,7 +26,7 @@ import {
   resetAuthRateLimit,
 } from "./helpers.js";
 import { textPdf } from "./pdf-fixtures.js";
-import { buildPptx } from "./office-fixtures.js";
+import { buildPptx, buildXlsx } from "./office-fixtures.js";
 
 type User = { apiKey: string; userId: string; email: string };
 
@@ -187,6 +187,16 @@ describe("MCP context_upload", () => {
     expect(read.data.node.content).toContain("## Slide 1: Kickoff");
     expect(read.data.node.content).toContain("Welcome everyone");
     expect(read.data.node.tags).toContain("#kickoff");
+  });
+
+  it("turns an xlsx into a governed document, a table per sheet", async () => {
+    const book = await buildXlsx([{ name: "Budget", rows: [["Line", "Amount"], ["Travel", 1200]] }]);
+    const out = await callTool(editor.apiKey, "context_upload", { filename: "Budget 2027.xlsx", content_base64: b64(book) });
+    expect(out.isError).toBe(false);
+    expect(out.data).toMatchObject({ kind: "office", id: "nodes/budget-2027", type: "document" });
+    expect(out.data.original.url).toMatch(/\.xlsx$/);
+    const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${out.data.id}`, undefined, owner.apiKey);
+    expect(read.data.node.content).toContain("## Sheet: Budget\n\n| Line | Amount |\n| --- | --- |\n| Travel | 1200 |");
   });
 
   it("refuses a title already used in the nest, like context_create", async () => {

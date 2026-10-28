@@ -11,8 +11,10 @@ import {
   OfficeFileError,
   OFFICE_MAX_ENTRIES,
   OFFICE_MAX_XML_BYTES,
+  XLSX_MAX_COLS,
+  XLSX_MAX_ROWS,
 } from "../src/nodes/office-extract.js";
-import { buildDocx, buildPptx, bombDocx, manyEntriesDocx } from "./office-fixtures.js";
+import { buildDocx, buildPptx, buildXlsx, bombDocx, manyEntriesDocx } from "./office-fixtures.js";
 
 describe("pptx → markdown", () => {
   it("gives one section per slide, in presentation order, with title, text, tables and notes", async () => {
@@ -93,6 +95,68 @@ describe("docx → markdown", () => {
     });
     const md = (await extractOffice(doc, "docx")).markdown;
     expect(md).toBe("kept");
+  });
+});
+
+describe("xlsx → markdown", () => {
+  it("gives one table per worksheet, in workbook order, skipping chart sheets", async () => {
+    const book = await buildXlsx(
+      [
+        {
+          name: "Accounts",
+          rows: [
+            ["Name", "Owner", "ARR", "Active"],
+            ["Acme | Co", { inline: "Kim" }, 1200, true],
+            [null, null, null, null],
+            ["Globex", "Sam", { formula: "C2*2", value: 2400 }, false],
+          ],
+        },
+        { name: "Dates", rows: [["Day", "Stamp"], [{ date: 45658 }, { date: 45658.5, custom: true }]] },
+      ],
+      { chartSheet: "Chart1" },
+    );
+    const out = await extractOffice(book, "xlsx");
+    expect(out.sheets).toBe(2);
+    expect(out.markdown).toBe(
+      [
+        "## Sheet: Accounts",
+        "",
+        "| Name | Owner | ARR | Active |",
+        "| --- | --- | --- | --- |",
+        "| Acme \\| Co | Kim | 1200 | TRUE |",
+        "| Globex | Sam | 2400 | FALSE |",
+        "",
+        "## Sheet: Dates",
+        "",
+        "| Day | Stamp |",
+        "| --- | --- |",
+        "| 2025-01-01 | 2025-01-01 12:00 |",
+      ].join("\n"),
+    );
+  });
+
+  it("reads dates in the 1904 date system", async () => {
+    const book = await buildXlsx([{ name: "S", rows: [["Day"], [{ date: 44196 }]] }], { date1904: true });
+    expect((await extractOffice(book, "xlsx")).markdown).toContain("| 2025-01-01 |");
+  });
+
+  it("caps rows and columns per sheet and says what was cut", async () => {
+    const wide = Array.from({ length: XLSX_MAX_COLS + 3 }, (_, k) => `c${k}`);
+    const rows = [wide, ...Array.from({ length: XLSX_MAX_ROWS + 7 }, (_, n) => [n])];
+    const out = await extractOffice(await buildXlsx([{ name: "Big", rows }]), "xlsx");
+    const lines = out.markdown.split("\n").filter((l) => l.startsWith("|"));
+    expect(lines).toHaveLength(XLSX_MAX_ROWS + 2); // header + separator + rows
+    expect(lines[0].split(" | ")).toHaveLength(XLSX_MAX_COLS);
+    expect(out.markdown).toContain(
+      `_Truncated: showing the first ${XLSX_MAX_ROWS} of ${XLSX_MAX_ROWS + 7} rows and the first ${XLSX_MAX_COLS} of ${XLSX_MAX_COLS + 3} columns._`,
+    );
+  });
+
+  it("marks an empty sheet and refuses a docx that claims to be an xlsx", async () => {
+    expect((await extractOffice(await buildXlsx([{ name: "Blank", rows: [] }]), "xlsx")).markdown).toBe(
+      "## Sheet: Blank\n\n_Empty sheet._",
+    );
+    await expect(extractOffice(await buildDocx([{ p: "hi" }]), "xlsx")).rejects.toThrow(/not an Excel workbook/);
   });
 });
 

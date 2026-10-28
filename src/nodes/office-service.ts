@@ -1,5 +1,5 @@
 /**
- * Office documents — a .pptx or .docx uploaded as a governed markdown
+ * Office documents — a .pptx, .docx or .xlsx uploaded as a governed markdown
  * document, with the original kept beside it as a download.
  *
  * The text is extracted here (office-extract.ts) rather than by an engine op:
@@ -43,15 +43,16 @@ import {
 export const OFFICE_CONTENT_TYPES: Record<OfficeKind, string> = {
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
 
-const KIND_LABEL: Record<OfficeKind, string> = { pptx: "PowerPoint", docx: "Word" };
+const KIND_LABEL: Record<OfficeKind, string> = { pptx: "PowerPoint", docx: "Word", xlsx: "Excel" };
 
-/** The Office kind a file name claims, or null. Legacy .ppt/.doc and the
- *  macro-enabled .pptm/.docm are not accepted. */
+/** The Office kind a file name claims, or null. Legacy .ppt/.doc/.xls and the
+ *  macro-enabled .pptm/.docm/.xlsm are not accepted. */
 export function officeKindOf(filename: string): OfficeKind | null {
   const ext = (filename.split(".").pop() || "").toLowerCase();
-  return ext === "pptx" || ext === "docx" ? ext : null;
+  return ext === "pptx" || ext === "docx" || ext === "xlsx" ? ext : null;
 }
 
 function originalsDir(nestId: string): string {
@@ -72,7 +73,7 @@ function displayName(filename: string): string {
 /** "Q3 deck.pptx" → "Q3 deck". */
 export function titleFromOfficeFilename(name: string): string {
   return (name.split(/[/\\]/).pop() || "")
-    .replace(/\.(pptx|docx)$/i, "")
+    .replace(/\.(pptx|docx|xlsx)$/i, "")
     .replace(/[_]+/g, " ")
     .trim()
     .slice(0, 200);
@@ -99,7 +100,7 @@ export async function createOfficeDocument(
 ): Promise<NodeMutationResult & { original: OriginalFile }> {
   const kind = officeKindOf(upload.filename);
   if (!kind) {
-    throw new ValidationError("Only .pptx and .docx files can be uploaded as Office documents.");
+    throw new ValidationError("Only .pptx, .docx and .xlsx files can be uploaded as Office documents.");
   }
   let extraction;
   try {
@@ -120,7 +121,9 @@ export async function createOfficeDocument(
   const summary =
     kind === "pptx"
       ? `${extraction.slides} slide${extraction.slides === 1 ? "" : "s"}`
-      : "Word document";
+      : kind === "xlsx"
+        ? `${extraction.sheets} sheet${extraction.sheets === 1 ? "" : "s"}`
+        : "Word document";
   const content =
     `> Imported from **${original.filename}** (${KIND_LABEL[kind]}, ${summary}). ` +
     `[Download the original](${originalUrl(nestId, file)})\n\n${extraction.markdown}\n`;

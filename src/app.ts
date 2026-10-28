@@ -3756,7 +3756,7 @@ export function createApp(): Hono<AuthEnv> {
   //      /:nodeId{.+}/hosted would read "<viewId>/view" as the node id; it
   //      falls through (next()) when the id is not a view node.
   nestsApp.route("/:nestId/nodes", viewRoutes);
-  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx/.xlsx upload), same reason.
   nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);

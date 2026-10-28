@@ -3,7 +3,7 @@
  *
  *   POST /nests/:id/assets          images + video  → the asset store
  *   POST /nests/:id/nodes/pdf       a PDF           → a governed `pdf` node
- *   POST /nests/:id/nodes/office    .pptx / .docx   → a governed document
+ *   POST /nests/:id/nodes/office    .pptx / .docx / .xlsx → a governed document
  *   MCP  context_upload             any of the above, routed by file type
  *
  * Each REST route takes multipart (`file`) or a JSON body naming the bytes —
@@ -71,6 +71,7 @@ const EXT_KIND: Record<string, UploadKind> = {
   pdf: "pdf",
   pptx: "office",
   docx: "office",
+  xlsx: "office",
 };
 
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -108,7 +109,7 @@ export function supportedTypes(kinds: UploadKind[] = ["image", "video", "pdf", "
   if (kinds.includes("image")) parts.push(`png, jpg, jpeg, gif, webp (images, max ${mb(uploadCap("image"))})`);
   if (kinds.includes("video")) parts.push(`mp4, webm (video, max ${mb(uploadCap("video"))})`);
   if (kinds.includes("pdf")) parts.push(`pdf (a PDF document, max ${mb(uploadCap("pdf"))})`);
-  if (kinds.includes("office")) parts.push(`pptx, docx (a document from PowerPoint/Word, max ${mb(uploadCap("office"))})`);
+  if (kinds.includes("office")) parts.push(`pptx, docx, xlsx (a document from PowerPoint/Word/Excel, max ${mb(uploadCap("office"))})`);
   return parts.join("; ");
 }
 
@@ -352,7 +353,7 @@ function fieldsOf(body: Record<string, unknown>): UploadFields {
 const MISSING_FILE: Record<Exclude<UploadRoute, "any">, string> = {
   asset: 'multipart field "file" (an image or video) is required',
   pdf: 'multipart field "file" (a PDF) is required',
-  office: 'multipart field "file" (a .pptx or .docx) is required',
+  office: 'multipart field "file" (a .pptx, .docx or .xlsx) is required',
 };
 
 /**
@@ -424,7 +425,7 @@ export async function storeAsset(nestId: string, upload: ResolvedUpload): Promis
 /** A readable title from an uploaded file name ("Q3 report.pdf" → "Q3 report"). */
 export function titleFromUploadFilename(name: string): string {
   return (name.split(/[/\\]/).pop() || "")
-    .replace(/\.(pdf|pptx|docx)$/i, "")
+    .replace(/\.(pdf|pptx|docx|xlsx)$/i, "")
     .replace(/[_]+/g, " ")
     .trim()
     .slice(0, 200);
@@ -491,7 +492,7 @@ export async function savePdfUpload(
   return { node, version, created: true };
 }
 
-/** A .pptx/.docx upload: always a new document. */
+/** A .pptx/.docx/.xlsx upload: always a new document. */
 export async function saveOfficeUpload(
   nestId: string,
   upload: ResolvedUpload,

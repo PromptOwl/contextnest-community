@@ -2065,7 +2065,7 @@ export async function createPdfNode(
 }
 
 /**
- * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * Upload a .pptx, .docx or .xlsx as a governed markdown document (multipart). The
  * server extracts the slides/text into the body and keeps the original file
  * as a download linked from it.
  */

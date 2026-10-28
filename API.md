@@ -514,7 +514,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
-| Document uploads — MCP `context_upload` (pdf/pptx/docx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
+| Document uploads — MCP `context_upload` (pdf/pptx/docx/xlsx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
 | `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
@@ -1340,15 +1340,16 @@ A `type: "view"` node (§1.12) is a governed layout over other nodes: its body i
 - `?format=raw` of a view node is its stored body (the intro); `/hosted` stays artifact-only (`404` for a view).
 
 ### POST `/nests/:nestId/nodes/office`
-Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PowerPoint (`.pptx`), Word (`.docx`) or Excel (`.xlsx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The text is extracted into the document body:
 - **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
 - **docx** — headings (`Title`, `Heading 1…6` or an outline level) as `#` headings, paragraphs, bulleted and numbered lists, and tables as markdown tables. Deleted tracked changes and field codes are left out.
+- **xlsx** — one `## Sheet: <name>` section per worksheet, in workbook order, holding a markdown table whose first non-empty row is the header. Shared and inline strings, numbers, booleans and errors as shown in the cell; formulas show their last calculated value; numbers in a date format become `YYYY-MM-DD` (or `YYYY-MM-DD HH:MM`), honouring the 1904 date system. Empty rows are skipped. Each sheet shows at most 500 rows and 50 columns, with a `_Truncated: …_` note naming what was cut. Chart sheets, charts and pivot tables are left out.
 
 The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned; re-uploading creates a new document.
 
-- `400` — no `file`; not `.pptx`/`.docx` (legacy `.ppt`/`.doc` and macro-enabled `.pptm`/`.docm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped (only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- `400` — no `file`; not `.pptx`/`.docx`/`.xlsx` (legacy `.ppt`/`.doc`/`.xls` and macro-enabled `.pptm`/`.docm`/`.xlsm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped or more than 500,000 XML elements (a very large sheet is refused, not truncated; only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
 - Returns `201` `{ node, version, stewards? }`.
 
 ### GET `/nests/:nestId/originals/:file`
@@ -1394,7 +1395,7 @@ Three routes take files, by what the file becomes. One allowlist and one set of 
 | Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB | `POST /nests/:id/assets` | an asset; reference it with the returned `markdown` |
 | Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) | `POST /nests/:id/assets` | an asset; the returned `markdown` is its URL on its own line |
 | PDF | `pdf` (judged by its `%PDF-` bytes on the PDF route) | 25 MB (`PDF_MAX_MB`) | `POST /nests/:id/nodes/pdf` | a governed `pdf` document with its text extracted |
-| PowerPoint / Word | `pptx`, `docx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
+| PowerPoint / Word / Excel | `pptx`, `docx`, `xlsx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
 
 SVG, HTML, executables, legacy `.ppt`/`.doc` and everything else are refused with a `400` listing the types above. Document uploads are governed exactly like `POST /nodes` (a draft in a governed nest).
 
