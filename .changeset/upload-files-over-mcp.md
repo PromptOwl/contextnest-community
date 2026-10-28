@@ -1,5 +1,0 @@
----
-"@promptowl/contextnest-community": minor
----
-
-Upload files without multipart. New MCP tool `context_upload` (`filename` + `content_base64`, or `url`) routes a file by type: images and video to the asset store (returning ready-to-paste `markdown`), a PDF to a governed pdf document, a `.pptx`/`.docx` to a governed Office document. `POST /nests/:id/assets`, `/nodes/pdf` and `/nodes/office` also accept the same JSON body. One service now backs all of them, so the type allowlist and caps match everywhere; `url` uploads are fetched with the server's SSRF-safe fetch (https only, private/loopback/metadata addresses refused at connect time, no redirects, size-capped while streaming). On a nest that holds agent writes, a document upload from an API key or over MCP is refused (`403` / `UNAUTHORIZED_ACTION`) because a held push can't carry a file; assets are unaffected. API.md gains an "Uploading files" section and the video cap is corrected to 30 MB (`VIDEO_MAX_MB`), what the server has enforced all along.
