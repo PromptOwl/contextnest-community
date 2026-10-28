@@ -578,6 +578,14 @@ export function createApp(): Hono<AuthEnv> {
   // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
+  // Prometheus metrics (METRICS_ENABLED). First, so every request is timed;
+  // loaded only when on, so a default server never imports prom-client.
+  if (config.METRICS_ENABLED) {
+    const metrics = import("./ops/metrics.js");
+    app.use("*", async (c, next) => (await metrics).httpMetrics(c, next));
+    app.get("/metrics", async (c) => (await metrics).metricsHandler(c));
+  }
+
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
   // CORS allowlist — see config.CORS_ORIGINS. In key mode we default to a

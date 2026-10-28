@@ -107,6 +107,19 @@ service:
   port: 3838
   annotations: {}
 
+metrics:
+  # -- Serve Prometheus metrics at /metrics (sets METRICS_ENABLED). To require
+  # a scrape token, put METRICS_TOKEN in secrets.env.
+  enabled: false
+  serviceMonitor:
+    # -- Render a prometheus-operator ServiceMonitor (needs its CRDs).
+    enabled: false
+    interval: 30s
+    # -- Extra labels, e.g. the release label your Prometheus selects on.
+    labels: {}
+    # -- When METRICS_TOKEN is set: {name: <secret>, key: METRICS_TOKEN}.
+    bearerTokenSecret: {}
+
 ingress:
   enabled: false
   className: ""

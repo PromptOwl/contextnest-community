@@ -69,6 +69,14 @@ has default 'DATA_ROOT: "/data"'
 lacks default "kind: Secret"
 lacks default "kind: Ingress"
 lacks default "DB_DRIVER"
+lacks default "METRICS_ENABLED"
+lacks default "kind: ServiceMonitor"
+
+render metrics --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set metrics.serviceMonitor.bearerTokenSecret.name=cn-metrics --set metrics.serviceMonitor.bearerTokenSecret.key=METRICS_TOKEN
+has metrics 'METRICS_ENABLED: "true"'
+has metrics "kind: ServiceMonitor"
+has metrics "path: /metrics"
+has metrics "name: cn-metrics"
 
 render postgres-url-rwx -f "$CHART/ci/postgres-url-rwx-values.yaml"
 has postgres-url-rwx "replicas: 2"

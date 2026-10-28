@@ -100,6 +100,14 @@ export const config = {
   get LOG_FORMAT(): "text" | "json" {
     return process.env.LOG_FORMAT?.trim().toLowerCase() === "json" ? "json" : "text";
   },
+  /** Serve Prometheus metrics at GET /metrics. Off by default. */
+  get METRICS_ENABLED(): boolean {
+    return process.env.METRICS_ENABLED === "true";
+  },
+  /** When set, /metrics needs `Authorization: Bearer <this>`. */
+  get METRICS_TOKEN(): string {
+    return process.env.METRICS_TOKEN?.trim() ?? "";
+  },
   /**
    * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
    * proxy traffic. Unset = every interface (Node's default, unchanged).

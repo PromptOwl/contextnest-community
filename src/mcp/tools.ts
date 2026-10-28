@@ -1979,6 +1979,10 @@ export async function handleToolCall(
     status = 500;
     throw err;
   } finally {
+    if (config.METRICS_ENABLED) {
+      const ms = Date.now() - started;
+      void import("../ops/metrics.js").then((m) => m.recordToolCall(toolName, status, ms));
+    }
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,

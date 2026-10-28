@@ -128,6 +128,9 @@ Kubernetes API.
 | `service.type` | `ClusterIP` | Service type. |
 | `service.port` | `3838` | Service port (the container always listens on 3838). |
 | `service.annotations` | `{}` | Service annotations. |
+| `metrics.enabled` | `false` | Serve Prometheus metrics at `/metrics`. Add `METRICS_TOKEN` to `secrets.env` to require a scrape token. |
+| `metrics.serviceMonitor.enabled` | `false` | Render a prometheus-operator ServiceMonitor (needs its CRDs). |
+| `metrics.serviceMonitor.interval` / `.labels` / `.bearerTokenSecret` | `30s` / `{}` / `{}` | Scrape interval, extra labels for your Prometheus selector, and `{name, key}` of the secret holding `METRICS_TOKEN`. |
 | `ingress.enabled` | `false` | Create an Ingress. |
 | `ingress.className` | `""` | `ingressClassName`. |
 | `ingress.annotations` | `{}` | Ingress annotations. MCP streams: with ingress-nginx, turn proxy buffering off. |
