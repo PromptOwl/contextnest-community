@@ -27,12 +27,14 @@ export function workItemKey(w: WorkItem): string {
 /**
  * The My Work badge: everything waiting on you — the reviews and requests the
  * server totals, plus the open tasks assigned to you. Assigned tasks aren't in
- * pagination.total because they don't page with the reviews.
+ * pagination.total because they don't page with the reviews. Unread
+ * notifications (comments, mentions, watched documents) count too — /me/work
+ * carries them whatever the page size.
  */
 export function waitingOnMeCount(
-  work: { pagination?: WorkPagination; assigned?: AssignedItem[] } | undefined,
+  work: { pagination?: WorkPagination; assigned?: AssignedItem[]; notifications?: unknown[] } | undefined,
 ): number {
-  return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0);
+  return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0) + (work?.notifications?.length ?? 0);
 }
 
 /** "All caught up" only when no review, request or assigned task waits on you. */

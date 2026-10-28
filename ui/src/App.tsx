@@ -20,6 +20,7 @@ import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { UpdateBadge } from "./components/UpdateBadge";
+import { InboxBell } from "./components/InboxBell";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
@@ -1460,6 +1461,12 @@ export default function App() {
                 actions, so they moved to the nest view switcher below — which
                 also keeps them reachable from each other. */}
 
+            {adminStatus?.me && (
+              <InboxBell
+                className={showSidebar ? "md:hidden" : ""}
+                onOpen={() => setView({ page: "dashboard", tab: "my-work" })}
+              />
+            )}
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}

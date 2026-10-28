@@ -45,6 +45,10 @@ describe("waitingOnMeCount (the My Work badge)", () => {
     expect(waitingOnMeCount({ pagination: page(4), assigned: [] })).toBe(4);
   });
 
+  it("counts unread notifications too", () => {
+    expect(waitingOnMeCount({ pagination: page(1), assigned: [task("a")], notifications: [{}, {}] })).toBe(4);
+  });
+
   it("is zero before the read lands", () => {
     expect(waitingOnMeCount(undefined)).toBe(0);
   });
