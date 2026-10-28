@@ -757,7 +757,7 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
       (n: any) => n.kind === "mention" && n.node_id === authNodeId,
     );
     expect(mention).toBeTruthy();
-    expect(mention.message).toContain(reader.email);
+    expect(mention.message).toContain("Reader mentioned you");
   });
 
   it("a name the MODEL writes notifies nobody — only the asker's own @mentions do", async () => {
