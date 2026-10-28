@@ -199,6 +199,14 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
+  {
+    // Nest page → New Document (CN-CREATE-001 … CN-CREATE-018). Serial: each
+    // case creates documents through the editor in a nest it then deletes.
+    file: 'new-document/new_document.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -282,7 +290,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -575,6 +583,17 @@ export default defineConfig({
           name: 'archive',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/archive/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'new-document',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/new-document/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
