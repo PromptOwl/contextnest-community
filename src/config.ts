@@ -202,6 +202,10 @@ export const config = {
   get PROMPTOWL_TEAMS_ENABLED(): boolean {
     return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
   },
+  /** View-data kill switch (§1.12): `off` withholds every view frame's data. */
+  get CN_VIEW_DATA_OFF(): boolean {
+    return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
+  },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
     return process.env.PROMPTOWL_BYPASS_SECRET || "";
