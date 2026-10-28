@@ -44,6 +44,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `3838` | HTTP port the server listens on. |
+| `UPDATE_CHECK` | `true` | Checks the public npm registry (`registry.npmjs.org`) for a newer release at startup and every 12 hours, and shows server admins a "vX available" badge by the footer version with the command that updates this install. The server never updates itself. `false` turns the check off (pinned versions, air-gapped servers). |
 | `METRICS_ENABLED` | `false` | `true` serves Prometheus metrics at `GET /metrics`: request latency by method, route pattern and status (`contextnest_http_request_duration_seconds`), MCP tool calls by tool and status (`contextnest_mcp_tool_duration_seconds`, status `503` = vault busy), Postgres pool connections (`contextnest_db_pool_*`) and Node process metrics. Route labels are patterns (`/nests/:nestId/nodes`), so ids never create series. A starter Grafana dashboard is in `deploy/grafana/`. |
 | `METRICS_TOKEN` | _(unset — no token)_ | When set, `/metrics` needs `Authorization: Bearer <token>`. Set it whenever the port is reachable beyond your Prometheus — route names and request rates are visible to whoever can scrape. |
 | `LOG_FORMAT` | `text` | `json` prints every log line as one JSON object — `{"time","level","severity","message"}`, with `info`/`debug` on stdout and `warn`/`error` on stderr — for log shippers (Loki, Cloud Logging, Datadog). Anything else keeps plain console output. |

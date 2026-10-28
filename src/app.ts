@@ -1085,6 +1085,15 @@ export function createApp(): Hono<AuthEnv> {
     return c.json(currentServerSettings());
   });
 
+  // Newer release on npm, and the command that updates this install.
+  app.use("/admin/update-status", flexAuthMiddleware);
+  app.get("/admin/update-status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { updateStatus } = await import("./ops/update-check.js");
+    return c.json(updateStatus());
+  });
+
   // Models the current credential can reach — the Hootie model picker. On the
   // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
   // an own key (byok), whatever that key's provider/gateway lists. With byok,

@@ -1,5 +1,6 @@
 import type React from "react";
 import {
+  ArrowUpCircle,
   BookOpen,
   Boxes,
   FileText,
@@ -206,6 +207,19 @@ export default function GuidePage() {
               ["Activity trace", <>Every governance action on the server. Each nest has its own trace under Activity.</>],
             ]}
           />
+        </Section>
+
+        <Section title="Updating" icon={ArrowUpCircle}>
+          <div className="space-y-2 text-muted-foreground">
+            <p>
+              When a newer release is out, server admins see <b className="text-foreground">vX.Y.Z available</b> next to the version at the bottom of the page. It opens the command for this server. Nests, users and settings are kept.
+            </p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>npm: stop the server, then start it with <code>npx @promptowl/contextnest-community@latest</code>.</li>
+              <li>Docker Compose: <code>docker compose pull && docker compose up -d</code>. Helm: set <code>image.tag</code> and <code>helm upgrade</code>.</li>
+              <li>The check reads the public npm registry every 12 hours. Set <code>UPDATE_CHECK=false</code> to turn it off.</li>
+            </ul>
+          </div>
         </Section>
 
         {ADMIN_HELP_TOPICS.map((t) => (

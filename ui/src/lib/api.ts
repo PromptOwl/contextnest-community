@@ -459,6 +459,21 @@ export async function getAdminSettings() {
   return request<AdminSettings>("/admin/settings");
 }
 
+/** Admin: is a newer release on npm, and the command that updates this install. */
+export interface UpdateStatus {
+  enabled: boolean;
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+  install: "container" | "npm";
+  command: string;
+}
+
+export async function getUpdateStatus() {
+  return request<UpdateStatus>("/admin/update-status");
+}
+
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
   patch: Partial<AdminSettings>,

@@ -100,6 +100,11 @@ export const config = {
   get LOG_FORMAT(): "text" | "json" {
     return process.env.LOG_FORMAT?.trim().toLowerCase() === "json" ? "json" : "text";
   },
+  /** Check npm for a newer release and tell the server admin. On by default;
+   *  "false" turns it off (pinned versions, air-gapped servers). */
+  get UPDATE_CHECK(): boolean {
+    return process.env.UPDATE_CHECK !== "false";
+  },
   /** Serve Prometheus metrics at GET /metrics. Off by default. */
   get METRICS_ENABLED(): boolean {
     return process.env.METRICS_ENABLED === "true";

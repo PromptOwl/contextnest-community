@@ -2931,6 +2931,9 @@ Authorization mirrors the grants / steward-roster rule (`canManageStewards`): th
 
 Surfaced in the UI from the nest view's overflow menu → **Activity trace** (owner/nest-admin only), which renders `ActivityTracePage` in nest-scoped mode (nest column hidden).
 
+### GET `/admin/update-status` (server admin)
+Whether a newer release is on npm, and the command that updates this install: `{ "enabled", "current", "latest", "update_available", "checked_at", "install": "npm" | "container", "command" }`. The server reads `registry.npmjs.org` at startup and every 12 hours (`UPDATE_CHECK=false` turns it off); `latest` is `null` until a check succeeds, so an offline server simply reports no update. The server never updates itself. Server admin only — `403` otherwise. The UI shows it as a badge next to the footer version.
+
 ### GET `/admin/status` (server admin)
 Health and network report behind **Settings → Network & status**. Server admin only (license admin or superadmin; anyone in open mode) — `401` without credentials, `403` otherwise. Never returns a secret: connection strings lose their userinfo, webhooks and SMTP are reported as host and port only.
 

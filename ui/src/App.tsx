@@ -19,6 +19,7 @@ import { LicenseBanner } from "./components/LicenseNotice";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { UpdateBadge } from "./components/UpdateBadge";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
@@ -1884,6 +1885,7 @@ export default function App() {
         ) : (
         <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+          {isAdmin && <UpdateBadge />}
         </footer>
         )
       )}

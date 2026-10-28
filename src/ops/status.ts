@@ -120,6 +120,13 @@ export function egressTargets(): EgressTarget[] {
     config.PROMPTOWL_API_URL,
     443,
   );
+  if (config.UPDATE_CHECK) {
+    add(
+      { id: "npm-registry", purpose: "Checks for a newer ContextNest release", protocol: "https", configuredBy: "UPDATE_CHECK", required: false },
+      "https://registry.npmjs.org",
+      443,
+    );
+  }
   const gw = getModelGateway();
   if (gw) {
     add(
