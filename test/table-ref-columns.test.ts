@@ -426,7 +426,8 @@ describe("review: UI backlinks resolve refs the way the server does", () => {
       { column: "a", rows: ["r1"] },
     ]);
     const old = findBacklinks(nodes, { id: "nodes/old/aga", title: "Old" });
-    expect(old.find((b) => b.id === "nodes/t")?.refs).toBeUndefined();
+    // Not even as an untyped link: the graph draws none there either.
+    expect(old.find((b) => b.id === "nodes/t")).toBeUndefined();
   });
 
   it("dedupes rows in linear time (10k rows at one target)", () => {
@@ -504,5 +505,52 @@ describe("review: approved-only readers can't probe unapproved titles", () => {
     expect(resolve("Acme Acquisition Target", false)).toBeNull();
     expect(resolve("acme", false)).toBe("nodes/acme");
     expect(resolve("nodes/acme", true)).toBe("nodes/acme");
+  });
+});
+
+describe("review: a public reader's graph uses the approved table only", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: User;
+  let outsider: User;
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@refpub.test", "Owner");
+    outsider = await registerUser(app, "outsider@refpub.test", "Outsider");
+    nestId = (await jsonRequest(app, "POST", "/nests", { name: "Public CRM" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true, allow_self_approve: true }, owner.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    for (const title of ["AGA", "Secret Co"]) {
+      expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title, content: "Account." }, owner.apiKey)).status).toBe(201);
+    }
+    // v1 approved; v2 (a draft row r9 → Secret Co) and a never-approved table wait for review.
+    const body = "id:key,account:ref\nr1,[[AGA]]";
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Pipeline", type: "table", content: body }, owner.apiKey)).status).toBe(201);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { allow_self_approve: false }, owner.apiKey);
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/pipeline`, { content: `${body}\nr9,[[Secret Co]]` }, owner.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Draft Deals", type: "table", content: "id:key,account:ref\nd1,[[AGA]]" }, owner.apiKey)).status).toBe(201);
+  });
+
+  afterAll(() => env.cleanup());
+
+  const typedFrom = (data: any, source: string) =>
+    data.links.filter((l: any) => l.source === source && l.type);
+
+  it("the owner sees the working copy's rows (unchanged)", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    expect(typedFrom(data, "nodes/pipeline").map((l: any) => l.rows).flat().sort()).toEqual(["r1", "r9"]);
+  });
+
+  it("a public reader gets no draft row key and no typed edge from a never-approved table", async () => {
+    const { status, data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, outsider.apiKey);
+    expect(status).toBe(200);
+    expect(typedFrom(data, "nodes/pipeline")).toEqual([
+      { source: "nodes/pipeline", target: "nodes/aga", type: "account", rows: ["r1"], rowCount: 1 },
+    ]);
+    expect(JSON.stringify(typedFrom(data, "nodes/pipeline"))).not.toContain("r9");
+    expect(typedFrom(data, "nodes/draft-deals")).toEqual([]);
   });
 });

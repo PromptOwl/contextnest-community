@@ -12,7 +12,9 @@ import {
   type ContextNode,
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
-import { isDerivedAnnotationsNode } from "./service.js";
+import { bodyOnly, isDerivedAnnotationsNode } from "./service.js";
+import { getApprovedVersion } from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import { taskFieldsOf } from "./task-fields.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
@@ -109,6 +111,17 @@ const MAX_LINK_ROWS = 50;
 
 const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
+/** The approved version's body, or null when the node was never approved. */
+async function approvedBody(
+  nestId: string,
+  versions: Parameters<typeof reconstructApproved>[0],
+  id: string,
+): Promise<string | null> {
+  const approved = await getApprovedVersion(nestId, id);
+  if (approved == null) return null;
+  return bodyOnly(id, (await reconstructApproved(versions, nestId, id, approved)).raw);
+}
+
 /** Extract the raw [[target]] strings (ignoring |display aliases) from a body. */
 export function extractWikiTargets(body: string): string[] {
   const out: string[] = [];
@@ -165,7 +178,7 @@ export async function buildNestGraph(
    *  public/read tier can't enumerate them via the graph. */
   canSeeIdentities: boolean,
 ): Promise<NestGraph> {
-  const { storage } = await engineCache.get(nestId);
+  const { storage, versions } = await engineCache.get(nestId);
   // Derived annotation projections are machine-maintained, so they are not
   // nodes of the ontology the graph draws.
   const docs: ContextNode[] = (await storage.discoverDocuments()).filter(
@@ -193,11 +206,19 @@ export async function buildNestGraph(
   // pointing there, and `refs` lists every column when more than one does.
   // Runs BEFORE the wikilink pass and claims the pair's dedupe key, so a ref
   // cell's `[[AGA]]` doesn't also draw an untyped duplicate.
+  // A public reader gets rows from the approved table only, resolved by
+  // id/slug — the same rule as table-query, so no draft row key leaks here.
+  const approvedOnly = await isPublicReader(nestId, userId);
+  const resolveTypedRef = approvedOnly
+    ? makeRefResolver(accessible, { titles: false })
+    : resolveRef;
   for (const d of accessible) {
     if ((d.frontmatter as { type?: string })?.type !== "table") continue;
     let refs: ReturnType<typeof extractTableRefs>;
     try {
-      refs = extractTableRefs(parseTable(d.body || ""));
+      const body = approvedOnly ? await approvedBody(nestId, versions, d.id) : d.body || "";
+      if (body == null) continue; // never approved: no typed edges for this reader
+      refs = extractTableRefs(parseTable(body));
     } catch {
       continue; // an unparseable table still gets its plain wikilink edges below
     }
@@ -205,7 +226,7 @@ export async function buildNestGraph(
     // pointing at one account must not dedupe quadratically.
     const byTarget = new Map<string, Map<string, Set<string>>>();
     for (const r of refs) {
-      const targetId = resolveRef(r.target, !!r.bare);
+      const targetId = resolveTypedRef(r.target, !!r.bare);
       if (!targetId || targetId === d.id) continue;
       let cols = byTarget.get(targetId);
       if (!cols) byTarget.set(targetId, (cols = new Map()));

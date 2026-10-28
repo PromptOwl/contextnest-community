@@ -1,4 +1,3 @@
-import { tableRefReport } from "../tables/refs.js";
 import { recordNodeAccess } from "../governance/access-log.js";
 import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
 import { Hono } from "hono";
@@ -20,6 +19,7 @@ import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,

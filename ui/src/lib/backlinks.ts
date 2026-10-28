@@ -224,7 +224,13 @@ export function findBacklinks(
       continue;
     }
     const targets = extractWikiLinkTargets(node.content ?? "");
-    if (targets.some(matches)) out.push({ id: node.id, title: node.title });
+    // A table's [[…]] resolve as the graph does (first title wins), so a ref
+    // cell naming a same-titled node never shows up here as an untyped link.
+    const linked =
+      node.type === "table"
+        ? targets.some((t) => (resolveRef ??= makeRefResolver(nodes))(t, false) === target.id)
+        : targets.some(matches);
+    if (linked) out.push({ id: node.id, title: node.title });
   }
   return out;
 }
