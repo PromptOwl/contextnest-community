@@ -9,10 +9,10 @@ import { reads, useNests } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Archive, ArchiveRestore, Bookmark, Building2, UserCheck,
+  FileText, Plus, Database, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Archive, ArchiveRestore, Bookmark, Building2, UserCheck,
 } from "lucide-react";
 import { ANON_USER_ID } from "../../../lib/constants";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { toast } from "sonner";
 import { AllNestsBar } from "../../../components/AllNestsBar";
 import { relTime, formatServerDate } from "../../../lib/dates";
@@ -402,7 +402,7 @@ export default function NestsPage() {
                 <code className="text-xs bg-white/60 px-1.5 py-0.5 rounded font-mono">
                   {serverUrl}
                 </code>
-                <CopyInline value={serverUrl} />
+                <CopyButton text={serverUrl} variant="ghost" className="ml-1 h-6 px-1.5" />
               </CardDescription>
             </div>
             {/* On a cold load `nests` is [], and rendering that as 0/0 reads as
@@ -434,12 +434,12 @@ export default function NestsPage() {
             <ClientHint
               icon={<Bot className="h-4 w-4" />}
               title="Hootie"
-              desc="Settings → Vault → Remote Server → paste URL"
+              desc="PromptOwl's AI assistant. In Hootie, open Settings → ContextNest Vault → Remote Server and paste the URL above."
             />
             <ClientHint
               icon={<Monitor className="h-4 w-4" />}
               title="Claude Desktop"
-              desc="Add MCP endpoint per nest via Connect button"
+              desc="Open a nest and click Connect in its sidebar to get that nest's MCP endpoint."
             />
           </div>
         </CardContent>
@@ -1581,32 +1581,11 @@ function ClientHint({
       <div className="text-muted-foreground mt-0.5">{icon}</div>
       <div className="min-w-0">
         <div className="font-medium text-foreground">{title}</div>
-        <div className={`text-muted-foreground ${mono ? "font-mono text-[10px]" : ""} truncate`}>
+        <div className={`text-muted-foreground ${mono ? "font-mono text-[10px] break-all" : ""}`}>
           {desc}
         </div>
       </div>
     </div>
-  );
-}
-
-function CopyInline({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={async (e) => {
-        e.stopPropagation();
-        if (!(await copyTextWithToast(value))) return;
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      }}
-      className="ml-1 inline-flex items-center hover:text-foreground"
-    >
-      {copied ? (
-        <Check className="h-3 w-3 text-green-600" />
-      ) : (
-        <Copy className="h-3 w-3" />
-      )}
-    </button>
   );
 }
 

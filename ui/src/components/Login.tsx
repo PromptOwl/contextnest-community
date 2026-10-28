@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { useAuth } from "../auth/AuthContext";
 import { toast } from "sonner";
 
@@ -22,7 +22,6 @@ export function Login() {
   const [loading, setLoading] = useState(false);
   const [deviceUrl, setDeviceUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
   // PromptOwl sign-in gate (PROMPTOWL_SIGN_IN_GATE on the server). When
@@ -89,13 +88,6 @@ export function Login() {
       cancelled = true;
     };
   }, []);
-
-  const copyCode = async () => {
-    if (!deviceCode) return;
-    if (!(await copyTextWithToast(deviceCode))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -286,13 +278,7 @@ export function Login() {
                 <code className="flex-1 bg-background border rounded px-2 py-1.5 text-xs font-mono break-all">
                   {deviceCode}
                 </code>
-                <button
-                  type="button"
-                  onClick={copyCode}
-                  className="px-2 py-1.5 rounded border text-xs hover:bg-secondary"
-                >
-                  {copied ? "Copied" : "Copy"}
-                </button>
+                <CopyButton text={deviceCode} label="Copy" />
               </div>
             )}
           </div>

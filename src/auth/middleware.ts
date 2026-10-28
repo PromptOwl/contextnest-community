@@ -36,6 +36,10 @@ export type AuthEnv = {
     /** Kind of principal behind the credential (see PrincipalKind). */
     principalKind?: PrincipalKind;
     nestPermission: NestPermission;
+    /** Set by the /nests access gate (app.ts) when THIS request is an org
+     *  contributor's create or propose (CU-wdqcq05rz6). The permission stays
+     *  'read'; only the node create/update handlers act on this. */
+    orgContribution?: boolean;
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
     // and the push allowlist attribute to — and key on — the exact credential

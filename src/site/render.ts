@@ -42,17 +42,17 @@ a{color:var(--accent)}
 header.top{border-bottom:1px solid var(--line);background:var(--head);padding:12px 24px;display:flex;align-items:center;gap:12px}
 header.top .brand{display:flex;align-items:center;gap:10px;font-weight:650;color:var(--fg);text-decoration:none;font-size:17px}
 header.top .brand img{height:28px;width:auto}
-.layout{display:grid;grid-template-columns:260px minmax(0,1fr) 220px;gap:40px;max-width:1280px;margin:0 auto;padding:0 24px}
-details.navbox{position:sticky;top:0;align-self:start;max-height:100vh;overflow-y:auto}
+.layout{display:grid;grid-template-columns:280px minmax(0,1fr) 200px;gap:40px;max-width:1280px;margin:0 auto;padding:0 24px}
+details.navbox{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 details.navbox summary{display:none}
-nav.side{padding:28px 0;font-size:14.5px}
+nav.side{padding:28px 4px 96px 0;font-size:14.5px}
 nav.side ul{list-style:none;margin:0;padding:0}
-nav.side li{margin:1px 0}
-nav.side a{display:block;padding:4px 10px;border-radius:6px;color:var(--fg);text-decoration:none;line-height:1.4}
+nav.side li{margin:2px 0}
+nav.side a{display:block;padding:5px 10px;border-radius:6px;color:var(--fg);text-decoration:none;line-height:1.4}
 nav.side a:hover{background:var(--soft)}
 nav.side a[aria-current=page]{background:var(--soft);color:var(--accent);font-weight:600}
-nav.side .folder{margin:14px 0 4px;padding:0 10px;font-size:12px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
-nav.side ul ul{padding-left:10px;border-left:1px solid var(--line);margin-left:10px}
+nav.side .folder{margin:20px 0 6px;padding:0 10px;font-size:12px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+nav.side ul ul{padding-left:6px;border-left:1px solid var(--line);margin-left:10px}
 nav.side input{width:100%;margin:0 0 12px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
 main{min-width:0;padding:28px 0 64px}
 article{max-width:72ch}
@@ -94,11 +94,11 @@ aside.toc li{margin:4px 0}aside.toc li.h3{padding-left:12px}
 aside.toc a{color:var(--muted);text-decoration:none}aside.toc a:hover{color:var(--accent)}
 footer.foot{border-top:1px solid var(--line);padding:20px 24px;font-size:13px;color:var(--muted);text-align:center}
 footer.foot a{color:var(--muted)}
-@media (max-width:1100px){.layout{grid-template-columns:240px minmax(0,1fr)}aside.toc{display:none}}
+@media (max-width:1100px){.layout{grid-template-columns:256px minmax(0,1fr)}aside.toc{display:none}}
 @media (max-width:760px){
   .layout{display:block;padding:0 16px}
   header.top{padding:12px 16px}
-  details.navbox{position:static;max-height:none;overflow:visible;border-bottom:1px solid var(--line);padding:10px 0}
+  details.navbox{position:static;height:auto;overflow:visible;border-bottom:1px solid var(--line);padding:10px 0}
   details.navbox summary{display:list-item;cursor:pointer;font-weight:600}
   nav.side{padding:12px 0 0}
   h1{font-size:1.75em}
@@ -108,8 +108,13 @@ footer.foot a{color:var(--muted)}
 `;
 }
 
-/** Nav filter + "Copy page" (fetches the page's own .md). Static, so its CSP hash is fixed. */
-const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){fetch(b.getAttribute('data-copy')).then(function(r){return r.text()}).then(function(t){return navigator.clipboard.writeText(t)}).then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
+/**
+ * Nav filter + "Copy page" (fetches the page's own .md). Static, so its CSP hash is fixed.
+ * Safari only lets a clipboard write start inside the click, so the write is
+ * opened at once with a ClipboardItem that waits on the fetch; writing after
+ * the fetch resolves is the fallback for browsers without ClipboardItem.
+ */
+const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){var c=navigator.clipboard,u=b.getAttribute('data-copy');function md(){return fetch(u).then(function(r){if(!r.ok)throw r.status;return r.text()})}function late(){return md().then(function(t){return c.writeText(t)})}var p;try{p=c.write([new ClipboardItem({'text/plain':md().then(function(t){return new Blob([t],{type:'text/plain'})})})]).catch(late)}catch(e){p=late()}p.then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
 
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s).digest("base64")}'`;
 
@@ -398,13 +403,60 @@ function renderToc(site: Site): string {
   });
 }
 
+/**
+ * Words a tag hub keeps upper-case: "mcp" reads "MCP", never "Mcp". Only
+ * letters that are never an ordinary English word — "rest", "id" and "soc"
+ * are left out, so a "rest" tag reads "Rest", not "REST".
+ */
+const ACRONYMS = new Set([
+  "ai", "api", "cli", "sdk", "sso", "mcp", "llm", "rag", "ui", "ux", "url", "http", "https",
+  "json", "yaml", "sql", "seo", "pdf", "csv", "html", "css", "jwt", "oidc", "saml", "rbac", "gdpr",
+  "hipaa", "gtm", "crm", "erp", "kpi", "okr", "faq", "dns", "aws", "gcp",
+]);
+
+/** A tag as a heading: "api-design" → "API Design", "getting_started" → "Getting Started". */
+export function tagTitle(tag: string): string {
+  const title = tag
+    .replace(/^#/, "")
+    .split(/[-_\s/]+/)
+    .filter(Boolean)
+    .map((w) => {
+      const lower = w.toLowerCase();
+      if (ACRONYMS.has(lower)) return lower.toUpperCase();
+      // A plural acronym: "apis" → "APIs", "llms" → "LLMs".
+      if (lower.endsWith("s") && ACRONYMS.has(lower.slice(0, -1))) return `${lower.slice(0, -1).toUpperCase()}s`;
+      return w[0].toUpperCase() + w.slice(1);
+    })
+    .join(" ");
+  // A tag of separators only still needs a heading.
+  return title || tag;
+}
+
+/** ~155 characters, cut on a word. */
+function clip(text: string, max = 155): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > 80 ? lastSpace : max).replace(/[,;:.\s]+$/, "")}…`;
+}
+
 export function renderTagPage(site: Site, hub: TagHub): string {
-  const description = hub.definition
-    ? hub.definition.slice(0, 155)
-    : `${hub.pages.length} pages in ${site.name} about ${hub.tag}.`;
+  const title = tagTitle(hub.tag);
+  const n = hub.pages.length;
+  const count = `${n} ${n === 1 ? "page" : "pages"}`;
+  // Name the topic and count its pages; lead with the glossary definition
+  // when there is one, else name the first pages so no two hubs read alike.
+  const names = hub.pages.slice(0, 3).map((p) => p.title);
+  // The count sentence is never clipped away: a long definition is cut first.
+  const tail = `${count} in ${site.name} about ${title}`;
+  const description = clip(
+    hub.definition
+      ? `${clip(`${title}: ${hub.definition.trim().replace(/[.\s]+$/, "")}.`, Math.max(60, 154 - tail.length))} ${tail}.`
+      : `${tail}${names.length ? `, including ${names.join(", ")}` : ""}.`,
+  );
   const canonical = url(site, hub.path);
   return shell(site, {
-    title: `${hub.tag} — ${site.name}`,
+    title: `${title} — ${site.name}`,
     description,
     canonical,
     current: hub.path,
@@ -414,14 +466,14 @@ export function renderTagPage(site: Site, hub: TagHub): string {
       "@graph": [
         {
           "@type": "CollectionPage",
-          name: hub.tag,
+          name: title,
           url: canonical,
-          about: { "@type": "DefinedTerm", name: hub.tag, ...(hub.definition ? { description: hub.definition } : {}) },
+          about: { "@type": "DefinedTerm", name: title, ...(hub.definition ? { description: hub.definition } : {}) },
           hasPart: hub.pages.map((p) => ({ "@type": "TechArticle", name: p.title, url: url(site, p.path) })),
         },
       ],
     })}</script>`,
-    main: `<article><nav class="crumbs" aria-label="Breadcrumb"><a href="${esc(href(site, ""))}">${esc(site.name)}</a> / Topics</nav><h1>${esc(hub.tag)}</h1>${hub.definition ? `<p>${esc(hub.definition)}</p>` : ""}<ul>${hub.pages
+    main: `<article><nav class="crumbs" aria-label="Breadcrumb"><a href="${esc(href(site, ""))}">${esc(site.name)}</a> / Topics</nav><h1>${esc(title)}</h1>${hub.definition ? `<p>${esc(hub.definition)}</p>` : ""}<ul>${hub.pages
       .map((p) => `<li><a href="${esc(href(site, p.path))}">${esc(p.title)}</a> — ${esc(p.description)}</li>`)
       .join("")}</ul></article>`,
   });

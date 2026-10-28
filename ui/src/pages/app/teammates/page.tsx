@@ -7,9 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../../lib/queries";
 import { parseServerDate } from "../../../lib/dates";
 import { useAuth } from "../../../auth/AuthContext";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
-  UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
+  UserPlus, Shield, ShieldCheck, ShieldOff, Users, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,10 +54,6 @@ export default function TeammatesPage() {
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
   const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
-  // "Copied" flash on the temp-password Copy button. Reset whenever a new
-  // password is generated so a prior flash doesn't leak across resets.
-  const [resetCopied, setResetCopied] = useState(false);
-  useEffect(() => setResetCopied(false), [resetPw?.password]);
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -429,32 +425,14 @@ export default function TeammatesPage() {
                   <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
                     {resetPw.password}
                   </code>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      const ok = await copyTextWithToast(
-                        resetPw.password!,
-                        "Temporary password copied",
-                      );
-                      if (ok) {
-                        setResetCopied(true);
-                        setTimeout(() => setResetCopied(false), 1500);
-                      }
-                    }}
-                  >
-                    {resetCopied ? (
-                      <>
-                        <Check className="h-3.5 w-3.5 mr-1 text-green-600" />
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3.5 w-3.5 mr-1" />
-                        Copy
-                      </>
-                    )}
-                  </Button>
+                  {/* Keyed by the password so a "Copied" flash never
+                      carries over to the next reset. */}
+                  <CopyButton
+                    key={resetPw.password}
+                    text={resetPw.password}
+                    label="Copy"
+                    toastMessage="Temporary password copied"
+                  />
                 </div>
                 <div className="mt-4 text-right">
                   <Button
@@ -705,12 +683,6 @@ function NewKeyModal({
   emailed: boolean;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(password))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -733,13 +705,7 @@ function NewKeyModal({
             <code className="min-w-0 flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
               {password}
             </code>
-            <Button size="sm" variant="outline" onClick={copy}>
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </Button>
+            <CopyButton text={password} />
           </div>
           <p className="text-xs text-muted-foreground pt-2">
             They sign in at this server with their email + this password, then

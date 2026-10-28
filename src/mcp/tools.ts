@@ -9,6 +9,7 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
 import {
   canReadNode,
@@ -31,7 +32,17 @@ import {
   NotFoundError,
   ValidationError,
   ConflictError,
+  LockedError,
 } from "../shared/errors.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  isOrgContribution,
+  ownsWorkingDraft,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import { listBoards } from "../nests/board-service.js";
 import { listBoardItems } from "../nests/board-items.js";
 import { bulkUpdateNodes } from "../nodes/bulk-update.js";
@@ -109,6 +120,7 @@ import {
 import { logTaskInteraction } from "../nodes/task-log.js";
 import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
@@ -116,9 +128,12 @@ import {
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
+import { setNestVisibility } from "../nests/visibility-service.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -408,6 +423,14 @@ export interface McpToolContext {
    *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
    *  when unset (cookie sessions, unscoped legacy keys, open mode). */
   capability?: "read" | "write";
+  /**
+   * The call arrived on a person's own full credential — a session, an
+   * unscoped personal key or an OAuth grant — which is the only kind an org
+   * contributor may contribute with (CU-wdqcq05rz6;
+   * governance/org-contribution.ts credentialMayContribute). Unset is false:
+   * any other caller of handleToolCall gets no contributor reach.
+   */
+  contributorCredential?: boolean;
 }
 
 /**
@@ -455,6 +478,14 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edge_types_list",
 ]);
 
+/** The zod field for an `array` property in a tool's JSON schema, shared by
+ *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
+ *  (metacognition feeds, MCP servers): each item must be an object, its fields
+ *  are the handler's parser's to check. Everything else is a list of strings. */
+export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+  return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
  *  UI/REST parity. Advertised only to a person who owns/administers the nest
  *  and holds a full credential (mcp/routes.ts), and re-checked on every call
@@ -462,8 +493,17 @@ export const MCP_READ_TOOLS = new Set<string>([
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
+  // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
+  "context_set_visibility",
   "context_systems",
   "context_instructions_update",
+  // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
+  // action; only advertised while both feature flags are on (mcp/routes.ts).
+  "context_metacognition_list",
+  "context_metacognition_suggest",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -531,7 +571,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
     description:
-      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines. Call this FIRST in every conversation.",
+      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines, followed by the nest's always-include documents (standing instructions, approved versions). Call this FIRST in every conversation.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -858,6 +898,51 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_upload",
+    // NOT an engine operation: it fronts this server's own upload routes
+    // (src/nodes/upload-service.ts — the asset store, POST /nodes/pdf and
+    // POST /nodes/office) so an agent can attach a file without multipart.
+    // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
+    description:
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx or .docx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, or the Word document's headings, lists and tables) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filename: {
+          type: "string",
+          description:
+            'File name with its extension, e.g. "q3-deck.pptx" — the extension decides where the file goes. Required with content_base64; with url, defaults to the URL\'s file name.',
+        },
+        content_base64: {
+          type: "string",
+          description: "The file's bytes, base64-encoded (a data: URL prefix is accepted). Use this OR url.",
+        },
+        url: {
+          type: "string",
+          description: "An https:// URL the server downloads the file from. Use this OR content_base64.",
+        },
+        title: {
+          type: "string",
+          description: "Documents only: the document title (default: the file name without its extension).",
+        },
+        folder: {
+          type: "string",
+          description: 'Documents only: folder path under nodes/ (e.g. "gtm/decks").',
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Documents only: tags for the new document.",
+        },
+        as: {
+          type: "string",
+          description:
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx). A file of the other kind is refused rather than rerouted.',
+        },
+      },
+    },
+  },
+  {
     name: "context_update",
     description:
       "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
@@ -879,6 +964,12 @@ export const TOOL_DEFINITIONS = [
         content: {
           type: "string",
           description: "New content (replaces)",
+        },
+        description: {
+          type: "string",
+          maxLength: 500,
+          description:
+            "One-line summary stored in frontmatter (at most 500 characters) — the public docs site uses it as the page's meta description. An empty string removes it.",
         },
         append: { type: "string", description: "Content to append" },
         tags: {
@@ -1529,6 +1620,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_set_visibility",
+    description:
+      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        visibility: {
+          type: "string",
+          enum: ["private", "org", "public"],
+          description: "The new tier.",
+        },
+        acknowledge: {
+          type: "boolean",
+          description: "The user confirmed who the nest will reach (needed to widen to public, and to org on a shared server).",
+        },
+      },
+      required: ["visibility"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -1935,6 +2046,113 @@ async function resolveTargetNode(
   return matches[0] ?? `Node not found: ${args.title}`;
 }
 
+/**
+ * context_upload — the MCP face of src/nodes/upload-service.ts. Same type
+ * allowlist, caps, URL fence and write paths as the REST upload routes; the
+ * gates REST gets from its middleware are applied here: the create gate (the
+ * /mcp middleware admits read-tier callers), and for documents the agent-write
+ * hold, which can't queue a binary and so refuses instead.
+ */
+async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+    return writeRefusal(ctx, "You don't have permission to upload files to this nest.", {
+      type: "nest",
+      id: nestId,
+    });
+  }
+  if (args.as !== undefined && args.as !== "asset" && args.as !== "document") {
+    return toolError('as must be "asset" or "document".', "VALIDATION_FAILED");
+  }
+  if (args.tags !== undefined && !(Array.isArray(args.tags) && args.tags.every((t: unknown) => typeof t === "string"))) {
+    return toolError("tags must be a list of strings.", "VALIDATION_FAILED");
+  }
+  for (const k of ["title", "folder"] as const) {
+    if (args[k] !== undefined && typeof args[k] !== "string") {
+      return toolError(`${k} must be a string.`, "VALIDATION_FAILED");
+    }
+  }
+  const refusal = (err: unknown): ToolResult => {
+    if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+    if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
+    if (err instanceof AppError && err.statusCode < 500) return toolError(err.message, "VALIDATION_FAILED");
+    throw err;
+  };
+  try {
+    // Fetch/decode first (outside any lock — a URL can take a while); the
+    // type and size refusals inside happen before bytes are fetched or
+    // decoded wherever they can — and so does the agent-write hold, as on REST.
+    const upload = await uploads.resolveUpload(args, args.as === "asset" ? "asset" : "any", async (kind) => {
+      if (kind !== "pdf" && kind !== "office") return;
+      await uploads.assertDocumentUploadNotGated({
+        nestId,
+        userId,
+        keyId: ctx.apiKeyId ?? null,
+        agentSurface: true,
+      });
+    });
+    const isDocument = upload.kind === "pdf" || upload.kind === "office";
+    if (args.as === "document" && !isDocument) {
+      return toolError(
+        `"${upload.filename}" is ${upload.kind === "image" ? "an image" : "a video"}, which uploads as an asset, not a document. Leave out as, or pass as: "asset".`,
+        "VALIDATION_FAILED",
+      );
+    }
+    if (!isDocument) {
+      const asset = await uploads.storeAsset(nestId, upload);
+      return {
+        text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
+        data: { kind: upload.kind, ...asset },
+      };
+    }
+    const fields = {
+      ...(args.title?.trim() ? { title: args.title.trim() } : {}),
+      ...(args.folder?.trim() ? { folder: args.folder.trim() } : {}),
+      ...(args.tags ? { tags: args.tags as string[] } : {}),
+    };
+    const title = fields.title || uploads.titleFromUploadFilename(upload.filename);
+    // Same rule and lock as context_create: a title already used anywhere in
+    // the vault would be unreachable for the title-addressed tools.
+    return await withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+      const wanted = title.toLowerCase();
+      const twin = (await storage.discoverDocuments()).find(
+        (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+      );
+      if (twin) {
+        return toolError(
+          `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — pass a different title.`,
+          "DOCUMENT_ALREADY_EXISTS",
+        );
+      }
+      const saved =
+        upload.kind === "pdf"
+          ? await uploads.savePdfUpload(nestId, upload, fields, userEmail, ctx.client)
+          : await uploads.saveOfficeUpload(nestId, upload, fields, userEmail, ctx.client);
+      const { node, version } = saved;
+      const docTitle = String(node.frontmatter.title ?? title);
+      return {
+        text:
+          `Created ${upload.kind === "pdf" ? "PDF" : "document"}: **${docTitle}** (${node.id}) from ${upload.filename} — status: ${node.frontmatter.status}` +
+          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : "."),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: docTitle,
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          markdown: `[[${docTitle}]]`,
+          ...(saved.original
+            ? { original: { ...saved.original, url: `/nests/${nestId}/originals/${saved.original.file}` } }
+            : {}),
+        },
+      };
+    });
+  } catch (err) {
+    return refusal(err);
+  }
+}
+
 /** Service result → MCP tool result (prose + structuredContent). */
 function serviceToTool<T extends object>(
   r: { ok: true } & T | { ok: false; status: number; error: string },
@@ -2085,6 +2303,136 @@ async function runSystemsTool(
 }
 
 /**
+ * Org contributors over MCP (CU-wdqcq05rz6) — the same service functions the
+ * REST create / PATCH call, so an agent acting for a contributor gets exactly
+ * what the web app gets: a draft sent to review, never a publish. Reached only
+ * after the ordinary write check refused AND isOrgContribution said yes for a
+ * person's own full credential (ctx.contributorCredential).
+ */
+const MCP_TRANSPORT_FIELDS = new Set(["client", "confirm_billing"]);
+
+function contributorFields(args: Record<string, any>, drop: string[] = []): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (MCP_TRANSPORT_FIELDS.has(k) || drop.includes(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function contributorError(err: unknown): ToolResult {
+  if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  // The suggestion cap (429) and size bound (413).
+  if (err instanceof AppError && (err.statusCode === 429 || err.statusCode === 413)) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
+  if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+  if (err instanceof ValidationError || err instanceof ConflictError || err instanceof LockedError) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
+  throw err;
+}
+
+async function contributeOverMcp(ctx: McpToolContext, args: Record<string, any>): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  try {
+    assertContributorCreate(contributorFields(args));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+  } catch (err) {
+    return contributorError(err);
+  }
+  const wanted = String(args.title ?? "").toLowerCase();
+  return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+    // Titles stay unique, as for every create. The message names no document:
+    // the twin may be someone else's draft, which a contributor can't see.
+    const existing = await storage.discoverDocuments();
+    if (existing.some((n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted)) {
+      return toolError(
+        `That title is already used in this nest. Suggest it under a different title, or propose an edit to the existing document with context_update.`,
+        "DOCUMENT_ALREADY_EXISTS",
+      );
+    }
+    let made: Awaited<ReturnType<typeof contributeDocument>>;
+    try {
+      made = await contributeDocument(
+        nestId,
+        { title: args.title, content: args.content, tags: args.tags, folder: args.folder, client: ctx.client },
+        userEmail,
+        { baseUrl: ctx.baseUrl },
+      );
+    } catch (err) {
+      return contributorError(err);
+    }
+    return {
+      text: `Suggested **${args.title}** (${made.node.id}) as an org contributor. It is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""} — not published until a reviewer approves it.`,
+      data: {
+        id: made.node.id,
+        version: made.version,
+        status: "draft",
+        checkpoint: null,
+        org_contribution: true,
+        review: made.review ? { id: made.review.id, status: made.review.status } : null,
+      },
+    };
+  });
+}
+
+async function proposeOverMcp(
+  ctx: McpToolContext,
+  nodeId: string,
+  args: Record<string, any>,
+): Promise<ToolResult> {
+  const { nestId, userId, userEmail } = ctx;
+  // context_update names the document by id or title, so it can't carry a new
+  // title too. A title sent alongside an id would otherwise be dropped while
+  // the reply says "proposed" — refuse it instead.
+  if (args.id && typeof args.title === "string" && args.title.trim()) {
+    const { storage } = ctx;
+    const current = await storage.readDocument(nodeId).catch(() => null);
+    if (!current || args.title.trim() !== String(current.frontmatter.title ?? "")) {
+      return toolError(
+        "As an org contributor you can't rename a document through context_update (its title names the document). Suggest the new title from the web app, or mention it in changeNote.",
+        "VALIDATION_FAILED",
+      );
+    }
+  }
+  let made: Awaited<ReturnType<typeof proposeEdit>>;
+  try {
+    // id / title name the document here; they aren't edits.
+    assertContributorPatch(contributorFields(args, ["id", "title"]));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+    made = await proposeEdit(
+      nestId,
+      nodeId,
+      userId,
+      {
+        content: args.content,
+        append: args.append,
+        tags: args.tags,
+        description: args.description,
+        changeNote: args.changeNote,
+        client: ctx.client,
+      },
+      userEmail,
+      { baseUrl: ctx.baseUrl },
+    );
+  } catch (err) {
+    return contributorError(err);
+  }
+  return {
+    text: `Proposed an edit to **${made.node.frontmatter.title}** as an org contributor — v${made.version} is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""}. The published text is unchanged until a reviewer approves it.`,
+    data: {
+      id: made.node.id,
+      version: made.version,
+      status: "draft",
+      checkpoint: null,
+      org_contribution: true,
+      review: made.review ? { id: made.review.id, status: made.review.status } : null,
+    },
+  };
+}
+
+/**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
  * distinguish reads from writes); per-tool permission checks in the cases
@@ -2113,6 +2461,43 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_set_visibility": {
+      const refused = await nestAdminRefusal(ctx);
+      if (refused) return refused;
+      const r = await setNestVisibility(
+        nestId,
+        ctx.userId,
+        args.visibility,
+        args.acknowledge === true,
+      );
+      if (!r.ok) {
+        // Same refusal as REST; the acknowledgement case carries the warning
+        // the agent should put to the user before retrying with acknowledge.
+        // The other 409s (headless, a concurrent change) are state conflicts,
+        // flagged as such so an agent re-reads instead of re-sending blindly.
+        const conflict = r.status === 409 && !r.requires_acknowledgement;
+        const msg = r.requires_acknowledgement
+          ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.`
+          : conflict
+            ? `${r.error} Re-read the nest (context_overview) before trying again.`
+            : r.error;
+        const code =
+          r.status === 404
+            ? "DOCUMENT_NOT_FOUND"
+            : r.status === 403
+              ? "UNAUTHORIZED_ACTION"
+              : "VALIDATION_FAILED";
+        // Machine-readable twins of the REST body, so an agent can branch on
+        // the cause without parsing text: the cap's `visibility_restricted`,
+        // the acknowledgement prompt, or a state conflict.
+        const extra: Record<string, unknown> = {};
+        if (r.code) extra.reason = r.code;
+        if (r.requires_acknowledgement) extra.requires_acknowledgement = true;
+        if (conflict) extra.conflict = true;
+        return toolError(msg, code, Object.keys(extra).length ? extra : undefined);
+      }
+      return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
+    }
     case "context_systems":
       return runSystemsTool(args, ctx);
 
@@ -2122,9 +2507,13 @@ async function runTool(
         {},
         await opContext(nestId, userEmail),
       );
-      if (!context_md)
-        return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
+      // The nest's always-include documents follow CONTEXT.md (CU-wdqcq05rn0):
+      // the same approved, access-filtered set the connect message carries.
+      const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
+      const head = context_md
+        ? `# Vault Instructions (CONTEXT.md)\n\n${context_md}`
+        : "No CONTEXT.md found. Use context_overview to see what's available.";
+      return standing ? `${head}\n\n${standing}` : head;
     }
 
     case "context_instructions_history": {
@@ -2961,6 +3350,9 @@ async function runTool(
       // (the MCP transport is always POST), so this per-tool check is what
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return contributeOverMcp(ctx, args);
+        }
         return writeRefusal(
           ctx,
           "You don't have permission to create documents in this nest.",
@@ -3083,6 +3475,9 @@ async function runTool(
       });
     }
 
+    case "context_upload":
+      return runUploadTool(args, ctx);
+
     case "context_update": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
@@ -3096,6 +3491,9 @@ async function runTool(
       // and this gate runs on the resolved node, not on how it was named.
       const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return proposeOverMcp(ctx, node.id, args);
+        }
         return writeRefusal(
           ctx,
           `You don't have permission to edit "${label}": ${editCheck.reason}`,
@@ -3119,6 +3517,7 @@ async function runTool(
             content: args.content,
             append: args.append,
             tags: args.tags,
+            ...(args.description !== undefined ? { description: args.description } : {}),
             status: args.status,
             ...(args.type !== undefined ? { type: args.type } : {}),
             changeNote: args.changeNote,
@@ -3951,7 +4350,12 @@ async function runTool(
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
-      if (!submitCheck.allowed) {
+      // An org contributor (CU-wdqcq05rz6) may send their OWN draft to review.
+      const ownContribution =
+        !submitCheck.allowed &&
+        (await isOrgContribution(ctx.nestId, userId, ctx.contributorCredential === true)) &&
+        (await ownsWorkingDraft(ctx.nestId, node.id, userEmail));
+      if (!submitCheck.allowed && !ownContribution) {
         return toolError(
           `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",
@@ -4280,6 +4684,11 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Metacognition tools: same deal, behind both flags; each call re-checks
+      // owner/admin and refuses system keys in metacognition/manage.ts.
+      if (isMetacognitionTool(toolName)) {
+        return runMetacognitionTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

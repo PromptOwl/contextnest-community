@@ -60,7 +60,8 @@ export interface EmailEventDetails {
     | "comment"
     | "access_requested"
     | "access_approved"
-    | "access_denied";
+    | "access_denied"
+    | "agent_notify";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -149,6 +150,13 @@ const STATUS_META: Record<
     subjectWord: "access denied",
     label: "Access denied",
     color: "#dc2626",
+  },
+  // A metacognition agent's `notify` (CU-wdqcq05rkq): `actor` is the persona
+  // label, `docTitle` its subject, `note` its (already defanged) message.
+  agent_notify: {
+    subjectWord: "agent note",
+    label: "From an agent",
+    color: "#7c3aed",
   },
 };
 
@@ -411,6 +419,22 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     lineH: (x) =>
       `Your request for <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc} was denied${x.byH}${x.noteH}. You can ask again later.`,
     rows: (x) => [plainRow("Nest", x.d.path), { label: "Status", text: x.meta.label, html: x.statusBadge }],
+  },
+  // The message is the model's words, so it is set apart from our own
+  // sentence and the reader is told an agent wrote it.
+  agent_notify: {
+    heading: (x) => `${x.d.actor || "An agent"}: ${x.title}`,
+    detailsHeader: "Details",
+    linkLabel: "Open in ContextNest",
+    lineT: (x) =>
+      `${x.d.actor || "An agent"} sent you this note. An automated agent wrote it, not a person, so check before acting on it.\n\n${x.d.note ?? ""}`,
+    lineH: (x) =>
+      `${escapeHtml(x.d.actor || "An agent")} sent you this note. An automated agent wrote it, not a person, so check before acting on it.<div style="margin-top:12px;padding:10px 14px;border-left:3px solid ${x.meta.color};background:#f9fafb;white-space:normal;">${escapeHtml(x.d.note ?? "").replace(/\n/g, "<br>")}</div>`,
+    rows: (x) => [
+      plainRow("Subject", x.title),
+      plainRow("Where", x.d.path),
+      { label: "From", text: x.meta.label, html: x.statusBadge },
+    ],
   },
   steward: {
     heading: (x) => `You're now a steward of ${x.title}`,

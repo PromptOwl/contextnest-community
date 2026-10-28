@@ -4,7 +4,7 @@ import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import * as api from "../lib/api";
-import { conventionKey, isHomeNode } from "@/lib/nest-caps";
+import { conventionKey, pickHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
 import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
@@ -76,10 +76,8 @@ export function ReaderView({
 }: ReaderViewProps) {
   const branded = isBranded(branding);
   const homeNode = useMemo(() => {
-    if (readerHomeNode) {
-      const exact = nodes.find((n) => isHomeNode(n, readerHomeNode));
-      if (exact) return exact;
-    }
+    const designated = pickHomeNode(nodes, readerHomeNode);
+    if (designated) return designated;
     for (const name of HOME_NODE_CONVENTION) {
       const hit = nodes.find((n) => conventionKey(n).includes(name));
       if (hit) return hit;

@@ -10,11 +10,11 @@ import {
   CheckCircle2,
   ChevronRight,
   Cloud,
-  Copy,
   HardDrive,
   Terminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -342,14 +342,7 @@ export function SetupPage() {
                   <pre className="flex-1 overflow-x-auto rounded-md bg-background p-3 text-xs">
                     {command}
                   </pre>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    aria-label="Copy command"
-                    onClick={() => navigator.clipboard?.writeText(command)}
-                  >
-                    <Copy className="h-4 w-4" />
-                  </Button>
+                  <CopyButton text={command} size="icon" aria-label="Copy command" />
                 </div>
               </div>
             )}

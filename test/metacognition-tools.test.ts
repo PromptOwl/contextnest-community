@@ -99,6 +99,8 @@ describe("MCP tools", () => {
       proposals: { made: 0 },
       comments: { made: 0 },
       accessRequests: { made: 0 },
+      notifications: { made: 0 },
+      read: new Set(),
       mcp: new McpPool(() => null),
       signal: new AbortController().signal,
     };

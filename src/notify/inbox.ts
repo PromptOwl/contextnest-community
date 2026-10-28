@@ -17,6 +17,15 @@ export interface InboxRow {
   createdAt?: string;
 }
 
+/** How an inbox message names a person: their display name, else the email. */
+export async function personLabel(email: string): Promise<string> {
+  const row = (await getDb().get(
+    "SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+    [email],
+  )) as { name: string | null } | undefined;
+  return row?.name?.trim() || email;
+}
+
 export async function insertNotification(
   row: InboxRow,
   ctx: OutboundContext & { from?: string | null } = {},

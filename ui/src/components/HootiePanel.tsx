@@ -589,8 +589,8 @@ function NoKeyNotice({
       <p className="text-base font-semibold">{name} needs an API key</p>
       <p className="text-muted-foreground">
         {isAdmin
-          ? `Add an Anthropic API key under Settings → General and ${name} can answer from your nests.`
-          : "Ask your server admin to add an Anthropic API key under Settings → General."}
+          ? `Add an Anthropic API key under Server settings → Hootie and ${name} can answer from your nests.`
+          : "Ask your server admin to add an Anthropic API key under Server settings → Hootie."}
       </p>
       {isAdmin && onOpenSettings && (
         <Button size="sm" variant="outline" onClick={onOpenSettings}>

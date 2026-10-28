@@ -50,6 +50,7 @@ interface Props {
   canEditDocs: boolean;
   /** Prime documents can't take approve-with-edits. */
   primeTags: string[];
+  alwaysIncludeTags?: string[];
   onResolveDeletion: (request: api.DeletionRequest, action: "delete" | "decline") => void;
   /** Your own pending submission back to Draft. */
   onWithdrawSubmission: (nodeId: string) => void;
@@ -73,6 +74,7 @@ export function ReviewTab({
   currentUser,
   canEditDocs,
   primeTags,
+  alwaysIncludeTags = [],
   onResolveDeletion,
   onWithdrawSubmission,
 }: Props) {
@@ -81,6 +83,8 @@ export function ReviewTab({
   // First page from the cache; later pages accumulate here. A write that
   // drops keys.feed re-reads page one and resets the rest.
   const firstPage = useFeedComments(nestId, enabled);
+  // Roster for comment author names — same cached read as the comments panel.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled });
   const [morePages, setMorePages] = useState<api.FeedCommentItem[]>([]);
   const [feedLoadingMore, setFeedLoadingMore] = useState(false);
   const firstComments = (firstPage.data?.items ?? []).filter(
@@ -401,6 +405,7 @@ export function ReviewTab({
         // Feed mode (interleaved comment rows) except on the Changes
         // chip, which renders the legacy changes-only queue untouched.
         comments={feedFilter === "changes" ? undefined : feedComments}
+        people={roster?.people}
         onSelectComment={(cm) =>
           onOpenDocument(cm.nodeId, { thread: cm.threadId })
         }
@@ -507,6 +512,7 @@ export function ReviewTab({
           currentUser={currentUser}
           canEditDocs={canEditDocs}
           primeTags={primeTags}
+          alwaysIncludeTags={alwaysIncludeTags}
           onApprove={(note) =>
             decideAndAdvance(openRequest.nodeId, () => onApproveReview(openRequest.nodeId, note))
           }

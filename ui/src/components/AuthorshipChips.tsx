@@ -1,16 +1,19 @@
 /**
  * AuthorshipChips — tiny initials circles for a document's people: the
  * creator (primary tint) plus up to `max` collaborators in per-person colours,
- * "+N" overflow, full emails on tooltips. A shrunk cousin of the
+ * "+N" overflow, display names (email fallback) on tooltips. A shrunk cousin of the
  * Avatar/AvatarFallback initials pattern (TeammatesPage) — plain spans, no
  * Radix, so long document lists stay cheap. Renders nothing when there's
  * nobody to show (old imports).
  */
+import { displayNameFor } from "../lib/person-name";
 
-export function initialsOf(email: string): string {
-  const local = (email.split("@")[0] || "").trim();
+/** Two-letter initials from an email's local part, or from a display name. */
+export function initialsOf(emailOrName: string): string {
+  const isEmail = emailOrName.includes("@");
+  const local = (isEmail ? emailOrName.split("@")[0] || "" : emailOrName).trim();
   if (!local) return "?";
-  const parts = local.split(/[._+-]+/).filter(Boolean);
+  const parts = local.split(isEmail ? /[._+-]+/ : /\s+/).filter(Boolean);
   const two =
     parts.length >= 2 ? parts[0][0] + parts[1][0] : local.slice(0, 2);
   return two.toUpperCase();
@@ -126,9 +129,12 @@ export function AuthorshipChips({
   collaborators = [],
   max = 3,
   size = "sm",
+  people,
 }: {
   author?: string | null;
   collaborators?: string[];
+  /** Nest roster: chips show display names instead of emails when given. */
+  people?: Array<{ email: string; name?: string | null }>;
   /** Collaborator chips shown before collapsing into "+N". */
   max?: number;
   size?: keyof typeof SIZES;
@@ -137,12 +143,13 @@ export function AuthorshipChips({
   const shown = collaborators.slice(0, max);
   const overflow = collaborators.length - shown.length;
   const tints = assignTints(shown);
+  const nameOf = (email: string) => displayNameFor(email, people);
   return (
     <span className="inline-flex shrink-0 items-center -space-x-1">
       {author && (
         <Chip
-          label={initialsOf(author)}
-          title={`Created by ${author}`}
+          label={initialsOf(nameOf(author))}
+          title={`Created by ${nameOf(author)}`}
           tint="bg-primary/15 text-primary"
           size={size}
         />
@@ -150,8 +157,8 @@ export function AuthorshipChips({
       {shown.map((email, i) => (
         <Chip
           key={email}
-          label={initialsOf(email)}
-          title={email}
+          label={initialsOf(nameOf(email))}
+          title={nameOf(email)}
           tint={tints[i]}
           size={size}
         />
@@ -159,7 +166,7 @@ export function AuthorshipChips({
       {overflow > 0 && (
         <Chip
           label={`+${overflow}`}
-          title={collaborators.slice(max).join(", ")}
+          title={collaborators.slice(max).map(nameOf).join(", ")}
           size={size}
         />
       )}

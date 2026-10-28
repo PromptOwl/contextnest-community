@@ -329,9 +329,9 @@ Response (201 one-shot, 200 finalize):
 
 ### GET `/nests/:nestId`
 ```json
-{ "nest": { ... }, "permission": "owner" | "admin" | "write" | "read" }
+{ "nest": { ... }, "permission": "owner" | "admin" | "write" | "read", "org_contributor": false }
 ```
-404 if caller has no permission.
+404 if caller has no permission. `org_contributor: true` means this caller may suggest documents and edits here as drafts for review (see *Org contributors* below); their `permission` stays `read`. `nest.org_domains` is returned to owners and admins only.
 
 ### PATCH `/nests/:nestId` (owner/admin)
 Rename a nest and/or change its description.
@@ -403,11 +403,14 @@ Pins live in `node_pins` (migration 071). A deleted document takes its pins with
   "allow_self_approve": false,
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
+  "always_include_tags": ["always-include"],
   "done_tags": ["done"],
   "require_push_confirmation": false,
   "creator_is_reviewer": false,
   "review_sla_hours": null,
-  "access_log_enabled": true
+  "access_log_enabled": true,
+  "org_contributions": "off",
+  "org_domains": []
 }
 ```
 
@@ -421,13 +424,51 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `always_include_tags` — tags that mark a document **always-include** (default `["always-include"]`): its approved text is pushed to every agent and model that enters the nest — see [Always-include documents](#always-include-documents-standing-instructions). Same input and normalization as `prime_tags`; an empty list leaves only the per-document flag. Owner/admin, like every field here. Works with stewardship on or off.
 - `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 - `review_sla_hours` — review SLA in whole hours (`1`–`8760`), or `null` (or `0`) for off, the default. When set, a review left pending that long escalates **one rung**: from the document's own reviewers to its **tag**-scope reviewers, then **nest**-scope reviewers, then the **nest owner** — each rung getting the same window before the next. Escalating notifies the new rung (a `review_escalated` inbox row linking the document, a Slack/Teams post — through the server-wide webhooks by default, in the same digest as review requests, and through any per-nest connector subscribed to `review_escalated` or `"*"` — and an email to each escalated reviewer when SMTP is configured); it never changes who may approve, and the submitter is never a recipient. Any other value → `400`, with nothing in the body applied. Inert while off and in ungoverned or archived nests. See `STEWARDSHIP.md → Review SLA escalation`.
 - `access_log_enabled` — record reads, retrievals and exports of this nest's documents in the activity log (see `GET /nests/:nestId/activity-log`). **On by default.** Any nest admin may turn it on; turning it **off** is owner / server-admin only — anyone else gets a per-field `403` (`"field": "access_log_enabled"`) and nothing in the same body is applied. Takes effect for the next read; rows already recorded stay until the retention window prunes them.
 
+- `org_contributions` — `"off"` (default) or `"drafts"`: anyone in the organization may suggest documents and edits on this nest without being added, always as drafts that go to review. See *Org contributors* below. Turning it on needs the nest's visibility to be `org` (`400` otherwise); if the nest later leaves `org` the stored value stays but admits nobody. On a shared deployment (`SHARED_DEPLOYMENT=true`) it also needs a non-empty `org_domains` — enabling without one, or emptying the list while it is on, is `400`. Any other value is `400`. Like every field here, a refused body writes nothing.
+- `org_domains` — the email domains that count as the organization, e.g. `["acme.com"]`. Required on a shared deployment, optional (a further restriction) on a self-hosted one. Each entry is trimmed, lowercased and stripped of a leading `@`; wildcards, schemes, ports and paths are `400`. Matched **exactly**: `acme.com` does not admit `eng.acme.com` or `evil-acme.com`. Only an email an identity provider vouched for counts (see below).
+
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
+
+### Org contributors
+
+On an `org` nest with `org_contributions: "drafts"`, a person **in the organization** who holds nothing above `read` may:
+
+- create a document — `POST /nests/:nestId/nodes` with `title`, `content`, and optionally `tags`, `folder`, `type: "document"`;
+- propose an edit to a document they can read — `PATCH /nests/:nestId/nodes/:nodeId` with `content`, `append`, `title`, `description`, `tags`, `changeNote`;
+- revise their own pending draft the same way, and send their own draft to review (`POST …/submit-review`);
+- see their own drafts — `GET /nests/:nestId/contributions/mine`.
+
+Both writes land as a **draft submitted for review** and answer with the review (`{ "node": …, "review": { "id": … }, "org_contribution": true }`). They never publish, whatever the nest's postures say: `creator_is_reviewer`, `prime_only_review`, self-approve and task-skip-review don't apply, and the contributor is never made a steward. The published text, and what every other reader sees, stays the same until a reviewer approves. Any other field (`prime`, `status`, `type` other than `document`, schedules, models, task or custom fields) is `403`. A proposal is refused before anything is written when someone else's change is under review on that document (`423`), when the working copy holds someone else's unreviewed draft (`409`), or when the contributor can't read the document (`404`). A contributor may have at most **25 open suggestions per nest** (newest version an unreviewed one they wrote; `429` past that, and a decided suggestion frees its slot), and a suggestion's text is capped at 500,000 characters (`413`). A duplicate title on create is `409` with a message that doesn't name the existing document.
+
+Who counts as in the organization:
+
+| Deployment | Who |
+|---|---|
+| Self-hosted, no `org_domains` | any signed-in person (the same boundary `org` visibility uses) |
+| Any deployment with `org_domains` | a person whose email domain **equals** one entry **and** whose address an identity provider verified (`users.email_verified_at`, set on a PromptOwl sign-in, or an OIDC sign-in / IdP token exchange whose token vouches for the address: `email_verified: true`, or — on a single-organization server only — an absent claim with an `email` claim present; never Entra's `preferred_username` fallback) |
+| Shared deployment, no `org_domains` | nobody |
+
+A password sign-up never verifies an address, so on a domain-limited nest it never qualifies — otherwise anyone could register `x@acme.com` and claim the domain. An existing SSO user becomes verified at their next SSO sign-in.
+
+What it is **not**: a permission. The caller's nest permission stays `read`, and the request gate admits exactly the two routes above for them, so everything else that needs `write` or more still refuses them — approve, reject, delete, move, discard, bulk actions, settings, visibility, collaborators, teams, hooks, env, connectors and the rest. Only a person's own full credential contributes: a browser session, an unscoped personal API key, or an MCP OAuth grant. A nest-scoped key, a read-only key, a named system key, a headless key, a PromptOwl service ticket and the anonymous caller get nothing new. A nest that holds agent writes (`require_push_confirmation`) refuses contributions over a key or MCP with `403` (a held write would later replay on the confirmer's authority); people still contribute from the web app. Archived nests take no contributions.
+
+MCP `context_create`, `context_update` and `context_submit_review` behave the same way for an org contributor: a draft sent to review, with `org_contribution: true` and the `review` in the structured result. `context_update` names the document by `id` or `title`, so a contributor's `context_update` carrying an `id` and a different `title` is refused rather than silently dropping the rename.
+
+Someone still has to approve: on a nest with no reviewer steward, that is the owner or an admin with self-approve on, exactly as for any other draft.
+
+### GET `/nests/:nestId/contributions/mine`
+The caller's own unpublished documents in this nest — every document whose newest version is an unreviewed one they wrote — with the draft text:
+```json
+{ "contributions": [{ "node_id": "nodes/idea", "title": "Idea", "version": 1, "status": "pending_review", "created_at": "...", "review_id": "...", "content": "..." }] }
+```
+Read tier. Only the caller's own rows can appear (the author is part of the query). This is how an org contributor, who otherwise reads approved content only, finds their drafts again.
 
 ## Structure rules
 
@@ -473,6 +514,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
+| Document uploads — MCP `context_upload` (pdf/pptx/docx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
 | `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
@@ -562,6 +604,14 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
   }
   ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
+- **Server cap on widening.** A server admin can restrict who may widen a nest to each tier: `NEST_PUBLIC_VISIBILITY` and `NEST_ORG_VISIBILITY` (or the `/admin/settings` fields `nest_public_visibility` / `nest_org_visibility`), each `owners` (default — anyone with the nest's admin tier) or `admins` (server admins only: the license admin or a superadmin). With `admins`, a caller who isn't a server admin gets `403` when the change would **widen** the nest to that tier — checked before the acknowledgement, so they are never asked to confirm a change they can't make:
+  ```json
+  {
+    "error": "Only a server admin can make nests public on this server (Server settings → \"Who can make nests public\"). Ask a server admin to publish it.",
+    "code": "visibility_restricted"
+  }
+  ```
+  Narrowing is never capped (`public` → `org`, anything → `private`), though on a shared deployment `public` → `org` still needs the org acknowledgement. Re-sending the current tier changes nothing but needs the same acknowledgement as widening to it. A `409` without `requires_acknowledgement` means the nest changed while saving (or is headless): re-read it and retry. Nests already at a restricted tier stay there. `GET /health` reports both as `nest_public_visibility` / `nest_org_visibility` so a client can disable the blocked tiers. Open mode (`AUTH_MODE=open`) is unaffected: every caller is the anonymous user and administers everything, so the cap has no one to restrict. Per-document public links (`/p/<slug>`) are a separate surface and are not covered. The MCP twin `context_set_visibility` (§9) applies the same rules; its `acknowledge` must be the boolean `true`, as in REST.
 
 ### Headless publishing (API-only nests) (owner / admin)
 Publish a **private** nest API-only and mint read-only access keys for it (what a key can reach is [above](#headless-access-keys-api-only-nests)).
@@ -588,7 +638,7 @@ Configure **Public Docs Reader Mode** — a clean, read-only public docs view of
 - `enabled` (optional boolean) — toggle reader mode. When on, read-only callers (public/anonymous readers) get a stripped three-pane docs reader instead of the tabbed authoring UI; owners/editors/reviewers/admins keep the full UI.
 - `home_node` (optional string | null) — the designated landing/hub node id. `null` (or a blank string) clears it, so the landing node resolves by convention (first node whose id/title is `welcome | index | readme | home | overview`, case-insensitive; else the synthesized Contents table). A non-string, non-null value is rejected `400`.
 - At least one of `enabled` / `home_node` must be present (`400` otherwise).
-- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader matches on either the full node id (`nodes/welcome`) or its bare slug (`welcome`), case-insensitively; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
+- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader and the public docs site (`/d/:key/`) match it the same way: on the full node id (`nodes/welcome`) or its bare slug — the last id segment, so `welcome` also finds `nodes/docs/welcome` — case-insensitively. A full-id match wins; a full id that matches no node (say the page was deleted) still falls back to any node with the same last segment; when several nodes share the slug, the lowest node id wins; the UI picks the id from the nest's document list rather than accepting typed input, so it never sends one that resolves to nothing.
 
 Rejections are the standard error shape:
 ```json
@@ -610,7 +660,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 | URL | What |
 |---|---|
-| `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
+| `/d/:key/` | Home: `reader_home_node` (full id or bare slug, matched as the reader does), else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
 | `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
 | `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
 | `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |
@@ -629,7 +679,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 
 **Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
 
-**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+**Redirects from the app.** In key mode, any anonymous `GET` or `HEAD` of `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization, Accept`, plus `User-Agent` when a crawler asked only for JSON) to the page, whatever its `Accept` or `User-Agent` — a browser, a crawler, a link checker and plain `curl` all see the same live link. A `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`), API clients whose `Accept` names JSON but not `text/html` (e.g. `application/json`, or axios' `application/json, text/plain, */*`) from a non-crawler User-Agent, and `?app=1` still get the app's answer.
 
 **IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
 
@@ -1134,7 +1184,8 @@ Optional query params, applied before the per-node enrichment:
     "type": "document",
     "tags": ["#api"],
     "status": "draft" | "pending_review" | "approved" | "rejected",
-    "version": 1,
+    "version": 3,
+    "approvedVersion": 2,
     "author": "creator@x.com",
     "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
@@ -1144,6 +1195,7 @@ Optional query params, applied before the per-node enrichment:
   }]
 }
 ```
+- `approvedVersion` — the published version agents are served, or `null` when none is. It can sit below `version` while a newer version is in review or sent back: the row above has v3 pending and v2 live. Not sent on the `approved_only` view, where `version` already is the approved one.
 - `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
 - `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
@@ -1169,6 +1221,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - Optional `model` (model id, opaque to the server; 1–128 characters of letters, digits and `. _ : / @ -`, `400` otherwise): the model a runner should use for this agent. Same rules as `schedule`: runnable types only (`400` otherwise), stored in frontmatter `metadata.model`, echoed on node responses, and returned as `agent.model` in the run bundle (`null` when unset, meaning the runner's default).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
+- Optional `always_include` (boolean) — the document-scope **always-include** flag (stored as `metadata.always_include`): `true` pushes this document's approved text to every agent entering the nest, `false` exempts it from an always-include tag. Owner/admin only (`403` otherwise); not a boolean → `400`. An always-include document is also prime. Echoed on node responses as `always_include` (absent when inherited from `always_include_tags`).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
 - Optional `fields` — custom field values, `{ "severity": "high", "estimate": 3 }`. Validated against the nest's definitions: an unknown key, a field that doesn't apply to this node type, a value of the wrong shape, or a computed field → `400` naming the field. Defaults fill fields left out; a required field still empty after that → `400`.
@@ -1227,6 +1280,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 {
   "title": "...",
   "content": "...",
+  "description": "One-line summary.",
   "tags": ["..."],
   "changeNote": "fixed typo",
   "schedule": "0 7 * * *",
@@ -1235,10 +1289,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
+- `description` — the frontmatter one-line summary, which the public docs site uses as the page's meta description. Trimmed; one line, at most 500 characters (`400` otherwise). `""` removes it. MCP `context_update` takes the same field.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
+- `always_include` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope always-include flag, `null` clears it back to `always_include_tags`. An always-include document is prime, so an edit that makes it always-include is gated the same way — and until that version is approved, nothing new is injected.
 - `fields` — custom field values to set, merged into the stored ones (keys left out are untouched; `null` clears one; clearing a required field → `400`). Same validation as create. A value change seals a version like any edit; a `fields`-only PATCH that changes nothing seals none.
 - `view` — replace a view node's `view:` block (§1.12), validated like create. Valid only on a node that is, or in the same PATCH becomes, `type: "view"` (`400` otherwise). See [View nodes](#view-nodes).
 
@@ -1250,7 +1306,7 @@ A node with a pending review is frozen — `423` — for callers who can't clear
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
 ### POST `/nests/:nestId/nodes/pdf`
-Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Or the JSON body from [Uploading files](#uploading-files) with the same fields (`tags` as an array or a comma-separated string). Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
 
@@ -1281,17 +1337,34 @@ A `type: "view"` node (§1.12) is a governed layout over other nodes: its body i
 - **Reserved addresses.** A view at `X` owns `X/view` and everything under `X/view/blocks/` (that is where its page and frames are served). Creating, moving or importing any node to one of those ids while a view lives at `X` is refused (`409`; a folder import lists the file under `rejected`/`problems`), and so is creating a view at `X`, converting a node at `X` with `type: "view"`, or moving a view to `X` while any node lives at `X/view` or under `X/view/blocks/` — on REST, MCP, bulk `POST /publish` and held writes alike. A folder move is checked for every node before the first one moves. Ids like `nodes/foo/view` stay ordinary when `nodes/foo` is not a view.
 - `?format=raw` of a view node is its stored body (the intro); `/hosted` stays artifact-only (`404` for a view).
 
+### POST `/nests/:nestId/nodes/office`
+Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The text is extracted into the document body:
+- **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
+- **docx** — headings (`Title`, `Heading 1…6` or an outline level) as `#` headings, paragraphs, bulleted and numbered lists, and tables as markdown tables. Deleted tracked changes and field codes are left out.
+
+The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned; re-uploading creates a new document.
+
+- `400` — no `file`; not `.pptx`/`.docx` (legacy `.ppt`/`.doc` and macro-enabled `.pptm`/`.docm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped (only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- Returns `201` `{ node, version, stewards? }`.
+
+### GET `/nests/:nestId/originals/:file`
+The original file behind an Office document. Read permission, and the caller must be able to read the document that binds it (the same gate as `GET /nodes/:nodeId`, so a public reader needs an approved version). Only server-minted `<uuid>.pptx` / `<uuid>.docx` names are accepted; a name that isn't bound to a document the caller can read is a `404`. The bytes are verified against the recorded sha256 before they are served.
+
+Headers: the Office `Content-Type`, `Content-Disposition: attachment` (always — never inline), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). The link survives a move of the document, since it names the file, not the node.
+
 ### POST `/nests/:nestId/assets`
-Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
+Upload of an image or video referenced from documents: multipart (field `file`), or the JSON body described in [Uploading files](#uploading-files). Write permission.
 
 Supported types and per-type size caps:
 
 | Type | Extensions | Max size |
 |------|-----------|----------|
 | Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB |
-| Video | `mp4`, `webm` | 100 MB |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) |
 
-SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
+SVG is deliberately not accepted (stored-XSS surface). An unsupported type or a file over its cap is a `400` that names the allowed types and caps. Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
 
 ### GET `/nests/:nestId/assets/:file`
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
@@ -1307,6 +1380,37 @@ Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_
 - `DELETE` (write) → the fresh `GET` shape. `404` unless the relation touches `:nodeId`.
 
 Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
+
+---
+
+## Uploading files
+
+Three routes take files, by what the file becomes. One allowlist and one set of caps covers all of them and the MCP `context_upload` tool:
+
+| File | Extensions | Max size | Route | Becomes |
+|---|---|---|---|---|
+| Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB | `POST /nests/:id/assets` | an asset; reference it with the returned `markdown` |
+| Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) | `POST /nests/:id/assets` | an asset; the returned `markdown` is its URL on its own line |
+| PDF | `pdf` (judged by its `%PDF-` bytes on the PDF route) | 25 MB (`PDF_MAX_MB`) | `POST /nests/:id/nodes/pdf` | a governed `pdf` document with its text extracted |
+| PowerPoint / Word | `pptx`, `docx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
+
+SVG, HTML, executables, legacy `.ppt`/`.doc` and everything else are refused with a `400` listing the types above. Document uploads are governed exactly like `POST /nodes` (a draft in a governed nest).
+
+**Multipart or JSON.** Each route takes multipart (field `file`, plus the route's other fields) or, with `Content-Type: application/json`, a body naming the bytes so a script never has to build multipart:
+
+```json
+{ "filename": "q3-deck.pptx", "content_base64": "UEsDBBQABgAIAAAAIQ…", "title": "Q3 deck", "folder": "decks", "tags": ["q3"] }
+```
+```json
+{ "url": "https://files.example.com/q3-deck.pptx", "folder": "decks" }
+```
+
+- Send exactly one of `content_base64` or `url`. `filename` is required with `content_base64` — its extension decides the type — and defaults to the URL's file name with `url`. A `data:…;base64,` prefix and line breaks in the base64 are accepted.
+- `content_base64` is refused on its decoded size before it is decoded. It travels inside the request, so the route's request ceiling (its file cap plus 1 MB) applies to the base64 text, which is a third larger than the file: base64 reaches about three quarters of the cap — use `url` or multipart for files near it.
+- `url` is fetched by the server: `https://` only, no credentials in the URL, and the host's addresses are checked when the connection is opened — loopback, private (RFC 1918, CGNAT, IPv6 ULA), link-local and cloud-metadata addresses are refused, including a public name that resolves to one, with no second lookup to rebind. Redirects are not followed (`400` — pass the final URL). The download is refused when its `Content-Length` is over the cap and torn down when the body passes it, before anything is buffered; it times out after 120 seconds. Not routed through `HTTPS_PROXY`, so the address check can't be bypassed by the proxy's resolver.
+- On a nest that holds agent writes (`require_push_confirmation`), a **document** upload from an API key is refused with `403` — a pending push carries markdown, not a file — unless the key is always-allowed. Session-cookie uploads from the web app and asset uploads are not affected.
+
+**MCP: `context_upload`.** `{ filename?, content_base64? | url?, title?, folder?, tags?, as? }`, write tier (the same create check as `context_create`; a read-only key or a viewer gets `UNAUTHORIZED_ACTION`). Routed by extension through the same service as the routes above: an image or video comes back as `{ kind, file, url, markdown }`; a PDF or Office file creates the governed document and comes back as `{ kind, id, title, type, version, status, markdown: "[[Title]]", original? }`. `as: "asset" | "document"` is an optional check that refuses a file of the other kind. Like `context_create`, a title already used anywhere in the nest is refused, and on a nest that holds agent writes a document upload is refused (assets still upload). The base64 rides in the MCP request, which is capped at `MAX_BODY_BYTES` (default 10 MB, about 7.5 MB of file) — use `url` for anything bigger. Also on the server-level `/mcp` endpoint (with `nest`).
 
 ---
 
@@ -1413,7 +1517,7 @@ Who besides the caller could approve the caller's submission of this document �
 ```json
 { "note": "ready for review", "priority": "low" | "normal" | "high" | "urgent" }
 ```
-Sets node status → `pending_review`. UI locks editing.
+Sets node status → `pending_review`. UI locks editing. A caller who reaches the nest only through its visibility (`org` or `public`, an org contributor included) may submit only their **own** draft; anything else is `404`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/approve`
 ```json
@@ -1459,7 +1563,7 @@ Pending external (on-disk) edits awaiting approval, newest first. The list is co
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 
-Returns ALL reviews for the nest (server does not gate by reviewer scope).
+Returns ALL reviews for the nest (server does not gate by reviewer scope) — except to a caller who reaches the nest only through its visibility (`org` or `public`, an org contributor included): they get their **own** requests only, since a request names an unapproved draft. Each row carries `requestedByOrgContributor: true` when the requester reaches the nest only as an org contributor — the UI labels it "org contributor (not a collaborator)".
 ```json
 {
   "requests": [{
@@ -2227,7 +2331,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the server's own model gateway when one is set (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, every model goes there as named), else the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the server's own model gateway when one is set (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, every model goes there as named), else the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Server settings → Hootie. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2254,6 +2358,8 @@ Response: `text/event-stream`.
 | `delta` | `{ text }` — a chunk of the answer. |
 | `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (by `[[Title]]`, in order), and what happened to any `@mentions`. |
 | `error` | `{ error }` — the model call failed; the stream ends. |
+
+**Standing instructions.** The nest's always-include documents the caller can read (approved versions) sit in the system prompt in a "Standing instructions for this nest" block, ahead of the retrieved documents, on every question — see [Always-include documents](#always-include-documents-standing-instructions).
 
 **Grounding.** The retrieved documents are placed in the system prompt verbatim with the instruction to answer from them alone. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
 
@@ -2301,12 +2407,14 @@ One call for everything a nest overview needs to describe the *whole* nest, what
     "tags": { "#api": 7 },
     "types": { "document": 40, "agent": 2 },
     "statuses": { "approved": 30, "draft": 12 },
+    "aiReady": 31,
     "authors": ["a@x.com"],
     "editedLast7d": 5,
     "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
   }
 }
 ```
+`aiReady` counts documents with a published version agents are served, whatever the status of their latest version — so it can exceed `statuses.approved`: a document with v2 published and v3 in review counts once here and once under `pending_review`.
 
 ### POST `/nests/:nestId/reindex` (write+)
 Force-rebuild the nest's document index from the vault, and return how many documents were indexed: `{ "indexed": 42 }`.
@@ -2435,7 +2543,7 @@ Only the approved version is ever served — a document with no approved snapsho
 
 ### Runs — the operational trace (server never executes)
 
-- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs?, parent_run_id? }`. Returns `201` with the executable **bundle**: `{ run_id, parent_run_id, depth, agent{content,…}, edges[<reachable flow subgraph>], definitions[], trace_hint }`. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`). `parent_run_id` spawns a **sub-agent run** nested under a still-running parent (`FEATURE_SUBAGENT_RUNS`, off by default — any `parent_run_id` is `400` while off); it's bounded by `SUBAGENT_MAX_DEPTH` (depth → `403`) and `SUBAGENT_MAX_CHILDREN` (fan-out → `403`, enforced atomically with the insert), rejects re-entrancy of an agent already in the ancestor chain (`409`), and refuses a closed (`409`) or unknown/cross-nest (`404`) parent.
+- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs?, parent_run_id? }`. Returns `201` with the executable **bundle**: `{ run_id, parent_run_id, depth, agent{content,…}, edges[<reachable flow subgraph>], definitions[], standing_instructions{text, documents[], overflow[]}, trace_hint }`. `standing_instructions.text` is the nest's always-include block (what the caller may read, approved versions) for the runner to put in its model's system prompt; `documents` / `overflow` name what it holds (`{ id, title, version }`). `GET /runs/:id/bundle` and MCP `workflow_run` carry the same field. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`). `parent_run_id` spawns a **sub-agent run** nested under a still-running parent (`FEATURE_SUBAGENT_RUNS`, off by default — any `parent_run_id` is `400` while off); it's bounded by `SUBAGENT_MAX_DEPTH` (depth → `403`) and `SUBAGENT_MAX_CHILDREN` (fan-out → `403`, enforced atomically with the insert), rejects re-entrancy of an agent already in the ancestor chain (`409`), and refuses a closed (`409`) or unknown/cross-nest (`404`) parent.
 - `POST /runs/:id/steps` (write) — append one step. Body: `{ action: read|write|branch|notify|external, node_id?, edge_id?, detail? }`. `seq` is server-assigned (monotonic, atomic); any client `seq` is ignored. `409` if the run is already terminal, or once the run hits `RUN_MAX_STEPS`.
 - `PATCH /runs/:id` (write) — close/update. Body: `{ status: running|succeeded|failed|cancelled, trace? }`. Compare-and-swap on `status='running'`: a second close → `409` ("terminal is final").
 - `GET /runs/:id` (read) — full trace `{ run, steps[] }`. Freeform payloads (`run.inputs`, `run.trace`, `steps[].detail`) are redacted to `null` below write tier.
@@ -2454,16 +2562,18 @@ Archived nests are skipped by the scheduler tick; restoring the nest resumes the
 
 ### Metacognition agents — the server runs these (`FEATURE_METACOGNITION`)
 
-Every route `404`s unless both `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are on. See [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md#the-one-exception-metacognition-agents).
+Every route `404`s unless both `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are on. Metacognition is an **owner/admin** feature: every action below — list, view, stats, run, configure, remove — needs the nest owner or an admin (else `403`), and a system key never reaches it. See [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md#the-one-exception-metacognition-agents).
 
-- `GET /nests/:nestId/metacognition` (write) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals,max_comments}, feeds[], mcp_servers[], model, configured_by, updated_at }] }`. `configured_by` is the agent's **owner**.
-- `GET /nests/:nestId/metacognition/:node` (write) — one agent.
-- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, enabled? }`. Folders are under `nodes/`. `read`: empty = the whole nest. `propose`: empty = **no proposals** (fail closed), `["*"]` = anywhere it may read, otherwise folders inside `read`. `avatar` is a glyph — an emoji or up to 4 letters; a URL is `400` (a remote image would be fetched by every reviewer's browser). Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20, comments ≤ 20; comments default 5). Tokens and seconds are **soft** caps: checked between turns (a turn's output is limited to what's left, but its input is only known afterwards), and the wall-clock cap aborts the model call and feed/MCP requests but lets a proposal already being written finish. Every turn re-sends the conversation, so re-read (cached) input counts toward the token cap too — long runs reach it sooner than their output alone suggests. Folder names are matched exactly, case included. Manual, `/run` and hook starts are limited to 30 per agent per hour (schedules are bounded by their interval). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token; it must start `MCP_`, so a config can't send the model key or another secret out. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The first saver becomes the **owner** (`configured_by`) and stays it: a later save — a server admin's included — does not change it. Only when the owner can no longer run the agent (gone, or below `write` on the nest) does the admin saving it take it over; the response then has `owner_changed: true`. The owner's access is a ceiling, never a source of reach: the persona works only in its own nest, within its configured folders, widened only by grants given to the persona itself (an approved access request it filed with `request_access`).
+- `GET /nests/:nestId/metacognition` (owner/admin) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals,max_comments}, feeds[], mcp_servers[], model, notify{recipients[],channels[],max_per_run}, configured_by, updated_at }] }`. `configured_by` is the agent's **owner**.
+- `GET /nests/:nestId/metacognition/:node` (owner/admin) — one agent.
+- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, notify?: { recipients: string[], channels: ("email"|"connectors")[], max_per_run? }, enabled? }`. `notify` is who the agent may notify (default: nobody — off): each recipient is `"owner"` (the nest owner), `"reviewers"` (reviewer stewards — the document's when the notification names one, else the nest-scope ones; at most 10, resolved when it sends) or the email of someone on the nest with a real account (`400` for anything else, including a non-member). With recipients, `channels` needs at least one of `email` (needs a mail transport + `NOTIFY_EMAIL_FROM`) and `connectors` (the nest's own connector rows subscribed to `agent_notify` or `"*"`); `max_per_run` is clamped to 1–10, default 3. Folders are under `nodes/`. `read`: empty = the whole nest. `propose`: empty = **no proposals** (fail closed), `["*"]` = anywhere it may read, otherwise folders inside `read`. `avatar` is a glyph — an emoji or up to 4 letters; a URL is `400` (a remote image would be fetched by every reviewer's browser). Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20, comments ≤ 20; comments default 5). Tokens and seconds are **soft** caps: checked between turns (a turn's output is limited to what's left, but its input is only known afterwards), and the wall-clock cap aborts the model call and feed/MCP requests but lets a proposal already being written finish. Every turn re-sends the conversation, so re-read (cached) input counts toward the token cap too — long runs reach it sooner than their output alone suggests. Folder names are matched exactly, case included. Manual, `/run` and hook starts are limited to 30 per agent per hour (schedules are bounded by their interval). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token; it must start `MCP_`, so a config can't send the model key or another secret out. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The first saver becomes the **owner** (`configured_by`) and stays it: a later save — a server admin's included — does not change it. Only when the owner can no longer run the agent (gone, or below `write` on the nest) does the admin saving it take it over; the response then has `owner_changed: true`. The owner's access is a ceiling, never a source of reach: the persona works only in its own nest, within its configured folders, widened only by grants given to the persona itself (an approved access request it filed with `request_access`).
+- `GET /nests/:nestId/metacognition/:node/suggest` (owner/admin, else `403`; `400` if the document is missing or isn't an **agent** document — the same gates as `PUT`) — a starting config read off the agent document, for the setup form to prefill. **Never saves anything.** → `{ suggestion: { config, why, mcp_candidates: [{ name, url }], instructions: "approved"|"none" } }`. `config` has the `PUT` body's shape and passes its validation unchanged. `why` gives a plain-language reason per field it filled (`"persona.name"`, `"persona.avatar"`, `"scope.read"`, `"scope.propose"`, `"feeds"`, `"mcp_servers"`). Deterministic heuristics over the document's **approved** instructions (the text a run reads; an unreviewed draft is ignored, and with no approved version `instructions` is `"none"` and only the name is filled), no model call: the persona name from the title; the avatar from a frontmatter `avatar`/`emoji`/`icon` glyph (never a URL); `scope.read` from folders the instructions name that **exist in the nest** (`nodes/gtm/`, `gtm/deals/`, `` `ops` ``, or "the ops folder"; a subfolder is dropped when its parent is named; none named = the whole nest); `scope.propose` `[]` when the instructions say to only flag/comment/review, "no edits", "fix nothing" or not to edit at all (a narrow "do not update the footer" doesn't count), `["*"]` when they use edit/fix/update/correct/rewrite/propose as an instruction about the nest (at a clause start or after "and"/"to"/"please"…, not "a status update" or "improve your reply") or say "keep … current", otherwise `[]` (fail closed); `feeds` from feed-like links (`.xml`/`.rss`/`.atom`, `/feed`, `/rss`) that pass the same public-`https` fence as `PUT`. Links ending `/mcp` come back as `mcp_candidates`, not in `config`: an MCP server needs its `allowed_tools` named by a person. Caps are the defaults; `model` is `null`.
 - `DELETE /nests/:nestId/metacognition/:node` (owner/admin) — stop treating the document as a metacognition agent. The document and the persona's history stay.
-- `GET /nests/:nestId/metacognition/:node/stats?days=30&limit=50` (write; `404` if the document isn't a metacognition agent) — what the agent did over the last `days` (1–365, default 30): `{ stats: { node_id, window_days, runs{total,running,succeeded,failed,timeout,skipped,cancelled}, tokens, est_cost_usd, proposals{made,approved,rejected,pending,withdrawn,approval_rate}, comments, access_requests, blocked_by_scope, last_run_at, last_error{run_id,at,message}|null, history: [{ id, outcome, triggered_by, started_at, finished_at, duration_ms, tokens, est_cost_usd, proposals, approved, rejected, comments, error }] } }`. `history` is the newest `limit` runs (1–200, default 50). Outcomes: `timeout` = stopped by its `max_seconds` cap; `skipped` = cancelled before it could start (no key, agent off, owner lost access). Tokens come from the run's trace total, or its per-turn step records if it ended before writing one. Proposal verdicts come from the review queue (`withdrawn` = a rejected draft the agent took back, or a request cancelled). `approval_rate` = approved ÷ (approved + rejected), `null` until one is decided. Non-integer or `< 1` `days`/`limit` → `400`. MCP: `workflow_runs_list { agent: "<node>", agent_stats: true, days?, limit? }` returns the same `{ stats }`, behind the same gate (metacognition on, write tier, a configured agent).
-- `POST /nests/:nestId/metacognition/:node/run` (write) — start a run now → `202 { run_id, executes: "server" }`; `409` while one is running. `POST /nests/:nestId/run/:node` does the same for a metacognition agent (no bundle is handed out), as do its schedules and inbound hooks.
+- `GET /nests/:nestId/metacognition/:node/stats?days=30&limit=50` (owner/admin; `404` if the document isn't a metacognition agent) — what the agent did over the last `days` (1–365, default 30): `{ stats: { node_id, window_days, runs{total,running,succeeded,failed,timeout,skipped,cancelled}, tokens, est_cost_usd, proposals{made,approved,rejected,pending,withdrawn,approval_rate}, comments, notifications, access_requests, blocked_by_scope, last_run_at, last_error{run_id,at,message}|null, history: [{ id, outcome, triggered_by, started_at, finished_at, duration_ms, tokens, est_cost_usd, proposals, approved, rejected, comments, notifications, error }] } }`. `history` is the newest `limit` runs (1–200, default 50). Outcomes: `timeout` = stopped by its `max_seconds` cap; `skipped` = cancelled before it could start (no key, agent off, owner lost access). Tokens come from the run's trace total, or its per-turn step records if it ended before writing one. Proposal verdicts come from the review queue (`withdrawn` = a rejected draft the agent took back, or a request cancelled). `approval_rate` = approved ÷ (approved + rejected), `null` until one is decided. Non-integer or `< 1` `days`/`limit` → `400`. MCP: `workflow_runs_list { agent: "<node>", agent_stats: true, days?, limit? }` returns the same `{ stats }`, behind the same gate (metacognition on, owner/admin, a configured agent).
+- `POST /nests/:nestId/metacognition/:node/run` (owner/admin) — start a run now → `202 { run_id, executes: "server" }`; `409` while one is running. `POST /nests/:nestId/run/:node` does the same for a metacognition agent (no bundle is handed out; owner/admin, else `403`), as do its schedules and inbound hooks. Creating a schedule or an inbound hook for a metacognition agent, or changing its schedule (`PATCH`), is owner/admin too; deleting one stays at write. Schedules and hooks that already exist keep firing whoever created them — they start runs under their own authority.
+- **MCP.** The same operations are MCP tools on `/nests/:id/mcp` and on the server-level `/mcp` (with a required `nest`): `context_metacognition_list` (configured agents with a plain-language `summary`, plus the agent documents not set up yet; each carries `instructions_approved` — `false` means runs are skipped until a reviewer approves the document), `context_metacognition_suggest` (`{ agent }` → the `GET …/suggest` result as `{ suggestion }`, saves nothing), `context_metacognition_configure` (the PUT body plus `agent: "<node>"` and `dry_run`; `dry_run: true` validates and returns `{ config, summary }` without saving — a harness should show the person the summary before saving), `context_metacognition_run` (`{ agent, inputs? }` → `{ run_id, executes: "server" }`) and `context_metacognition_remove` (`{ agent }`). They call the same code as these routes, so the gates, `parseConfig` messages, `409`s and start limits are identical; a refusal is a tool error carrying the REST message and `http_status`. Advertised only while both flags are on, and only to a person on a full (non-read-only) credential who owns or administers the nest; system keys and headless/read-only keys never see them, and a call is re-checked every time.
 
-The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment; `detail.kind: "access_request"` with `access_request_id` for an access request it filed), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`, and `"turn"` — one per model turn with that turn's `usage` and `est_cost_usd`, written as it happens so a crash keeps what was spent). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, stopped_by: end_turn|max_steps|max_tokens|timeout|crashed|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start or had nothing to do. A run its wall clock cut off is **`failed`** with `stopped_by: "timeout"` and an `error`; a run the server lost (restart, crash) is `failed` with `stopped_by: "crashed"` and the usage its turns recorded. Every `failed` run — these, and any runner's — fires the `run_failed` connector event. A **scheduled** run is skipped (`cancelled`, no model call) when the agent has no feeds or MCP servers and nothing changed since its last successful run: no document version and no verdict on its proposals. A person pressing Run, a hook or a trigger always runs. The agent does not propose a change that is still waiting for review, or one a reviewer rejected in the last 7 days (it's told to comment instead), and files at most 3 access requests per run. `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
+The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment; `detail.kind: "access_request"` with `access_request_id` for an access request it filed; `detail.tool: "notify"` with `kind: "notification"`, `to`, `recipients` (a count), `channels` and `subject` for a notification sent, or `skipped_channels`/`failed_channels` when a channel didn't take it, or `refused: "not_a_recipient"|"cap"|"daily_cap"|"not_reachable"|"no_channel"|"delivery_failed"|"not_configured"` for one that wasn't), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`, and `"turn"` — one per model turn with that turn's `usage` and `est_cost_usd`, written as it happens so a crash keeps what was spent). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, notifications, stopped_by: end_turn|max_steps|max_tokens|timeout|crashed|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start or had nothing to do. A run its wall clock cut off is **`failed`** with `stopped_by: "timeout"` and an `error`; a run the server lost (restart, crash) is `failed` with `stopped_by: "crashed"` and the usage its turns recorded. Every `failed` run — these, and any runner's — fires the `run_failed` connector event. A **scheduled** run is skipped (`cancelled`, no model call) when the agent has no feeds or MCP servers and nothing changed since its last successful run: no document version and no verdict on its proposals. A person pressing Run, a hook or a trigger always runs. The agent does not propose a change that is still waiting for review, or one a reviewer rejected in the last 7 days (it's told to comment instead), and files at most 3 access requests per run. With `notify` configured it is offered a `notify` tool (`{ to, subject, message, node_id? }`, `to` an enum of the configured keys; not offered otherwise). A `to` outside the config, a recipient no longer on the nest, a call past `max_per_run` or past `METACOGNITION_NOTIFY_PER_DAY` (per agent, any 24 hours), or an email the transport rejected sends nothing countable and is recorded as a refused step. A notification is about `node_id` and every document the run read with `read_node` (leaving out `node_id` doesn't lift this). If not everyone on the nest can open all of them, it is not posted to connectors (their audience isn't the documents'); it still goes by email to recipients who can open them all. The subject (150 chars) and message (2000) are stripped of markup and mass mentions, and every link or domain except this nest's own document links is broken (`hxxps[:]//evil[.]com`). Email goes as one send to the resolved people (Bcc when several), headed `<avatar> <name> (agent) in <nest>: <subject>` with a link to `node_id` (or the nest); a recipient who can't open those documents is dropped. Each send is in the message log (`GET /admin/messages`, sender kind `persona`, with the run). `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
 
 What a run produced links back to it: the review request a `proposal` step filed carries `runId` (`GET /nests/:id/review-queue`, `GET /me/work` → `run_id`), each comment in a thread a `comment` step opened carries `runId` (`GET /nests/:id/nodes/:node/annotations`), and an access request a step filed (`detail.access_request_id`) carries `run_id`. The link is only ever set on a row in the run's own nest that has no run yet. The UI opens it at `/nest/:id/workflows?run=:runId`. Finished runs are kept forever unless `RUN_RETENTION_DAYS` is set; after a run is pruned, the id stays on the row but `GET /runs/:id` is `404`.
 
@@ -2487,7 +2597,7 @@ Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY
 Not behind the workflow-plane flag: connectors fire on review events too.
 
 - `GET /nests/:nestId/connectors` (read).
-- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated` (a review passed its nest's review SLA and moved up a rung), or `["*"]`. Subscription is explicit: a connector that should hear escalations needs `review_escalated` (or `"*"`) alongside `review_requested`. The server-wide Slack/Teams webhooks need no row — they receive review requests and escalations by default, through the debounced digest.
+- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated` (a review passed its nest's review SLA and moved up a rung), `agent_notify` (a metacognition agent's `notify`; only per-nest rows receive it, never the server-wide webhooks), or `["*"]`. Subscription is explicit: a connector that should hear escalations needs `review_escalated` (or `"*"`) alongside `review_requested`. The server-wide Slack/Teams webhooks need no row — they receive review requests and escalations by default, through the debounced digest.
 - `PATCH /nests/:nestId/connectors/:id` (write) — `{ enabled?, events?, url? }`.
 - `DELETE /nests/:nestId/connectors/:id` (write).
 
@@ -2497,6 +2607,31 @@ Not behind the workflow-plane flag: connectors fire on review events too.
 
 ### `/nests/:nestId/mcp/*`
 Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually; LLM clients connect here.
+
+#### Always-include documents (standing instructions)
+
+The server pushes a nest's rules to agents instead of waiting for them to call `context_init` (CU-wdqcq05rn0). A document is **always-include** when its approved version has `metadata.always_include: true`, or carries one of the nest's `always_include_tags` (default `always-include`) without `always_include: false`. Wherever an agent or model enters the server it gets those documents' **approved** text:
+
+| Entry point | What it gets |
+|---|---|
+| `initialize` on `/nests/:id/mcp` | `result.instructions` = CONTEXT.md (first 24,000 chars, cut at a line, pointing at `context_init` for the rest), then the standing-instructions block. A headless access key gets the block only (CONTEXT.md isn't a reviewed document and `context_init` is closed to it). |
+| `initialize` on `/mcp` | `result.instructions` = a pointer to each nest's `context_init`, then one block covering every nest the caller can read (in name order, one shared budget). A nest whose documents can't be loaded is named, not silently left out. |
+| `context_init` | CONTEXT.md, then the block. |
+| Hootie (`POST /nests/:id/chat`) | The block, ahead of the retrieved documents. |
+| Metacognition agents | The block, after the agent's own instructions, resolved as the agent's owner. |
+| Workflow runs | `standing_instructions` in the run bundle. |
+| `GET /nests/:id/instructions` | `always_included: { documents, overflow }` (ids, titles, versions — no text). |
+
+Rules for what goes in:
+- **Approved versions only.** Whether a document is always-include is read from its approved version too, so a draft that adds the tag (or the flag) injects nothing until a steward approves it. A document with no approved version is never included; neither is one whose approved version can't be rebuilt.
+- **Access-filtered.** Each caller gets only the documents they can read (`filterAccessible`): a document share narrows it to the shared documents; a public reader or headless key reads approved documents anyway. Nobody learns a document exists through this.
+- **Ordered by node id**, so the same nest yields the same text every time.
+- **Budget: 24,000 characters** per entry point, counting each document's text, title and wrapping. Whole documents only: a document that doesn't fit what's left is listed by title, id and version (up to 50 named, the rest counted) instead of being cut mid-text, and later documents that do fit still go in. On `/nests/:id/mcp` this is on top of up to 24,000 characters of CONTEXT.md, so `instructions` can reach about 48,000 characters. On `/mcp` the budget is shared, and once it is spent the remaining nests are counted, not resolved.
+- **Cached per nest** until the result can change: the cache key is the nest's always-include tags plus every approved (document, version) pin, so an approval, a move, a delete or a tag-setting change resolves afresh. A rebuild that failed is not cached.
+- **Fenced.** Each document is wrapped as `<standing_document id="nodes/…" version="N">` inside `<standing_instructions>`; a document can't open or close either fence (both tag forms are defused in its text, `<standing_…` → `< standing_…`).
+- **Always-include documents are prime** (see `STEWARDSHIP.md`), so in a governed nest the injected text can't change without a steward's approval.
+
+The server guarantees **delivery**, not obedience: an outside client (Claude Code, Cursor, …) receives the rules in `instructions`, which most clients place in the system prompt, but its model may still ignore them. For the models this server runs (Hootie, metacognition) and the run bundle, the server owns the prompt.
 
 **Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
 
@@ -2533,11 +2668,12 @@ Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a revi
 
 **Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
-**Headless publishing and systems** (nest owner/admin only, and **advertised only to them** in `tools/list` — a viewer, an editor, a read-only key, a headless access key or a system key never sees them, and a direct call is refused by the same service layer the REST routes use):
+**Headless publishing, visibility and systems** (nest owner/admin only, and **advertised only to them** in `tools/list` — a viewer, an editor, a read-only key, a headless access key or a system key never sees them, and a direct call is refused by the same service layer the REST routes use):
 - `context_headless` — `action`: `status` (on/off, keys, `shared_with`) | `enable` | `disable` | `create_key` (`label`; returns the token once) | `revoke_key` (`key_id`). Mirrors `/nests/:id/headless` (§2).
+- `context_set_visibility` — `visibility` (`private` | `org` | `public`), `acknowledge` (boolean, the `acknowledge_public` of REST). Mirrors `PATCH /nests/:id/visibility` (§2): same acknowledgement rule, same server cap (`nest_public_visibility` / `nest_org_visibility`), same headless refusal. A refusal is a tool error — `UNAUTHORIZED_ACTION` for the cap, `VALIDATION_FAILED` for a missing acknowledgement (its text carries the warning to put to the user). Refusals also carry machine-readable fields in `structuredContent`: `reason: "visibility_restricted"` for the cap, `requires_acknowledgement: true`, or `conflict: true` (headless, or a concurrent change — re-read the nest first).
 - `context_systems` — `action`: `list` (systems in this nest) | `create` (`name`, `capability`, `nest_ids` — defaults to this nest) | `rotate` / `revoke` (`system_id`) | `add_nest` / `remove_nest` (`system_id`, `nest_id`). Mirrors `/systems` (§3c).
 
-Both return the REST payload as `structuredContent`.
+All three return the REST payload as `structuredContent`.
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 

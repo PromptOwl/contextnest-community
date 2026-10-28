@@ -10,6 +10,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { saveOutcome } from "../lib/save-outcome";
@@ -22,6 +23,7 @@ import {
   newTags,
   normalizeTagInput,
   tagKey,
+  tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -75,8 +77,8 @@ import {
   GitCompare,
   ChevronDown,
   Check,
-  Copy,
   Star,
+  Megaphone,
   Undo2,
   PanelLeft,
   Globe,
@@ -97,6 +99,7 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
+import { TaskAssignee } from "./board/TaskAssignee";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -146,6 +149,7 @@ import { displayNameFor } from "../lib/person-name";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -198,7 +202,7 @@ interface DocumentEditorProps {
    *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
-  onSaved?: (savedNodeId: string) => void;
+  onSaved?: (savedNodeId: string, info?: { publishedDraft?: boolean }) => void;
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
@@ -339,6 +343,13 @@ export function DocumentEditor({
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
   const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
+  // Document-scope always-include flag (CU-wdqcq05rn0): same shape as prime —
+  // null inherits from the nest's always-include tags. Owner/admin only.
+  const [alwaysInclude, setAlwaysInclude] = useState<boolean | null>(null);
+  const loadedAlwaysIncludeRef = useRef<boolean | null>(null);
+  const alwaysIncludeTags = ((nestSettings.data as any)?.always_include_tags ?? [
+    "always-include",
+  ]) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -364,6 +375,7 @@ export function DocumentEditor({
   // Saved by NodeFieldsPanel on their own, outside the body's Save.
   const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
   const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
+  const [assignee, setAssignee] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -385,6 +397,9 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // CU-wdqcq05rz6: may suggest edits here as drafts for review.
+  const isOrgContributor = !!(nestMeta.data as { org_contributor?: boolean } | undefined)?.org_contributor;
+  const [suggestOpen, setSuggestOpen] = useState(false);
   // Read straight off the same GET /nests/:id response `permission` above
   // comes from, rather than a prop threaded down through App.tsx's View
   // state — the document page is reachable via wiki-link nav, a board/graph
@@ -525,12 +540,6 @@ export function DocumentEditor({
   const serverOrigin =
     typeof window !== "undefined" ? window.location.origin : "";
   const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
-  const [copiedRunnables, setCopiedRunnables] = useState(false);
-  const copyRunnablesUrl = async () => {
-    if (!(await copyTextWithToast(runnablesUrl))) return;
-    setCopiedRunnables(true);
-    setTimeout(() => setCopiedRunnables(false), 1500);
-  };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
   // select-to-comment and painted highlights are reachable without TipTap
@@ -1147,9 +1156,14 @@ export function DocumentEditor({
       const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
       setPrime(loadedPrime);
       loadedPrimeRef.current = loadedPrime;
+      const loadedAlwaysInclude =
+        typeof node?.always_include === "boolean" ? node.always_include : null;
+      setAlwaysInclude(loadedAlwaysInclude);
+      loadedAlwaysIncludeRef.current = loadedAlwaysInclude;
       setBaseVersion(node?.version);
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
+      setAssignee((node as any)?.assignee ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -1358,8 +1372,9 @@ export function DocumentEditor({
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
     if (prime !== loadedPrimeRef.current) return true;
+    if (alwaysInclude !== loadedAlwaysIncludeRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule, prime]);
+  }, [touched, title, content, tags, schedule, prime, alwaysInclude]);
 
   // Save is a no-op on a clean document (it would only bump the version), so
   // the button says so by being disabled — the enabled/disabled pair IS the
@@ -1481,8 +1496,14 @@ export function DocumentEditor({
     };
   }, [tagInput, tags]);
 
-  const addTag = useCallback(() => {
-    const { tags: accepted, notes } = tagPreview;
+  // Nest tag vocabulary for the tag field's suggestions (cached reference read).
+  const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
+  const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
+
+  // `picked` is a suggestion chosen from the list — already a valid nest tag.
+  const addTag = useCallback((picked?: string) => {
+    const { tags: accepted, notes } =
+      picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
     // A paste commits several tags at once, and one transient toast per
     // rewrite is unreadable — stack them into a single summary and leave the
     // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
@@ -1545,12 +1566,17 @@ export function DocumentEditor({
         // Only sent when explicitly flagged — the server 403s a non-admin who
         // sends `prime` at all, so an inherited (null) flag stays off the wire.
         ...(prime === null ? {} : { prime }),
+        ...(alwaysInclude === null ? {} : { always_include: alwaysInclude }),
       });
       savedId = (res as any)?.node?.id;
       createdStatus = (res as any)?.node?.status;
     } else {
-      const primePatch =
-        prime === loadedPrimeRef.current ? {} : { prime };
+      const primePatch = {
+        ...(prime === loadedPrimeRef.current ? {} : { prime }),
+        ...(alwaysInclude === loadedAlwaysIncludeRef.current
+          ? {}
+          : { always_include: alwaysInclude }),
+      };
       const res = await api.updateNode(
         nestId,
         nodeId,
@@ -1561,6 +1587,7 @@ export function DocumentEditor({
         baseVersion,
       );
       loadedPrimeRef.current = prime;
+      loadedAlwaysIncludeRef.current = alwaysInclude;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -1648,7 +1675,11 @@ export function DocumentEditor({
     }
   };
 
-  const handleSave = () => runSave((savedId) => onSaved?.(savedId));
+  const handleSave = () => {
+    // Read before the save: a draft this save publishes (the caller may leave the page).
+    const publishedDraft = !isNew && status === "draft" && outcome === "publish";
+    return runSave((savedId) => onSaved?.(savedId, { publishedDraft }));
+  };
 
   // Clear the "Saved" hint the moment the doc is edited again.
   useEffect(() => {
@@ -1834,7 +1865,13 @@ export function DocumentEditor({
   const primeByTag =
     primeTags.length > 0 &&
     tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
-  const effectivePrime = prime === null ? primeByTag : prime;
+  // Always-include mirrors the server the same way; an always-include
+  // document is prime whatever its own prime flag says.
+  const alwaysIncludeByTag =
+    alwaysIncludeTags.length > 0 &&
+    tags.some((t) => alwaysIncludeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectiveAlwaysInclude = alwaysInclude === null ? alwaysIncludeByTag : alwaysInclude;
+  const effectivePrime = effectiveAlwaysInclude || (prime === null ? primeByTag : prime);
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
@@ -2094,6 +2131,14 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {isOrgContributor && (
+        <SuggestDialog
+          nestId={nestId}
+          open={suggestOpen}
+          onOpenChange={setSuggestOpen}
+          edit={{ nodeId, title, content }}
+        />
+      )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
       )}
@@ -2683,7 +2728,22 @@ export function DocumentEditor({
               {/* A viewer gets the way to ask instead of no Edit at all. Not on
                   an archived nest (nobody edits it) or for a signed-out reader
                   (nobody to grant it to). */}
-              {isViewOnly && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+              {/* An org contributor (CU-wdqcq05rz6) can suggest the edit
+                  instead of asking for access — it goes to review. */}
+              {isViewOnly && isOrgContributor && !isArchived && !isNew && !isPdfNode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setSuggestOpen(true)}
+                  data-testid="document-editor-suggest-edit"
+                  title="Suggest a change. It goes to review; the document stays as it is until a reviewer approves it."
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Suggest an edit
+                </Button>
+              )}
+              {isViewOnly && !isOrgContributor && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -3100,7 +3160,15 @@ export function DocumentEditor({
                       {canEditContent && !fieldsDisabled && (
                         <input
                           value={tagInput}
-                          onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                          onChange={(e) => {
+                            // Picking a datalist suggestion arrives as a replacement — add it straight away.
+                            if ((e.nativeEvent as InputEvent).inputType === "insertReplacementText") {
+                              addTag(e.target.value);
+                              return;
+                            }
+                            setTagInput(clampTagInput(e.target.value));
+                          }}
+                          list="document-editor-tag-suggestions"
                           onKeyDown={(e) => {
                             // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                             if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -3119,6 +3187,13 @@ export function DocumentEditor({
                           className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
                           data-testid="document-editor-tag-input"
                         />
+                      )}
+                      {canEditContent && !fieldsDisabled && (
+                        <datalist id="document-editor-tag-suggestions">
+                          {suggestedTags.map((t) => (
+                            <option key={t} value={t} />
+                          ))}
+                        </datalist>
                       )}
                       {tags.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
@@ -3193,9 +3268,14 @@ export function DocumentEditor({
                           ? "Inherited from a prime tag on this document — it always needs steward approval."
                           : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
                       </p>
-                      {primeByTag && prime === false && (
+                      {primeByTag && prime === false && !effectiveAlwaysInclude && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its prime tag.
+                        </p>
+                      )}
+                      {effectiveAlwaysInclude && (
+                        <p className="text-xs text-muted-foreground">
+                          Prime because it is always-included — turn that off first.
                         </p>
                       )}
                       {/* The one case people get wrong: an owner with auto-publish on
@@ -3209,7 +3289,7 @@ export function DocumentEditor({
                     </div>
                     <Switch
                       checked={effectivePrime}
-                      disabled={fieldsDisabled}
+                      disabled={fieldsDisabled || effectiveAlwaysInclude}
                       onCheckedChange={(next) => {
                         // Turning the switch back to whatever the tags already imply
                         // clears the override rather than pinning a redundant flag.
@@ -3218,6 +3298,42 @@ export function DocumentEditor({
                       }}
                       aria-label="Prime document"
                       data-testid="document-editor-prime"
+                    />
+                  </div>
+                )}
+
+                {/* Always include — any nest, owner/admin only. It reaches every
+              agent and model, governed or not; in a governed nest it also
+              makes the document prime. */}
+                {canFlagPrime && pageActive && (
+                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                    <div className="space-y-0.5">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Megaphone className="h-4 w-4" />
+                        Always include
+                      </span>
+                      <p className="text-xs text-muted-foreground">
+                        {alwaysIncludeByTag && alwaysInclude === null
+                          ? "Inherited from an always-include tag on this document."
+                          : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs."}
+                        {stewardshipEnabled &&
+                          " It is also prime: every change to it needs steward approval."}
+                      </p>
+                      {alwaysIncludeByTag && alwaysInclude === false && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Exempted from its always-include tag.
+                        </p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={effectiveAlwaysInclude}
+                      disabled={fieldsDisabled}
+                      onCheckedChange={(next) => {
+                        setAlwaysInclude(next === alwaysIncludeByTag ? null : next);
+                        setTouched(true);
+                      }}
+                      aria-label="Always include"
+                      data-testid="document-editor-always-include"
                     />
                   </div>
                 )}
@@ -3249,6 +3365,23 @@ export function DocumentEditor({
                       </span>
                     )}
                   </div>
+                )}
+
+                {/* Assignee — tasks only, the board card's picker (saved on pick). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskAssignee
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    assignee={assignee}
+                    people={roster?.people ?? []}
+                    me={currentEmail}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setAssignee(n?.assignee ?? undefined);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
                 )}
 
                 {/* Relations — tasks only: blocks / blocked by / related /
@@ -3496,19 +3629,12 @@ export function DocumentEditor({
                       <span className="text-xs font-medium text-muted-foreground">
                         Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
                       </span>
-                      <Button
+                      <CopyButton
+                        text={runnablesUrl}
                         variant="ghost"
-                        size="sm"
                         className="h-6 px-2 shrink-0"
-                        onClick={copyRunnablesUrl}
                         title="Copy URL"
-                      >
-                        {copiedRunnables ? (
-                          <Check className="h-3 w-3 text-green-600" />
-                        ) : (
-                          <Copy className="h-3 w-3" />
-                        )}
-                      </Button>
+                      />
                     </div>
                     <code className="block text-[11px] font-mono break-all text-foreground/80">
                       GET {runnablesUrl}

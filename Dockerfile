@@ -19,6 +19,14 @@ ENV PORT=3838
 ENV NODE_USE_ENV_PROXY=1
 ENV DATA_ROOT=/data
 
+# Run as the image's built-in non-root `node` user (uid/gid 1000), which owns
+# /data. The ownership must be set before VOLUME: changes to a volume path
+# after it is declared are discarded. The numeric USER lets Kubernetes verify
+# `runAsNonRoot` without a separate runAsUser. A bind mount or a volume created
+# by an older root image may hold root-owned files: `chown -R 1000:1000` it once.
+RUN mkdir -p /data && chown 1000:1000 /data
+USER 1000:1000
+
 VOLUME ["/data"]
 EXPOSE 3838
 
