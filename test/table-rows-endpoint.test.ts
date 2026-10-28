@@ -108,6 +108,29 @@ describe("governed nest", () => {
   });
 });
 
+describe("an editor steward on the table (read collaborator)", () => {
+  it("may write rows on that table, as they may PATCH it", async () => {
+    const t = await mk(govNest, { title: "Stewarded Pipeline", type: "table", content: T_CSV });
+    const s = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/stewards`,
+      { scope: "document", documentId: t, users: [{ email: reader.email, role: "editor" }] },
+      owner.apiKey,
+    );
+    expect(s.status, JSON.stringify(s.data)).toBe(201);
+    const r = await rows(govNest, t, { ops: [{ op: "update", key: "r2", set: { amount: 25 } }] }, reader);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect(r.data.state).toBe("draft");
+    // …and on no other table.
+    const other = await mk(govNest, { title: "Unstewarded Pipeline", type: "table", content: T_CSV });
+    const refused = await rows(govNest, other, { ops: [{ op: "delete", key: "r1" }] }, reader);
+    expect(refused.status).toBe(403);
+    // The access-request hint names the table, not "<table>/rows".
+    expect(refused.data.target).toEqual({ type: "node", id: other });
+  });
+});
+
 describe("refusals write nothing", () => {
   let t: string;
   let baseline: { content: string; version: number };
