@@ -560,13 +560,16 @@ export function DocumentEditor({
   // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
   // opened from the page count as inside, or opening one would hide the toolbar.
   const pageRef = useRef<HTMLDivElement | null>(null);
+  // The top bar counts as inside too: putting the controls away on a press
+  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
+  const topBarRef = useRef<HTMLDivElement | null>(null);
   const [pageActive, setPageActive] = useState(isNew);
   useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pageActive) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t)) return;
+      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
       if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
       setPageActive(false);
     };
@@ -2353,6 +2356,7 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
+        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
