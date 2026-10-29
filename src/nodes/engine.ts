@@ -424,6 +424,7 @@ class NestEngineCache {
             : new NestStorage(nestPath),
         ),
       );
+      nestOfStorage.set(storage, nestId);
       const histories = withHistoryCache(storage);
       const query = new GraphQueryEngine(storage as any);
       const versions = new VersionManager(storage);
@@ -458,6 +459,16 @@ export const engineCache = new NestEngineCache();
  * surfaces stay on one contract (see docs/prds/api-convergence.md).
  */
 export const engineApi = createEngineApi();
+
+// Each op is timed as `engine:<op>` while a write on its nest is recorded
+// (io-stats): the vault lock and the checkpoint run inside the op, not on
+// storage, so this total is the only place their cost shows.
+const nestOfStorage = new WeakMap<object, string>();
+const runOp = engineApi.run.bind(engineApi);
+engineApi.run = ((op: any, input: any, ctx: OperationContext) => {
+  const nestId = nestOfStorage.get(ctx.storage);
+  return nestId ? timed(nestId, `engine:${op}`, () => runOp(op, input, ctx)) : runOp(op, input, ctx);
+}) as typeof engineApi.run;
 
 /**
  * Build an OperationContext for one nest. `onProgress` is the engine's
