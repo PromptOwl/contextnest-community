@@ -288,6 +288,25 @@ export function MaturityBoard({
   // which tag to drop when retagging a multi-tagged card.
   const [dragFromCol, setDragFromCol] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
+  // The board scroller ends at the window's bottom edge, so its sideways
+  // scrollbar is always in view, not at the page bottom (CU-wdqcq0656t).
+  // Re-measured whenever the page above it changes height.
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const [boardH, setBoardH] = useState<number | null>(null);
+  useEffect(() => {
+    const fit = () => {
+      const el = boardRef.current;
+      if (el) setBoardH(Math.max(320, Math.floor(window.innerHeight - el.getBoundingClientRect().top - window.scrollY - 8)));
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(document.body);
+    window.addEventListener("resize", fit);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, []);
   const [busy, setBusy] = useState(false);
   // Same derivation NestView uses. Starts false so a read-only viewer never
   // sees a draggable card during the fetch, then flips on for writers.
@@ -2247,9 +2266,10 @@ export function MaturityBoard({
       ) : (
         lanes ? (
           // Swimlanes: column headers once, then one row of cells per lane.
-          <div className="overflow-x-auto pb-4">
+          <div ref={boardRef} className="overflow-auto pb-4" style={boardH ? { maxHeight: boardH } : undefined}>
             <div className="inline-flex min-w-full flex-col gap-2">
-              <div className="flex gap-3">
+              {/* Column titles stay put while the lanes scroll (CU-wdqcq0656r). */}
+              <div className="sticky top-0 z-10 flex gap-3 bg-background">
                 {columns.map((col) => (
                   <div
                     key={col.key}
@@ -2323,7 +2343,7 @@ export function MaturityBoard({
             </div>
           </div>
         ) : (
-          <div className="flex gap-3 overflow-x-auto pb-4">
+          <div ref={boardRef} className="flex gap-3 overflow-x-auto pb-4">
             {columns.map((col) => {
               const cards = orderedByColumn[col.key] ?? [];
               return (
@@ -2332,6 +2352,8 @@ export function MaturityBoard({
                   {...cellDropHandlers(col)}
                   className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-border"
                     }`}
+                  // Fit above the scroller's bottom padding (pb-4).
+                  style={boardH ? { maxHeight: boardH - 16 } : undefined}
                 >
                   {renderHeader(col, cards.length)}
                   {renderCards(col, cards)}

@@ -275,6 +275,23 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
                 </pre>
               )}
             </div>
+          ) : !body.trim() ? (
+            // Empty CONTEXT.md (an imported nest often has one): say so instead
+            // of a blank card (CU-wdqcq06259).
+            <div className="py-8 text-center" data-testid="instructions-empty">
+              <p className="font-medium">No instructions yet</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+                {canEdit
+                  ? "Agents read these first when they work in this nest. Tell them what the nest is for and how to use it."
+                  : "The nest owner or an admin can add instructions for agents working in this nest."}
+              </p>
+              {canEdit && (
+                <Button size="sm" className="mt-4" onClick={startEdit}>
+                  <Pencil className="mr-1.5 h-4 w-4" />
+                  Add instructions
+                </Button>
+              )}
+            </div>
           ) : (
             <>
               <MarkdownEditor

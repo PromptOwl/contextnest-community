@@ -35,7 +35,7 @@ import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
-import { useBreadcrumbTail, crumbLabelClass, type Crumb } from "./lib/breadcrumb";
+import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -852,6 +852,13 @@ export default function App() {
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
+  // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
+  const pageTabTitle = tabTitle(crumbs);
+  const brandedReader = readerMode && !!nestBranding;
+  useEffect(() => {
+    if (!brandedReader) document.title = pageTabTitle;
+  }, [pageTabTitle, brandedReader]);
+
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
   const appNav = useMemo<AppNav>(
@@ -1566,6 +1573,8 @@ export default function App() {
           // With the sidebar <main> has no padding of its own (pages add it),
           // so the card needs its own gap from the header and the edges.
           className={withSidebar ? "mx-4 mt-4 md:mx-6" : "mb-4"}
+          // Full card on the dashboard; one line where content needs the room.
+          compact={view.page !== "dashboard"}
         />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with

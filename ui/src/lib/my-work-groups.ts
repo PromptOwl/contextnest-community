@@ -29,12 +29,19 @@ export function workItemKey(w: WorkItem): string {
  * server totals, plus the open tasks assigned to you. Assigned tasks aren't in
  * pagination.total because they don't page with the reviews. Unread
  * notifications (comments, mentions, watched documents) count too — /me/work
- * carries them whatever the page size.
+ * carries them whatever the page size. What you handed off (Waiting on others)
+ * needs nothing from you, so it stays out (CU-wdqcq0658p).
  */
 export function waitingOnMeCount(
-  work: { pagination?: WorkPagination; assigned?: AssignedItem[]; notifications?: unknown[] } | undefined,
+  work:
+    | { waiting_on_me_total?: number; pagination?: WorkPagination; assigned?: AssignedItem[]; notifications?: unknown[] }
+    | undefined,
 ): number {
-  return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0) + (work?.notifications?.length ?? 0);
+  return (
+    (work?.waiting_on_me_total ?? work?.pagination?.total ?? 0) +
+    (work?.assigned?.length ?? 0) +
+    (work?.notifications?.length ?? 0)
+  );
 }
 
 /** "All caught up" only when no review, request or assigned task waits on you. */
