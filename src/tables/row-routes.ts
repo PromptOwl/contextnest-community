@@ -53,6 +53,27 @@ function conflict(c: any, base: number, current: number) {
   );
 }
 
+/**
+ * Read the head version and the body as one consistent pair: head → body →
+ * head, retried while they move. Reading the body first and the head after
+ * would let a write land in between, and the ops would be applied to the
+ * older body under the newer head — which expectHead then accepts, silently
+ * reverting that write. Throws ConflictError if the node keeps moving.
+ */
+export async function readStable(
+  getHead: () => Promise<number>,
+  readBody: () => Promise<string>,
+  attempts = 3,
+): Promise<{ head: number; body: string }> {
+  for (let i = 0; i < attempts; i++) {
+    const before = await getHead();
+    const body = await readBody();
+    const after = await getHead();
+    if (before === after) return { head: after, body };
+  }
+  throw new ConflictError("The table changed while it was being read. Reload it and try again.");
+}
+
 tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -92,10 +113,15 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     throw new ValidationError(`"${nodeId}" is type "${type}" — row operations only apply to table nodes`);
   }
 
-  const head = await versions.getCurrentVersion(nestId, nodeId);
+  // The head and the body the ops apply to must belong together; updateNode's
+  // expectHead then refuses anything that lands after this read.
+  const { head, body: current } = await readStable(
+    () => versions.getCurrentVersion(nestId, nodeId),
+    async () => (await storage.readDocument(nodeId)).body || "",
+  );
   if (base !== undefined && base !== head) return conflict(c, base, head);
 
-  const applied = applyRowOps(doc.body || "", ops);
+  const applied = applyRowOps(current, ops);
   const counts = { appended: applied.appended, updated: applied.updated, deleted: applied.deleted };
   const stateOf = async (v: number) =>
     (await versions.getApprovedVersion(nestId, nodeId)) === v ? "published" : "draft";

@@ -104,16 +104,21 @@ function requireKey(v: unknown, at: string): Value {
   return key;
 }
 
+/** Plain decimal (optionally signed, with exponent): no hex, no Infinity. */
+const NUMBER_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+/** An ISO date, optionally with a time — what WHERE compares as a date. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?$/;
+
 function checkValue(col: Column, value: Value, at: string): void {
   if (/[\r\n]/.test(value)) throw new ValidationError(`${at}: "${col.name}" may not contain a line break`);
   if (value.length > ROW_OPS_CAPS.MAX_VALUE_CHARS) {
     throw new ValidationError(`${at}: "${col.name}" is longer than ${ROW_OPS_CAPS.MAX_VALUE_CHARS} characters`);
   }
   if (value === "") return;
-  if (col.type === "number" && !Number.isFinite(Number(value))) {
+  if (col.type === "number" && !(NUMBER_RE.test(value) && Number.isFinite(Number(value)))) {
     throw new ValidationError(`${at}: "${col.name}" is a :number column, and "${value}" is not a number`);
   }
-  if (col.type === "date" && Number.isNaN(Date.parse(value))) {
+  if (col.type === "date" && !(ISO_DATE_RE.test(value) && !Number.isNaN(Date.parse(value)))) {
     throw new ValidationError(`${at}: "${col.name}" is a :date column, and "${value}" is not a date`);
   }
 }
@@ -139,13 +144,19 @@ const isContentLine = (l: string) => l.trim() !== "" && !l.trim().startsWith("#"
 export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
   const { columns } = parseTable(body);
   const byName = new Map(columns.map((c, i) => [c.name, i]));
+  if (byName.size !== columns.length) {
+    throw new ValidationError("the table header names a column more than once; fix the header before writing rows");
+  }
   const keyIdx = columns.findIndex((c) => c.key);
   const keyName = keyIdx >= 0 ? columns[keyIdx].name : null;
 
-  // Work on lines so untouched ones are kept exactly. `null` marks a deleted
-  // line; data rows hold their parsed cells next to the original text.
-  const eol = body.includes("\r\n") ? "\r\n" : "\n";
-  const lines: Array<string | null> = body.split(/\r?\n/);
+  // Work on lines so untouched ones are kept exactly, each with its own line
+  // ending. `null` marks a deleted line; data rows hold their parsed cells.
+  const pieces = body.split(/(\r?\n)/);
+  const lines: Array<string | null> = pieces.filter((_, i) => i % 2 === 0);
+  const ends: string[] = pieces.filter((_, i) => i % 2 === 1);
+  const crlf = ends.filter((e) => e === "\r\n").length;
+  const eol = crlf > ends.length - crlf ? "\r\n" : "\n";
   const headerAt = lines.findIndex((l) => l !== null && isContentLine(l));
   const headerLine = lines[headerAt] as string;
   type Row = { line: number; values: Value[]; dirty: boolean };
@@ -227,11 +238,29 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
   if (!changed) return { body, appended: nAppend, updated: nUpdate, deleted: nDelete, changed: false };
 
   for (const r of rows) if (r.dirty && lines[r.line] !== null) lines[r.line] = csvLine(r.values);
-  const kept = lines.filter((l): l is string => l !== null);
+  // Each kept line with the ending that followed it (the last has none).
+  const kept: Array<{ text: string; end: string }> = [];
+  lines.forEach((text, i) => {
+    if (text !== null) kept.push({ text, end: ends[i] ?? "" });
+  });
   // Appends go after the last content line, keeping any trailing blank lines
   // (a body ending in a newline still ends in one).
   let lastContent = kept.length - 1;
-  while (lastContent > 0 && !isContentLine(kept[lastContent])) lastContent--;
-  kept.splice(lastContent + 1, 0, ...appended.map(csvLine));
-  return { body: kept.join(eol), appended: nAppend, updated: nUpdate, deleted: nDelete, changed: true };
+  while (lastContent > 0 && !isContentLine(kept[lastContent].text)) lastContent--;
+  if (appended.length) {
+    const before = kept[lastContent];
+    const tailEnd = before.end;
+    before.end = before.end || eol;
+    const added = appended.map((v, i) => ({ text: csvLine(v), end: i === appended.length - 1 ? tailEnd : eol }));
+    kept.splice(lastContent + 1, 0, ...added);
+  }
+  // A deleted last line leaves the new last line's ending dangling.
+  if (kept.length && lines[lines.length - 1] === null) kept[kept.length - 1].end = "";
+  return {
+    body: kept.map((k) => k.text + k.end).join(""),
+    appended: nAppend,
+    updated: nUpdate,
+    deleted: nDelete,
+    changed: true,
+  };
 }

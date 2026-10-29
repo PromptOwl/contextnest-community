@@ -162,6 +162,25 @@ describe("applyRowOps", () => {
     });
   });
 
+  describe("review round 1", () => {
+    it("keeps each untouched line's own line ending in a mixed-EOL body", () => {
+      const body = "k:key,v\n1,a\r\n2,b\n3,c";
+      const out = applyRowOps(body, parseRowOps([{ op: "update", key: "3", set: { v: "z" } }]));
+      expect(out.body).toBe("k:key,v\n1,a\r\n2,b\n3,z");
+      const del = applyRowOps(body, parseRowOps([{ op: "delete", key: "1" }]));
+      expect(del.body).toBe("k:key,v\n2,b\n3,c");
+    });
+    it("refuses hex/odd numbers and non-ISO dates", () => {
+      expect(() => applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { amount: "0x10" } }]))).toThrow(/number/);
+      expect(() => applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { amount: "Infinity" } }]))).toThrow(/number/);
+      expect(() => applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { closed: "1" } }]))).toThrow(/date/);
+      expect(applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { amount: "-1.5e3", closed: "2026-03-04T10:00:00Z" } }])).changed).toBe(true);
+    });
+    it("refuses to write a table whose header repeats a column name", () => {
+      expect(() => applyRowOps("k:key,v,v\n1,a,b", parseRowOps([{ op: "update", key: "1", set: { v: "z" } }]))).toThrow(/more than once/);
+    });
+  });
+
   it("appends to a table with no :key column", () => {
     const out = applyRowOps("name,v\na,1", parseRowOps([{ op: "append", row: { name: "b", v: "2" } }]));
     expect(out.body).toBe("name,v\na,1\nb,2");
