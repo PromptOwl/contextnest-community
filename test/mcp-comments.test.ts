@@ -334,7 +334,7 @@ describe("MCP comment permissions", () => {
       (n) => n.kind === "mention",
     );
     expect(mentions).toHaveLength(1);
-    expect(mentions[0].message).toContain(viewer.email);
+    expect(mentions[0].message).toContain("Viewer mentioned you");
   });
 
   it("refuses a caller with no access, without confirming the document", async () => {

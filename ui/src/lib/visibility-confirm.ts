@@ -80,3 +80,88 @@ export function visibilityConfirmCopy(
     confirm: "Open to everyone here",
   };
 }
+
+/** Who may widen a nest, from /health (NEST_PUBLIC_VISIBILITY /
+ *  NEST_ORG_VISIBILITY), plus whether the viewer is a server admin. */
+export interface VisibilityPolicy {
+  publicBy: "owners" | "admins";
+  orgBy: "owners" | "admins";
+  isServerAdmin: boolean;
+}
+
+const TIER_RANK: Record<NestVisibility, number> = { private: 0, org: 1, public: 2 };
+
+/** Why the viewer can't move a nest from `current` to `target`, or null when
+ *  they can. Mirrors the server (nests/visibility-service.ts): only widening
+ *  to an admins-only tier is restricted; narrowing never is. */
+export function visibilityBlockedReason(
+  target: NestVisibility,
+  current: NestVisibility,
+  policy: VisibilityPolicy,
+): string | null {
+  if (TIER_RANK[target] <= TIER_RANK[current] || policy.isServerAdmin) return null;
+  if (target === "public" && policy.publicBy === "admins")
+    return "Only a server admin can make nests public on this server.";
+  if (target === "org" && policy.orgBy === "admins")
+    return "Only a server admin can make nests organization-wide on this server.";
+  return null;
+}
+
+export interface VisibilityMenuOption {
+  value: NestVisibility;
+  label: string;
+  /** The tier's one-liner, or why it's blocked when it is. */
+  hint: string;
+  disabled: boolean;
+  current: boolean;
+}
+
+const TIER_LABELS: Array<[NestVisibility, string]> = [
+  ["private", "Private"],
+  ["org", "Organization"],
+  ["public", "Public"],
+];
+
+/** The choices every visibility control offers — the nest header button,
+ *  the document top bar and the Collaborators card alike: all three tiers
+ *  from any tier, with a capped one disabled and explained. */
+export function visibilityMenuOptions(
+  current: NestVisibility,
+  ctx: VisibilityContext,
+  policy: VisibilityPolicy,
+): VisibilityMenuOption[] {
+  return TIER_LABELS.map(([value, label]) => {
+    const reason = visibilityBlockedReason(value, current, policy);
+    return {
+      value,
+      label,
+      hint: reason ?? visibilityTierHint(value, ctx),
+      disabled: reason !== null,
+      current: value === current,
+    };
+  });
+}
+
+/** Settle a visibility save into what the control should show. Success takes
+ *  the server's echoed (re-read) value verbatim; failure reverts to the
+ *  PREVIOUS value — never one derived from the target, which once showed a
+ *  public badge on a nest that never went public. */
+export async function settleVisibilityChange(
+  prev: NestVisibility,
+  target: NestVisibility,
+  send: () => Promise<{ visibility?: NestVisibility }>,
+): Promise<{ visibility: NestVisibility; error: string | null }> {
+  try {
+    const result = await send();
+    const visibility = result?.visibility || target;
+    return {
+      visibility,
+      error:
+        visibility === target
+          ? null
+          : "Server did not accept the change. You may not have admin access to this nest.",
+    };
+  } catch (err: any) {
+    return { visibility: prev, error: err?.message || "Failed to change visibility" };
+  }
+}

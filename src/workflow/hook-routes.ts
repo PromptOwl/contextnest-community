@@ -22,6 +22,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { getAgent } from "../metacognition/store.js";
+import { isMetacognitionAgent, requireMetacognitionAdmin } from "../metacognition/manage.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
@@ -108,6 +109,10 @@ hookNestRoutes.post("/", requireWorkflowPlane, async (c) => {
   if (!RUNNABLE_TYPES.includes(t)) {
     throw new ValidationError(`"${agentNode}" is type "${t}" — only agent/skill nodes are triggerable`);
   }
+
+  // A hook fires a metacognition agent without anyone signed in: handing out
+  // that trigger is owner/admin, like everything else about the agent.
+  if (await isMetacognitionAgent(nestId, agentNode)) requireMetacognitionAdmin(c.get("nestPermission"));
 
   // 128-bit random token — the capability. hk_ prefix for log greppability.
   const id = `hk_${randomUUID().replace(/-/g, "")}`;

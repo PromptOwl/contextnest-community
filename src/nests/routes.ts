@@ -28,6 +28,9 @@ import {
   nestAllowsSelfApprove,
   nestCreatorIsReviewer,
   setCreatorIsReviewer,
+  nestOrgContributions,
+  validateOrgContributionsPatch,
+  setOrgContributions,
   nestReviewSlaHours,
   setReviewSlaHours,
   MAX_REVIEW_SLA_HOURS,
@@ -35,6 +38,8 @@ import {
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
   nestPrimeTags,
+  nestAlwaysIncludeTags,
+  setAlwaysIncludeTags,
   setPrimeTags,
   nestDoneTags,
   setDoneTags,
@@ -68,6 +73,7 @@ import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { parseStoredBranding } from "../shared/branding.js";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -638,12 +644,20 @@ nestRoutes.get("/:nestId", async (c) => {
       grant_only: false,
     });
   }
+  // The org-contribution domain list is the nest's governance, not something
+  // every org reader needs (on a shared server org readers span customers).
+  const shown = withParsedBranding(nest) as Record<string, unknown> | null;
+  if (shown && permission !== "owner" && permission !== "admin") delete shown.org_domains;
   return c.json({
-    nest: withParsedBranding(nest),
+    nest: shown,
     permission,
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
     grant_only,
+    // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
+    // drafts for review — their permission stays 'read'.
+    org_contributor:
+      permission === "read" && access.orgContributor && credentialMayContribute(c),
   });
 });
 
@@ -772,6 +786,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
@@ -779,6 +794,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     review_sla_hours: await nestReviewSlaHours(nestId),
     access_log_enabled: await nestAccessLogEnabled(nestId),
+    ...(await nestOrgContributions(nestId)),
   });
 });
 
@@ -808,11 +824,14 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    always_include_tags?: string[] | string;
     done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
     review_sla_hours?: number | null;
     access_log_enabled?: boolean;
+    org_contributions?: unknown;
+    org_domains?: unknown;
   }>();
 
   // Validated before anything is written, so a bad SLA can't leave the other
@@ -829,6 +848,10 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
     );
   }
+
+  // Org contributions (CU-wdqcq05rz6), validated against the state they'd
+  // leave behind — before anything in the body is written.
+  const orgPatch = await validateOrgContributionsPatch(nestId, body);
 
   // Read logging (the record of what each person and agent read) is an audit
   // control. Any admin may turn it ON; turning it OFF stays with the owner or
@@ -910,6 +933,16 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Always-include tags change what agents are TOLD from the next connect
+  // on; only approved versions are ever injected, so this can't publish a draft.
+  if (body.always_include_tags !== undefined) {
+    await setAlwaysIncludeTags(
+      nestId,
+      Array.isArray(body.always_include_tags)
+        ? body.always_include_tags
+        : [body.always_include_tags],
+    );
+  }
   // Done columns only change how FUTURE task moves are stamped.
   if (body.done_tags !== undefined) {
     await setDoneTags(
@@ -931,17 +964,20 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   if (typeof body.access_log_enabled === "boolean") {
     await setAccessLogEnabled(nestId, body.access_log_enabled);
   }
+  if (orgPatch) await setOrgContributions(nestId, orgPatch);
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     review_sla_hours: await nestReviewSlaHours(nestId),
     access_log_enabled: await nestAccessLogEnabled(nestId),
+    ...(await nestOrgContributions(nestId)),
     wiped,
   });
 });

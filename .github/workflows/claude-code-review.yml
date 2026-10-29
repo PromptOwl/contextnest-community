@@ -46,7 +46,7 @@ jobs:
 
             Read REVIEW.md at the repository root and apply it. Before reviewing code, run
             `gh pr view ${{ github.event.pull_request.number }} --json title,body,headRefName` and check the
-            REVIEW.md "Required PR checklist" (ClickUp ticket, Steps to test). Start your comment with the
+            REVIEW.md "Required PR checklist" (Ticket: an Engineering Ops `Task:` link or a ClickUp id; Steps to test). Start your comment with the
             `### PR checklist` block; a missing item is a blocking finding.
 
             Then review the code and provide feedback on:

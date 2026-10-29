@@ -19,11 +19,20 @@ import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import {
   holdWriteIfGated,
   heldWriteResponse,
@@ -252,6 +261,7 @@ nodeRoutes.post("/", async (c) => {
     model?: string;
     folder?: string;
     prime?: boolean;
+    always_include?: boolean;
     client?: unknown;
     assignee?: string | null;
     due?: string | null;
@@ -270,6 +280,39 @@ nodeRoutes.post("/", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const authorEmail = await getUserEmail(c);
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier by the access gate
+  // for exactly this route. Their document is a draft sent to review, never
+  // published, whatever the nest's self-publish postures.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorCreate(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const { node, review } = await contributeDocument(
+      nestId,
+      {
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        folder: body.folder,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json(
+      {
+        node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+        review,
+        org_contribution: true,
+      },
+      201,
+    );
+  }
 
   // Agent-write gate. Only an API-key caller is held: a person creating a
   // document in the web UI authenticates with a session cookie and is exactly
@@ -295,6 +338,7 @@ nodeRoutes.post("/", async (c) => {
             model: body.model,
             folder: body.folder,
             prime: body.prime,
+            alwaysInclude: body.always_include,
             ...customFieldsFromBody(body),
             ...viewFromBody(body),
           },
@@ -317,6 +361,7 @@ nodeRoutes.post("/", async (c) => {
       model: body.model,
       folder: body.folder,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
@@ -327,9 +372,13 @@ nodeRoutes.post("/", async (c) => {
 
   // Resolve stewards for the response
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
+  // A table with :ref columns reports refs that name no readable node. Never
+  // blocks: the write above already landed. Absent for everything else.
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -715,10 +764,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     tags?: string[];
     status?: string;
     title?: string;
+    description?: string;
     changeNote?: string;
     schedule?: string;
     model?: string;
     prime?: boolean | null;
+    always_include?: boolean | null;
     client?: unknown;
     type?: string;
     assignee?: string | null;
@@ -730,6 +781,45 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
+  }
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier for this route
+  // only. The edit is proposed as a draft for review; the published text
+  // stays exactly as it is until a reviewer approves. Ahead of the
+  // X-Base-Version check on purpose: that 409 names who last changed the
+  // document and echoes the working version, which for a contributor could
+  // be someone else's unapproved draft. proposeEdit's own checks decide.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorPatch(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const authorEmail = await getUserEmail(c);
+    const { node, version, review } = await proposeEdit(
+      nestId,
+      nodeId,
+      c.get("userId"),
+      {
+        content: body.content,
+        append: body.append,
+        title: body.title,
+        description: body.description,
+        tags: body.tags,
+        changeNote: body.changeNote,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json({
+      node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+      version,
+      review,
+      org_contribution: true,
+    });
   }
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -753,6 +843,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   }
 
   const authorEmail = await getUserEmail(c);
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -761,11 +852,13 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       append: body.append,
       tags: body.tags,
       title: body.title,
+      description: body.description,
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
       model: body.model,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       type: body.type,
       ...taskFieldsFromInput(body),
@@ -774,10 +867,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     },
     authorEmail,
   );
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });
 

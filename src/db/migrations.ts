@@ -2292,6 +2292,48 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("071_node_pins");
   }
+
+  // 073: nests.always_include_tags (CU-wdqcq05rn0). Tags whose documents'
+  //   APPROVED text is pushed to every agent and model that enters the nest
+  //   (MCP initialize, context_init, Hootie, metacognition, run bundles). Comma
+  //   list like prime_tags; defaults to "always-include". (072 is claimed by an
+  //   open branch.)
+  if (!hasMigration("073_nest_always_include_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("always_include_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN always_include_tags TEXT NOT NULL DEFAULT 'always-include'");
+    }
+    recordMigration("073_nest_always_include_tags");
+  }
+
+  // 074: org contributors (CU-wdqcq05rz6). Numbered past 072 (nest plugins)
+  // and 073 (always-include tags), both claimed by open branches.
+  //   - nests.org_contributions: 'off' | 'drafts'. 'drafts' lets anyone in the
+  //     organization create documents and propose edits on an org-visibility
+  //     nest, always as drafts for review (src/shared/access.ts). Any other
+  //     value reads as off.
+  //   - nests.org_domains: JSON array of bare email domains. On a shared
+  //     deployment it IS the org boundary (required to turn the setting on).
+  //   - users.email_verified_at: when an identity provider (OIDC, token
+  //     exchange, PromptOwl) last vouched for the address. A password sign-up
+  //     never sets it, so a domain match can't be claimed by signing up as
+  //     someone@their-domain.
+  if (!hasMigration("074_org_contributions")) {
+    const nestColumns = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestColumns.includes("org_contributions")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_contributions TEXT NOT NULL DEFAULT 'off'");
+    }
+    if (!nestColumns.includes("org_domains")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_domains TEXT");
+    }
+    const userColumns = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!userColumns.includes("email_verified_at")) {
+      db.exec("ALTER TABLE users ADD COLUMN email_verified_at TEXT");
+    }
+    recordMigration("074_org_contributions");
+  }
 }
 
 /**

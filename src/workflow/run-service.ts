@@ -20,6 +20,7 @@ import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { safeJson } from "../shared/json.js";
+import { standingBlockFor, standingRefs, type StandingRef } from "../governance/always-include-service.js";
 
 export const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -209,6 +210,9 @@ export interface RunBundle {
   };
   edges: Awaited<ReturnType<typeof flowSubgraph>>;
   definitions: unknown[];
+  /** The nest's always-include documents, rendered for the runner's system
+   *  prompt, and which ones they are (CU-wdqcq05rn0). */
+  standing_instructions: { text: string; documents: StandingRef[]; overflow: StandingRef[] };
   trace_hint: { retrieval: string; steps: string };
 }
 
@@ -224,6 +228,8 @@ export async function triggerRun(opts: {
   triggeredBy: string;
   storage: NestStorage;
   parentRunId?: unknown;
+  /** The caller's user id: the standing instructions are what they may read. */
+  userId: string;
 }): Promise<RunBundle> {
   const { nestId, inputs, triggeredBy, storage } = opts;
   // SECURITY: agentNode is caller-supplied and untrusted (the MCP workflow_run
@@ -260,6 +266,7 @@ export async function triggerRun(opts: {
 
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
+  const standing = await standingBlockFor(nestId, { userId: opts.userId, userEmail: triggeredBy });
 
   const id = `run_${uuid()}`;
   const db = getDb();
@@ -318,6 +325,7 @@ export async function triggerRun(opts: {
     },
     edges,
     definitions,
+    standing_instructions: { text: standing.text, ...standingRefs(standing.set) },
     trace_hint: {
       retrieval:
         "POST /context is deterministic — record selector+hops per read so the run replays to the identical read-set",
