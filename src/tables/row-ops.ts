@@ -62,7 +62,8 @@ function scalar(v: unknown, where: string): Value {
 
 function cells(v: unknown, where: string): Record<string, Value> {
   if (!isPlainObject(v)) throw new ValidationError(`${where} must be an object of column → value`);
-  const out: Record<string, Value> = {};
+  // Null prototype: a "__proto__" key is a (refused, unknown) column, not a prototype.
+  const out: Record<string, Value> = Object.create(null);
   for (const [k, raw] of Object.entries(v)) out[k] = scalar(raw, `${where}.${k}`);
   return out;
 }
@@ -109,6 +110,15 @@ const NUMBER_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 /** An ISO date, optionally with a time — what WHERE compares as a date. */
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?$/;
 
+/** ISO shape, parseable, and a real calendar day (Date.parse rolls
+ *  2024-02-30 over to March 1 instead of failing). */
+function isRealDate(v: string): boolean {
+  if (!ISO_DATE_RE.test(v) || Number.isNaN(Date.parse(v))) return false;
+  const [y, m, d] = v.slice(0, 10).split("-").map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d));
+  return day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === d;
+}
+
 function checkValue(col: Column, value: Value, at: string): void {
   if (/[\r\n]/.test(value)) throw new ValidationError(`${at}: "${col.name}" may not contain a line break`);
   if (value.length > ROW_OPS_CAPS.MAX_VALUE_CHARS) {
@@ -118,7 +128,7 @@ function checkValue(col: Column, value: Value, at: string): void {
   if (col.type === "number" && !(NUMBER_RE.test(value) && Number.isFinite(Number(value)))) {
     throw new ValidationError(`${at}: "${col.name}" is a :number column, and "${value}" is not a number`);
   }
-  if (col.type === "date" && !(ISO_DATE_RE.test(value) && !Number.isNaN(Date.parse(value)))) {
+  if (col.type === "date" && !isRealDate(value)) {
     throw new ValidationError(`${at}: "${col.name}" is a :date column, and "${value}" is not a date`);
   }
 }
@@ -132,17 +142,22 @@ function csvCell(v: Value, first: boolean): string {
 
 const csvLine = (values: Value[]) => values.map((v, i) => csvCell(v, i === 0)).join(",");
 
-/** Parse one data line with the table's own parser (header + that line). */
-function lineCells(headerLine: string, line: string, width: number): Value[] {
-  const row = parseTable(`${headerLine}\n${line}`).rows[0] ?? [];
-  while (row.length < width) row.push("");
-  return row.slice(0, width);
+/** Every cell of one data line, including any past the header (the table
+ *  parser drops those; a rewrite must keep them). Trailing empty extras are
+ *  dropped — they carry nothing and may be padding. */
+function extraCells(line: string, width: number): Value[] {
+  const wide = Math.max(width, line.split(",").length);
+  const header = Array.from({ length: wide }, (_, i) => `c${i}`).join(",");
+  const all = parseTable(`${header}\n${line}`).rows[0] ?? [];
+  const extra = all.slice(width);
+  while (extra.length && extra[extra.length - 1] === "") extra.pop();
+  return extra;
 }
 
 const isContentLine = (l: string) => l.trim() !== "" && !l.trim().startsWith("#");
 
 export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
-  const { columns } = parseTable(body);
+  const { columns, rows: parsedRows } = parseTable(body);
   const byName = new Map(columns.map((c, i) => [c.name, i]));
   if (byName.size !== columns.length) {
     throw new ValidationError("the table header names a column more than once; fix the header before writing rows");
@@ -158,12 +173,12 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
   const crlf = ends.filter((e) => e === "\r\n").length;
   const eol = crlf > ends.length - crlf ? "\r\n" : "\n";
   const headerAt = lines.findIndex((l) => l !== null && isContentLine(l));
-  const headerLine = lines[headerAt] as string;
   type Row = { line: number; values: Value[]; dirty: boolean };
   const rows: Row[] = [];
-  for (let i = headerAt + 1; i < lines.length; i++) {
-    const l = lines[i] as string;
-    if (isContentLine(l)) rows.push({ line: i, values: lineCells(headerLine, l, columns.length), dirty: false });
+  // parseTable already parsed the data rows, in this same line order (same
+  // content-line rule), so zip them with their line numbers.
+  for (let i = headerAt + 1, r = 0; i < lines.length; i++) {
+    if (isContentLine(lines[i] as string)) rows.push({ line: i, values: [...parsedRows[r++]], dirty: false });
   }
   const appended: Value[][] = [];
   let nAppend = 0;
@@ -201,7 +216,9 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
     const at = `ops[${i}]`;
     if (op.op === "append") {
       resolveColumns(op.row, at);
-      const values = columns.map((c) => op.row[c.name] ?? "");
+      // Own properties only: a column named "constructor" must not read
+      // Object.prototype's.
+      const values = columns.map((c) => (Object.hasOwn(op.row, c.name) ? op.row[c.name] : ""));
       if (keyIdx >= 0) {
         const key = values[keyIdx];
         if (!key) throw new ValidationError(`${at}: an appended row needs its key column "${keyName}"`);
@@ -237,7 +254,11 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
 
   if (!changed) return { body, appended: nAppend, updated: nUpdate, deleted: nDelete, changed: false };
 
-  for (const r of rows) if (r.dirty && lines[r.line] !== null) lines[r.line] = csvLine(r.values);
+  for (const r of rows) {
+    if (r.dirty && lines[r.line] !== null) {
+      lines[r.line] = csvLine([...r.values, ...extraCells(lines[r.line] as string, columns.length)]);
+    }
+  }
   // Each kept line with the ending that followed it (the last has none).
   const kept: Array<{ text: string; end: string }> = [];
   lines.forEach((text, i) => {

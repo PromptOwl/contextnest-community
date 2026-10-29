@@ -131,6 +131,33 @@ describe("an editor steward on the table (read collaborator)", () => {
   });
 });
 
+describe("someone else's unreviewed draft (code-review round)", () => {
+  it("is not built on or submitted under the caller's name: 409, nothing written", async () => {
+    const t = await mk(govNest, { title: "Drafted Pipeline", type: "table", content: T_CSV });
+    // The reader is promoted to write here only to hold a second editor.
+    const other = await registerUser(app, "other-editor@rows.test", "Other");
+    await jsonRequest(app, "POST", `/nests/${govNest}/collaborators`, { email: other.email, permission: "write" }, owner.apiKey);
+    const draft = await jsonRequest(app, "PATCH", `/nests/${govNest}/nodes/${t}`, { content: `${T_CSV}\nr7,secret-draft,1` }, other.apiKey);
+    expect(draft.data.node.status).toBe("draft");
+    const before = await content(govNest, t);
+    const r = await rows(govNest, t, { ops: [{ op: "update", key: "r1", set: { stage: "won" } }], submit_review: true }, editor);
+    expect(r.status, JSON.stringify(r.data)).toBe(409);
+    expect(r.data.code).toBe("draft_in_progress");
+    const after = await content(govNest, t);
+    expect(after.version).toBe(before.version);
+    const queue = await jsonRequest(app, "GET", `/nests/${govNest}/review-queue`, undefined, owner.apiKey);
+    expect(queue.data.requests.some((q: any) => q.nodeId === t)).toBe(false);
+  });
+
+  it("the caller's own draft is built on", async () => {
+    const t = await mk(govNest, { title: "Own Draft Pipeline", type: "table", content: T_CSV });
+    await rows(govNest, t, { ops: [{ op: "delete", key: "r2" }] }, editor);
+    const r = await rows(govNest, t, { ops: [{ op: "update", key: "r1", set: { stage: "won" } }] }, editor);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect((await content(govNest, t)).content).toBe("id:key,stage,amount:number\nr1,won,10");
+  });
+});
+
 describe("refusals write nothing", () => {
   let t: string;
   let baseline: { content: string; version: number };

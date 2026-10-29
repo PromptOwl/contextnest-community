@@ -181,6 +181,21 @@ describe("applyRowOps", () => {
     });
   });
 
+  describe("code-review round", () => {
+    it("an omitted column named like an Object.prototype key stays empty", () => {
+      const out = applyRowOps("id:key,constructor,toString\n1,a,b", parseRowOps([{ op: "append", row: { id: "2" } }]));
+      expect(out.body).toBe("id:key,constructor,toString\n1,a,b\n2,,");
+    });
+    it("an update keeps cells a ragged row has past the header", () => {
+      const out = applyRowOps("id:key,stage\nr1,lead,call back friday", parseRowOps([{ op: "update", key: "r1", set: { stage: "won" } }]));
+      expect(out.body).toBe("id:key,stage\nr1,won,call back friday");
+    });
+    it("refuses an impossible calendar date", () => {
+      expect(() => applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { closed: "2024-02-30" } }]))).toThrow(/date/);
+      expect(applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { closed: "2024-02-29" } }])).changed).toBe(true);
+    });
+  });
+
   it("appends to a table with no :key column", () => {
     const out = applyRowOps("name,v\na,1", parseRowOps([{ op: "append", row: { name: "b", v: "2" } }]));
     expect(out.body).toBe("name,v\na,1\nb,2");

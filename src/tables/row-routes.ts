@@ -121,6 +121,26 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
   );
   if (base !== undefined && base !== head) return conflict(c, base, head);
 
+  // The working copy may be someone else's unreviewed draft. Building on it
+  // would fold their unseen edits into this write (and, with submit_review,
+  // submit them under this caller's name), so it is refused until that draft
+  // is submitted, approved or discarded. The caller's own draft is built on.
+  const headRow = head > 0 ? await versions.getVersion(nestId, nodeId, head) : null;
+  if (
+    headRow &&
+    String(headRow.status) === "draft" &&
+    String(headRow.editedBy ?? "").toLowerCase() !== userEmail.toLowerCase()
+  ) {
+    return c.json(
+      {
+        error: "This table has an unreviewed draft by someone else. Ask them to submit or discard it, then try again.",
+        code: "draft_in_progress",
+        current_version: head,
+      },
+      409,
+    );
+  }
+
   const applied = applyRowOps(current, ops);
   const counts = { appended: applied.appended, updated: applied.updated, deleted: applied.deleted };
   const stateOf = async (v: number) =>
@@ -153,22 +173,29 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
 
   const state = await stateOf(version);
   let reviewId: string | undefined;
+  let reviewError: string | undefined;
   if (state === "draft" && body.submit_review === true && (await isStewardshipEnabled(nestId))) {
     // The author's own open review was repointed to this draft by updateNode.
     const pending = await reviews.getPendingReview(nestId, nodeId);
     if (pending) {
       reviewId = pending.id;
     } else {
-      const request = await reviews.submitForReview({
+      // The write has landed; a failed submission must not read as a failed
+      // write (a retry would then append twice). Report it alongside.
+      try {
+        const request = await reviews.submitForReview({
         nestId,
         nodeId,
         version,
         requestedBy: userEmail,
         note: (note as string | undefined) ?? describe(counts),
         baseUrl: requestBaseUrl(c.req.url),
-        client,
-      });
-      reviewId = request.id;
+          client,
+        });
+        reviewId = request.id;
+      } catch (err) {
+        reviewError = err instanceof Error ? err.message : String(err);
+      }
     }
   }
 
@@ -178,6 +205,7 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     state,
     applied: counts,
     ...(reviewId ? { review_id: reviewId } : {}),
+    ...(reviewError ? { review_error: reviewError } : {}),
   });
 });
 
