@@ -216,11 +216,11 @@ test.describe('My Work', () => {
 
       /**
        * Load `open` and check the badge shows what is waiting on the user:
-       * the server's review/request total plus the tasks assigned to them
-       * (`waitingOnMeCount`). Other suites raise and settle work on this
-       * account in parallel, so the badge is held to the count read just
-       * before the page loaded or the one read now — never to a number taken
-       * earlier.
+       * the reviews and requests waiting on them, the tasks assigned to them
+       * and their unread notifications (`waitingOnMeCount`). Other suites
+       * raise and settle work on this account in parallel, so the badge is
+       * held to the count read just before the page loaded or the one read
+       * now — never to a number taken earlier.
        */
       const pendingTotal = async () => MyWorkApi.waitingOnMe(await api.myWork({ limit: 1 }));
       const expectBadgeMatchesServer = async (open) => {
@@ -232,7 +232,7 @@ test.describe('My Work', () => {
             const shown = (await myWork.railBadge.count()) ? Number(await myWork.railBadge.textContent()) : 0;
             const now = await pendingTotal();
             return shown === before || shown === now;
-          }, { message: 'the rail badge should show reviews + requests + assigned tasks', timeout: 30_000 })
+          }, { message: 'the rail badge should show reviews + requests + assigned tasks + unread notifications', timeout: 30_000 })
           .toBe(true);
       };
 

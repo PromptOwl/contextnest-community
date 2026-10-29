@@ -25,6 +25,7 @@ export const GUIDE_SECTIONS = [
   'Views inside a nest',
   'Workspace',
   'Admin',
+  'Updating',
   'Single sign-on (OIDC)',
   'Account',
 ];

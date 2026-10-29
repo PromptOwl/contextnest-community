@@ -40,6 +40,7 @@ import SidebarRailPage from '../page_factory/app/sidebar_rail_page.js';
 import ImportFolderPage from '../page_factory/app/import_folder_page.js';
 import NestArchivePage from '../page_factory/app/nest_archive_page.js';
 import NewDocumentPage from '../page_factory/app/new_document_page.js';
+import NewFolderPage from '../page_factory/app/new_folder_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -67,6 +68,9 @@ import NestArchiveApi from './nest_archive_api.js';
 
 // REST helper used to arrange New Document preconditions (nests, folders, governance)
 import NewDocumentApi from './new_document_api.js';
+
+// REST helper used to arrange New Folder preconditions (nests, shares, archive)
+import NewFolderApi from './new_folder_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -366,6 +370,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get newDocumentApi() {
         if (!this._newDocumentApi) this._newDocumentApi = new NewDocumentApi(this.page);
         return this._newDocumentApi;
+      },
+
+      // Nest page → New Folder dialog, Contents tree
+      get newFolderPage() {
+        return new NewFolderPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the New Folder suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get newFolderApi() {
+        if (!this._newFolderApi) this._newFolderApi = new NewFolderApi(this.page);
+        return this._newFolderApi;
       },
 
       /**
