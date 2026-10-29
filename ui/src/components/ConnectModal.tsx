@@ -223,6 +223,7 @@ export function ConnectModal({
     nestName,
     showOpenModeBanner,
   );
+  const ctxLogin = ctxLoginCommand(serverUrl);
   // Same rule for push: the key travels in the environment, never on argv.
   const ctxPush = showOpenModeBanner
     ? `ctx push --server ${serverUrl} --nest ${nestId}`
@@ -798,22 +799,26 @@ export function ConnectModal({
                   />
                   {!showOpenModeBanner && (
                     <>
-                      <Snippet
-                        label="Sign in to this server (ctx 3.2+) — no key to copy"
-                        value={ctxLoginCommand(serverUrl)}
-                      />
-                      <p className="text-xs text-muted-foreground mb-3">
-                        Opens your browser to approve. Every nest you can open
-                        here, this one included, then appears in{" "}
-                        <code className="text-[10px]">ctx vault list</code> as{" "}
-                        <code className="text-[10px]">&lt;alias&gt;/&lt;nest&gt;</code>.
-                        Signing in uploads nothing. No browser sign-in on this
-                        server? Add{" "}
-                        <code className="text-[10px]">--key-stdin</code> and
-                        paste your API key.
-                      </p>
+                      {ctxLogin && (
+                        <>
+                          <Snippet
+                            label="Sign in to this server (ctx 3.4+) — no key to copy"
+                            value={ctxLogin}
+                          />
+                          <p className="text-xs text-muted-foreground mb-3">
+                            Opens your browser to approve. Every nest you can open
+                            here, this one included, then appears in{" "}
+                            <code className="text-[10px]">ctx vault list</code> as{" "}
+                            <code className="text-[10px]">&lt;alias&gt;/&lt;nest&gt;</code>.
+                            Signing in uploads nothing. No browser sign-in on this
+                            server? Add{" "}
+                            <code className="text-[10px]">--key-stdin</code> and
+                            paste your API key.
+                          </p>
+                        </>
+                      )}
                       <p className="text-sm mb-3">
-                        Or use a key: export{" "}
+                        {ctxLogin ? "Or use a key: export" : "Export"}{" "}
                         <code className="text-[11px] bg-muted px-1 rounded">
                           CONTEXTNEST_API_KEY
                         </code>{" "}

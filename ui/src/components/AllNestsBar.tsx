@@ -50,6 +50,7 @@ export function AllNestsBar({
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
   const prompt = allNestsChatPrompt(serverUrl, openMode);
+  const loginCmd = openMode ? null : ctxLoginCommand(serverUrl);
 
   return (
     <>
@@ -75,7 +76,7 @@ export function AllNestsBar({
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>Connect all my nests</DialogTitle>
             <DialogDescription>
@@ -84,7 +85,8 @@ export function AllNestsBar({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
+          {/* Only the body scrolls, so the close button stays in view. */}
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
             <div>
               <p className="mb-1.5 text-xs font-medium text-muted-foreground">
                 Server (MCP) endpoint
@@ -152,14 +154,14 @@ export function AllNestsBar({
               </p>
               <CommandRow
                 title="Claude Code plugin"
-                note="Type each line inside Claude Code. Setup asks where your notes should live, on this server or only on this computer, and connects everything."
+                note={`Type each line inside Claude Code. Setup asks where your notes should live; to use this server, choose Other and enter ${serverUrl}.`}
                 text={PLUGIN_SETUP_COMMANDS}
               />
-              {!openMode && (
+              {loginCmd && (
                 <CommandRow
-                  title="Terminal (ctx 3.2+)"
+                  title="Terminal (ctx 3.4+)"
                   note="Opens your browser to approve; every nest you can open here then appears in ctx vault list. Signing in uploads nothing. No browser sign-in on this server? Add --key-stdin and paste your key."
-                  text={ctxLoginCommand(serverUrl)}
+                  text={loginCmd}
                 />
               )}
             </div>

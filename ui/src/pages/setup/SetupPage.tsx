@@ -3,7 +3,7 @@
  * loopback ?cb; the chosen options go back to the terminal. Opened by hand,
  * it builds the equivalent `ctx init` line instead. See lib/setup-page.ts.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { getHealth } from "@/lib/api";
 import { PLUGIN_SETUP_COMMANDS, ctxLoginCommand } from "@/lib/connect";
 import {
   ALIAS_PATTERN,
@@ -99,6 +100,12 @@ export function SetupPage() {
     () => (cloud ? cloudGuides(c.server, c.alias) : connectGuides(c.alias)),
     [cloud, c.server, c.alias]
   );
+  // AUTH_MODE=open has no sign-in, the same rule the Connect dialogs follow.
+  const [openMode, setOpenMode] = useState(false);
+  useEffect(() => {
+    getHealth().then((h) => setOpenMode(h.auth_mode === "open"), () => {});
+  }, []);
+  const loginCmd = openMode ? null : ctxLoginCommand(window.location.origin);
 
   const send = () => {
     if (!cb || !ready) return;
@@ -381,15 +388,17 @@ export function SetupPage() {
           </p>
           <Choice title="Claude Code plugin" command={PLUGIN_SETUP_COMMANDS}>
             Type each line inside Claude Code. The last one asks where your
-            notes should live, on this server or only on this computer, and
-            connects everything. From then on the plugin looks up matching
-            notes on each prompt and saves notes when you ask.
+            notes should live: only on this computer, or online (to use{" "}
+            {window.location.host}, choose Other and enter{" "}
+            <code>{window.location.origin}</code>), and connects everything.
+            From then on the plugin looks up matching notes on each prompt and
+            saves notes when you ask.
           </Choice>
           {/* Cloud mode already runs this exact sign-in (section 1 or the terminal). */}
-          {!cloud && (
+          {!cloud && loginCmd && (
             <Choice
               title={`Sign in to ${window.location.host} from a terminal`}
-              command={`npm i -g @promptowl/contextnest-cli\n${ctxLoginCommand(window.location.origin)}`}
+              command={`npm i -g @promptowl/contextnest-cli\n${loginCmd}`}
             >
               The first line installs or updates the <code>ctx</code> CLI
               (needs Node 20 or later). The second opens your browser to

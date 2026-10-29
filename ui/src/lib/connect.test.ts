@@ -561,21 +561,19 @@ describe("isPrivateHost", () => {
 });
 
 describe("ctxLoginCommand", () => {
-  it("names the server after its hostname, past a nest./www. prefix", () => {
-    expect(ctxLoginCommand("https://nest.promptowl.ai")).toBe(
-      "ctx login https://nest.promptowl.ai --as promptowl",
-    );
-    expect(ctxLoginCommand("https://www.acme.com/app/x?y=1")).toBe(
-      "ctx login https://www.acme.com --as acme",
-    );
-    expect(ctxLoginCommand("http://localhost:3838/")).toBe(
-      "ctx login http://localhost:3838 --as localhost",
-    );
+  // No --as: ctx derives a collision-free alias from the host itself.
+  it("signs in to the server's origin and leaves the alias to ctx", () => {
+    expect(ctxLoginCommand("https://nest.promptowl.ai")).toBe("ctx login https://nest.promptowl.ai");
+    expect(ctxLoginCommand("https://www.acme.com/app/x?y=1")).toBe("ctx login https://www.acme.com");
+    expect(ctxLoginCommand("http://localhost:3838/")).toBe("ctx login http://localhost:3838");
+    expect(ctxLoginCommand("http://[::1]:3838")).toBe("ctx login http://[::1]:3838");
+    expect(ctxLoginCommand("http://127.0.0.1:3838")).toBe("ctx login http://127.0.0.1:3838");
+    expect(ctxLoginCommand("https://10.0.0.5")).toBe("ctx login https://10.0.0.5");
   });
 
-  it("falls back to a safe alias when the hostname gives none", () => {
-    expect(ctxLoginCommand("http://[::1]:3838")).toBe(
-      "ctx login http://[::1]:3838 --as server",
-    );
+  it("offers nothing for plain http off loopback, which ctx refuses", () => {
+    expect(ctxLoginCommand("http://10.0.0.5:3838")).toBeNull();
+    expect(ctxLoginCommand("http://nest.lan:3838")).toBeNull();
+    expect(ctxLoginCommand("null")).toBeNull();
   });
 });

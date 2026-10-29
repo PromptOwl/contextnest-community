@@ -13,6 +13,7 @@
  * generated prompts must not tell an agent to send an Authorization header or
  * ask the user for a credential that does not exist.
  */
+import { cloudServer } from "./setup-page";
 
 export interface NestCountRow {
   document_count?: number | string | null;
@@ -158,16 +159,16 @@ export const PLUGIN_SETUP_COMMANDS =
   "/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup";
 
 /**
- * `ctx login` (CLI 3.2+): browser sign-in that registers the whole server as
- * one alias, every reachable nest as `<alias>/<nest>`. The alias is the
- * hostname's first label after `nest.`/`www.` (nest.promptowl.ai → promptowl).
- * Built from the origin only, so nothing shell-special reaches the command.
+ * `ctx login` (CLI 3.4+): browser sign-in that registers the whole server as
+ * one alias, every reachable nest as `<alias>/<nest>`. No `--as`: ctx names
+ * the alias from the host (nest.promptowl.ai → promptowl) and picks a free one
+ * when that name is taken. Built from the origin only, so nothing
+ * shell-special reaches the command. null when ctx would refuse the server:
+ * plain http to anything but loopback (see cloudServer).
  */
-export function ctxLoginCommand(serverUrl: string): string {
-  const u = new URL(serverUrl);
-  const label = u.hostname.split(".").find((l) => l !== "nest" && l !== "www") ?? "";
-  const alias = /^[A-Za-z0-9_-]{1,64}$/.test(label) ? label : "server";
-  return `ctx login ${u.origin} --as ${alias}`;
+export function ctxLoginCommand(serverUrl: string): string | null {
+  const origin = cloudServer(serverUrl);
+  return origin ? `ctx login ${origin}` : null;
 }
 
 /**
