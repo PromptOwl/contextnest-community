@@ -13,6 +13,8 @@ import {
   nestSummary,
   serverMcpUrl,
   allNestsChatPrompt,
+  ctxLoginCommand,
+  PLUGIN_SETUP_COMMANDS,
   type NestCountRow,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
@@ -73,7 +75,7 @@ export function AllNestsBar({
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Connect all my nests</DialogTitle>
             <DialogDescription>
@@ -144,6 +146,24 @@ export function AllNestsBar({
               />
             </div>
 
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Or connect from your computer
+              </p>
+              <CommandRow
+                title="Claude Code plugin"
+                note="Type each line inside Claude Code. Setup asks where your notes should live, on this server or only on this computer, and connects everything."
+                text={PLUGIN_SETUP_COMMANDS}
+              />
+              {!openMode && (
+                <CommandRow
+                  title="Terminal (ctx 3.2+)"
+                  note="Opens your browser to approve; every nest you can open here then appears in ctx vault list. Signing in uploads nothing. No browser sign-in on this server? Add --key-stdin and paste your key."
+                  text={ctxLoginCommand(serverUrl)}
+                />
+              )}
+            </div>
+
             <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
               <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
@@ -157,5 +177,34 @@ export function AllNestsBar({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/** A labelled, copyable command for the "connect from your computer" list. */
+function CommandRow({
+  title,
+  note,
+  text,
+}: {
+  title: string;
+  note: string;
+  text: string;
+}) {
+  return (
+    <div className="rounded-md border bg-muted/40 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium">{title}</span>
+        <CopyButton
+          text={text}
+          variant="ghost"
+          aria-label={`Copy: ${title}`}
+          toastMessage="Command copied"
+        />
+      </div>
+      <p className="mb-1.5 text-xs text-muted-foreground">{note}</p>
+      <pre className="overflow-x-auto rounded bg-background p-2 text-[11px]">
+        {text}
+      </pre>
+    </div>
   );
 }

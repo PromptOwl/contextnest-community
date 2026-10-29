@@ -7,6 +7,7 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  ctxLoginCommand,
   slugify,
   claudeDesktopConfig,
   claudeCodeCommand,
@@ -556,5 +557,25 @@ describe("isPrivateHost", () => {
       expect(isPrivateHost(u), u).toBe(true);
     for (const u of ["http://172.32.0.1/", "http://172.15.255.255/", "http://[::ffff:8.8.8.8]/"])
       expect(isPrivateHost(u), u).toBe(false);
+  });
+});
+
+describe("ctxLoginCommand", () => {
+  it("names the server after its hostname, past a nest./www. prefix", () => {
+    expect(ctxLoginCommand("https://nest.promptowl.ai")).toBe(
+      "ctx login https://nest.promptowl.ai --as promptowl",
+    );
+    expect(ctxLoginCommand("https://www.acme.com/app/x?y=1")).toBe(
+      "ctx login https://www.acme.com --as acme",
+    );
+    expect(ctxLoginCommand("http://localhost:3838/")).toBe(
+      "ctx login http://localhost:3838 --as localhost",
+    );
+  });
+
+  it("falls back to a safe alias when the hostname gives none", () => {
+    expect(ctxLoginCommand("http://[::1]:3838")).toBe(
+      "ctx login http://[::1]:3838 --as server",
+    );
   });
 });

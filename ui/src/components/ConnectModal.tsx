@@ -60,6 +60,8 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  ctxLoginCommand,
+  PLUGIN_SETUP_COMMANDS,
   claudeDesktopConfig,
   claudeCodeCommand,
   mcpHttpConfig,
@@ -560,7 +562,7 @@ export function ConnectModal({
                   </p>
                   <Snippet
                     label="Run inside Claude Code"
-                    value={"/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup"}
+                    value={PLUGIN_SETUP_COMMANDS}
                     multiline
                   />
                 </div>
@@ -788,23 +790,37 @@ export function ConnectModal({
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       ctx
                     </code>{" "}
-                    CLI
-                    {!showOpenModeBanner && (
-                      <>
-                        {" "}
-                        (export{" "}
-                        <code className="text-[11px] bg-muted px-1 rounded">
-                          CONTEXTNEST_API_KEY
-                        </code>{" "}
-                        first — the key never goes on the command line)
-                      </>
-                    )}
-                    :
+                    CLI (needs Node 20 or later):
                   </p>
                   <Snippet
                     label="Install"
                     value="npm i -g @promptowl/contextnest-cli"
                   />
+                  {!showOpenModeBanner && (
+                    <>
+                      <Snippet
+                        label="Sign in to this server (ctx 3.2+) — no key to copy"
+                        value={ctxLoginCommand(serverUrl)}
+                      />
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Opens your browser to approve. Every nest you can open
+                        here, this one included, then appears in{" "}
+                        <code className="text-[10px]">ctx vault list</code> as{" "}
+                        <code className="text-[10px]">&lt;alias&gt;/&lt;nest&gt;</code>.
+                        Signing in uploads nothing. No browser sign-in on this
+                        server? Add{" "}
+                        <code className="text-[10px]">--key-stdin</code> and
+                        paste your API key.
+                      </p>
+                      <p className="text-sm mb-3">
+                        Or use a key: export{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          CONTEXTNEST_API_KEY
+                        </code>{" "}
+                        first — the key never goes on the command line.
+                      </p>
+                    </>
+                  )}
                   <Snippet
                     label="Register this nest as a vault alias, then query it"
                     value={ctxAliasSnippet}

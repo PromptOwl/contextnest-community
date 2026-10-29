@@ -152,6 +152,24 @@ export function ctxCliConnectSnippet(
   ].join("\n");
 }
 
+/** Typed inside Claude Code, one line at a time. `/contextnest:setup` asks
+ *  where the notes live (this server or only this computer) and connects. */
+export const PLUGIN_SETUP_COMMANDS =
+  "/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup";
+
+/**
+ * `ctx login` (CLI 3.2+): browser sign-in that registers the whole server as
+ * one alias, every reachable nest as `<alias>/<nest>`. The alias is the
+ * hostname's first label after `nest.`/`www.` (nest.promptowl.ai → promptowl).
+ * Built from the origin only, so nothing shell-special reaches the command.
+ */
+export function ctxLoginCommand(serverUrl: string): string {
+  const u = new URL(serverUrl);
+  const label = u.hostname.split(".").find((l) => l !== "nest" && l !== "www") ?? "";
+  const alias = /^[A-Za-z0-9_-]{1,64}$/.test(label) ? label : "server";
+  return `ctx login ${u.origin} --as ${alias}`;
+}
+
 /**
  * The one-shot bootstrap brief for wiring an agent to ONE nest.
  *
