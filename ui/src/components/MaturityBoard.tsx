@@ -2268,7 +2268,8 @@ export function MaturityBoard({
           // Swimlanes: column headers once, then one row of cells per lane.
           <div ref={boardRef} className="overflow-auto pb-4" style={boardH ? { maxHeight: boardH } : undefined}>
             <div className="inline-flex min-w-full flex-col gap-2">
-              <div className="flex gap-3">
+              {/* Column titles stay put while the lanes scroll (CU-wdqcq0656r). */}
+              <div className="sticky top-0 z-10 flex gap-3 bg-background">
                 {columns.map((col) => (
                   <div
                     key={col.key}
