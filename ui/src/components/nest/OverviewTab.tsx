@@ -1,7 +1,7 @@
 /**
  * Overview tab — the nest's landing page, in the public reader's design
- * language (CU-wdqcq02qb1). It reads like the reader's home page: the nest
- * as the page title, its description as the lede, the governance facts as
+ * language (CU-wdqcq02qb1). It reads like the reader's home page: the nest's
+ * description as the lede (the header above names it), the governance facts as
  * the provenance line, then the contents as the reader's folder nav — an
  * expandable tree with full-width rows and one right-aligned column for
  * counts and recency. Recently edited sits in a side card the way "On this
@@ -132,13 +132,13 @@ export function OverviewTab({
           <>
             {/* The reader's page header: title, lede, provenance. */}
             <header className="mb-8 max-sm:mb-6">
-              {/* On a phone the page header right above already names the nest; the
-                  title stays for screen readers only. */}
-              <h2 id="nest-overview-heading" className="break-words text-[2rem] font-semibold leading-[1.15] tracking-tight text-foreground max-sm:sr-only">
+              {/* The breadcrumb and page header above already name the nest
+                  (CU-wdqcq06596); the title stays for screen readers only. */}
+              <h2 id="nest-overview-heading" className="sr-only">
                 {nestName}
               </h2>
-              {description && <p className="mt-3 max-sm:mt-0 max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
-              <p className={"mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? "" : " max-sm:mt-0")} data-testid="nest-overview-facts">
+              {description && <p className="max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
+              <p className={"flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? " mt-3" : "")} data-testid="nest-overview-facts">
                 {facts.map((f) => {
                   const dot = f.tone && (
                     <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />
