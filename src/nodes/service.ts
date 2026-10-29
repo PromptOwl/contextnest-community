@@ -24,7 +24,7 @@ import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
-import { withIoStats } from "./io-stats.js";
+import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -59,7 +59,7 @@ import {
   documentAlwaysIncludeFlag,
 } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
-import { notifyMentions } from "../governance/mention-notify.js";
+import { notifyMentions as sendMentions } from "../governance/mention-notify.js";
 import {
   resolveUserRoles,
   stewardDocumentCreator,
@@ -92,7 +92,7 @@ import {
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { nestDoneTags } from "../nests/service.js";
-import { notifyAssigned } from "../governance/assign-notify.js";
+import { notifyAssigned as sendAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
@@ -117,6 +117,12 @@ import {
   type FieldDefinition,
   type FieldsPatch,
 } from "./custom-fields.js";
+
+// Awaited inside a write, so timed as part of it (io-stats).
+const notifyMentions = (p: Parameters<typeof sendMentions>[0]) =>
+  timed(p.nestId, "notify:mentions", () => sendMentions(p));
+const notifyAssigned = (p: Parameters<typeof sendAssigned>[0]) =>
+  timed(p.nestId, "notify:assigned", () => sendAssigned(p));
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -1935,7 +1941,7 @@ export async function createNode(
   const generatedId = !input.id && !slugify(input.title);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await createNodeOnce(nestId, input, userEmail, opts);
+      return await withWriteStats(nestId, "create", () => createNodeOnce(nestId, input, userEmail, opts));
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
         // A rule refusing the document is the caller's to fix — kept as a 400
@@ -2701,7 +2707,7 @@ export async function updateNode(
   userEmail: string,
   opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+  return withWriteStats(nestId, "update", () => withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
@@ -3215,7 +3221,7 @@ export async function updateNode(
         "Couldn't save your changes. Please reload the document and try again."
       );
     }
-  });
+  }));
 }
 
 /**
@@ -3387,7 +3393,16 @@ export interface MoveNodeResult {
  * prefix, so a doc moved out of a shared folder leaves that share and a
  * doc moved into one joins it. That asymmetry is the feature.
  */
-export async function moveNode(
+export function moveNode(
+  nestId: string,
+  nodeId: string,
+  folder: string,
+  userEmail: string,
+): Promise<MoveNodeResult> {
+  return withWriteStats(nestId, "move", () => moveNodeInner(nestId, nodeId, folder, userEmail));
+}
+
+async function moveNodeInner(
   nestId: string,
   nodeId: string,
   folder: string,
@@ -3725,7 +3740,7 @@ export async function deleteNodeIfUnchanged(
   });
 }
 
-export async function deleteNode(
+export function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
@@ -3734,6 +3749,15 @@ export async function deleteNode(
      *  leaves, so it is where "which agent deleted this" has to live. */
     client?: ClientMetadata;
   } = {},
+): Promise<void> {
+  return withWriteStats(nestId, "delete", () => deleteNodeInner(nestId, nodeId, userEmail, opts));
+}
+
+async function deleteNodeInner(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { client?: ClientMetadata },
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 
