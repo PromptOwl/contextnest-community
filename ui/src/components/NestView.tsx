@@ -1147,12 +1147,20 @@ export function NestView({
             // (the server extracts its text); a .pptx/.docx/.xlsx becomes a markdown
             // document with the original kept as a download; everything else
             // is read as text.
+            // Markdown frontmatter supplies the title and tags (CU-wdqcq0657f).
+            const md =
+              type === "document" ? (await import("@/lib/import-frontmatter")).importedMarkdown(await file.text()) : null;
             const res =
               type === "pdf"
                 ? await api.createPdfNode(nestId, file, { title, folder })
                 : type === "office"
                   ? await api.createOfficeNode(nestId, file, { title, folder })
-                  : await api.createNode(nestId, { title, content: await file.text(), type, folder });
+                  : await api.createNode(
+                      nestId,
+                      md
+                        ? { title: md.title ?? title, content: md.body, tags: md.tags, type, folder }
+                        : { title, content: await file.text(), type, folder },
+                    );
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
