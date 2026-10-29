@@ -1566,6 +1566,8 @@ export default function App() {
           // With the sidebar <main> has no padding of its own (pages add it),
           // so the card needs its own gap from the header and the edges.
           className={withSidebar ? "mx-4 mt-4 md:mx-6" : "mb-4"}
+          // Full card on the dashboard; one line where content needs the room.
+          compact={view.page !== "dashboard"}
         />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
