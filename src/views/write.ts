@@ -24,7 +24,7 @@
  * or reviewed can't make a writer's browser write. Permissions on the write
  * itself are the viewer's, checked by the server on every request.
  */
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import type { ViewMeta } from "@promptowl/contextnest-engine";
 import { blockIdOf, blockKindOf, normalizeDataFrom, servedBlocks, type AuthorInfo, type ResolvedBlock } from "./core.js";
 import { ROW_OPS_CAPS } from "../tables/row-ops.js";
@@ -100,8 +100,21 @@ export function rowsUrl(nestId: string, tableId: string): string {
   return `/nests/${encodeURIComponent(nestId)}/nodes/${tableId.split("/").map(encodeURIComponent).join("/")}/rows`;
 }
 
-/** html block id → { data block id → rows URL } */
-export type WriteFrames = Record<string, Record<string, string>>;
+/** html block id → its frame token and { data block id → rows URL } */
+export type WriteFrames = Record<string, { token: string; targets: Record<string, string> }>;
+
+/** A frame token: 18 random bytes, base64url (24 chars). */
+export function mintFrameToken(): string {
+  return randomBytes(18).toString("base64url");
+}
+export const FRAME_TOKEN_RE = /^[A-Za-z0-9_-]{24}$/;
+
+/** The element a write frame's artifact reads its token from:
+ *  `JSON.parse(document.getElementById("nest-write-token").textContent)`. */
+export function frameTokenTag(token: string): string {
+  if (!FRAME_TOKEN_RE.test(token)) throw new Error("invalid frame token");
+  return `<script type="application/json" id="nest-write-token">"${token}"</script>`;
+}
 
 const LS = new RegExp(String.fromCharCode(0x2028), "g");
 const PS = new RegExp(String.fromCharCode(0x2029), "g");
@@ -133,6 +146,12 @@ export function writeConfigJson(frames: WriteFrames): string {
  *    sandboxed without allow-same-origin, so their origin is opaque).
  *  - The frame's block id is read from that element, never from the message.
  *  - The target must be in that block's write_to (the server-rendered config).
+ *  - The message must carry that frame's token. The window handle survives a
+ *    navigation of the frame (to any same-origin page, e.g. another
+ *    artifact's /hosted), so the handle alone is not the frame's document:
+ *    the token is minted per page serve, reaches only the frame document the
+ *    server served for that block (and only when it serves the artifact
+ *    version the page checked), and never leaves the browser.
  *  - Caps: ops count, body size, one request in flight per frame, a rolling
  *    per-minute budget per frame.
  *  - Replies to the source window only. Its origin is opaque, so the target
@@ -155,16 +174,18 @@ export const WRITE_BRIDGE_JS = [
   "var src=ev.source;var hid=f.getAttribute(\"data-cn-block\");",
   "var id=(typeof m.id===\"string\"&&m.id.length<=64)?m.id:undefined;",
   "var blk=typeof m.block===\"string\"?m.block:null;",
-  "var targets=(hid!==null&&own.call(cfg.frames,hid))?cfg.frames[hid]:null;",
+  "var fr=(hid!==null&&own.call(cfg.frames,hid))?cfg.frames[hid]:null;var targets=fr&&fr.targets;",
   "var url=(blk!==null&&targets&&own.call(targets,blk)&&typeof targets[blk]===\"string\")?targets[blk]:null;",
   "if(!url)return reply(src,id,{ok:false,block:blk,error:\"not_writable\"});",
+  "if(typeof fr.token!==\"string\"||m.token!==fr.token)return reply(src,id,{ok:false,block:blk,error:\"bad_token\"});",
   "if(!Array.isArray(m.ops)||m.ops.length===0)return reply(src,id,{ok:false,block:blk,error:\"bad_request\"});",
   "if(m.ops.length>cfg.caps.maxOps)return reply(src,id,{ok:false,block:blk,error:\"too_many_ops\"});",
   "var payload={ops:m.ops};",
   "if(typeof m.base_version===\"number\"&&m.base_version>=0&&m.base_version%1===0)payload.base_version=m.base_version;",
   "payload.submit_review=true;",
   "var body;try{body=JSON.stringify(payload);}catch(e){return reply(src,id,{ok:false,block:blk,error:\"bad_request\"});}",
-  "if(typeof body!==\"string\"||body.length>cfg.caps.maxBytes)return reply(src,id,{ok:false,block:blk,error:\"too_large\"});",
+  "var size=typeof body===\"string\"?(typeof TextEncoder===\"function\"?new TextEncoder().encode(body).length:body.length*3):Infinity;",
+  "if(size>cfg.caps.maxBytes)return reply(src,id,{ok:false,block:blk,error:\"too_large\"});",
   "var st=own.call(state,hid)?state[hid]:(state[hid]={busy:false,times:[]});",
   "if(st.busy)return reply(src,id,{ok:false,block:blk,error:\"busy\"});",
   "var now=Date.now();var kept=[];for(var i=0;i<st.times.length;i++){if(now-st.times[i]<60000)kept.push(st.times[i]);}st.times=kept;",

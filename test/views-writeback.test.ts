@@ -133,9 +133,9 @@ describe("the page of a view with write_to", () => {
   it("the config maps only write_to targets that are table data blocks, per frame", async () => {
     const body = await (await page(vId)).text();
     const cfg = config(body);
-    expect(cfg.frames).toEqual({
-      h: { d: `/nests/${encodeURIComponent(nestId)}/nodes/${tId}/rows` },
-    });
+    expect(Object.keys(cfg.frames)).toEqual(["h"]);
+    expect(cfg.frames.h.targets).toEqual({ d: `/nests/${encodeURIComponent(nestId)}/nodes/${tId}/rows` });
+    expect(cfg.frames.h.token).toMatch(/^[A-Za-z0-9_-]{24}$/);
     // h2 has no write_to; h3's targets are a callout and an unknown id.
     expect(cfg.frames.h2).toBeUndefined();
     expect(cfg.frames.h3).toBeUndefined();
@@ -167,6 +167,59 @@ describe("the page of a view with write_to", () => {
         delete process.env[k];
       }
     }
+  });
+});
+
+describe("frame token and artifact version pin (review round 1)", () => {
+  const frameSrc = (body: string, id: string) =>
+    new RegExp(`<iframe[^>]*src="([^"]+)"[^>]*data-cn-block="${id}"`).exec(body)![1].replace(/&amp;/g, "&");
+  const tokenIn = (html: string) => {
+    const m = /<script type="application\/json" id="nest-write-token">([\s\S]*?)<\/script>/.exec(html);
+    return m ? JSON.parse(m[1]) : null;
+  };
+  const getFrame = (src: string) =>
+    app.request(src, { headers: { ...authed(editor.apiKey), "Sec-Fetch-Dest": "iframe" } });
+
+  it("a write frame's URL carries its token and the artifact version the page checked; the frame echoes the token", async () => {
+    const body = await (await page(vId)).text();
+    const cfg = config(body);
+    const src = frameSrc(body, "h");
+    const url = new URL(src, "http://x");
+    expect(url.searchParams.get("wt")).toBe(cfg.frames.h.token);
+    expect(Number(url.searchParams.get("av"))).toBeGreaterThan(0);
+    const res = await getFrame(src);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(tokenIn(html)).toBe(cfg.frames.h.token);
+    // Exactly one nest-data element still, and the token comes before it.
+    expect((html.match(/id="nest-data"/g) || []).length).toBe(1);
+    expect(html.indexOf("nest-write-token")).toBeLessThan(html.indexOf('id="nest-data"'));
+  });
+
+  it("a frame without write targets gets no token in its URL or body", async () => {
+    const body = await (await page(vId)).text();
+    const src = frameSrc(body, "h2");
+    expect(src).not.toContain("wt=");
+    expect(tokenIn(await (await getFrame(src)).text())).toBeNull();
+  });
+
+  it("no token when the served artifact version is not the one the page checked", async () => {
+    const body = await (await page(vId)).text();
+    const src = frameSrc(body, "h");
+    const url = new URL(src, "http://x");
+    url.searchParams.set("av", String(Number(url.searchParams.get("av")) + 1));
+    const res = await getFrame(url.pathname + url.search);
+    expect(res.status).toBe(200);
+    expect(tokenIn(await res.text())).toBeNull();
+  });
+
+  it("a malformed token is not echoed", async () => {
+    const body = await (await page(vId)).text();
+    const url = new URL(frameSrc(body, "h"), "http://x");
+    url.searchParams.set("wt", '"></script><script>alert(1)</script>');
+    const html = await (await getFrame(url.pathname + url.search)).text();
+    expect(tokenIn(html)).toBeNull();
+    expect(html).not.toContain("alert(1)");
   });
 });
 

@@ -39,8 +39,8 @@ const CONFIG = {
   v: 1,
   caps: { maxOps: WRITE_CAPS.MAX_OPS, maxBytes: WRITE_CAPS.MAX_MESSAGE_BYTES, perMinute: WRITE_CAPS.MAX_WRITES_PER_MINUTE },
   frames: {
-    h1: { d: "/nests/n1/nodes/nodes/pipeline/rows" },
-    h2: { e: "/nests/n1/nodes/nodes/other/rows" },
+    h1: { token: "tok-h1-aaaaaaaaaaaaaaaaaaaa", targets: { d: "/nests/n1/nodes/nodes/pipeline/rows" } },
+    h2: { token: "tok-h2-bbbbbbbbbbbbbbbbbbbb", targets: { e: "/nests/n1/nodes/nodes/other/rows" } },
   },
 };
 
@@ -92,7 +92,13 @@ function load(config: unknown = CONFIG): Harness {
 }
 
 const OPS = [{ op: "update", key: "r1", set: { stage: "won" } }];
-const msg = (extra: Record<string, unknown> = {}) => ({ type: "nest-write", block: "d", ops: OPS, ...extra });
+const msg = (extra: Record<string, unknown> = {}) => ({
+  type: "nest-write",
+  block: "d",
+  ops: OPS,
+  token: "tok-h1-aaaaaaaaaaaaaaaaaaaa",
+  ...extra,
+});
 
 let h: Harness;
 beforeEach(() => {
@@ -145,7 +151,7 @@ describe("who may ask", () => {
   });
 
   it("refuses a target outside that frame's write_to — another frame's target included", () => {
-    h.dispatch({ data: msg({ block: "e" }), source: h.frames.h1, origin: "null" });
+    h.dispatch({ data: msg({ block: "e", token: "tok-h2-bbbbbbbbbbbbbbbbbbbb" }), source: h.frames.h1, origin: "null" });
     h.dispatch({ data: msg({ block: "d" }), source: h.frames.h3, origin: "null" });
     h.dispatch({ data: msg({ block: "__proto__" }), source: h.frames.h1, origin: "null" });
     h.dispatch({ data: msg({ block: "toString" }), source: h.frames.h1, origin: "null" });
@@ -158,6 +164,22 @@ describe("who may ask", () => {
     // h3 has no write_to; claiming to be h1 changes nothing.
     h.dispatch({ data: msg({ frame: "h1", htmlBlock: "h1" }), source: h.frames.h3, origin: "null" });
     expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("frame token (review round 1: a navigated frame keeps its window handle)", () => {
+  it("refuses a message from the right window without the frame's token", () => {
+    h.dispatch({ data: msg({ token: undefined }), source: h.frames.h1, origin: "null" });
+    h.dispatch({ data: msg({ token: "guess" }), source: h.frames.h1, origin: "null" });
+    // Another frame's token does not work either.
+    h.dispatch({ data: msg({ token: "tok-h2-bbbbbbbbbbbbbbbbbbbb" }), source: h.frames.h1, origin: "null" });
+    expect(h.calls).toHaveLength(0);
+    expect(h.frames.h1.posted.map((p) => p.msg.error)).toEqual(["bad_token", "bad_token", "bad_token"]);
+  });
+
+  it("the token is never sent to the server", () => {
+    h.dispatch({ data: msg(), source: h.frames.h1, origin: "null" });
+    expect(h.calls[0].init.body).not.toContain("tok-h1");
   });
 });
 
@@ -189,6 +211,14 @@ describe("what reaches the network", () => {
     h.dispatch({ data: msg({ ops: many }), source: h.frames.h1, origin: "null" });
     expect(h.calls).toHaveLength(0);
     expect(h.frames.h1.posted.map((p) => p.msg.error)).toEqual(["bad_request", "bad_request", "too_many_ops"]);
+  });
+
+  it("counts the size cap in UTF-8 bytes, not characters", () => {
+    const n = Math.floor(WRITE_CAPS.MAX_MESSAGE_BYTES / 3) + 10; // ~1/3 the cap in chars, over it in bytes
+    const big = [{ op: "append", row: { id: "x", note: "€".repeat(n) } }];
+    h.dispatch({ data: msg({ ops: big }), source: h.frames.h1, origin: "null" });
+    expect(h.calls).toHaveLength(0);
+    expect(h.frames.h1.posted[0].msg.error).toBe("too_large");
   });
 
   it("refuses an oversized message without a request", () => {
