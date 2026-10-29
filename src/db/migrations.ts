@@ -2334,6 +2334,33 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("074_org_contributions");
   }
+
+  // 075: task rules + ticket counters. Numbered past 074; another open branch
+  //   may claim 075 — renumber on merge if so (the name only has to be unique).
+  //   - nests.task_rules: JSON (src/nodes/task-rules.ts) — exclusive tag
+  //     namespaces, the default stage tag, and ticket numbering settings. NULL
+  //     reads as "no rules", so existing nests behave exactly as before.
+  //   - nest_ticket_counters: the last ticket number handed out per (nest,
+  //     prefix). One row per prefix; the number is allocated by a single
+  //     INSERT … ON CONFLICT DO UPDATE … RETURNING, so two writers can never be
+  //     handed the same value (src/nodes/ticket-numbers.ts).
+  if (!hasMigration("075_task_rules_ticket_counters")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("task_rules")) {
+      db.exec("ALTER TABLE nests ADD COLUMN task_rules TEXT");
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        prefix TEXT NOT NULL,
+        last_value INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (nest_id, prefix)
+      );
+    `);
+    recordMigration("075_task_rules_ticket_counters");
+  }
 }
 
 /**

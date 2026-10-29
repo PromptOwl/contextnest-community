@@ -99,6 +99,7 @@ export const HISTORICAL_MIGRATIONS = [
   "071_node_pins",
   "073_nest_always_include_tags",
   "074_org_contributions",
+  "075_task_rules_ticket_counters",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1275,6 +1276,17 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_contributions TEXT NOT NULL DEFAULT 'off';
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_domains TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TEXT;
+  `);
+
+  // Migration 075 parity: task rules + ticket counters (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS task_rules TEXT;
+    CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      prefix TEXT NOT NULL,
+      last_value INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (nest_id, prefix)
+    );
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

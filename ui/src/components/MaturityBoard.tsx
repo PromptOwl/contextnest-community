@@ -12,6 +12,10 @@
  * All bucketing / drag-plan rules live in lib/board-dimensions (pure, tested);
  * this file owns React state, localStorage, and running the plan against the API.
  */
+import { ticketOf, visibleTags } from "../lib/ticket";
+import { stageDot, universalTags } from "../lib/tones";
+import { nestPath } from "../lib/nest-url";
+import { levelLabel, levelsOrDefault, PriorityLevelsContext, usePriorityLevels } from "../lib/priorities";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NestPageHeader } from "./NestPageHeader";
 import {
@@ -22,7 +26,8 @@ import {
   Plus,
   Lock,
   ChevronDown,
-  Filter,
+  Search,
+  HelpCircle,
   CheckCircle2,
   LayoutGrid,
   List as ListIcon,
@@ -55,6 +60,7 @@ import {
   isColumnPattern,
   keepPatterns,
   tagSuggestions,
+  tagNamespaces,
   withoutPattern,
   newCardPlacement,
   planMove,
@@ -70,6 +76,7 @@ import {
   type BoardSettings,
   type ColumnLayout,
   type DimensionKind,
+  namespaceKey,
 } from "../lib/board-dimensions";
 import {
   UNASSIGNED,
@@ -88,6 +95,8 @@ import {
 import { timeAgo } from "./nest/node-display";
 import {
   AssigneeMenu,
+  TicketChip,
+  TagPill,
   Avatar,
   BlockedBadge,
   DueChip,
@@ -102,6 +111,7 @@ import {
 import { CreateTaskDialog, type NewTask } from "./board/CreateTaskDialog";
 import { BoardListView } from "./board/BoardListView";
 import { TagColumnInput } from "./board/TagColumnInput";
+import { TagGroupInput } from "./board/TagGroupInput";
 import {
   resolveViewMode,
   viewStorageKey,
@@ -205,6 +215,39 @@ function fieldSettings(cfg: Record<string, any>): Pick<
 /** "field:severity" ↔ { dimension: "field", fieldKey: "severity" } — the
  *  value the Columns-by / Lanes selects carry for a custom field. */
 const FIELD_PREFIX = "field:";
+/** The toolbar is two capsules (Columns, Lanes). Each holds a muted label and
+ *  borderless selects with one custom chevron, so it reads as a single setting
+ *  rather than loose boxes. */
+const CAPSULE =
+  "flex h-8 items-center rounded-md border border-input bg-background text-sm focus-within:ring-2 focus-within:ring-ring";
+const CAPSULE_LABEL = "pl-2.5 pr-0.5 text-muted-foreground";
+/** A dismissible callout in the brand tint — for one-off nudges that shouldn't
+ *  sit in the toolbar. */
+function HintBanner({ testId, onDismiss, children }: { testId: string; onDismiss: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      data-testid={testId}
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-foreground/80"
+    >
+      {children}
+      <button
+        type="button"
+        aria-label="Dismiss"
+        title="Dismiss"
+        onClick={onDismiss}
+        className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-primary/10 hover:text-foreground"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+const bareTag = (t: string) => t.replace(/^#/, "").trim().toLowerCase();
+const BARE_SELECT =
+  "h-8 cursor-pointer appearance-none bg-transparent pl-1.5 pr-6 text-sm focus:outline-none";
+const CHEVRON =
+  "pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 opacity-50";
 
 /** A saved board's config → the settings this component works on. Same
  *  normalisation as loadConfig, so a hand-edited blob can't break the page. */
@@ -257,7 +300,7 @@ function saveConfig(nestId: string, config: BoardSettings) {
   }
 }
 
-export function MaturityBoard({
+function MaturityBoardInner({
   nestId,
   nestName,
   isOwner,
@@ -269,6 +312,30 @@ export function MaturityBoard({
   const me = adminStatus?.me?.email?.toLowerCase();
   const qc = useQueryClient();
   const nestSettings = useNestSettings(nestId);
+  const priorityLevels = usePriorityLevels();
+  // The nest's workflow order for its stage group, so a Stage board opens as
+  // backlog → … → done instead of alphabetically.
+  const stageOrder = useMemo(() => {
+    const r = (nestSettings.data as any)?.task_rules as import("../lib/api").TaskRules | undefined;
+    const ns = namespaceKey(r?.default_stage_tag ?? r?.exclusive_namespaces?.[0]);
+    return ns && r?.stage_order?.length ? { namespace: ns, order: r.stage_order } : undefined;
+  }, [nestSettings.data]);
+  // Surfaces for the new-task dialog: name plus the tag it adds (its first).
+  const surfaceChoices = useMemo(() => {
+    const r = (nestSettings.data as any)?.task_rules as import("../lib/api").TaskRules | undefined;
+    return (r?.surfaces ?? []).map((sf) => ({ name: sf.name, tag: sf.tags[0]! })).filter((x) => x.tag);
+  }, [nestSettings.data]);
+  const defaultSurfaceTag = useMemo(() => {
+    const r = (nestSettings.data as any)?.task_rules as import("../lib/api").TaskRules | undefined;
+    return r?.surfaces?.find((sf) => sf.name === r.default_surface)?.tags[0];
+  }, [nestSettings.data]);
+  // The nest's one-per-task tag groups (task_rules.exclusive_namespaces), e.g.
+  // `stage` — offered as ready-made "Columns by" choices so a task board is one
+  // click, and never confused with the document review status.
+  const taskGroups = useMemo(
+    () => ((nestSettings.data as any)?.task_rules?.exclusive_namespaces ?? []) as string[],
+    [nestSettings.data],
+  );
   // Custom field definitions: card chips, field columns/lanes, field filters.
   const fieldsQuery = useQuery(reads.fields(nestId));
   const fieldDefs = useMemo(() => fieldsQuery.data?.fields ?? [], [fieldsQuery.data]);
@@ -280,6 +347,38 @@ export function MaturityBoard({
     return () => clearInterval(t);
   }, [fieldDefs]);
   const [nodes, setNodes] = useState<BoardNode[]>([]);
+  // Numbering is off and the board holds tasks: admins get a pointer to the
+  // switch instead of cards that silently lack a number.
+  // Numbering is on (the default) but some tasks predate it: admins can number
+  // them in one click instead of hunting for the backfill.
+  const unnumbered =
+    (isAdmin || isOwner) && (nestSettings.data as any)?.task_rules?.ticket_numbering === true
+      ? nodes.filter((n) => n.type === "task" && !ticketOf(n.tags)).length
+      : 0;
+  const [numbering, setNumbering] = useState(false);
+  const numberThem = async () => {
+    setNumbering(true);
+    try {
+      let total = 0;
+      for (let i = 0; i < 20; i++) {
+        const r = await api.backfillTickets(nestId, {});
+        total += r.numbered;
+        if (r.remaining === 0 || r.numbered === 0) break;
+      }
+      toast.success(`${total} task${total === 1 ? "" : "s"} numbered`);
+      qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
+      void load({ silent: true });
+    } catch (e: any) {
+      toast.error(e?.message || "Couldn't number the tasks");
+    } finally {
+      setNumbering(false);
+    }
+  };
+  const numberingOffHint =
+    (isAdmin || isOwner) &&
+    !!nestSettings.data &&
+    (nestSettings.data as any)?.task_rules?.ticket_numbering !== true &&
+    nodes.some((n) => n.type === "task");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<BoardSettings>(() => loadConfig(nestId));
@@ -487,7 +586,37 @@ export function MaturityBoard({
     [persist],
   );
 
-  const effectiveConfig = useMemo(() => resolveConfig(config, fieldDefs), [config, fieldDefs]);
+  // Card chips leave out the ticket number (shown as the ID) and, on a tag
+  // board, the tags of the grouped namespace — that is the column, so
+  // repeating "#stage:backlog" on every card in Backlog is noise.
+  const hideNs = config.dimension === "tag" ? namespaceKey(config.tagNamespace) : "";
+  // A card also leaves out tags nearly every card carries (#projects,
+  // #engineering), judged over the whole board so a filter doesn't change it,
+  // and a flat tag that a namespaced one already says (#community beside
+  // #surface:community). Namespaced tags lead, as coloured pills.
+  const universal = useMemo(() => {
+    const tasks = nodes.filter((n) => n.type === "task");
+    return universalTags((tasks.length >= 5 ? tasks : nodes).map((n) => n.tags));
+  }, [nodes]);
+  const surfaceName = useMemo(
+    () => new Map(surfaceChoices.map((s) => [bareTag(s.tag), s.name] as const)),
+    [surfaceChoices],
+  );
+  const cardTags = (tags: string[]) => {
+    const kept = visibleTags(tags).filter(
+      (t) =>
+        !universal.has(bareTag(t)) &&
+        (!hideNs || namespaceKey(t.includes(":") ? t : "") !== hideNs),
+    );
+    const spoken = new Set(
+      kept.filter((t) => t.includes(":")).map((t) => bareTag(t).split(":").slice(1).join(":")),
+    );
+    return [
+      ...kept.filter((t) => t.includes(":")),
+      ...kept.filter((t) => !t.includes(":") && !spoken.has(bareTag(t))),
+    ];
+  };
+  const effectiveConfig = useMemo(() => resolveConfig(config, fieldDefs, priorityLevels, stageOrder), [config, fieldDefs, priorityLevels, stageOrder]);
   const laneField = useMemo(
     () =>
       config.swimlane === "field"
@@ -755,9 +884,9 @@ export function MaturityBoard({
     async (colKey: string, task: NewTask, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
       if (!placement) return;
-      const { content, ...details } = task;
+      const { content, surfaceTag, ...details } = task;
       try {
-        const res = await api.createNode(nestId, {
+        const payload: Record<string, any> = {
           // The create route requires a body; a task's notes may start empty.
           content: content.trim() ? content : "\n",
           type: typeTaskEnabled ? "task" : "document",
@@ -803,7 +932,11 @@ export function MaturityBoard({
             : {}),
           // Title plus what the dialog set — a picked assignee/priority wins.
           ...details,
-        });
+        };
+        // The surface picked in the dialog is an ordinary tag, added to whatever
+        // the column and filters already put on the card.
+        if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
+        const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
         // The caller opens the new task — refresh the board behind it, don't wait.
         void load({ silent: true });
@@ -1028,6 +1161,26 @@ export function MaturityBoard({
   const [colDrag, setColDrag] = useState<string | null>(null);
   const [colDropTarget, setColDropTarget] = useState<string | null>(null);
   const [newColumn, setNewColumn] = useState("");
+  // The tag board's add-column box stays a "+ Column" button until needed.
+  const [addingColumn, setAddingColumn] = useState(false);
+  // The how-to lines stay out of the way until asked for (the "?" button).
+  const [showHelp, setShowHelp] = useState(false);
+  const hintKey = `board-hint:${nestId}`;
+  const [hintGone, setHintGone] = useState(() => {
+    try {
+      return localStorage.getItem(hintKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const dismissHint = () => {
+    setHintGone(true);
+    try {
+      localStorage.setItem(hintKey, "1");
+    } catch {
+      /* private mode: the hint just comes back next visit */
+    }
+  };
 
   // Reorderable keys — Uncategorized is pinned last by the lib, so exclude it.
   const orderedKeys = useMemo(
@@ -1170,6 +1323,16 @@ export function MaturityBoard({
     () => tagSuggestions(nodes, effectiveConfig, ""),
     [nodes, effectiveConfig],
   );
+  // The tag groups in use, for the group picker beside "Columns by".
+  const tagGroups = useMemo(() => tagNamespaces(nodes), [nodes]);
+  // Where picking "Tag" lands: the nest's stage group, not a wall of every tag.
+  const defaultTagGroup = useMemo(
+    () =>
+      stageOrder?.namespace ??
+      taskGroups[0] ??
+      (tagGroups.some((g) => g.namespace === "stage") ? "stage" : ""),
+    [stageOrder, taskGroups, tagGroups],
+  );
   const tagPatterns = useMemo(
     () =>
       effectiveConfig.dimension === "tag"
@@ -1261,10 +1424,12 @@ export function MaturityBoard({
         : lane === "assignee"
           ? personLabel(key)
           : lane === "priority"
-            ? PRIORITY_LABELS[key as Priority] ?? key
+            ? levelLabel(priorityLevels, key)
             : (nodes.find((n) => n.id === key)?.title ?? key),
+      undefined,
+      priorityLevels.map((l) => l.key),
     );
-  }, [config.swimlane, laneField, visibleNodes, nodes, personLabel]);
+  }, [config.swimlane, laneField, visibleNodes, nodes, personLabel, priorityLevels]);
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set());
 
   /** Drop handling for a column (no lane) or one lane's cell of it. */
@@ -1334,8 +1499,11 @@ export function MaturityBoard({
             ) : null
           )}
           {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
+          {effectiveConfig.dimension === "tag" && !isDone && stageDot(col.key) && (
+            <span className={`h-2 w-2 shrink-0 rounded-full ${stageDot(col.key)}`} />
+          )}
           <span
-            className={`min-w-0 text-sm font-medium truncate ${
+            className={`min-w-0 text-[13px] font-semibold truncate ${
               capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
             } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
           >
@@ -1347,7 +1515,7 @@ export function MaturityBoard({
           </span>
         </span>
         <div className="flex items-center gap-1 shrink-0">
-          <span className="text-xs text-muted-foreground tabular-nums">{count}</span>
+          <span className="rounded-full bg-background px-1.5 py-px text-[11px] font-medium text-muted-foreground tabular-nums">{count}</span>
           {/* Linear's "completed" status category, as a column flag. */}
           {effectiveConfig.dimension === "tag" && col.key !== UNCATEGORIZED && canManageNest && (
             <button
@@ -1415,6 +1583,7 @@ export function MaturityBoard({
         {cards.map((n, i) => {
           const kids = subItems.get(n.id) ?? [];
           const completed = !!n.completed_at;
+          const shownTags = cardTags(n.tags);
           return (
             <div key={n.id}>
               {dragId && dragId !== n.id && dropBefore?.cell === cell && dropBefore.before === n.id && (
@@ -1447,7 +1616,7 @@ export function MaturityBoard({
                   setDropBefore(null);
                 }}
                 onClick={() => onOpenDocument(n.id)}
-                className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${
+                className={`group rounded-lg border border-border bg-card px-3 py-2.5 text-sm cursor-pointer shadow-sm hover:border-primary/50 hover:shadow-md transition ${
                   dragId === n.id ? "opacity-50" : ""
                 } ${busy ? "pointer-events-none" : ""}`}
               >
@@ -1455,7 +1624,7 @@ export function MaturityBoard({
                     inside its parent's own swimlane, so hidden there. */}
                 {n.parent && !(config.swimlane === "parent" && laneKey === n.parent) && (
                   <div
-                    className="mb-0.5 truncate pl-5 text-[10px] text-muted-foreground"
+                    className="mb-1 truncate text-[10px] text-muted-foreground"
                     title={`Sub-item of ${nodes.find((x) => x.id === n.parent)?.title ?? n.parent}`}
                   >
                     ↳ {nodes.find((x) => x.id === n.parent)?.title ?? n.parent}
@@ -1476,23 +1645,12 @@ export function MaturityBoard({
                   {/* min-w-0: lets an unbroken title wrap instead of widening
                       the card past the column. */}
                   <span
-                    className={`min-w-0 flex-1 leading-snug break-words ${completed ? "text-muted-foreground" : ""}`}
+                    className={`min-w-0 flex-1 text-[13px] font-medium leading-snug break-words ${completed ? "text-muted-foreground" : ""}`}
                   >
+                    <TicketChip ticket={ticketOf(n.tags)} className="mr-1.5 align-middle" />
                     {n.title}
                   </span>
                 </div>
-                {n.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-1.5 pl-5">
-                    {n.tags.slice(0, 4).map((t) => (
-                      <span
-                        key={t}
-                        className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground"
-                      >
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                )}
                 {/* Custom fields with a value, in the nest's order. The
                     board's own grouping field is the column — not repeated. */}
                 {(() => {
@@ -1505,16 +1663,28 @@ export function MaturityBoard({
                   const chips = shown.map((d) => (
                     <FieldChip key={d.key} def={d} node={n} now={now} personLabel={personLabel} />
                   ));
-                  return <div className="mt-1.5 flex flex-wrap gap-1 pl-5">{chips}</div>;
+                  return <div className="mt-2 flex flex-wrap gap-1">{chips}</div>;
                 })()}
-                {/* Footer, Linear-style: priority · due · sub-items · last
-                    touched on the left, assignee on the right. */}
-                <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
+                {/* One meta row: priority and tags lead, then due, blockers and
+                    sub-items. Last-touched and the assignee sit at the right
+                    and wrap to their own line when the card is crowded. */}
+                <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 min-h-6">
                   <PriorityMenu
                     value={n.priority}
                     editable={canEditDocs}
                     onChange={(priority) => patchFields(n.id, { priority })}
                   />
+                  {shownTags.slice(0, 3).map((t) => (
+                    <TagPill key={t} tag={t} label={surfaceName.get(bareTag(t).replace(/^surface:/, ""))} />
+                  ))}
+                  {shownTags.length > 3 && (
+                    <span
+                      className="text-[10px] text-muted-foreground"
+                      title={shownTags.slice(3).join(" ")}
+                    >
+                      +{shownTags.length - 3}
+                    </span>
+                  )}
                   <BlockedBadge count={openBlockers(n)} />
                   {!completed && (
                     <DueChip
@@ -1529,12 +1699,8 @@ export function MaturityBoard({
                     done={kids.filter((k) => !!k.completed_at).length}
                     onOpen={onOpenDocument}
                   />
-                  {/* Last touched — the first thing to give way on a crowded
-                      card: a zero-width lead lets the label wrap onto a clipped
-                      second line, so it disappears whole instead of as "j…". */}
-                  {(n.updated_at || n.created_at) && (
-                    <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
-                      <span aria-hidden className="h-4 w-0" />
+                  <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                    {(n.updated_at || n.created_at) && (
                       <span
                         className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
                         title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
@@ -1543,9 +1709,7 @@ export function MaturityBoard({
                           ? `done ${timeAgo(n.completed_at)}`
                           : timeAgo((n.updated_at || n.created_at)!)}
                       </span>
-                    </span>
-                  )}
-                  <span className="ml-auto flex shrink-0 items-center gap-1">
+                    )}
                     {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
                       <button
                         type="button"
@@ -1599,6 +1763,8 @@ export function MaturityBoard({
             }}
             people={members}
             me={me}
+            surfaces={surfaceChoices}
+            defaultSurface={defaultSurfaceTag}
             onSubmit={async (task) => {
               const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
               setAddingIn(null);
@@ -1614,10 +1780,18 @@ export function MaturityBoard({
   return (
     <div className="space-y-4">
       <NestPageHeader nestName={nestName} onBack={onBack}>
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-muted-foreground">Columns by</label>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Two capsules — what the columns are, and how the rows split — so
+              the bar reads as two settings, not six loose controls. */}
+          <div className={CAPSULE}>
+          <span className={CAPSULE_LABEL}>Columns</span>
+          <div className="relative">
           <select
-            value={config.dimension === "field" ? `${FIELD_PREFIX}${config.fieldKey ?? ""}` : config.dimension}
+            value={
+              config.dimension === "field"
+                ? `${FIELD_PREFIX}${config.fieldKey ?? ""}`
+                : config.dimension
+            }
             onChange={(e) => {
               // The add-column input is shared between folder and tag mode;
               // an unsubmitted value from one doesn't mean anything in the
@@ -1626,15 +1800,21 @@ export function MaturityBoard({
               const v = e.target.value;
               if (v.startsWith(FIELD_PREFIX)) {
                 updateConfig({ dimension: "field", fieldKey: v.slice(FIELD_PREFIX.length) });
+              } else if (v === "tag") {
+                updateConfig({
+                  dimension: "tag",
+                  tagNamespace: (config.tagNamespace ?? "").trim() ? config.tagNamespace : defaultTagGroup,
+                });
               } else {
                 updateConfig({ dimension: v as DimensionKind });
               }
             }}
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+            aria-label="Group columns by"
+            className={BARE_SELECT}
           >
             <option value="folder">Folder</option>
-            <option value="status">Status</option>
-            <option value="tag">Tag namespace</option>
+            <option value="status">Review status</option>
+            <option value="tag">Tag</option>
             <option value="assignee">Assignee</option>
             <option value="priority">Priority</option>
             {groupableFields.length > 0 && (
@@ -1647,10 +1827,26 @@ export function MaturityBoard({
               </optgroup>
             )}
           </select>
+          <ChevronDown className={CHEVRON} />
+          </div>
+          {config.dimension === "tag" && (
+            <>
+              <span className="h-4 w-px bg-border" />
+              <TagGroupInput
+                borderless
+                value={config.tagNamespace ?? ""}
+                groups={tagGroups}
+                onChange={(ns) => updateConfig({ tagNamespace: ns })}
+              />
+            </>
+          )}
+          </div>
           {/* Swimlanes: sub-group the columns into rows (Linear/Jira). The
               list has no lanes — its sections are the columns. */}
           {viewMode === "board" && (<>
-          <label className="text-sm text-muted-foreground">Lanes</label>
+          <div className={CAPSULE}>
+          <span className={CAPSULE_LABEL}>Lanes</span>
+          <div className="relative">
           <select
             value={
               config.swimlane === "field"
@@ -1665,7 +1861,8 @@ export function MaturityBoard({
                 updateConfig({ swimlane: (v || undefined) as SwimlaneKind | undefined });
               }
             }}
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+            aria-label="Lanes"
+            className={BARE_SELECT}
           >
             <option value="">None</option>
             {config.dimension !== "assignee" && <option value="assignee">Assignee</option>}
@@ -1683,16 +1880,10 @@ export function MaturityBoard({
               </optgroup>
             )}
           </select>
+          <ChevronDown className={CHEVRON} />
+          </div>
+          </div>
           </>)}
-          {config.dimension === "tag" && (
-            <Input
-              value={config.tagNamespace ?? ""}
-              onChange={(e) => updateConfig({ tagNamespace: e.target.value })}
-              placeholder="all tags"
-              className="h-8 w-32"
-              title="Optional. Empty groups by every tag; a namespace like 'stage' groups by stage:<value> tags only."
-            />
-          )}
           {/* Add a column: a tag value, or — for writers on the folder board —
               a folder. Without this a nest whose documents all sit in Root has
               a single column and nowhere to drag them. */}
@@ -1717,10 +1908,28 @@ export function MaturityBoard({
                   </button>
                 </span>
               ))}
-              <TagColumnInput
-                suggestions={tagColumnSuggestions}
-                onAdd={(v) => void addColumn(v)}
-              />
+              {tagColumnSuggestions.length > 0 || addingColumn ? (
+                <TagColumnInput
+                  suggestions={tagColumnSuggestions}
+                  autoFocus={addingColumn}
+                  onAdd={(v) => {
+                    void addColumn(v);
+                    setAddingColumn(false);
+                  }}
+                  onClose={() => setAddingColumn(false)}
+                />
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setAddingColumn(true)}
+                  title="Add a column for a tag no card carries yet, such as an empty stage"
+                >
+                  <Plus className="mr-1 h-3.5 w-3.5" />
+                  Column
+                </Button>
+              )}
             </>
           )}
           {(effectiveConfig.dimension === "folder" ||
@@ -1763,7 +1972,49 @@ export function MaturityBoard({
               </Button>
             </form>
           )}
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          {/* Board | List — the same slice, laid out as cards or rows. */}
+          <div
+            role="radiogroup"
+            aria-label="Layout"
+            className="inline-flex h-8 items-center rounded-md border border-border bg-muted/40 p-0.5"
+          >
+            {(
+              [
+                ["board", "Board", LayoutGrid],
+                ["list", "List", ListIcon],
+              ] as const
+            ).map(([mode, label, Icon]) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={viewMode === mode}
+                onClick={() => setViewMode(mode)}
+                className={`inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${
+                  viewMode === mode
+                    ? "bg-background text-primary shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {viewMode === "board" && (
+            <Button
+              variant={showHelp ? "secondary" : "outline"}
+              size="sm"
+              className="h-8 px-2"
+              aria-pressed={showHelp}
+              title="How this board works"
+              onClick={() => setShowHelp((v) => !v)}
+            >
+              <HelpCircle className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button variant="outline" size="sm" className="h-8" onClick={() => void load()} disabled={loading}>
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
             />
@@ -1869,14 +2120,15 @@ export function MaturityBoard({
         </div>
       )}
 
-      {viewMode === "board" && (
-      <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+      {viewMode === "board" && showHelp && (
+      <ul className="max-w-2xl list-disc space-y-1 rounded-lg border border-border bg-muted/40 py-3 pl-8 pr-4 text-xs text-muted-foreground">
         {config.dimension === "status" ? (
           <>
             <li>
-              Status is{" "}
+              Review status (draft, pending, published) is{" "}
               <span className="font-medium text-foreground">read-only</span>{" "}
-              here — move a doc through review in the document view.
+              here — move a doc through review in the document view. To group tasks by
+              stage, pick the stage option instead.
             </li>
             <li>
               Switch to{" "}
@@ -1900,8 +2152,8 @@ export function MaturityBoard({
             </li>
             <li>
               {config.tagNamespace?.trim()
-                ? "Clear the box to group by every tag."
-                : "Type a namespace (e.g. stage) to group by stage: values only."}
+                ? "Pick All tags in the list beside Tag to group by every tag."
+                : "Pick a group such as stage: from the list beside Tag to use only its values."}
             </li>
             <li>
               {canEditDocs ? (
@@ -2011,18 +2263,23 @@ export function MaturityBoard({
           (Jira/ClickUp's avatar row — click faces to show only their cards). */}
       <div className="flex flex-wrap items-center gap-3">
         {typeTaskEnabled && (
-          <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={!!config.tasksOnly}
-              onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
-              className="h-3.5 w-3.5"
-            />
+          <button
+            type="button"
+            aria-pressed={!!config.tasksOnly}
+            onClick={() => updateConfig({ tasksOnly: !config.tasksOnly })}
+            className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-sm transition-colors ${
+              config.tasksOnly
+                ? "border-primary/30 bg-primary/10 font-medium text-primary"
+                : "border-input text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
             Tasks only
-          </label>
+          </button>
         )}
-        <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          Completed
+        <div className={CAPSULE}>
+          <span className={CAPSULE_LABEL}>Completed</span>
+          <div className="relative">
           <select
             value={config.hideDoneAfterDays ?? ""}
             onChange={(e) =>
@@ -2030,17 +2287,20 @@ export function MaturityBoard({
                 hideDoneAfterDays: e.target.value === "" ? undefined : Number(e.target.value),
               })
             }
-            className="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+            aria-label="Completed"
+            className={BARE_SELECT}
           >
             <option value="">All</option>
             <option value="7">Past week</option>
             <option value="30">Past month</option>
             <option value="0">Hide</option>
           </select>
-        </label>
+          <ChevronDown className={CHEVRON} />
+          </div>
+        </div>
         {/* Tag filter: cards must carry every tag listed (saved per board). */}
-        <div className="flex items-center gap-1">
-          <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+        <div className="flex h-8 min-w-0 flex-wrap items-center gap-1 rounded-md border border-input bg-background pl-2 pr-1 text-sm focus-within:ring-2 focus-within:ring-ring">
+          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           {(config.filterTags ?? []).map((t) => (
             <span
               key={t}
@@ -2058,7 +2318,7 @@ export function MaturityBoard({
               </button>
             </span>
           ))}
-          <Input
+          <input
             value={filterDraft}
             onChange={(e) => setFilterDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -2069,9 +2329,9 @@ export function MaturityBoard({
               }
               setFilterDraft("");
             }}
-            placeholder="filter by title or #tag…"
+            placeholder="Filter by title or #tag"
             title="Type to filter by title. Enter adds the text as a tag filter."
-            className="h-7 w-40 text-xs"
+            className="h-7 w-44 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
         {/* Custom-field filters (select / person / checkbox), saved per board. */}
@@ -2167,36 +2427,31 @@ export function MaturityBoard({
             <span className="ml-1 tabular-nums text-muted-foreground">{blockedCount}</span>
           </Button>
         )}
-        {/* Board | List — the same slice, laid out as cards or rows. */}
-        <div
-          role="radiogroup"
-          aria-label="Layout"
-          className="ml-auto inline-flex items-center rounded-md border border-border bg-muted/40 p-0.5"
-        >
-          {(
-            [
-              ["board", "Board", LayoutGrid],
-              ["list", "List", ListIcon],
-            ] as const
-          ).map(([mode, label, Icon]) => (
-            <button
-              key={mode}
-              type="button"
-              role="radio"
-              aria-checked={viewMode === mode}
-              onClick={() => setViewMode(mode)}
-              className={`inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${
-                viewMode === mode
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </button>
-          ))}
-        </div>
       </div>
+
+      {/* Cards carry a number only once numbering is on. Say so once, to the
+          people who can turn it on — the number is the team's shorthand. */}
+      {!hintGone && unnumbered > 0 && (
+        <HintBanner testId="board-unnumbered-hint" onDismiss={dismissHint}>
+          <span>
+            <span className="font-medium text-foreground">
+              {unnumbered} task{unnumbered === 1 ? " has" : "s have"} no ticket number yet.
+            </span>{" "}
+            Number them and every card gets its ID.
+          </span>
+          <Button size="sm" className="h-7 px-2.5 text-xs" disabled={numbering} onClick={() => void numberThem()}>
+            {numbering ? "Numbering…" : "Number them, oldest first"}
+          </Button>
+        </HintBanner>
+      )}
+      {!hintGone && numberingOffHint && (
+        <HintBanner testId="board-numbering-hint" onDismiss={dismissHint}>
+          <span>These tasks have no ticket numbers yet, so cards can't show one.</span>
+          <a className="font-medium text-primary underline-offset-2 hover:underline" href={`${nestPath(nestId)}?tab=fields`}>
+            Turn on task numbering
+          </a>
+        </HintBanner>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 text-muted-foreground py-12 justify-center">
@@ -2218,6 +2473,7 @@ export function MaturityBoard({
           boardId={activeBoard?.id}
           dimension={effectiveConfig.dimension}
           fieldLabel={effectiveConfig.field?.label}
+          tagNamespace={effectiveConfig.tagNamespace}
           sections={columns.map((c) => ({
             key: c.key,
             label: c.label,
@@ -2250,7 +2506,7 @@ export function MaturityBoard({
                   <div
                     key={col.key}
                     {...cellDropHandlers(col)}
-                    className="w-64 flex-shrink-0 rounded-lg border border-border bg-muted/30"
+                    className="w-64 flex-shrink-0 rounded-lg border border-transparent bg-muted/60"
                   >
                     {renderHeader(col, (orderedByColumn[col.key] ?? []).length)}
                   </div>
@@ -2303,8 +2559,8 @@ export function MaturityBoard({
                             <div
                               key={col.key}
                               {...cellDropHandlers(col, lane.key)}
-                              className={`flex w-64 flex-shrink-0 flex-col rounded-lg border bg-muted/20 transition-colors ${
-                                dropCol === cell ? "border-primary ring-1 ring-primary" : "border-border"
+                              className={`flex w-64 flex-shrink-0 flex-col rounded-lg border bg-muted/40 transition-colors ${
+                                dropCol === cell ? "border-primary ring-1 ring-primary" : "border-transparent"
                               }`}
                             >
                               {renderCards(col, cards, lane.key)}
@@ -2327,8 +2583,8 @@ export function MaturityBoard({
               <div
                 key={col.key}
                 {...cellDropHandlers(col)}
-                className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${
-                  dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-border"
+                className={`flex-shrink-0 w-64 rounded-lg border bg-muted/60 flex flex-col max-h-[70vh] transition-colors ${
+                  dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-transparent"
                 }`}
               >
                 {renderHeader(col, cards.length)}
@@ -2378,5 +2634,17 @@ export function MaturityBoard({
         }}
       />
     </div>
+  );
+}
+
+/** The board, with the nest's priority levels (task_rules.priorities) in scope
+ *  for every card, menu and column below it. */
+export function MaturityBoard(props: Props) {
+  const settings = useNestSettings(props.nestId);
+  const levels = levelsOrDefault(settings.data?.task_rules?.priorities);
+  return (
+    <PriorityLevelsContext.Provider value={levels}>
+      <MaturityBoardInner {...props} />
+    </PriorityLevelsContext.Provider>
   );
 }
