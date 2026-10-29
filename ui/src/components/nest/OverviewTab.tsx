@@ -11,7 +11,7 @@
  * opening a folder here asks NestView for that level — the same read the
  * Documents tab makes. Actions are callbacks into NestView.
  */
-import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Loader2, Plus, Sparkles, Trash2, Upload } from "lucide-react";
 import type { KnownFolder } from "../FolderTree";
 import { FolderTree, prettyFolderPath } from "../FolderTree";
@@ -19,7 +19,7 @@ import { typePill } from "./node-display";
 import { NodeTypeIcon } from "./NodeTypeIcon";
 import { READER_CARD_CLASS, breadcrumbFor } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
-import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, overviewFacts, type MoreMarker } from "@/lib/nest-overview";
+import { capFolderDocs, emptyStateActions, folderCollapsed, overviewFacts, type MoreMarker } from "@/lib/nest-overview";
 
 interface Props {
   /** Cold load still in flight — shows a spinner instead of an empty index. */
@@ -32,8 +32,7 @@ interface Props {
   /** Folder → documents, from the loaded levels. */
   tocGroups: { folder: string; depth: number; items: any[] }[];
   knownFolders: KnownFolder[];
-  /** Folder levels whose documents are loaded / in flight. */
-  loadedFolders: Set<string>;
+  /** Folder levels whose documents are in flight. */
   loadingFolders: Set<string>;
   /** Load one folder level (no-op when already loaded). */
   onExpandFolder: (path: string) => void;
@@ -56,8 +55,7 @@ interface Props {
   onDeleteFolder?: (folder: { path: string; label: string; total: number }) => void;
 }
 
-/** Top-level folders opened on arrival, and documents shown per folder before "View all". */
-const PREFETCH_FOLDERS = 5;
+/** Documents shown per folder before "View all". */
 const DOCS_PER_FOLDER = 5;
 
 // The reader's shared text treatments, so the two surfaces can't drift apart
@@ -81,7 +79,6 @@ export function OverviewTab({
   folderCount,
   tocGroups,
   knownFolders,
-  loadedFolders,
   loadingFolders,
   onExpandFolder,
   isReadOnly,
@@ -95,26 +92,14 @@ export function OverviewTab({
   onAddWithAI,
   onDeleteFolder,
 }: Props) {
-  // Folder rows: open once loaded, closed until then; a click wins either way.
+  // Folder rows: closed until opened; a click wins either way.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(() => new Map());
-  const isCollapsed = (path: string) => folderCollapsed(path, overrides, loadedFolders);
+  const isCollapsed = (path: string) => folderCollapsed(path, overrides);
   const toggle = (path: string) => {
     const opening = isCollapsed(path);
     setOverrides((prev) => new Map(prev).set(path, !opening));
     if (opening) onExpandFolder(path);
   };
-
-  // Open the first few top-level folders on arrival, so the index shows
-  // documents rather than a column of closed folders.
-  const prefetch = useMemo(() => foldersToPrefetch(knownFolders, loadedFolders, PREFETCH_FOLDERS), [knownFolders, loadedFolders]);
-  // Keyed on the prefetch list only: loadingFolders / overrides are read
-  // inside, not deps — an in-flight folder is skipped here, and one the user
-  // has collapsed by hand is never reopened behind their back.
-  useEffect(() => {
-    if (initialLoad) return;
-    for (const p of prefetch) if (!loadingFolders.has(p) && !overrides.has(p)) onExpandFolder(p);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialLoad, prefetch.join("|")]);
 
   const cappedGroups = useMemo(() => capFolderDocs(tocGroups, DOCS_PER_FOLDER), [tocGroups]);
 

@@ -109,26 +109,12 @@ export function emptyStateActions(input: { canWrite: boolean; canImport: boolean
 }
 
 /**
- * Whether an index folder row is collapsed — the reader nav's rule: open once
- * its documents are loaded, closed until then, and a click wins either way.
+ * Whether a folder row is collapsed — the index's and the reader nav's rule:
+ * closed until opened, so a large folder never floods the tree on arrival
+ * (CU-wdqcpzy9ac). A click wins either way.
  */
-export function folderCollapsed(path: string, overrides: Map<string, boolean>, loaded: Set<string>): boolean {
-  return overrides.get(path) ?? !loaded.has(path);
-}
-
-/**
- * The top-level folders the Overview opens on arrival so the index shows
- * documents, not a column of closed folders: non-empty, in path order, at most
- * `limit` of them (already-loaded ones count toward it). One folder-level
- * read each — the same read the Documents tab makes when a folder opens.
- */
-export function foldersToPrefetch(known: { path: string; total: number }[], loaded: Set<string>, limit: number): string[] {
-  return known
-    .filter((f) => f.path && !f.path.includes("/") && f.total > 0)
-    .sort((a, b) => byPathSegments(a.path, b.path))
-    .slice(0, limit)
-    .map((f) => f.path)
-    .filter((p) => !loaded.has(p));
+export function folderCollapsed(path: string, overrides: Map<string, boolean>): boolean {
+  return overrides.get(path) ?? true;
 }
 
 /** Marker row that stands in for a folder's documents past the cap. */

@@ -35,6 +35,8 @@ export const NEST_SCOPED_KEY_CODE = "nest_scoped_key";
  *  they expose nothing account-wide. */
 const PUBLIC_PATHS = new Set([
   "/health",
+  "/livez",
+  "/readyz",
   "/license/status",
   "/llms.txt",
   "/auth/admin-status",

@@ -7,6 +7,7 @@ import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import * as api from "../lib/api";
 import { conventionKey, pickHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
+import { folderCollapsed } from "@/lib/nest-overview";
 import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 import { brandingToCssVars, brandedDocumentTitle, cssUrl, isBranded, type NestBranding } from "@/lib/branding";
@@ -131,10 +132,10 @@ export function ReaderView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, nestId]);
 
-  // Folder rows: expanded once their docs are loaded, collapsed until then;
+  // Folder rows: collapsed until opened (the page's own ancestors open below);
   // a click overrides either way and fetches on first open.
   const [folderOverrides, setFolderOverrides] = useState<Map<string, boolean>>(() => new Map());
-  const isFolderCollapsed = (path: string) => folderOverrides.get(path) ?? !loadedFolders?.has(path);
+  const isFolderCollapsed = (path: string) => folderCollapsed(path, folderOverrides);
   const toggleFolder = (path: string) => {
     const opening = isFolderCollapsed(path);
     setFolderOverrides((prev) => new Map(prev).set(path, !opening));

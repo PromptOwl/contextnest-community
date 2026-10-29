@@ -578,6 +578,14 @@ export function createApp(): Hono<AuthEnv> {
   // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
+  // Prometheus metrics (METRICS_ENABLED). First, so every request is timed;
+  // loaded only when on, so a default server never imports prom-client.
+  if (config.METRICS_ENABLED) {
+    const metrics = import("./ops/metrics.js");
+    app.use("*", async (c, next) => (await metrics).httpMetrics(c, next));
+    app.get("/metrics", async (c) => (await metrics).metricsHandler(c));
+  }
+
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
   // CORS allowlist — see config.CORS_ORIGINS. In key mode we default to a
@@ -792,6 +800,16 @@ export function createApp(): Hono<AuthEnv> {
       subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     });
+  });
+
+  // Kubernetes-style probes (public). Liveness is "the process answers";
+  // readiness also needs the database and nest storage, so an outage takes the
+  // pod out of rotation without restarting it.
+  app.get("/livez", (c) => c.json({ status: "ok" }));
+  app.get("/readyz", async (c) => {
+    const { readiness } = await import("./ops/status.js");
+    const { ready, checks } = await readiness();
+    return c.json({ status: ready ? "ok" : "unavailable", checks }, ready ? 200 : 503);
   });
 
   // Admin-features gate: teammate management is blocked until a valid
@@ -1065,6 +1083,15 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Newer release on npm, and the command that updates this install.
+  app.use("/admin/update-status", flexAuthMiddleware);
+  app.get("/admin/update-status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { updateStatus } = await import("./ops/update-check.js");
+    return c.json(updateStatus());
   });
 
   // Models the current credential can reach — the Hootie model picker. On the
@@ -3729,7 +3756,7 @@ export function createApp(): Hono<AuthEnv> {
   //      /:nodeId{.+}/hosted would read "<viewId>/view" as the node id; it
   //      falls through (next()) when the id is not a view node.
   nestsApp.route("/:nestId/nodes", viewRoutes);
-  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx/.xlsx upload), same reason.
   nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
