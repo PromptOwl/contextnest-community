@@ -2449,16 +2449,25 @@ export function createApp(): Hono<AuthEnv> {
     const restNestIds = [...nestName.keys()].filter(
       (id) => !nestApprove.get(id),
     );
-    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
-      await Promise.all([
-        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
-        getReviewQueue({
-          status: "pending",
-          nestIds: restNestIds,
-          requestedByEmail: me,
-          limit: 1,
-        }),
-      ]);
+    const [
+      { total: approvableReviewTotal },
+      { total: myReviewsElsewhereTotal },
+      { total: myReviewsTotal },
+    ] = await Promise.all([
+      getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: restNestIds,
+        requestedByEmail: me,
+        limit: 1,
+      }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: [...nestName.keys()],
+        requestedByEmail: me,
+        limit: 1,
+      }),
+    ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
     // Deletion flags and access requests ride the same two buckets (above)
     // but aren't paginated (both lists fetch every pending one), so folding in
@@ -2473,11 +2482,17 @@ export function createApp(): Hono<AuthEnv> {
       console.error("[me/work] assigned list failed", err);
       return [];
     });
+    // The badge's share (CU-wdqcq0658p): the same total minus what waits on
+    // others — the caller's own pending reviews and the requests they filed.
+    const waitingOnMeTotal =
+      reviewTotal + requestsShown - myReviewsTotal -
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
     return c.json({
       items,
       waiting,
       notifications,
       assigned,
+      waiting_on_me_total: waitingOnMeTotal,
       pagination: {
         total: reviewTotal + requestsShown,
         limit,

@@ -3623,6 +3623,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
+    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    waiting_on_me_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
