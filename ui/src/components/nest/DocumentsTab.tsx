@@ -1257,7 +1257,9 @@ export function DocumentsTab({
                   // Cards: collapse every row action into a 3-dot menu kept on
                   // the title line. List keeps inline hover buttons below.
                   const actionMenu = (
-                    <div onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                      {/* Same pin control the list rows and document header use (CU-wdqcq06256). */}
+                      <DocPinControl nestId={nestId} nodeId={node.id} />
                       <DropdownMenu modal={false}>
                         <DropdownMenuTrigger asChild>
                           <Button
