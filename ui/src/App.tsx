@@ -35,7 +35,7 @@ import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
-import { useBreadcrumbTail, crumbLabelClass, type Crumb } from "./lib/breadcrumb";
+import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -851,6 +851,13 @@ export default function App() {
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+
+  // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
+  const pageTabTitle = tabTitle(crumbs);
+  const brandedReader = readerMode && !!nestBranding;
+  useEffect(() => {
+    if (!brandedReader) document.title = pageTabTitle;
+  }, [pageTabTitle, brandedReader]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
