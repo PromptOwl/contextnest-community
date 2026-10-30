@@ -125,12 +125,13 @@ export interface MoreMarker {
 
 /**
  * First `max` documents per folder, then a single "more" marker (rendered as
- * "View all N"). The loose root documents are never capped — they are the
- * top of the index. Returns new groups; the input is not touched.
+ * "View all N"). The loose root documents cap too — uncapped they made the
+ * Overview a flat list of every document (CU-wdqcq06a1q). Returns new groups;
+ * the input is not touched.
  */
 export function capFolderDocs<G extends { folder: string; items: any[] }>(groups: G[], max: number): G[] {
   return groups.map((g) => {
-    if (g.folder === "Root" || g.items.length <= max) return g;
+    if (g.items.length <= max) return g;
     const marker: MoreMarker = {
       id: `more:${g.folder}`,
       more: { folder: g.folder, hidden: g.items.length - max, total: g.items.length },
