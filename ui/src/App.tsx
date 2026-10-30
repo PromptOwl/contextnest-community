@@ -88,6 +88,8 @@ type View =
       page: "dashboard";
       /** A dashboard page id (its folder under pages/app); omitted = nests. */
       tab?: string;
+      /** Where the header bell was clicked from — the page offers Back to it. */
+      returnTo?: View;
     }
   | {
       page: "nest";
@@ -881,6 +883,11 @@ export default function App() {
     }),
     [setView],
   );
+  const dashReturnTo = view.page === "dashboard" ? view.returnTo : undefined;
+  const dashboardNav = useMemo<AppNav>(
+    () => (dashReturnTo ? { ...appNav, goBack: () => setView(dashReturnTo) } : appNav),
+    [appNav, dashReturnTo, setView],
+  );
 
   // Back out of the nest entirely. Shared by all five nest-scoped pages —
   // their back arrows used to return to the nest page, but the view switcher
@@ -1471,7 +1478,14 @@ export default function App() {
 
             {adminStatus?.me && (
               <InboxBell
-                onOpen={() => setView({ page: "dashboard", tab: "my-work" })}
+                onOpen={() =>
+                  setView({
+                    page: "dashboard",
+                    tab: "my-work",
+                    // Keep the page the bell was clicked on, for My Work's Back (CU-wdqcq067ud).
+                    returnTo: view.page === "dashboard" && view.tab === "my-work" ? view.returnTo : view,
+                  })
+                }
                 onOpenDoc={appNav.openReview}
                 onOpenNest={(id, name) => appNav.openNest(id, name, false, false)}
               />
@@ -1623,7 +1637,7 @@ export default function App() {
           // page — the server would refuse it anyway; this keeps the shell whole.
           const Page = visibleAppPage(view.tab, pageCaps).Component;
           return (
-            <AppNavProvider value={appNav}>
+            <AppNavProvider value={dashboardNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
                 <Page />
               </Suspense>

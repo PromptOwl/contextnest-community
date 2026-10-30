@@ -15,7 +15,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
+  ArrowLeft, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
@@ -30,7 +30,7 @@ import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/C
 import { localToday } from "../../../lib/board-tasks";
 
 export default function MyWorkPage() {
-  const { openNest: onSelectNest, openReview: onOpenReview } = useAppNav();
+  const { openNest: onSelectNest, openReview: onOpenReview, goBack } = useAppNav();
   const { adminStatus } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -318,7 +318,21 @@ export default function MyWorkPage() {
 
   return (
     <div className="space-y-4">
-      <PageTitle icon={Inbox} title="My Work" description="Tasks, reviews and requests waiting on you, and what you handed off." className="mb-0" />
+      <PageTitle
+        icon={Inbox}
+        title="My Work"
+        description="Tasks, reviews and requests waiting on you, and what you handed off."
+        className="mb-0"
+        actions={
+          // Opened from the header bell: back to where you were (CU-wdqcq067ud).
+          goBack && (
+            <Button variant="outline" size="sm" onClick={goBack} data-testid="my-work-back">
+              <ArrowLeft className="h-4 w-4 mr-1.5" />
+              Back
+            </Button>
+          )
+        }
+      />
       <div>
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject
