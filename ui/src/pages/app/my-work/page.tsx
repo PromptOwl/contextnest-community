@@ -647,7 +647,7 @@ export default function MyWorkPage() {
             {work.waiting.length > 0 && (
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+                  <h3 className="text-sm font-medium">
                     Waiting on others
                   </h3>
                   <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
