@@ -132,6 +132,7 @@ import {
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
+import { SURFACES_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -505,6 +506,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // Surfaces (bindings, identity links): only advertised while
+  // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
+  ...SURFACES_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -4732,6 +4736,9 @@ async function runTool(
       // owner/admin and refuses system keys in metacognition/manage.ts.
       if (isMetacognitionTool(toolName)) {
         return runMetacognitionTool(toolName, args, ctx);
+      }
+      if (isSurfacesTool(toolName)) {
+        return runSurfacesTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

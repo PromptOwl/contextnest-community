@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { invalidateAllGuards } from "../surfaces/invalidate.js";
 
 /**
  * Record that an identity provider just vouched for this account's email
@@ -26,6 +27,9 @@ export async function markEmailVerified(userId: string, source: string): Promise
       "UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL",
       [new Date().toISOString(), userId],
     );
+    // A newly verified email can change who auto-matches into a bound
+    // conversation (Surfaces guard, PRD §4.17).
+    await invalidateAllGuards();
   } catch (err) {
     console.error(
       `[auth] recording a verified email failed (user ${userId}, ${source}; sign-in continues):`,

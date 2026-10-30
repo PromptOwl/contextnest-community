@@ -2627,6 +2627,51 @@ Not behind the workflow-plane flag: connectors fire on review events too.
 
 ---
 
+### Surfaces — conversation ↔ nest bindings and identity links (`FEATURE_SURFACES`)
+
+Every route `404`s unless `FEATURE_SURFACES`, `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are all on. A conversation (a Slack/Teams channel or DM, an email address) is bound to one nest. Binding is refused unless **every reader of the nest is in the conversation** (`capture_ok`), or the conversation is an org-public channel that the admin binds with `explicit_public_bind`. The following count as readers who are not in the room, so each of them blocks:
+- the owner and collaborators;
+- team members, stewards and share-grant holders;
+- org/service keys (`key`);
+- other agents (`agent`);
+- outbound connectors, including the server-wide Slack/Teams webhooks (`connector`);
+- public, org or link-shared visibility (`universe`).
+
+Personal keys and MCP tokens act as their user, so they add no reader. Server administrators can read every nest and can't be removed. They are left out of the check, and every response carries `disclosure: "This server's administrators can read every nest."`. `surface_ok` means that everyone in the conversation can read the nest. Nest text is posted only when it holds. Guard detail is counts only, with no names.
+
+Binding states: `active | paused_guard | paused_by_member | removed`.
+- The guard re-checks within 60 s of any membership or permission change.
+- A binding whose capture stops being safe becomes `paused_guard`. Its buffer is purged, its pending cards are withdrawn and admins are alerted with counts only.
+- It stays paused until an admin resumes it.
+- A member can remove Nest from a non-general conversation (`paused_by_member`). It comes back only through an admin resume, and only once that member has agreed or has left.
+
+- `GET /surfaces/status`: installs (server admin only), binding counts by state, the disclosure.
+- `GET /surfaces/bindings?nest_id=`: server admins see every binding; others see bindings on nests they own or administer.
+- `POST /surfaces/bindings/preview` `{ install_id, conversation_id, nest_id, explicit_public_bind?, ext_capture_enabled? }` (nest owner/admin): dry-run guard, `{ would_bind, guard, disclosure }`.
+  - For a private channel or DM, the caller must also be a current member (or a server admin). Otherwise the answer is a uniform `404` with no counts. The same applies to create.
+- `POST /surfaces/bindings` (same body, nest owner/admin): `201 { binding, guard, disclosure }`.
+  - `409 { code: "guard_refused", guard, guard_detail }` when capture isn't safe, or when the members can't be read.
+  - `422` for `explicit_public_bind` on a private, DM or externally shared conversation.
+  - `ext_capture_enabled` defaults to false.
+  - `explicit_public_bind` is server-admin only (`403` otherwise). It relaxes only the rule that every person who reads the nest is in the channel: a public or link-shared nest, outbound connectors, org/service keys and other agents still refuse it. A nest with `org` visibility is allowed (on a single-company server).
+  - `listener_agent_node_id` is never accepted from a client (`422`). The server records the binding's own listener when Surfaces creates it.
+- `GET /surfaces/bindings/:id`, `PATCH /surfaces/bindings/:id` `{ explicit_public_bind?, ext_capture_enabled?, listener_agent_node_id?, conversation_name? }` (re-runs the guard), `DELETE /surfaces/bindings/:id` (→ `removed`): nest owner/admin.
+- `POST /surfaces/bindings/:id/recheck`, `POST /surfaces/bindings/:id/resume` (nest owner/admin). Resume returns `409` while the guard fails, or while the member who removed Nest is still present without consent.
+- The link and link-review routes below need your own full credential: a session, an unscoped read-write key or an OAuth grant. A read-only key is refused with `403` on every non-GET `/surfaces` route. Surfaces is always off in `AUTH_MODE=open`.
+- `GET /surfaces/links`: server admins see every identity link; anyone else sees their own.
+- `DELETE /surfaces/links/:id`: server admin or the linked person. Takes effect immediately and blocks auto-match for that surface user.
+- `POST /surfaces/links/unblock` `{ install_id, surface_user_id }` (server admin): clears that block.
+- `GET /surfaces/link-reviews?status=`, `POST /surfaces/link-reviews/:id` `{ decision: "approve" | "deny" }` (server admin): one-time links refused because the emails didn't match.
+- `GET /link/:token` (signed in): names both identities and returns a `csrf`. Renders HTML for a browser.
+- `POST /link/:token` `{ csrf }` (signed in): links them. The token is single use and lasts 15 min.
+  - The surface email must be confirmed by the surface (re-read at redeem time) and equal the signed-in user's verified email. Otherwise it returns `409`, and an admin review is queued (at most 3 per surface user per day).
+  - At most 5 links per surface user per 15 minutes. Expired links are purged by the hourly retention sweep.
+  - Linking never runs the action that was clicked: `{ linked: true, executed: false, message }`.
+
+MCP twins (per-nest endpoint, advertised to nest owners/admins while the flags are on):
+- bindings: `context_surfaces_status`, `context_surfaces_bindings_list`, `context_surfaces_binding_preview`, `_binding_create`, `_binding_update`, `_binding_delete`, `_binding_recheck`, `_binding_resume`;
+- identity links (server admin): `context_surfaces_links_list`, `_link_revoke`, `_link_unblock`, `_link_reviews_list`, `_link_review_decide`.
+
 ## 9. MCP
 
 ### `/nests/:nestId/mcp/*`

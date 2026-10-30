@@ -1,5 +1,6 @@
 import type { DatabaseAdapter } from "./adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -102,6 +103,7 @@ export const HISTORICAL_MIGRATIONS = [
   "075_node_index_manifest",
   "076_nest_write_jobs",
   "077_nest_seal_leases",
+  "079_surfaces_core",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1303,6 +1305,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       expires_at BIGINT NOT NULL
     );
   `);
+
+  // Migration 079 parity: Surfaces core tables (shared DDL, see migrations.ts).
+  await db.exec(surfacesS1Ddl(NOW));
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
