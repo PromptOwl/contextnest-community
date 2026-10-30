@@ -13,6 +13,7 @@ import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { saveDestination } from "./lib/document-save-nav";
+import { withNestName } from "./lib/nest-name";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { LicenseBanner } from "./components/LicenseNotice";
@@ -1646,6 +1647,9 @@ export default function App() {
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
+            // Not a navigation, so no leave guard; functional so a tab switched
+            // while the save was in flight survives.
+            onRenamed={(name) => setViewNow((v) => withNestName(v, view.nestId, name))}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
               setView({
