@@ -1472,6 +1472,8 @@ export default function App() {
             {adminStatus?.me && (
               <InboxBell
                 onOpen={() => setView({ page: "dashboard", tab: "my-work" })}
+                onOpenDoc={appNav.openReview}
+                onOpenNest={(id, name) => appNav.openNest(id, name, false, false)}
               />
             )}
             {adminStatus?.me ? (
