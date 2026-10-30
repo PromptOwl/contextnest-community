@@ -134,6 +134,8 @@ interface NestViewProps {
   onTabChange?: (tab: string) => void;
   /** Open the settings dialog once the nest has loaded (deep link). */
   initialSettings?: boolean;
+  /** The nest's name was saved — App updates every place that shows it. */
+  onRenamed?: (name: string) => void;
 }
 
 /** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
@@ -159,6 +161,7 @@ export function NestView({
   initialTab,
   onTabChange,
   initialSettings,
+  onRenamed,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -176,6 +179,8 @@ export function NestView({
   const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
+    // Our own save echoing back via onRenamed — resetting would eat typing since.
+    if (nestName === lastSavedName.current) return;
     setEditableName(nestName);
     lastSavedName.current = nestName;
   }, [nestName, nestId]);
@@ -195,6 +200,7 @@ export function NestView({
       await api.updateNest(nestId, { name: trimmed });
       lastSavedName.current = trimmed;
       setRenameError(null);
+      onRenamed?.(trimmed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to rename nest";
       setRenameError(msg);
@@ -2288,6 +2294,7 @@ export function NestView({
               setEditableName(updated.name);
               lastSavedName.current = updated.name;
               setRenameError(null);
+              onRenamed?.(updated.name);
             }
             setNestDescription(updated.description);
             setShowRename(false);

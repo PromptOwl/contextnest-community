@@ -328,8 +328,6 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");
@@ -944,6 +942,11 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
+  useBreadcrumb([
+    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
+  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
@@ -2947,7 +2950,7 @@ export function DocumentEditor({
                                 ?.focus();
                           }
                         }}
-                        placeholder="Untitled"
+                        placeholder={loading ? "Loading…" : "Untitled"}
                         // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.

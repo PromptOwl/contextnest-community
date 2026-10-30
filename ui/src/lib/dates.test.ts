@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseServerDate, formatServerDate, relTime, untilTime } from "./dates";
+import { parseServerDate, formatServerDate, relTime, untilTime, SHORT_DATE_TIME } from "./dates";
 
 // A SQL-default timestamp ("2026-08-04 05:02:32") is UTC with nothing saying
 // so, and new Date() reads it as LOCAL time — a request raised a minute ago
@@ -51,6 +51,14 @@ describe("relTime", () => {
   it("is empty for missing input rather than 'Invalid Date'", () => {
     expect(relTime(null)).toBe("");
     expect(formatServerDate(null)).toBe("");
+  });
+});
+
+describe("formatServerDate", () => {
+  it("drops seconds with SHORT_DATE_TIME", () => {
+    const raw = "2026-10-27 14:50:06";
+    expect(formatServerDate(raw)).toMatch(/:06/);
+    expect(formatServerDate(raw, SHORT_DATE_TIME)).not.toMatch(/:06/);
   });
 });
 

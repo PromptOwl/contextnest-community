@@ -15,7 +15,7 @@ import { ANON_USER_ID } from "../../../lib/constants";
 import { CopyButton } from "@/components/ui/copy-button";
 import { toast } from "sonner";
 import { AllNestsBar } from "../../../components/AllNestsBar";
-import { relTime, formatServerDate } from "../../../lib/dates";
+import { relTime, formatServerDate, SHORT_DATE_TIME } from "../../../lib/dates";
 import { nestNameProblem } from "../../../lib/nest-name";
 import {
   scopeShowsNests,
@@ -1233,7 +1233,7 @@ export default function NestsPage() {
                                 <span className="font-medium">
                                   {nest.is_owner ? "you" : nest.owner_email || "unknown user"}
                                 </span>{" "}
-                                · {formatServerDate(nest.created_at)}
+                                · {formatServerDate(nest.created_at, SHORT_DATE_TIME)}
                               </span>
                             </p>
                           ) : null}
@@ -1330,7 +1330,10 @@ export default function NestsPage() {
                                 Imported
                               </span>
                             ) : null}
-                            <span>{formatServerDate(nest.created_at)}</span>
+                            {/* An imported card already dates itself in the "Imported by" line (CU-wdqcq06a1r). */}
+                            {!nest.is_imported && (
+                              <span>{formatServerDate(nest.created_at, SHORT_DATE_TIME)}</span>
+                            )}
                           </div>
                         </div>
                       </div>
