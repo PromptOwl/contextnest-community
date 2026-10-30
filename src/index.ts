@@ -311,6 +311,16 @@ ${config.AUTH_MODE === "key" ? `
     .then((n) => n && console.log(`[seal] resuming queued writes in ${n} nest(s)`))
     .catch((err) => console.error("[seal] resume failed", err));
 
+  // Cloud Run sends SIGTERM, then kills after 10s. Let a running seal finish
+  // and release its lease, so the next instance does not wait out a dead one;
+  // the rest stays queued for it. Exits itself: a listener replaces Node's
+  // default exit on SIGTERM.
+  process.once("SIGTERM", () => {
+    const exit = () => process.exit(0);
+    setTimeout(exit, 8_000).unref();
+    void import("./nodes/seal-queue.js").then((m) => m.stopSeals()).finally(exit);
+  });
+
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.
   if (config.FEATURE_METACOGNITION) {

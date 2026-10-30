@@ -63,6 +63,49 @@ describe("seal queue", () => {
     expect(res.documents.map((d) => d.id)).toContain(id);
   });
 
+  // Another instance holding the nest's lease: this one leaves the rows to it,
+  // and takes over once the lease runs out (the holder died).
+  const holdLease = (expiresAt: number) =>
+    getDb().run(
+      "INSERT INTO nest_seal_leases (nest_id, owner, expires_at) VALUES (?, 'other-instance', ?)",
+      [nestId, expiresAt],
+    );
+  const until = async (cond: () => Promise<boolean>, ms = 5_000) => {
+    const end = Date.now() + ms;
+    while (!(await cond())) {
+      if (Date.now() > end) throw new Error("timed out");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  it("leaves a nest to the instance holding its lease, and takes over when it lapses", async () => {
+    await holdLease(Date.now() + 60_000);
+    await create("Held elsewhere");
+    await new Promise((r) => setTimeout(r, 1_200));
+    expect(await queue.hasPendingSeals(nestId)).toBe(true);
+
+    await getDb().run("UPDATE nest_seal_leases SET expires_at = 0 WHERE nest_id = ?", [nestId]);
+    await until(async () => !(await queue.hasPendingSeals(nestId)));
+    const lease = await getDb().get("SELECT 1 FROM nest_seal_leases WHERE nest_id = ?", [nestId]);
+    expect(lease).toBeUndefined();
+  });
+
+  it("a query waits while another instance seals, then sees the write", async () => {
+    await holdLease(Date.now() + 60_000);
+    const id = await create("Waited for");
+    // The other instance "finishes": its lease goes away.
+    setTimeout(() => void getDb().run("DELETE FROM nest_seal_leases WHERE nest_id = ?", [nestId]), 800);
+    const started = Date.now();
+    const res = await engine.engineApi.run<{ documents: Array<{ id: string }> }>(
+      "context_query",
+      { query: "#sealq" },
+      await engine.opContext(nestId, "seal@test.com"),
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+    expect(res.documents.map((d) => d.id)).toContain(id);
+    expect(await queue.hasPendingSeals(nestId)).toBe(false);
+  });
+
   it("boot seals what a previous process queued", async () => {
     const id = await create("Left behind");
     await queue.sealsSettled(nestId);

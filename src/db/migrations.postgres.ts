@@ -101,6 +101,7 @@ export const HISTORICAL_MIGRATIONS = [
   "074_org_contributions",
   "075_node_index_manifest",
   "076_nest_write_jobs",
+  "077_nest_seal_leases",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1292,6 +1293,15 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
+  `);
+
+  // Migration 077 parity: which instance seals a nest (seal-queue.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_seal_leases (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      owner TEXT NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

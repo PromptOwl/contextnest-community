@@ -2363,6 +2363,20 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("076_nest_write_jobs");
   }
+
+  // 077: nest_seal_leases — which instance seals a nest's queued writes. One
+  // row per nest while a drain runs; expires_at (epoch ms) lets another
+  // instance take over from one that died holding it.
+  if (!hasMigration("077_nest_seal_leases")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_seal_leases (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        owner TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+    `);
+    recordMigration("077_nest_seal_leases");
+  }
 }
 
 /**

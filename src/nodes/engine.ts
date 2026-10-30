@@ -15,7 +15,7 @@ import { FlatNestStorage } from "./flat-storage.js";
 import { syncIndexedNode, markIndexStale, indexedManifest } from "./node-index.js";
 import { instrumentStorage, timed } from "./io-stats.js";
 import { isMetaFile } from "./meta-files.js";
-import { enqueueSeal, hasPendingSeals, scheduleSeal } from "./seal-queue.js";
+import { enqueueSeal, sealedFor } from "./seal-queue.js";
 
 /**
  * How long a nest's discovered-document set stays cached, in ms.
@@ -501,13 +501,7 @@ engineApi.run = (async (op: any, input: any, ctx: OperationContext) => {
   return result;
 }) as typeof engineApi.run;
 
-/**
- * Read-your-writes for readers of sealed state (context.yaml, checkpoints):
- * finish the nest's queued seals first. One indexed lookup when none are queued.
- */
-export async function sealedFor(nestId: string): Promise<void> {
-  if (await hasPendingSeals(nestId)) await scheduleSeal(nestId);
-}
+export { sealedFor };
 
 /**
  * Build an OperationContext for one nest. `onProgress` is the engine's
