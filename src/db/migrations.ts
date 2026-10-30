@@ -2334,6 +2334,35 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("074_org_contributions");
   }
+
+  // 075: node_index.manifest_json — each document's engine manifest entry, so
+  // the index update and the checkpoint read the nest from here (see
+  // indexedManifest). NULL on existing rows; the first write that finds one
+  // flags the nest stale, and the rebuild fills them all in.
+  if (!hasMigration("075_node_index_manifest")) {
+    const cols = (db.prepare("PRAGMA table_info(node_index)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("manifest_json")) {
+      db.exec("ALTER TABLE node_index ADD COLUMN manifest_json TEXT");
+    }
+    recordMigration("075_node_index_manifest");
+  }
+
+  // 076: nest_write_jobs — writes whose checkpoint and index update still
+  // have to run (src/nodes/seal-queue.ts). A row lives from the write until
+  // its batch is sealed; whatever a restart leaves is sealed at boot.
+  if (!hasMigration("076_nest_write_jobs")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_write_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
+    `);
+    recordMigration("076_nest_write_jobs");
+  }
 }
 
 /**

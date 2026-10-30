@@ -49,4 +49,28 @@ describe("write I/O summary", () => {
       log.mockRestore();
     }
   });
+
+  // With the discovery cache warm, a save returns the document from the cache
+  // the write just patched instead of reading it back from disk.
+  it("returns the saved document from a warm cache, matching disk", async () => {
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Warm", content: "v1" }, apiKey);
+    const id = created.data.node.id;
+    await jsonRequest(app, "GET", `/nests/${nestId}/search?q=warm`, undefined, apiKey);
+
+    const log = vi.spyOn(console, "log");
+    let updated: any;
+    try {
+      updated = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "v2 warm" }, apiKey);
+      expect(updated.status).toBe(200);
+      const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("[write] io update:"))!;
+      // The pre-edit read and the engine's own reads remain; the read-back is gone.
+      const reads = Number(/readDocument (\d+)x/.exec(line)?.[1] ?? 0);
+      expect(reads).toBeLessThanOrEqual(3);
+    } finally {
+      log.mockRestore();
+    }
+    const fresh = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, apiKey);
+    expect(updated.data.node.content ?? updated.data.node.body).toBe(fresh.data.node.content ?? fresh.data.node.body);
+    expect(fresh.data.node.content ?? fresh.data.node.body).toContain("v2 warm");
+  });
 });

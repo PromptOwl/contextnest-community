@@ -6,7 +6,7 @@
  */
 import { it, expect, beforeEach, afterEach } from "vitest";
 import { NestStorage, publishDocument, serializeDocument } from "@promptowl/contextnest-engine";
-import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest, settleSeals } from "./helpers";
 
 let env: ReturnType<typeof setupTestEnv>;
 beforeEach(() => {
@@ -45,6 +45,7 @@ async function setup() {
 
 /** Each (version, hash) pair the head sealed must exist in the history on disk. */
 async function expectHeadMatchesDisk(storage: NestStorage) {
+  await settleSeals();
   const fresh = await storage.findAllHistories(() => {}); // the callback bypasses the cache
   const last = (await storage.readCheckpointHistory())!.checkpoints.at(-1)!;
   for (const [id, hash] of Object.entries(last.document_chain_hashes)) {

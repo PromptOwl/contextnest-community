@@ -17,6 +17,7 @@ import {
   pdfSidecarPath,
   viewMetaSchema,
   TITLE_MAX_LENGTH,
+  withVaultLock,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -117,6 +118,18 @@ import {
   type FieldDefinition,
   type FieldsPatch,
 } from "./custom-fields.js";
+
+/**
+ * The document as the write just left it. The discovery cache folds every
+ * write in on the spot (engine.ts), so only a cold cache reads it back — a
+ * round trip a network mount charges ~0.5 s for. A copy, so a caller that
+ * shapes the result can't edit the cached set.
+ */
+async function writtenDocument(nestId: string, id: string): Promise<ContextNode> {
+  const engine = await engineCache.get(nestId);
+  const cached = engine.cachedDocument(id);
+  return cached ? structuredClone(cached) : engine.storage.readDocument(id);
+}
 
 // Awaited inside a write, so timed as part of it (io-stats).
 const notifyMentions = (p: Parameters<typeof sendMentions>[0]) =>
@@ -2243,7 +2256,7 @@ async function createNodeOnce(
       throw err;
     }
 
-    const node = await storage.readDocument(id);
+    const node = await writtenDocument(nestId, id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
@@ -2663,7 +2676,7 @@ async function stagePdfImport(
     try {
       await storage.writeDocument(nodeId, priorRaw);
       if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId] });
     } catch (err) {
       console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
     }
@@ -3092,7 +3105,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // A draft revision is NOT appended to the engine's history chain. That
@@ -3158,7 +3171,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
@@ -3440,8 +3453,12 @@ async function moveNodeInner(
 
   // Destination check through write under the destination's lock — same
   // check-then-write race create takes it for, and the same key, so a
-  // concurrent create at that id can't slip in between either.
-  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+  // concurrent create at that id can't slip in between either. The vault lock
+  // inside it is the one every engine write op takes: a move rewrites the doc,
+  // its .versions chain and the index outside the catalog, so without it a
+  // concurrent publish could checkpoint the nest mid-move. Node lock first,
+  // vault lock second — the order create and update take them in.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), () => withVaultLock(storage.root, async () => {
     try {
       await storage.readDocument(newId);
       throw new ConflictError(
@@ -3559,14 +3576,14 @@ async function moveNodeInner(
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
     try {
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
     } catch (err) {
       console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });
     return { node: moved, previousId: nodeId };
-  });
+  }));
 }
 
 /**
@@ -3630,7 +3647,7 @@ export async function discardDraft(
     // Same move rejectSuggestion makes, and for the same reason — a discard
     // must not cost a version.
     await storage.writeDocument(nodeId, raw);
-    await storage.regenerateIndex();
+    await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.

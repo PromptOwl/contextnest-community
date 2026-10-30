@@ -99,6 +99,8 @@ export const HISTORICAL_MIGRATIONS = [
   "071_node_pins",
   "073_nest_always_include_tags",
   "074_org_contributions",
+  "075_node_index_manifest",
+  "076_nest_write_jobs",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1275,6 +1277,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_contributions TEXT NOT NULL DEFAULT 'off';
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_domains TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TEXT;
+  `);
+
+  // Migration 075 parity: each document's engine manifest entry.
+  await db.exec("ALTER TABLE node_index ADD COLUMN IF NOT EXISTS manifest_json TEXT");
+
+  // Migration 076 parity: the seal queue (src/nodes/seal-queue.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_write_jobs (
+      id BIGSERIAL PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      published INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

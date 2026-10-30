@@ -304,6 +304,13 @@ ${config.AUTH_MODE === "key" ? `
   // review governance isn't. Inert while no nest sets an SLA.
   startReviewSlaLoop();
 
+  // Writes defer their checkpoint and index update to the seal queue; seal
+  // what a previous process queued and never got to.
+  void import("./nodes/seal-queue.js")
+    .then((m) => m.resumeSeals())
+    .then((n) => n && console.log(`[seal] resuming queued writes in ${n} nest(s)`))
+    .catch((err) => console.error("[seal] resume failed", err));
+
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.
   if (config.FEATURE_METACOGNITION) {
