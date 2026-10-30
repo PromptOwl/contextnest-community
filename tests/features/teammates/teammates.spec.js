@@ -89,7 +89,7 @@ test.describe('Teammates', () => {
     expect(res.status, 'GET /auth/teammates as a non-admin').toBe(403);
   });
 
-  test('CN-TMATE-002: the All Users list shows You/Admin/Invited badges, key count and last active', async ({
+  test('CN-TMATE-002: the All Users list shows You/Superadmin/Invited badges, key count and last active', async ({
     primary_user,
   }) => {
     await openAsAdmin(primary_user);
@@ -103,18 +103,18 @@ test.describe('Teammates', () => {
     await expect(page.getByText('All Users', { exact: true })).toBeVisible();
     await expect(tm.rows).toHaveCount(teammates.length);
 
-    // The caller's own row: You + Admin (a server admin is always one).
+    // The caller's own row: You + Superadmin (a server admin is always one).
     const me = teammates.find((t) => t.email.toLowerCase() === primaryRole.email.toLowerCase());
     expect(me, 'the signed-in admin should be in the directory').toBeTruthy();
     await expect(tm.rowBadge(me.email, 'You')).toBeVisible();
-    await expect(tm.rowBadge(me.email, 'Admin')).toBeVisible();
+    await expect(tm.rowBadge(me.email, 'Superadmin')).toBeVisible();
     await expect(tm.page.locator('main').getByText('You', { exact: true })).toHaveCount(1);
 
     // Every row: badges, key count and last active exactly as the server says.
     const unique = teammates.filter((t) => teammates.filter((o) => o.email.toLowerCase() === t.email.toLowerCase()).length === 1);
     for (const t of unique) {
       const label = `row for ${t.email}`;
-      await expect(tm.rowBadge(t.email, 'Admin'), label).toHaveCount(t.is_admin ? 1 : 0);
+      await expect(tm.rowBadge(t.email, 'Superadmin'), label).toHaveCount(t.is_admin ? 1 : 0);
       await expect(tm.rowBadge(t.email, 'Invited'), label).toHaveCount(t.is_invited ? 1 : 0);
       await expect(tm.rowMeta(t.email), label).toContainText(`${t.key_count} key${t.key_count !== 1 ? 's' : ''}`);
       if (t.last_active) await expect(tm.rowMeta(t.email), label).toContainText('last active');
@@ -129,16 +129,16 @@ test.describe('Teammates', () => {
     const mine = primaryRole.email;
     await expect(tm.rowName(mine)).toHaveText('QA Admin');
     await expect(tm.rowBadge(mine, 'You')).toBeVisible();
-    await expect(tm.rowBadge(mine, 'Admin')).toBeVisible();
+    await expect(tm.rowBadge(mine, 'Superadmin')).toBeVisible();
     await expect(tm.rowMeta(mine)).toContainText('3 keys');
     await expect(tm.rowMeta(mine)).toContainText('last active Just now');
 
     await expect(tm.rowBadge('grace.granted@example.com', 'You')).toHaveCount(0);
-    await expect(tm.rowBadge('grace.granted@example.com', 'Admin')).toBeVisible();
+    await expect(tm.rowBadge('grace.granted@example.com', 'Superadmin')).toBeVisible();
     await expect(tm.rowMeta('grace.granted@example.com')).toContainText(/(^|[^0-9])1 key(?!s)/);
     await expect(tm.rowMeta('grace.granted@example.com')).toContainText('last active 3h ago');
 
-    await expect(tm.rowBadge('mary.member@example.com', 'Admin')).toHaveCount(0);
+    await expect(tm.rowBadge('mary.member@example.com', 'Superadmin')).toHaveCount(0);
     await expect(tm.rowMeta('mary.member@example.com')).toContainText('0 keys');
     await expect(tm.rowMeta('mary.member@example.com')).toContainText('last active 5m ago');
     await expect(tm.rowMeta('bob.builder@example.com')).toContainText('2 keys');
@@ -148,7 +148,7 @@ test.describe('Teammates', () => {
     const ivy = 'ivy.invited@example.com';
     await expect(tm.rowName(ivy)).toHaveText(ivy);
     await expect(tm.rowBadge(ivy, 'Invited')).toBeVisible();
-    await expect(tm.rowBadge(ivy, 'Admin')).toHaveCount(0);
+    await expect(tm.rowBadge(ivy, 'Superadmin')).toHaveCount(0);
     await expect(tm.rowMeta(ivy)).toContainText('0 keys');
     await expect(tm.rowMeta(ivy)).not.toContainText('last active');
   });
@@ -392,7 +392,7 @@ test.describe('Teammates', () => {
     await tm.grantDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(tm.grantDialog).toHaveCount(0);
     expect(calls.filter((c) => c.path === '/admin/super-admins')).toHaveLength(0);
-    await expect(tm.rowBadge(mary, 'Admin')).toHaveCount(0);
+    await expect(tm.rowBadge(mary, 'Superadmin')).toHaveCount(0);
 
     // Grant: the page asks for exactly that user, and the row becomes an admin.
     await tm.rowGrant(mary).click();
@@ -401,7 +401,7 @@ test.describe('Teammates', () => {
     expect(calls.filter((c) => c.path === '/admin/super-admins').map((c) => [c.method, c.body])).toEqual([
       ['POST', { email: mary }],
     ]);
-    await expect(tm.rowBadge(mary, 'Admin')).toBeVisible();
+    await expect(tm.rowBadge(mary, 'Superadmin')).toBeVisible();
     await expect(tm.rowGrant(mary)).toHaveCount(0);
     await expect(tm.rowRevoke(mary)).toBeVisible();
     await expect(tm.rowReset(mary)).toHaveCount(0);
@@ -461,11 +461,11 @@ test.describe('Teammates', () => {
     expect(calls.filter((c) => c.path.startsWith('/admin/super-admins/')).map((c) => [c.method, c.path])).toEqual([
       ['DELETE', `/admin/super-admins/${encodeURIComponent(grace)}`],
     ]);
-    await expect(tm.rowBadge(grace, 'Admin')).toHaveCount(0);
+    await expect(tm.rowBadge(grace, 'Superadmin')).toHaveCount(0);
     await expect(tm.rowRevoke(grace)).toHaveCount(0);
     await expect(tm.rowGrant(grace)).toBeVisible();
     // You are still an admin, and still can't revoke yourself.
-    await expect(tm.rowBadge(primaryRole.email, 'Admin')).toBeVisible();
+    await expect(tm.rowBadge(primaryRole.email, 'Superadmin')).toBeVisible();
     await expect(tm.rowRevoke(primaryRole.email)).toHaveCount(0);
   });
 

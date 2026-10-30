@@ -224,7 +224,7 @@ export default function TeammatesPage() {
                               className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
                             >
                               <Shield className="h-3 w-3" />
-                              Admin
+                              Superadmin
                             </Badge>
                           )}
                           {!!t.is_invited && (

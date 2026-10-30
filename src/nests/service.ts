@@ -1174,6 +1174,11 @@ export async function getNest(nestId: string): Promise<Nest | null> {
 export async function deleteNest(nestId: string): Promise<void> {
   const db = getDb();
 
+  // Queued seals would write the nest's files back after the folder is gone:
+  // drop them, and let a seal already running finish first.
+  const { dropSeals } = await import("../nodes/seal-queue.js");
+  await dropSeals(nestId);
+
   // Foreign-key CASCADE handles most of this (see migrations.ts) but the
   // explicit deletes inside a single transaction give us two guarantees:
   //   1. Behaviour stays correct even if a future migration drops a CASCADE

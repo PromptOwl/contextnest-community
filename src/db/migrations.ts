@@ -2335,8 +2335,50 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("074_org_contributions");
   }
 
-  // 075: task rules + ticket counters. Numbered past 074; another open branch
-  //   may claim 075 — renumber on merge if so (the name only has to be unique).
+  // 075: node_index.manifest_json — each document's engine manifest entry, so
+  // the index update and the checkpoint read the nest from here (see
+  // indexedManifest). NULL on existing rows; the first write that finds one
+  // flags the nest stale, and the rebuild fills them all in.
+  if (!hasMigration("075_node_index_manifest")) {
+    const cols = (db.prepare("PRAGMA table_info(node_index)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("manifest_json")) {
+      db.exec("ALTER TABLE node_index ADD COLUMN manifest_json TEXT");
+    }
+    recordMigration("075_node_index_manifest");
+  }
+
+  // 076: nest_write_jobs — writes whose checkpoint and index update still
+  // have to run (src/nodes/seal-queue.ts). A row lives from the write until
+  // its batch is sealed; whatever a restart leaves is sealed at boot.
+  if (!hasMigration("076_nest_write_jobs")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_write_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
+    `);
+    recordMigration("076_nest_write_jobs");
+  }
+
+  // 077: nest_seal_leases — which instance seals a nest's queued writes. One
+  // row per nest while a drain runs; expires_at (epoch ms) lets another
+  // instance take over from one that died holding it.
+  if (!hasMigration("077_nest_seal_leases")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_seal_leases (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        owner TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+    `);
+    recordMigration("077_nest_seal_leases");
+  }
+
+  // 078: task rules + ticket counters.
   //   - nests.task_rules: JSON (src/nodes/task-rules.ts) — exclusive tag
   //     namespaces, the default stage tag, and ticket numbering settings. NULL
   //     reads as "no rules", so existing nests behave exactly as before.
@@ -2344,7 +2386,7 @@ export function runMigrations(db: Database.Database): void {
   //     prefix). One row per prefix; the number is allocated by a single
   //     INSERT … ON CONFLICT DO UPDATE … RETURNING, so two writers can never be
   //     handed the same value (src/nodes/ticket-numbers.ts).
-  if (!hasMigration("075_task_rules_ticket_counters")) {
+  if (!hasMigration("078_task_rules_ticket_counters")) {
     const cols = (
       db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
     ).map((c) => c.name);
@@ -2359,7 +2401,7 @@ export function runMigrations(db: Database.Database): void {
         PRIMARY KEY (nest_id, prefix)
       );
     `);
-    recordMigration("075_task_rules_ticket_counters");
+    recordMigration("078_task_rules_ticket_counters");
   }
 }
 

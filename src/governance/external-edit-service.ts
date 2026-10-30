@@ -7,7 +7,7 @@
  * scan / list / approve / reject.
  */
 
-import { readFile, readdir } from "fs/promises";
+import { readFile, readdir, stat } from "fs/promises";
 import { join, relative, sep } from "path";
 import {
   detectDrift,
@@ -36,6 +36,7 @@ import {
   indexedNodeIds,
 } from "../nodes/node-index.js";
 import { getDb } from "../db/client.js";
+import { batchViewCollisions } from "../views/collision.js";
 import { isNestArchived } from "../shared/access.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -259,8 +260,8 @@ async function refreshSuggestionFlag(
 export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
-): Promise<{ scanned: number; staged: number }> {
-  if (await isNestArchived(nestId)) return { scanned: 0, staged: 0 };
+): Promise<{ scanned: number; staged: number; viewCollisions: string[] }> {
+  if (await isNestArchived(nestId)) return { scanned: 0, staged: 0, viewCollisions: [] };
   const { storage, dropDiscoveryCache } = await engineCache.get(nestId);
   // Edits made outside this process are the whole point of the scan, so it
   // reads disk directly rather than the cached document set — which by
@@ -294,8 +295,26 @@ export async function scanNestForDrift(
     indexed.size !== onDisk.length || onDisk.some((d) => !indexed.has(d.id));
   if (staged > 0 || membershipMoved) await markIndexStale(nestId);
 
-  return { scanned: docs.length, staged };
+  // Files written outside the server skip the write-time view-address check:
+  // flag any node sitting on a view's `X/view/…` URLs (the view wins there).
+  const viewCollisions = [
+    ...batchViewCollisions(
+      onDisk.map((d) => ({ id: d.id, type: String(d.frontmatter?.type || "document") })),
+      [],
+    ).keys(),
+  ];
+  for (const id of viewCollisions) {
+    const key = `${nestId}:${id}`;
+    if (warnedViewCollisions.has(key)) continue;
+    warnedViewCollisions.add(key);
+    console.warn(`[external-edit] nest ${nestId}: ${id} is unreachable — it sits on a view's address`);
+  }
+
+  return { scanned: docs.length, staged, viewCollisions };
 }
+
+/** Collisions already logged, so the 30s timer warns once per node. */
+const warnedViewCollisions = new Set<string>();
 
 /**
  * Document ids with at least one staged suggestion, from ONE directory walk
@@ -307,6 +326,7 @@ export async function scanNestForDrift(
  */
 export async function documentsWithSuggestions(
   nestId: string,
+  retries = 3,
 ): Promise<Set<string>> {
   const root = resolveNestPath(nestId);
   const ids = new Set<string>();
@@ -314,6 +334,11 @@ export async function documentsWithSuggestions(
   try {
     entries = await readdir(root, { recursive: true, withFileTypes: true });
   } catch (err: any) {
+    // ENOENT while the nest is still there: an entry vanished mid-walk (a
+    // write's lock folder, a temp file — seals run beside reads now). Walk again.
+    if (err?.code === "ENOENT" && retries > 0 && (await stat(root).catch(() => null))) {
+      return documentsWithSuggestions(nestId, retries - 1);
+    }
     // A missing folder genuinely means nothing is staged. Anything else
     // (permissions, descriptor exhaustion) is NOT that, and this one walk
     // covers every document — so a swallowed failure drops pending-edit

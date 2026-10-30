@@ -45,6 +45,8 @@ Each release also publishes a container image, `ghcr.io/promptowl/contextnest-co
 docker run -p 3838:3838 -v contextnest-data:/data ghcr.io/promptowl/contextnest-community:latest
 ```
 
+For a single VM with HTTPS and PostgreSQL, use the Compose bundle in [`deploy/compose`](./deploy/compose/README.md): set two values in `.env`, then `docker compose up -d`.
+
 For Kubernetes, use the Helm chart in [`deploy/helm/contextnest-community`](./deploy/helm/contextnest-community/README.md): `helm install cn deploy/helm/contextnest-community`. See [CONFIGURATION.md → Kubernetes (Helm)](./CONFIGURATION.md#kubernetes-helm).
 
 ## License setup

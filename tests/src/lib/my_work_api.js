@@ -30,13 +30,20 @@ class MyWorkApi extends DashboardApi {
   }
 
   /**
-   * What the My Work rail badge shows for a /me/work response: the reviews and
-   * requests the server totals plus the open tasks assigned to the caller
-   * (`waitingOnMeCount` in ui/src/lib/my-work-groups.ts, since CU-wdqcq05jg8).
-   * `assigned` is not paged, so a one-row read carries all of it.
+   * What the My Work rail badge shows for a /me/work response, the same sum as
+   * `waitingOnMeCount` in ui/src/lib/my-work-groups.ts: the reviews and
+   * requests waiting on the caller (`waiting_on_me_total`, which leaves out
+   * what they handed off — CU-wdqcq0658p), plus the open tasks assigned to
+   * them (CU-wdqcq05jg8), plus their unread notifications (CU-wdqcpzy4z6).
+   * `assigned` and `notifications` are not paged, so a one-row read carries
+   * all of them.
    */
   static waitingOnMe(work) {
-    return (work?.pagination?.total ?? 0) + (work?.assigned?.length ?? 0);
+    return (
+      (work?.waiting_on_me_total ?? work?.pagination?.total ?? 0) +
+      (work?.assigned?.length ?? 0) +
+      (work?.notifications?.length ?? 0)
+    );
   }
 
   /**

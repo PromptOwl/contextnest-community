@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, Search, X } from "lucide-react";
+import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import * as api from "../lib/api";
 import { conventionKey, pickHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
+import { folderCollapsed } from "@/lib/nest-overview";
 import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 import { brandingToCssVars, brandedDocumentTitle, cssUrl, isBranded, type NestBranding } from "@/lib/branding";
@@ -130,10 +132,10 @@ export function ReaderView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, nestId]);
 
-  // Folder rows: expanded once their docs are loaded, collapsed until then;
+  // Folder rows: collapsed until opened (the page's own ancestors open below);
   // a click overrides either way and fetches on first open.
   const [folderOverrides, setFolderOverrides] = useState<Map<string, boolean>>(() => new Map());
-  const isFolderCollapsed = (path: string) => folderOverrides.get(path) ?? !loadedFolders?.has(path);
+  const isFolderCollapsed = (path: string) => folderCollapsed(path, folderOverrides);
   const toggleFolder = (path: string) => {
     const opening = isFolderCollapsed(path);
     setFolderOverrides((prev) => new Map(prev).set(path, !opening));
@@ -225,7 +227,7 @@ export function ReaderView({
             }
             title={n.title || n.id}
           >
-            <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <NodeTypeGlyph type={n.type} className="h-3.5 w-3.5" />
             <span className="truncate">{n.title || n.id}</span>
           </button>
         );
@@ -311,7 +313,7 @@ export function ReaderView({
                           (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
                         }
                       >
-                        <FileText className="mt-[3px] h-3.5 w-3.5 shrink-0 opacity-70" />
+                        <NodeTypeGlyph type={n.type} className="mt-[3px] h-3.5 w-3.5" />
                         <span className="min-w-0">
                           <span className="block truncate">{n.title || n.id}</span>
                           {where && <span className="block truncate text-[11px] font-normal text-muted-foreground/70">{where}</span>}

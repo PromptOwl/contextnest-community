@@ -57,7 +57,7 @@ export function headlessToolRefusal(tool: string): string {
   return `This is a read-only access key for a published nest — "${tool}" isn't available with it. It can list, get, query and search the nest's documents.`;
 }
 
-const PUBLIC_PATHS = new Set(["/health", "/license/status", "/llms.txt", "/auth/admin-status"]);
+const PUBLIC_PATHS = new Set(["/health", "/livez", "/readyz", "/license/status", "/llms.txt", "/auth/admin-status"]);
 
 /** Nest-level GET routes a key may read (the part after /nests/:id). Not the
  *  folder tree or the glossary: neither is approval-gated (folders are read

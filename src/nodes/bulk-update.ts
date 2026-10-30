@@ -21,7 +21,7 @@
  * non-transactional batch defensible (same contract as bulk publish).
  */
 import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
-import { engineCache } from "./engine.js";
+import { engineCache, sealedFor } from "./engine.js";
 import { updateNode } from "./service.js";
 import * as versions from "../governance/version-service.js";
 import { isDueDate, taskFieldsOf } from "./task-fields.js";
@@ -251,6 +251,8 @@ async function resolveTargets(
     if (typeof input.selector !== "string" || !input.selector.trim()) {
       throw new ValidationError("selector must be a non-empty string, e.g. #sprint-12");
     }
+    // The selector runs over context.yaml: seal queued writes first.
+    await sealedFor(nestId);
     const { query } = await engineCache.get(nestId);
     const res = await query.query(input.selector.trim(), { hops: 0 });
     // Each match costs a permission check, so a selector over a whole nest is

@@ -134,6 +134,8 @@ interface NestViewProps {
   onTabChange?: (tab: string) => void;
   /** Open the settings dialog once the nest has loaded (deep link). */
   initialSettings?: boolean;
+  /** The nest's name was saved — App updates every place that shows it. */
+  onRenamed?: (name: string) => void;
 }
 
 /** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
@@ -159,6 +161,7 @@ export function NestView({
   initialTab,
   onTabChange,
   initialSettings,
+  onRenamed,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -176,6 +179,8 @@ export function NestView({
   const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
+    // Our own save echoing back via onRenamed — resetting would eat typing since.
+    if (nestName === lastSavedName.current) return;
     setEditableName(nestName);
     lastSavedName.current = nestName;
   }, [nestName, nestId]);
@@ -195,6 +200,7 @@ export function NestView({
       await api.updateNest(nestId, { name: trimmed });
       lastSavedName.current = trimmed;
       setRenameError(null);
+      onRenamed?.(trimmed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to rename nest";
       setRenameError(msg);
@@ -352,6 +358,9 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
+  // Nest meta + settings have landed: enough for the document tree, which
+  // need not wait on the review/deletion queues that initialLoad covers.
+  const [shellReady, setShellReady] = useState(false);
   // The change open in the Review tab's pane. Mirrored into ?review= so a
   // review can be linked and survives a refresh (CU-wdqcq05mhk).
   const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
@@ -472,15 +481,22 @@ export function NestView({
       // Re-expanding a folder already on screen is not a reason to re-read
       // it; only an explicit refresh (a mutation) is.
       if (!opts.refresh && loadedFolders.current.has(folder)) return;
-      setLoadingFolders((prev) => new Set(prev).add(folder));
-      try {
-        const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
+      const apply = (res: { nodes: any[] }) => {
         loadedFolders.current.add(folder);
         setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
         ]);
+      };
+      const query = reads.folderNodes(nestId, folder);
+      // Paint the cached level at once and refresh behind it; a stale entry
+      // used to block the tree on the network. A mutation refresh skips this.
+      const cached = opts.refresh ? undefined : qc.getQueryData(query.queryKey);
+      if (cached) apply(cached);
+      else setLoadingFolders((prev) => new Set(prev).add(folder));
+      try {
+        apply(await qc.fetchQuery(query));
       } catch (e: any) {
         console.error("[NestView] listFolderNodes failed", nestId, folder, e);
         toast.error(e?.message || "Failed to load folder");
@@ -498,6 +514,12 @@ export function NestView({
   /** The nest-wide shape. Describes the whole nest whatever level is open,
    *  so it is read once per nest rather than once per folder expanded. */
   const fetchCensus = useCallback(async () => {
+    // Same paint-then-refresh as fetchLevel.
+    const cached = qc.getQueryData(reads.census(nestId).queryKey);
+    if (cached) {
+      setCensus(cached.census);
+      setCensusSettled(true);
+    }
     try {
       const { census: fresh } = await qc.fetchQuery(reads.census(nestId));
       setCensus(fresh);
@@ -520,7 +542,8 @@ export function NestView({
 
 
   const openFolderInDocuments = (folder: string) => {
-    setFolderFilter(folder);
+    // "Root" is the loose top-level bucket — its "View all" is the unscoped list.
+    setFolderFilter(folder && folder !== "Root" ? folder : null);
     setActiveTab("documents");
   };
 
@@ -562,32 +585,33 @@ export function NestView({
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [, queueData, deletionData, settingsData] =
+    // The reads below go through the shared cache (same keys and invalidation
+    // as the hook-based screens) so returning from a document paints from
+    // memory instead of re-fetching. Read imperatively rather than via hooks to
+    // keep each call's own error fallback — a failing node list must still let
+    // the settings response apply, per the note above.
+    // The queues are started now but awaited last: the tree needs only the
+    // nest meta and settings, so they no longer hold it back (shellReady).
+    const queueRead = grantOnly
+      ? empty({ requests: [], total: 0 })
+      : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
+        console.error("[NestView] getReviewQueue failed", nestId, e);
+        toast.error(e?.message || "Failed to load review queue");
+        return { requests: [], total: 0 };
+      });
+    // Pending AND declined in one call: pending drives the admin queue,
+    // declined is how the person who asked learns the verdict.
+    const deletionRead = grantOnly
+      ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
+      : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
+        console.error("[NestView] getDeletionRequests failed", nestId, e);
+        return { requests: [] as api.DeletionRequest[], total: 0 };
+      });
+    const [, settingsData] =
       await Promise.all([
-        // The five reads below go through the shared cache (same keys and
-        // invalidation as the hook-based screens) so returning from a document
-        // paints from memory instead of re-fetching. Read imperatively rather
-        // than via hooks to keep each call's own error fallback — a failing
-        // node list must still let the settings response apply, per the note
-        // above.
         // Documents come from the folder levels currently on screen, not one
         // whole-nest listing — see fetchLevel.
         reloadLevels(),
-        grantOnly
-          ? empty({ requests: [], total: 0 })
-          : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-            console.error("[NestView] getReviewQueue failed", nestId, e);
-            toast.error(e?.message || "Failed to load review queue");
-            return { requests: [], total: 0 };
-          }),
-        // Pending AND declined in one call: pending drives the admin queue,
-        // declined is how the person who asked learns the verdict.
-        grantOnly
-          ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
-          : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-            console.error("[NestView] getDeletionRequests failed", nestId, e);
-            return { requests: [] as api.DeletionRequest[], total: 0 };
-          }),
         grantOnly
           ? empty({
             stewardship_enabled: false,
@@ -607,8 +631,6 @@ export function NestView({
             };
           }),
       ]);
-    setReviewQueue(queueData.requests);
-    setDeletionRequests(deletionData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
@@ -636,6 +658,10 @@ export function NestView({
     }
     setRoles(nestMeta?.roles ?? []);
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
+    setShellReady(true);
+    const [queueData, deletionData] = await Promise.all([queueRead, deletionRead]);
+    setReviewQueue(queueData.requests);
+    setDeletionRequests(deletionData.requests);
     setLoading(false);
     setInitialLoad(false);
   }, [nestId, qc, reloadLevels]);
@@ -1093,7 +1119,7 @@ export function NestView({
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
     if (ext === "pdf") return "pdf";
-    if (ext === "pptx" || ext === "docx") return "office";
+    if (ext === "pptx" || ext === "docx" || ext === "xlsx") return "office";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1103,7 +1129,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md, .html, .pdf, .pptx or .docx files to add them to this vault.");
+        toast.error("Drop .md, .html, .pdf, .pptx, .docx or .xlsx files to add them to this vault.");
         return;
       }
       setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
@@ -1111,7 +1137,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf|pptx|docx)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf|pptx|docx|xlsx)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1125,15 +1151,23 @@ export function NestView({
           }
           try {
             // A PDF is uploaded as bytes and becomes a governed `pdf` document
-            // (the server extracts its text); a .pptx/.docx becomes a markdown
+            // (the server extracts its text); a .pptx/.docx/.xlsx becomes a markdown
             // document with the original kept as a download; everything else
             // is read as text.
+            // Markdown frontmatter supplies the title and tags (CU-wdqcq0657f).
+            const md =
+              type === "document" ? (await import("@/lib/import-frontmatter")).importedMarkdown(await file.text()) : null;
             const res =
               type === "pdf"
                 ? await api.createPdfNode(nestId, file, { title, folder })
                 : type === "office"
                   ? await api.createOfficeNode(nestId, file, { title, folder })
-                  : await api.createNode(nestId, { title, content: await file.text(), type, folder });
+                  : await api.createNode(
+                      nestId,
+                      md
+                        ? { title: md.title ?? title, content: md.body, tags: md.tags, type, folder }
+                        : { title, content: await file.text(), type, folder },
+                    );
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1227,7 +1261,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact · .pdf → PDF document · .pptx/.docx → document
+              .md → document · .html → hosted artifact · .pdf → PDF document · .pptx/.docx/.xlsx → document
             </div>
           </div>
         </div>
@@ -1515,7 +1549,7 @@ export function NestView({
               ref={importInputRef}
               type="file"
               multiple
-              accept=".md,.markdown,.txt,.html,.htm,.pdf,.pptx,.docx"
+              accept=".md,.markdown,.txt,.html,.htm,.pdf,.pptx,.docx,.xlsx"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void importFiles(e.target.files);
@@ -1910,7 +1944,7 @@ export function NestView({
           <OrgContributorPanel nestId={nestId} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <OverviewTab
-              initialLoad={initialLoad || !censusSettled}
+              initialLoad={!shellReady || !censusSettled}
               stats={stats}
               recentlyEdited={recentlyEdited}
               recentlyEditedCount={recentlyEditedCount}
@@ -1922,7 +1956,6 @@ export function NestView({
               onOpenDocument={onOpenDocument}
               onOpenFolder={openFolderInDocuments}
               nestName={editableName}
-              loadedFolders={loadedFolderPaths}
               loadingFolders={loadingFolders}
               onExpandFolder={fetchLevel}
               description={nestDescription}
@@ -1962,7 +1995,7 @@ export function NestView({
               onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
               initialTags={initialTags}
-              initialLoad={initialLoad}
+              initialLoad={!shellReady}
               loading={loading}
               nodes={nodes}
               census={census}
@@ -2262,6 +2295,7 @@ export function NestView({
               setEditableName(updated.name);
               lastSavedName.current = updated.name;
               setRenameError(null);
+              onRenamed?.(updated.name);
             }
             setNestDescription(updated.description);
             setShowRename(false);
@@ -2279,7 +2313,7 @@ export function NestView({
           </DialogHeader>
           <div className="grid gap-2">
             {[
-              { ref: importInputRef, label: "Files", detail: ".md, .html, .pdf, .pptx or .docx — one or many", testId: undefined },
+              { ref: importInputRef, label: "Files", detail: ".md, .html, .pdf, .pptx, .docx or .xlsx — one or many", testId: undefined },
               { ref: pdfInputRef, label: "Upload PDF", detail: "Becomes a PDF document with its text extracted", testId: "nest-upload-pdf" },
               { ref: importDirRef, label: "Whole vault", detail: "A folder, keeping its structure", testId: undefined },
             ].map((o) => (

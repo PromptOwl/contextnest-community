@@ -24,7 +24,7 @@ import {
   authed,
   resetAuthRateLimit,
 } from "./helpers.js";
-import { buildDocx, buildPptx, bombDocx } from "./office-fixtures.js";
+import { buildDocx, buildPptx, buildXlsx, bombDocx } from "./office-fixtures.js";
 import { OFFICE_MAX_XML_BYTES } from "../src/nodes/office-extract.js";
 
 type User = { apiKey: string; userId: string; email: string };
@@ -196,6 +196,24 @@ describe("POST /nests/:id/nodes/office — governed nest", () => {
     expect(node.content).toContain("# Travel policy");
     expect(node.content).toContain("| Class | Allowed |\n| --- | --- |\n| Economy | Always |\n| Business | Over 6 hours |");
     expect(node.original.kind).toBe("docx");
+  });
+
+  it("an xlsx becomes one table per sheet, and its original downloads byte for byte", async () => {
+    const book = await buildXlsx([
+      { name: "Pipeline", rows: [["Account", "Stage"], ["Acme", "Won"]] },
+      { name: "Owners", rows: [["Owner"], ["Kim"]] },
+    ]);
+    const res = await uploadOffice(app, nestId, editor.apiKey, book, "Q4 Pipeline.xlsx");
+    expect(res.status).toBe(201);
+    const { node } = await res.json();
+    expect(node.original.kind).toBe("xlsx");
+    expect(node.content).toContain("(Excel, 2 sheets)");
+    expect(node.content).toContain("## Sheet: Pipeline\n\n| Account | Stage |\n| --- | --- |\n| Acme | Won |");
+    expect(node.content).toContain("## Sheet: Owners");
+    const dl = await app.request(`/nests/${nestId}/originals/${node.original.file}`, { headers: authed(owner.apiKey) });
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get("content-type")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(new Uint8Array(await dl.arrayBuffer())).toEqual(book);
   });
 
   it("a viewer can't upload, and nothing is written", async () => {

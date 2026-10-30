@@ -19,6 +19,7 @@ import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
@@ -89,6 +90,13 @@ function customFieldsFromBody(body: Record<string, unknown>): { fields?: Record<
     throw new ValidationError("fields must be an object of field key → value");
   }
   return { fields: v as Record<string, unknown> };
+}
+
+/** The `view:` block of a type: view node (§1.12), when the body carries one.
+ *  Shape and type are validated in the service (assertViewBlock) so REST, MCP
+ *  and a held write's replay refuse the same blocks the same way. */
+function viewFromBody(body: Record<string, unknown>): { view?: unknown } {
+  return body.view === undefined ? {} : { view: body.view };
 }
 
 /** `?field.<key>=<value>` query params → the list's field filters. */
@@ -260,6 +268,7 @@ nodeRoutes.post("/", async (c) => {
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -331,6 +340,7 @@ nodeRoutes.post("/", async (c) => {
             prime: body.prime,
             alwaysInclude: body.always_include,
             ...customFieldsFromBody(body),
+            ...viewFromBody(body),
           },
         ],
       },
@@ -355,15 +365,20 @@ nodeRoutes.post("/", async (c) => {
       client: attributeRequest(c, body.client),
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );
 
   // Resolve stewards for the response
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
+  // A table with :ref columns reports refs that name no readable node. Never
+  // blocks: the write above already landed. Absent for everything else.
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -762,6 +777,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
@@ -847,13 +863,16 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       type: body.type,
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });
 

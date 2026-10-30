@@ -95,6 +95,24 @@ export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
   },
+  /** "json" prints one JSON object per log line (for log shippers); anything
+   *  else keeps plain console output. */
+  get LOG_FORMAT(): "text" | "json" {
+    return process.env.LOG_FORMAT?.trim().toLowerCase() === "json" ? "json" : "text";
+  },
+  /** Check npm for a newer release and tell the server admin. On by default;
+   *  "false" turns it off (pinned versions, air-gapped servers). */
+  get UPDATE_CHECK(): boolean {
+    return process.env.UPDATE_CHECK !== "false";
+  },
+  /** Serve Prometheus metrics at GET /metrics. Off by default. */
+  get METRICS_ENABLED(): boolean {
+    return process.env.METRICS_ENABLED === "true";
+  },
+  /** When set, /metrics needs `Authorization: Bearer <this>`. */
+  get METRICS_TOKEN(): string {
+    return process.env.METRICS_TOKEN?.trim() ?? "";
+  },
   /**
    * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
    * proxy traffic. Unset = every interface (Node's default, unchanged).
@@ -201,6 +219,10 @@ export const config = {
    */
   get PROMPTOWL_TEAMS_ENABLED(): boolean {
     return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
+  },
+  /** View-data kill switch (§1.12): `off` withholds every view frame's data. */
+  get CN_VIEW_DATA_OFF(): boolean {
+    return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
   },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
@@ -1063,7 +1085,7 @@ export const config = {
   },
 
   /**
-   * Max .pptx/.docx upload size in bytes (POST /nests/:id/nodes/office), the
+   * Max .pptx/.docx/.xlsx upload size in bytes (POST /nests/:id/nodes/office), the
    * file as uploaded (compressed). Default 25 MB, for the PDF cap's reasons;
    * what it may inflate to is capped separately (office-extract.ts). Read per
    * request. Override via OFFICE_MAX_MB.

@@ -146,12 +146,13 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { CopyButton } from "@/components/ui/copy-button";
+import { ViewNodePage } from "./ViewNodePage";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -329,8 +330,6 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");
@@ -563,13 +562,16 @@ export function DocumentEditor({
   // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
   // opened from the page count as inside, or opening one would hide the toolbar.
   const pageRef = useRef<HTMLDivElement | null>(null);
+  // The top bar counts as inside too: putting the controls away on a press
+  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
+  const topBarRef = useRef<HTMLDivElement | null>(null);
   const [pageActive, setPageActive] = useState(isNew);
   useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pageActive) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t)) return;
+      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
       if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
       setPageActive(false);
     };
@@ -944,10 +946,15 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
+  useBreadcrumb([
+    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
+  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
-    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+    Array<{ id: string; title: string; content?: string; tags?: string[]; type?: string }>
   >([]);
   // The nest's folders, including any holding no document. Same cached census
   // the nest views read, so this costs no extra request in practice.
@@ -982,6 +989,7 @@ export function DocumentEditor({
               title: string;
               content?: string;
               tags?: string[];
+              type?: string;
             }>,
           );
         }
@@ -2355,12 +2363,19 @@ export function DocumentEditor({
     );
   }
 
+  // View nodes (§1.12) are a server-rendered layout over other nodes, not
+  // markdown. Views are authored via REST, MCP or the vault in v1 — no editor here.
+  if (!isNew && !loading && nodeType === "view") {
+    return <ViewNodePage nestId={nestId} nodeId={nodeId} title={title} onBack={onBack} />;
+  }
+
   return (
     <div className="flex min-h-full flex-col" data-testid="document-page">
       {/* Top bar — one row, Notion-style: where you are on the left, what you
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
+        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
@@ -2951,7 +2966,7 @@ export function DocumentEditor({
                                 ?.focus();
                           }
                         }}
-                        placeholder="Untitled"
+                        placeholder={loading ? "Loading…" : "Untitled"}
                         // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
@@ -4132,6 +4147,13 @@ export function DocumentEditor({
                           }
                         >
                           {b.title}
+                          {/* A table's :ref rows: "Pipeline · account · r1". */}
+                          {backlinkRefLabels(b).map((label) => (
+                            <span key={label} className="text-muted-foreground">
+                              {" · "}
+                              {label}
+                            </span>
+                          ))}
                         </button>
                       ))}
                     </div>

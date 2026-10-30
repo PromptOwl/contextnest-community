@@ -4,7 +4,7 @@
  * summary under "Contents" says (the stat cards it replaces).
  */
 import { describe, it, expect } from "vitest";
-import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, groupNodesByFolder, overviewFacts, queueBreakdown } from "./nest-overview";
+import { capFolderDocs, emptyStateActions, folderCollapsed, groupNodesByFolder, overviewFacts, queueBreakdown } from "./nest-overview";
 
 describe("queueBreakdown (why pending reviews aren't yours to approve)", () => {
   it("names your own submission instead of 'outside your scope' (CU-wdqcq02t1r)", () => {
@@ -151,37 +151,13 @@ describe("emptyStateActions (who gets which start action on an empty nest)", () 
   });
 });
 
-describe("folderCollapsed (the index's expandable tree, same rule as the reader nav)", () => {
-  const loaded = new Set(["", "guides"]);
-  it("a loaded folder starts open, an unloaded one closed", () => {
-    expect(folderCollapsed("guides", new Map(), loaded)).toBe(false);
-    expect(folderCollapsed("policies", new Map(), loaded)).toBe(true);
+describe("folderCollapsed (the index tree and the reader nav)", () => {
+  it("starts closed, even for a folder whose documents are already loaded", () => {
+    expect(folderCollapsed("guides", new Map())).toBe(true);
   });
   it("a click wins either way", () => {
-    expect(folderCollapsed("guides", new Map([["guides", true]]), loaded)).toBe(true);
-    expect(folderCollapsed("policies", new Map([["policies", false]]), loaded)).toBe(false);
-  });
-});
-
-describe("foldersToPrefetch (which folders the Overview opens on arrival)", () => {
-  const known = [
-    { path: "archive", total: 0 },
-    { path: "guides", total: 4 },
-    { path: "guides/engineering", total: 2 },
-    { path: "policies", total: 3 },
-    { path: "research", total: 1 },
-  ];
-  it("top-level, non-empty, not yet loaded, in path order, capped", () => {
-    expect(foldersToPrefetch(known, new Set(), 2)).toEqual(["guides", "policies"]);
-    expect(foldersToPrefetch(known, new Set(), 10)).toEqual(["guides", "policies", "research"]);
-  });
-  it("skips what is already loaded but still counts it toward the cap", () => {
-    expect(foldersToPrefetch(known, new Set(["guides"]), 2)).toEqual(["policies"]);
-  });
-  it("never nested folders, never empty ones, nothing for a nest without folders", () => {
-    expect(foldersToPrefetch(known, new Set(), 10)).not.toContain("guides/engineering");
-    expect(foldersToPrefetch(known, new Set(), 10)).not.toContain("archive");
-    expect(foldersToPrefetch([], new Set(), 5)).toEqual([]);
+    expect(folderCollapsed("guides", new Map([["guides", false]]))).toBe(false);
+    expect(folderCollapsed("guides", new Map([["guides", true]]))).toBe(true);
   });
 });
 
@@ -201,8 +177,10 @@ describe("capFolderDocs (first few documents per folder, then 'View all')", () =
   it("leaves a short folder alone", () => {
     expect(capFolderDocs(groups, 5).find((x) => x.folder === "policies")!.items).toHaveLength(2);
   });
-  it("never caps the loose root documents — they are the top of the index", () => {
-    expect(capFolderDocs(groups, 5).find((x) => x.folder === "Root")!.items).toHaveLength(7);
+  it("caps the loose root documents too, so Overview isn't a flat list (CU-wdqcq06a1q)", () => {
+    const root = capFolderDocs(groups, 5).find((x) => x.folder === "Root")!;
+    expect(root.items).toHaveLength(6);
+    expect(root.items[5]).toMatchObject({ more: { folder: "Root", hidden: 2, total: 7 } });
   });
   it("does not mutate the input groups", () => {
     capFolderDocs(groups, 5);

@@ -16,18 +16,14 @@ import { priorityTone, tagPillTone } from "../../lib/tones";
 import { useState, type ReactNode } from "react";
 import { copyTextWithToast } from "../../lib/clipboard";
 import {
+  AlertTriangle,
   Ban,
-  Bot,
   CalendarDays,
-  Database,
-  FileText,
-  FileType,
-  ListTodo,
   ListTree,
   UserRound,
   X,
-  Zap,
 } from "lucide-react";
+import { NodeTypeGlyph } from "../nest/NodeTypeIcon";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -118,13 +114,7 @@ export function TagPill({ tag, label }: { tag: string; label?: string }) {
 }
 
 export function TypeIcon({ type }: { type: string }) {
-  const cls = "h-3.5 w-3.5 shrink-0";
-  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
-  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
-  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
-  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
-  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
-  return <FileText className={`${cls} text-muted-foreground`} />;
+  return <NodeTypeGlyph type={type} className="h-3.5 w-3.5" />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
@@ -163,6 +153,18 @@ export function PriorityIcon({ priority, tone }: { priority?: string; tone?: str
   );
 }
 
+/** A set priority as a tinted pill (red → grey by urgency): its bars plus the label. */
+export function PriorityBadge({ priority }: { priority: string }) {
+  const levels = usePriorityLevels();
+  const tone = priorityTone(levels.map((l) => l.key), priority) ?? "bg-muted text-muted-foreground";
+  return (
+    <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium ${tone}`}>
+      <PriorityIcon priority={priority} tone="text-current" />
+      {levelLabel(levels, priority)}
+    </span>
+  );
+}
+
 export function PriorityMenu({
   value,
   editable,
@@ -173,24 +175,13 @@ export function PriorityMenu({
   onChange: (p: string | null) => void;
 }) {
   const levels = usePriorityLevels();
-  // A set priority is a coloured, labelled pill (red → grey by urgency), so
-  // what matters stands out on a grey board. Unset stays the quiet glyph.
-  const tone = value ? priorityTone(levels.map((l) => l.key), value) : undefined;
-  const icon =
-    value && tone ? (
-      <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium leading-none ${tone}`}>
-        <PriorityIcon priority={value} tone="text-current" />
-        {levelLabel(levels, value)}
-      </span>
-    ) : (
-      <PriorityIcon priority={value} />
-    );
+  const icon = value ? <PriorityBadge priority={value} /> : <PriorityIcon />;
   if (!editable) return value ? <span title={levelLabel(levels, value)}>{icon}</span> : null;
   return (
     <Isolate>
       <DropdownMenu>
         <DropdownMenuTrigger
-          className={`rounded p-0.5 hover:bg-muted ${value ? "" : "opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
+          className={`rounded hover:bg-muted ${value ? "" : "p-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
           title={value ? `Priority: ${levelLabel(levels, value)}` : "Set priority"}
         >
           {icon}
@@ -232,12 +223,15 @@ export function DueChip({
   onChange: (d: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Overdue carries a warning icon and label, not only red (CU-wdqcq06a1x).
+  const overdue = !!due && dueState(due, today) === "overdue";
   const chip = due ? (
     <span
       className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${DUE_TONES[dueState(due, today)]}`}
-      title={`Due ${due}${dueState(due, today) === "overdue" ? " — overdue" : ""}`}
+      title={`Due ${due}${overdue ? " — overdue" : ""}`}
     >
-      <CalendarDays className="h-3 w-3" />
+      {overdue ? <AlertTriangle className="h-3 w-3" aria-hidden /> : <CalendarDays className="h-3 w-3" />}
+      {overdue && <span className="sr-only">Overdue:</span>}
       {formatDue(due, today)}
     </span>
   ) : (

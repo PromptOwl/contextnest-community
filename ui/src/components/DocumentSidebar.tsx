@@ -15,7 +15,6 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
-  FileText,
   Folder,
   FolderOpen,
   Globe,
@@ -29,6 +28,7 @@ import {
   Search,
   Users,
 } from "lucide-react";
+import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
 import { reads, useNestMeta } from "../lib/queries";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
@@ -687,7 +687,7 @@ function NestTree({
             title={doc.title}
             data-testid="document-sidebar-doc"
           >
-            <FileText className={ROW_ICON} />
+            <NodeTypeGlyph type={doc.type} className={ROW_ICON} />
             <span className="truncate">{doc.title || "Untitled"}</span>
           </button>
         );

@@ -387,6 +387,25 @@ function MaturityBoardInner({
   // which tag to drop when retagging a multi-tagged card.
   const [dragFromCol, setDragFromCol] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
+  // The board scroller ends at the window's bottom edge, so its sideways
+  // scrollbar is always in view, not at the page bottom (CU-wdqcq0656t).
+  // Re-measured whenever the page above it changes height.
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const [boardH, setBoardH] = useState<number | null>(null);
+  useEffect(() => {
+    const fit = () => {
+      const el = boardRef.current;
+      if (el) setBoardH(Math.max(320, Math.floor(window.innerHeight - el.getBoundingClientRect().top - window.scrollY - 8)));
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(document.body);
+    window.addEventListener("resize", fit);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, []);
   const [busy, setBusy] = useState(false);
   // Same derivation NestView uses. Starts false so a read-only viewer never
   // sees a draggable card during the fetch, then flips on for writers.
@@ -1665,77 +1684,94 @@ function MaturityBoardInner({
                   ));
                   return <div className="mt-2 flex flex-wrap gap-1">{chips}</div>;
                 })()}
-                {/* One meta row: priority and tags lead, then due, blockers and
-                    sub-items. Last-touched and the assignee sit at the right
-                    and wrap to their own line when the card is crowded. */}
-                <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 min-h-6">
-                  <PriorityMenu
-                    value={n.priority}
-                    editable={canEditDocs}
-                    onChange={(priority) => patchFields(n.id, { priority })}
-                  />
-                  {shownTags.slice(0, 3).map((t) => (
-                    <TagPill key={t} tag={t} label={surfaceName.get(bareTag(t).replace(/^surface:/, ""))} />
-                  ))}
-                  {shownTags.length > 3 && (
-                    <span
-                      className="text-[10px] text-muted-foreground"
-                      title={shownTags.slice(3).join(" ")}
-                    >
-                      +{shownTags.length - 3}
-                    </span>
-                  )}
-                  <BlockedBadge count={openBlockers(n)} />
-                  {!completed && (
+                {/* Footer, Linear-style: set priority · tags · due · sub-items ·
+                    last touched on the left; the hover-only "set" controls for
+                    empty fields, then the assignee, on the right — so an
+                    invisible placeholder never pushes the timestamp inward. */}
+                {(() => {
+                  const priorityCtl = (
+                    <PriorityMenu
+                      value={n.priority}
+                      editable={canEditDocs}
+                      onChange={(priority) => patchFields(n.id, { priority })}
+                    />
+                  );
+                  const dueCtl = !completed && (
                     <DueChip
                       due={n.due}
                       today={today}
                       editable={canEditDocs}
                       onChange={(due) => patchFields(n.id, { due })}
                     />
-                  )}
-                  <SubItemChip
-                    items={kids}
-                    done={kids.filter((k) => !!k.completed_at).length}
-                    onOpen={onOpenDocument}
-                  />
-                  <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                    {(n.updated_at || n.created_at) && (
-                      <span
-                        className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
-                        title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
-                      >
-                        {completed && n.completed_at
-                          ? `done ${timeAgo(n.completed_at)}`
-                          : timeAgo((n.updated_at || n.created_at)!)}
+                  );
+                  return (
+                    <div className="mt-2 flex min-w-0 items-center gap-1.5 min-h-6">
+                      {n.priority && priorityCtl}
+                      {shownTags.slice(0, 3).map((t) => (
+                        <TagPill key={t} tag={t} label={surfaceName.get(bareTag(t).replace(/^surface:/, ""))} />
+                      ))}
+                      {shownTags.length > 3 && (
+                        <span
+                          className="text-[10px] text-muted-foreground"
+                          title={shownTags.slice(3).join(" ")}
+                        >
+                          +{shownTags.length - 3}
+                        </span>
+                      )}
+                      <BlockedBadge count={openBlockers(n)} />
+                      {n.due && dueCtl}
+                      <SubItemChip
+                        items={kids}
+                        done={kids.filter((k) => !!k.completed_at).length}
+                        onOpen={onOpenDocument}
+                      />
+                      {/* Last touched — the first thing to give way on a crowded
+                      card: a zero-width lead lets the label wrap onto a clipped
+                      second line, so it disappears whole instead of as "j…". */}
+                      {(n.updated_at || n.created_at) && (
+                        <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
+                          <span aria-hidden className="h-4 w-0" />
+                          <span
+                            className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
+                            title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
+                          >
+                            {completed && n.completed_at
+                              ? `done ${timeAgo(n.completed_at)}`
+                              : timeAgo((n.updated_at || n.created_at)!)}
+                          </span>
+                        </span>
+                      )}
+                      <span className="ml-auto flex shrink-0 items-center gap-1">
+                        {!n.priority && priorityCtl}
+                        {!n.due && dueCtl}
+                        {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAddingIn({ cell, col: col.key, lane: laneKey, parent: n.id });
+                            }}
+                            className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+                            title="Add a sub-item"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <AssigneeMenu
+                          assignee={n.assignee}
+                          people={people}
+                          me={me}
+                          editable={canEditDocs}
+                          onChange={(assignee, member) =>
+                            assignee && member === false
+                              ? setPendingShare({ id: n.id, email: assignee })
+                              : patchFields(n.id, { assignee })
+                          }
+                        />
                       </span>
-                    )}
-                    {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAddingIn({ cell, col: col.key, lane: laneKey, parent: n.id });
-                        }}
-                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
-                        title="Add a sub-item"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    <AssigneeMenu
-                      assignee={n.assignee}
-                      people={people}
-                      me={me}
-                      editable={canEditDocs}
-                      onChange={(assignee, member) =>
-                        assignee && member === false
-                          ? setPendingShare({ id: n.id, email: assignee })
-                          : patchFields(n.id, { assignee })
-                      }
-                    />
-                  </span>
-                </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           );
@@ -2499,9 +2535,10 @@ function MaturityBoardInner({
       ) : (
         lanes ? (
           // Swimlanes: column headers once, then one row of cells per lane.
-          <div className="overflow-x-auto pb-4">
+          <div ref={boardRef} className="overflow-auto pb-4" style={boardH ? { maxHeight: boardH } : undefined}>
             <div className="inline-flex min-w-full flex-col gap-2">
-              <div className="flex gap-3">
+              {/* Column titles stay put while the lanes scroll (CU-wdqcq0656r). */}
+              <div className="sticky top-0 z-10 flex gap-3 bg-background">
                 {columns.map((col) => (
                   <div
                     key={col.key}
@@ -2576,7 +2613,7 @@ function MaturityBoardInner({
             </div>
           </div>
         ) : (
-        <div className="flex gap-3 overflow-x-auto pb-4">
+        <div ref={boardRef} className="flex gap-3 overflow-x-auto pb-4">
           {columns.map((col) => {
             const cards = orderedByColumn[col.key] ?? [];
             return (
@@ -2586,6 +2623,8 @@ function MaturityBoardInner({
                 className={`flex-shrink-0 w-64 rounded-lg border bg-muted/60 flex flex-col max-h-[70vh] transition-colors ${
                   dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-transparent"
                 }`}
+                // Fit above the scroller's bottom padding (pb-4).
+                style={boardH ? { maxHeight: boardH - 16 } : undefined}
               >
                 {renderHeader(col, cards.length)}
                 {renderCards(col, cards)}

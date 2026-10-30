@@ -15,14 +15,17 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  viewMetaSchema,
   TITLE_MAX_LENGTH,
+  withVaultLock,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
+import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
-import { withIoStats } from "./io-stats.js";
+import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -57,7 +60,7 @@ import {
   documentAlwaysIncludeFlag,
 } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
-import { notifyMentions } from "../governance/mention-notify.js";
+import { notifyMentions as sendMentions } from "../governance/mention-notify.js";
 import {
   resolveUserRoles,
   stewardDocumentCreator,
@@ -102,7 +105,7 @@ import {
   type TaskRules,
 } from "./task-rules.js";
 import { allocateTicket } from "./ticket-numbers.js";
-import { notifyAssigned } from "../governance/assign-notify.js";
+import { notifyAssigned as sendAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
@@ -127,6 +130,24 @@ import {
   type FieldDefinition,
   type FieldsPatch,
 } from "./custom-fields.js";
+
+/**
+ * The document as the write just left it. The discovery cache folds every
+ * write in on the spot (engine.ts), so only a cold cache reads it back — a
+ * round trip a network mount charges ~0.5 s for. A copy, so a caller that
+ * shapes the result can't edit the cached set.
+ */
+async function writtenDocument(nestId: string, id: string): Promise<ContextNode> {
+  const engine = await engineCache.get(nestId);
+  const cached = engine.cachedDocument(id);
+  return cached ? structuredClone(cached) : engine.storage.readDocument(id);
+}
+
+// Awaited inside a write, so timed as part of it (io-stats).
+const notifyMentions = (p: Parameters<typeof sendMentions>[0]) =>
+  timed(p.nestId, "notify:mentions", () => sendMentions(p));
+const notifyAssigned = (p: Parameters<typeof sendAssigned>[0]) =>
+  timed(p.nestId, "notify:assigned", () => sendAssigned(p));
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -558,13 +579,15 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 export interface OriginalFile {
   file: string;
   filename: string;
-  kind: "pptx" | "docx";
+  kind: "pptx" | "docx" | "xlsx";
   bytes: number;
   sha256: string;
+  /** Hash of the body this file produced, to tell hand edits apart on re-upload. */
+  body_sha256?: string;
 }
 
 /** Server-minted original names only — the traversal defense for the route. */
-export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx|xlsx)$/;
 
 export function isOriginalFile(v: unknown): v is OriginalFile {
   const o = v as OriginalFile | null | undefined;
@@ -1674,6 +1697,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** The `view:` block of a type: view node (§1.12) — validated against the
+   *  engine's view schema, refused on any other type. */
+  view?: unknown;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1694,6 +1720,10 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   prime?: boolean | null;
   /** Document-scope always-include flag. `null` clears it back to the tags. */
   alwaysInclude?: boolean | null;
+  /** A re-uploaded Office file (office-service.ts): the new `metadata.original`,
+   *  and every earlier one, so each version's file stays downloadable. */
+  original?: OriginalFile;
+  previousOriginals?: OriginalFile[];
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1706,6 +1736,33 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   /** Custom field values to set, field key → value; `null` clears one. Merged
    *  into the stored map — keys left out are untouched. */
   fields?: FieldsPatch;
+  /** Replacement `view:` block (§1.12), for a node that is or is becoming
+   *  type: view. Replaces the block wholesale; validated like create. */
+  view?: unknown;
+}
+
+/**
+ * Validate a `view:` block with the engine's own schema (§13 rules 30–36) and
+ * the type it is meant for. The engine re-validates on write; checking here
+ * turns its refusal into a 400 that names the rule, before any governance
+ * work, on every surface (REST, MCP, a held write's replay).
+ */
+export function assertViewBlock(view: unknown, type: string): void {
+  if (type !== "view") {
+    throw new ValidationError(
+      `A view block is only valid on type: view (§13 rule 31), and this node is type: "${type}". Pass type: "view" in the same call, or drop the view parameter.`,
+    );
+  }
+  if (view === null || typeof view !== "object" || Array.isArray(view)) {
+    throw new ValidationError("view must be an object: { blocks: [...] } (§1.12)");
+  }
+  const parsed = viewMetaSchema.safeParse(view);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) =>
+      i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message,
+    );
+    throw new ValidationError(`Invalid view block — ${issues.join("; ")}`);
+  }
 }
 
 /**
@@ -1917,7 +1974,7 @@ export async function createNode(
   const generatedId = !input.id && !slugify(input.title);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await createNodeOnce(nestId, input, userEmail, opts);
+      return await withWriteStats(nestId, "create", () => createNodeOnce(nestId, input, userEmail, opts));
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
         // A rule refusing the document is the caller's to fix — kept as a 400
@@ -2059,6 +2116,7 @@ async function createNodeOnce(
   if (input.pdf && requestedType !== PDF_NODE_TYPE) {
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
+  if (input.view !== undefined) assertViewBlock(input.view, requestedType);
 
   assertModelId(input.model);
   for (const field of ["schedule", "model"] as const) {
@@ -2092,6 +2150,9 @@ async function createNodeOnce(
         `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
       );
     }
+    // A view's page and frames are served at <view>/view/…: neither may be
+    // taken by another node, nor a view placed where one already is.
+    await assertNoViewCollision(storage, id, requestedType);
 
     // Rows can outlive their document when a file goes missing outside the app
     // — deleteNode's purge never runs because the delete 404s first. Those rows
@@ -2256,6 +2317,7 @@ async function createNodeOnce(
                 : {}),
               ...(tags.length ? { tags } : {}),
               ...(input.status ? { status: input.status } : {}),
+              ...(input.view !== undefined ? { view: input.view } : {}),
               metadata,
               publish: published,
               ...(publishNote ? { note: publishNote } : {}),
@@ -2296,7 +2358,7 @@ async function createNodeOnce(
       throw err;
     }
 
-    const node = await storage.readDocument(id);
+    const node = await writtenDocument(nestId, id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
@@ -2408,6 +2470,49 @@ async function stageImportedFilesInner(
     return !segs.includes("_suggestions") && !segs.includes(".context");
   });
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
+  // View addresses (see views/collision.ts): a document arriving at a view's
+  // <view>/view/… address, or a view arriving over an occupied one, is refused
+  // like any other unusable file — named, with the reason.
+  const viewRefusals: Array<{ path: string; why: string }> = [];
+  {
+    const idOf = (path: string) => path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.md$/i, "");
+    const docsIn = carried
+      .filter((f) => /\.md$/i.test(String(f.path)) && !String(f.path).split(/[\\/]/).some((seg) => seg.startsWith(".")))
+      .map((f) => {
+        const id = idOf(String(f.path));
+        let type = "document";
+        try {
+          type = String(parseDocument(`${id}.md`, String(f.content ?? ""), id).frontmatter.type || "document");
+        } catch {
+          /* unparseable: the engine reports it */
+        }
+        return { id, type, path: String(f.path) };
+      });
+    if (docsIn.some((d) => d.type === "view" || /(^|\/)view(\/|$)/.test(d.id))) {
+      const { storage } = await engineCache.get(nestId);
+      const existing = (await storage.discoverDocuments({ includeRetired: true } as any)).map((d) => ({
+        id: d.id,
+        type: String(d.frontmatter.type || "document"),
+      }));
+      const refused = batchViewCollisions(docsIn, existing);
+      for (const d of docsIn) {
+        const why = refused.get(d.id);
+        if (why) viewRefusals.push({ path: d.path, why });
+      }
+    }
+  }
+  if (viewRefusals.length) {
+    const drop = new Set(viewRefusals.map((r) => r.path));
+    for (let i = carried.length - 1; i >= 0; i--) if (drop.has(String(carried[i].path))) carried.splice(i, 1);
+    if (!carried.length) {
+      return {
+        written: 0,
+        rejected: viewRefusals.map((r) => r.path),
+        problems: viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+        warnings: [],
+      };
+    }
+  }
   const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
@@ -2423,7 +2528,10 @@ async function stageImportedFilesInner(
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
-  const rejected = (result.failed ?? []).map((f) => f.id ?? "(unnamed)");
+  const rejected = [
+    ...viewRefusals.map((r) => r.path),
+    ...(result.failed ?? []).map((f) => f.id ?? "(unnamed)"),
+  ];
   if (rejected.length) {
     console.warn(
       `[import] ${rejected.length} file(s) rejected:`,
@@ -2431,9 +2539,12 @@ async function stageImportedFilesInner(
     );
   }
   // The reason travels too, as a readable `path: reason` line for the user.
-  const problems = (result.failed ?? []).map((f) =>
-    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
-  );
+  const problems = [
+    ...viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+    ...(result.failed ?? []).map((f) =>
+      f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+    ),
+  ];
   return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
@@ -2667,7 +2778,7 @@ async function stagePdfImport(
     try {
       await storage.writeDocument(nodeId, priorRaw);
       if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId] });
     } catch (err) {
       console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
     }
@@ -2711,7 +2822,7 @@ export async function updateNode(
   userEmail: string,
   opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+  return withWriteStats(nestId, "update", () => withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
@@ -2864,6 +2975,7 @@ export async function updateNode(
       // node is becoming, as create does.
       if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
         assertAcceptedType(patch.type);
+        if (patch.type === "view") await assertNoViewCollision(storage, nodeId, "view");
         // A skill node is invalid without a skill block and this surface has
         // no field for one — default the trigger from the title, as create
         // does. The engine requires the block in the same call as the re-type.
@@ -2881,6 +2993,12 @@ export async function updateNode(
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
+      }
+      if (patch.view !== undefined) {
+        // Validated against the type the node is becoming, as create does.
+        assertViewBlock(patch.view, String(node.frontmatter.type || "document"));
+        node = { ...node, frontmatter: { ...node.frontmatter, view: patch.view as any } };
+        opInput.view = patch.view;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
@@ -2938,6 +3056,11 @@ export async function updateNode(
           ...(opInput.metadata as object),
           always_include: patch.alwaysInclude,
         };
+      }
+      if (patch.original) {
+        const files = { original: patch.original, previous_originals: patch.previousOriginals ?? [] };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: { ...(node.frontmatter.metadata as any), ...files } } };
+        opInput.metadata = { ...(opInput.metadata as object), ...files };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
@@ -3092,7 +3215,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // A draft revision is NOT appended to the engine's history chain. That
@@ -3158,7 +3281,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
@@ -3221,7 +3344,7 @@ export async function updateNode(
         "Couldn't save your changes. Please reload the document and try again."
       );
     }
-  });
+  }));
 }
 
 /**
@@ -3393,7 +3516,16 @@ export interface MoveNodeResult {
  * prefix, so a doc moved out of a shared folder leaves that share and a
  * doc moved into one joins it. That asymmetry is the feature.
  */
-export async function moveNode(
+export function moveNode(
+  nestId: string,
+  nodeId: string,
+  folder: string,
+  userEmail: string,
+): Promise<MoveNodeResult> {
+  return withWriteStats(nestId, "move", () => moveNodeInner(nestId, nodeId, folder, userEmail));
+}
+
+async function moveNodeInner(
   nestId: string,
   nodeId: string,
   folder: string,
@@ -3431,8 +3563,12 @@ export async function moveNode(
 
   // Destination check through write under the destination's lock — same
   // check-then-write race create takes it for, and the same key, so a
-  // concurrent create at that id can't slip in between either.
-  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+  // concurrent create at that id can't slip in between either. The vault lock
+  // inside it is the one every engine write op takes: a move rewrites the doc,
+  // its .versions chain and the index outside the catalog, so without it a
+  // concurrent publish could checkpoint the nest mid-move. Node lock first,
+  // vault lock second — the order create and update take them in.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), () => withVaultLock(storage.root, async () => {
     try {
       await storage.readDocument(newId);
       throw new ConflictError(
@@ -3443,6 +3579,12 @@ export async function moveNode(
       // Fail closed: only a missing document leaves the destination free.
       if (!(err instanceof DocumentNotFoundError)) throw err;
     }
+    await assertNoViewCollision(
+      storage,
+      newId,
+      String(node.frontmatter.type || "document"),
+      new Set([nodeId]),
+    );
 
     // On a folder board a move IS the column change, so a task gets the same
     // moved_at stamp a tag swap gives it (updateNode).
@@ -3466,6 +3608,13 @@ export async function moveNode(
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
     // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
+    // No document at the destination (checked above), so any rows there are
+    // orphans — same as create, clear them or the repoint trips UNIQUE. Before
+    // the write: its index write-through creates fresh rows at newId.
+    await getDb().transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
+    });
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
@@ -3505,10 +3654,6 @@ export async function moveNode(
     const newDerived = derivedIdOf(newId);
     const db = getDb();
     await db.transaction(async (tx) => {
-      // No document at the destination (checked above), so any rows there are
-      // orphans — same as create, clear them or the repoint trips UNIQUE.
-      await purgeNodeKeyedRows(tx, nestId, newId);
-      await purgeNodeKeyedRows(tx, nestId, newDerived);
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
       await tx.run(
@@ -3547,14 +3692,14 @@ export async function moveNode(
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
     try {
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
     } catch (err) {
       console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });
     return { node: moved, previousId: nodeId };
-  });
+  }));
 }
 
 /**
@@ -3618,7 +3763,7 @@ export async function discardDraft(
     // Same move rejectSuggestion makes, and for the same reason — a discard
     // must not cost a version.
     await storage.writeDocument(nodeId, raw);
-    await storage.regenerateIndex();
+    await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
@@ -3728,7 +3873,7 @@ export async function deleteNodeIfUnchanged(
   });
 }
 
-export async function deleteNode(
+export function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
@@ -3737,6 +3882,15 @@ export async function deleteNode(
      *  leaves, so it is where "which agent deleted this" has to live. */
     client?: ClientMetadata;
   } = {},
+): Promise<void> {
+  return withWriteStats(nestId, "delete", () => deleteNodeInner(nestId, nodeId, userEmail, opts));
+}
+
+async function deleteNodeInner(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { client?: ClientMetadata },
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 
@@ -3905,6 +4059,20 @@ export async function moveFolder(
   const taken = new Set(all);
   const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
   if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+  // View addresses (see views/collision.ts), checked for every node BEFORE
+  // the first one moves, so a refusal never leaves the folder half-moved.
+  {
+    const leaving = new Set(targets);
+    for (const id of targets) {
+      const doc = await storage.readDocument(id);
+      await assertNoViewCollision(
+        storage,
+        `nodes/${destOf(id)}/${id.split("/").pop()}`,
+        String(doc.frontmatter.type || "document"),
+        leaving,
+      );
+    }
+  }
 
   // Sequential, like deleteFolder: a failure names how far it got, and what
   // moved stays coherent (each move is atomic).

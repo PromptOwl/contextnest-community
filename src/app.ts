@@ -58,6 +58,7 @@ import {
 import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
+import { viewRoutes } from "./views/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
@@ -577,6 +578,14 @@ export function createApp(): Hono<AuthEnv> {
   // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
+  // Prometheus metrics (METRICS_ENABLED). First, so every request is timed;
+  // loaded only when on, so a default server never imports prom-client.
+  if (config.METRICS_ENABLED) {
+    const metrics = import("./ops/metrics.js");
+    app.use("*", async (c, next) => (await metrics).httpMetrics(c, next));
+    app.get("/metrics", async (c) => (await metrics).metricsHandler(c));
+  }
+
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
   // CORS allowlist — see config.CORS_ORIGINS. In key mode we default to a
@@ -791,6 +800,16 @@ export function createApp(): Hono<AuthEnv> {
       subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     });
+  });
+
+  // Kubernetes-style probes (public). Liveness is "the process answers";
+  // readiness also needs the database and nest storage, so an outage takes the
+  // pod out of rotation without restarting it.
+  app.get("/livez", (c) => c.json({ status: "ok" }));
+  app.get("/readyz", async (c) => {
+    const { readiness } = await import("./ops/status.js");
+    const { ready, checks } = await readiness();
+    return c.json({ status: ready ? "ok" : "unavailable", checks }, ready ? 200 : 503);
   });
 
   // Admin-features gate: teammate management is blocked until a valid
@@ -1064,6 +1083,15 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Newer release on npm, and the command that updates this install.
+  app.use("/admin/update-status", flexAuthMiddleware);
+  app.get("/admin/update-status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { updateStatus } = await import("./ops/update-check.js");
+    return c.json(updateStatus());
   });
 
   // Models the current credential can reach — the Hootie model picker. On the
@@ -2421,16 +2449,25 @@ export function createApp(): Hono<AuthEnv> {
     const restNestIds = [...nestName.keys()].filter(
       (id) => !nestApprove.get(id),
     );
-    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
-      await Promise.all([
-        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
-        getReviewQueue({
-          status: "pending",
-          nestIds: restNestIds,
-          requestedByEmail: me,
-          limit: 1,
-        }),
-      ]);
+    const [
+      { total: approvableReviewTotal },
+      { total: myReviewsElsewhereTotal },
+      { total: myReviewsTotal },
+    ] = await Promise.all([
+      getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: restNestIds,
+        requestedByEmail: me,
+        limit: 1,
+      }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: [...nestName.keys()],
+        requestedByEmail: me,
+        limit: 1,
+      }),
+    ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
     // Deletion flags and access requests ride the same two buckets (above)
     // but aren't paginated (both lists fetch every pending one), so folding in
@@ -2445,11 +2482,17 @@ export function createApp(): Hono<AuthEnv> {
       console.error("[me/work] assigned list failed", err);
       return [];
     });
+    // The badge's share (CU-wdqcq0658p): the same total minus what waits on
+    // others — the caller's own pending reviews and the requests they filed.
+    const waitingOnMeTotal =
+      reviewTotal + requestsShown - myReviewsTotal -
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
     return c.json({
       items,
       waiting,
       notifications,
       assigned,
+      waiting_on_me_total: waitingOnMeTotal,
       pagination: {
         total: reviewTotal + requestsShown,
         limit,
@@ -3723,7 +3766,12 @@ export function createApp(): Hono<AuthEnv> {
   //      GET falls through (next()) when the id is not a pdf node, so a
   //      document whose own id ends in /pdf still reads.
   nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
-  //   0b. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  //   0b. viewRoutes — GET /:nodeId/view/hosted and /:nodeId/view/blocks/:id/hosted
+  //      (§1.12 view serving). Before annotationRoutes, whose greedy
+  //      /:nodeId{.+}/hosted would read "<viewId>/view" as the node id; it
+  //      falls through (next()) when the id is not a view node.
+  nestsApp.route("/:nestId/nodes", viewRoutes);
+  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx/.xlsx upload), same reason.
   nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);

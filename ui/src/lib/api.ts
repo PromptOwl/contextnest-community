@@ -459,6 +459,21 @@ export async function getAdminSettings() {
   return request<AdminSettings>("/admin/settings");
 }
 
+/** Admin: is a newer release on npm, and the command that updates this install. */
+export interface UpdateStatus {
+  enabled: boolean;
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+  install: "container" | "npm";
+  command: string;
+}
+
+export async function getUpdateStatus() {
+  return request<UpdateStatus>("/admin/update-status");
+}
+
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
   patch: Partial<AdminSettings>,
@@ -2078,7 +2093,7 @@ export async function createPdfNode(
 }
 
 /**
- * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * Upload a .pptx, .docx or .xlsx as a governed markdown document (multipart). The
  * server extracts the slides/text into the body and keeps the original file
  * as a download linked from it.
  */
@@ -2865,6 +2880,18 @@ export function hostedArtifactUrl(
 }
 
 /**
+ * URL of a §1.12 view node's server-rendered page (iframe `src`). `v` pins the
+ * layout of that version; the data its blocks show is always live. Unlike the
+ * artifact URL above, the node id keeps its own `nodes/` prefix: a doc or
+ * folder share grant is matched against the path under /nodes/, so only the
+ * full id lets a grantee open a view shared with them.
+ */
+export function viewPageUrl(nestId: string, nodeId: string, version?: number | null): string {
+  const qs = version != null ? `?v=${encodeURIComponent(String(version))}` : "";
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/view/hosted${qs}`;
+}
+
+/**
  * Fetch the artifact's served HTML as text — used to derive the *extracted
  * text* the annotation layer highlights over (same text the nest indexes).
  * Same-origin, cookie-authed; not subject to the iframe sandbox.
@@ -3511,7 +3538,16 @@ export interface GraphNode {
 
 export interface NestGraph {
   nodes: GraphNode[];
-  links: Array<{ source: string; target: string }>;
+  /** `type`/`rows`/`rowCount` (and `refs` when several columns point at the
+   *  same target) only on typed edges — a table's :ref columns. */
+  links: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    rows?: string[];
+    rowCount?: number;
+    refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
+  }>;
   stewards: Array<{
     /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
     id: string;
@@ -3615,6 +3651,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
+    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    waiting_on_me_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }

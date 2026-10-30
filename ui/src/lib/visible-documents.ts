@@ -17,6 +17,9 @@ export interface VisibleDocumentsInput {
   levelNodes: any[];
   /** The whole nest, fetched on demand once a filter is switched on. */
   fullNodes: any[] | null;
+  /** Grid view: the whole nest's metadata. A flat grid has no folders to
+   *  expand, so the loaded levels alone would hide every nested document. */
+  gridNodes?: any[] | null;
   /** Scoped folder ("" is the nest root); null means the whole nest. */
   folderFilter: string | null;
   search: string;
@@ -66,7 +69,8 @@ export function visibleDocuments(input: VisibleDocumentsInput): any[] {
     // means the date filter is on.
     datePreset: input.updatedAfter ? "on" : "any",
   });
-  const source = filtering ? (input.fullNodes ?? input.levelNodes) : input.levelNodes;
+  const unfiltered = input.gridNodes ?? input.levelNodes;
+  const source = filtering ? (input.fullNodes ?? unfiltered) : unfiltered;
 
   return source.filter((n) => {
     // Folder scope: the doc's folder must be the scoped folder or inside it.

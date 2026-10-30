@@ -55,6 +55,7 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import {
@@ -65,6 +66,7 @@ import {
   type InstructionsRevision,
 } from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
+import { tableRefProse, tableRefReport } from "../tables/refs.js";
 import {
   addComment,
   createThread,
@@ -534,6 +536,38 @@ const TASK_FIELD_PROPERTIES = {
   },
 };
 
+/**
+ * The `view` argument of context_create / context_update (§1.12), taken from
+ * the engine's own operation descriptor rather than written out here — the
+ * engine owns the view block's shape (see the Engine Logic Boundary). Throws
+ * at module load when the engine lacks the operation or the property, so an
+ * engine downgrade fails loudly instead of silently dropping the argument
+ * (test/views-mcp-schema.test.ts).
+ */
+export function engineViewProperty(
+  op: "context_create" | "context_update",
+  api: Pick<typeof engineApi, "getOperation"> = engineApi,
+): Record<string, unknown> {
+  const desc = api.getOperation(op);
+  if (!desc) {
+    throw new Error(
+      `The engine has no "${op}" operation, so its view argument cannot be advertised over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  let props: Record<string, unknown> = {};
+  try {
+    props = (inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {};
+  } catch {
+    props = {};
+  }
+  if (!props.view) {
+    throw new Error(
+      `The engine's "${op}" operation has no view property (§1.12), so view nodes cannot be authored over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  return { view: props.view };
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
@@ -859,6 +893,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_create"),
       },
       required: ["title", "content"],
     },
@@ -870,7 +905,7 @@ export const TOOL_DEFINITIONS = [
     // POST /nodes/office) so an agent can attach a file without multipart.
     // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
     description:
-      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx or .docx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, or the Word document's headings, lists and tables) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx, .docx or .xlsx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, the Word document's headings, lists and tables, or a table per spreadsheet sheet) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -903,7 +938,12 @@ export const TOOL_DEFINITIONS = [
         as: {
           type: "string",
           description:
-            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx). A file of the other kind is refused rather than rerouted.',
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx, xlsx). A file of the other kind is refused rather than rerouted.',
+        },
+        node_id: {
+          type: "string",
+          description:
+            "Office files only: the id of the document an earlier .pptx/.docx/.xlsx upload created. The file becomes that document's new version (same kind of file required) instead of a new document; the earlier file stays downloadable from its version. In a governed nest it lands as a draft for review.",
         },
       },
     },
@@ -964,6 +1004,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_update"),
       },
       // Neither is required alone — one of them is (the engine catalog's
       // `.refine(id || title)`, which JSON Schema can't express here).
@@ -1944,6 +1985,10 @@ export async function handleToolCall(
     status = 500;
     throw err;
   } finally {
+    if (config.METRICS_ENABLED) {
+      const ms = Date.now() - started;
+      void import("../ops/metrics.js").then((m) => m.recordToolCall(toolName, status, ms));
+    }
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,
@@ -2064,11 +2109,40 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
         "VALIDATION_FAILED",
       );
     }
+    if (args.node_id && upload.kind !== "office") {
+      return toolError("node_id replaces an Office document's file; it only works with a .pptx, .docx or .xlsx.", "VALIDATION_FAILED");
+    }
     if (!isDocument) {
       const asset = await uploads.storeAsset(nestId, upload);
       return {
         text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
         data: { kind: upload.kind, ...asset },
+      };
+    }
+    if (args.node_id) {
+      const saved = await uploads.saveOfficeUpload(
+        nestId,
+        upload,
+        { nodeId: String(args.node_id), ...(args.title?.trim() ? { title: args.title.trim() } : {}), ...(args.tags ? { tags: args.tags as string[] } : {}) },
+        userEmail,
+        ctx.client,
+      );
+      const { node, version } = saved;
+      const url = `/nests/${nestId}/originals/${saved.original!.file}`;
+      return {
+        text:
+          `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: String(node.frontmatter.title ?? ""),
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          original: { ...saved.original, url },
+          ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
+        },
       };
     }
     const fields = {
@@ -3385,6 +3459,7 @@ async function runTool(
                 scope: args.scope,
                 folder: args.folder,
                 ...(args.fields !== undefined ? { fields: args.fields } : {}),
+                ...(args.view !== undefined ? { view: args.view } : {}),
               },
             ],
           },
@@ -3413,6 +3488,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -3424,8 +3500,9 @@ async function runTool(
         }
         const { node, version } = made;
         const created = settableTaskFields(node.frontmatter.metadata);
+        const tableRefs = await tableRefReport(nestId, node, ctx.userId, ctx.userEmail);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -3434,6 +3511,7 @@ async function runTool(
             status: node.frontmatter.status,
             checkpoint: null,
             ...created,
+            ...(tableRefs ? { table_refs: tableRefs } : {}),
           },
         };
       });
@@ -3488,6 +3566,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -3501,8 +3580,9 @@ async function runTool(
       }
       const { node: updated, version } = result;
       const fields = settableTaskFields(updated.frontmatter.metadata);
+      const tableRefs = await tableRefReport(nestId, updated, ctx.userId, ctx.userEmail);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
@@ -3510,6 +3590,7 @@ async function runTool(
           status: updated.frontmatter.status,
           checkpoint: null,
           ...fields,
+          ...(tableRefs ? { table_refs: tableRefs } : {}),
         },
       };
     }
