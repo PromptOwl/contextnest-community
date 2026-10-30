@@ -13,12 +13,15 @@ import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { saveDestination } from "./lib/document-save-nav";
+import { withNestName } from "./lib/nest-name";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { LicenseBanner } from "./components/LicenseNotice";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { UpdateBadge } from "./components/UpdateBadge";
+import { InboxBell } from "./components/InboxBell";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
@@ -33,7 +36,7 @@ import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
-import { useBreadcrumbTail, crumbLabelClass, type Crumb } from "./lib/breadcrumb";
+import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -85,6 +88,8 @@ type View =
       page: "dashboard";
       /** A dashboard page id (its folder under pages/app); omitted = nests. */
       tab?: string;
+      /** Where the header bell was clicked from — the page offers Back to it. */
+      returnTo?: View;
     }
   | {
       page: "nest";
@@ -850,6 +855,13 @@ export default function App() {
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
+  // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
+  const pageTabTitle = tabTitle(crumbs);
+  const brandedReader = readerMode && !!nestBranding;
+  useEffect(() => {
+    if (!brandedReader) document.title = pageTabTitle;
+  }, [pageTabTitle, brandedReader]);
+
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
   const appNav = useMemo<AppNav>(
@@ -870,6 +882,11 @@ export default function App() {
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
     [setView],
+  );
+  const dashReturnTo = view.page === "dashboard" ? view.returnTo : undefined;
+  const dashboardNav = useMemo<AppNav>(
+    () => (dashReturnTo ? { ...appNav, goBack: () => setView(dashReturnTo) } : appNav),
+    [appNav, dashReturnTo, setView],
   );
 
   // Back out of the nest entirely. Shared by all five nest-scoped pages —
@@ -1459,6 +1476,20 @@ export default function App() {
                 actions, so they moved to the nest view switcher below — which
                 also keeps them reachable from each other. */}
 
+            {adminStatus?.me && (
+              <InboxBell
+                onOpen={() =>
+                  setView({
+                    page: "dashboard",
+                    tab: "my-work",
+                    // Keep the page the bell was clicked on, for My Work's Back (CU-wdqcq067ud).
+                    returnTo: view.page === "dashboard" && view.tab === "my-work" ? view.returnTo : view,
+                  })
+                }
+                onOpenDoc={appNav.openReview}
+                onOpenNest={(id, name) => appNav.openNest(id, name, false, false)}
+              />
+            )}
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
@@ -1558,6 +1589,8 @@ export default function App() {
           // With the sidebar <main> has no padding of its own (pages add it),
           // so the card needs its own gap from the header and the edges.
           className={withSidebar ? "mx-4 mt-4 md:mx-6" : "mb-4"}
+          // Full card on the dashboard; one line where content needs the room.
+          compact={view.page !== "dashboard"}
         />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
@@ -1604,7 +1637,7 @@ export default function App() {
           // page — the server would refuse it anyway; this keeps the shell whole.
           const Page = visibleAppPage(view.tab, pageCaps).Component;
           return (
-            <AppNavProvider value={appNav}>
+            <AppNavProvider value={dashboardNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
                 <Page />
               </Suspense>
@@ -1613,6 +1646,8 @@ export default function App() {
         })()}
         {view.page === "nest" && (
           <NestView
+            // One mount per nest: filters, folder scope and selection belong to the nest they were set on.
+            key={view.nestId}
             nestId={view.nestId}
             nestName={view.nestName}
             isOwner={view.isOwner}
@@ -1627,6 +1662,9 @@ export default function App() {
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
+            // Not a navigation, so no leave guard; functional so a tab switched
+            // while the save was in flight survives.
+            onRenamed={(name) => setViewNow((v) => withNestName(v, view.nestId, name))}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
               setView({
@@ -1882,6 +1920,7 @@ export default function App() {
         ) : (
         <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+          {isAdmin && <UpdateBadge />}
         </footer>
         )
       )}

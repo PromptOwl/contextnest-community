@@ -19,10 +19,17 @@ export function parseServerDate(raw: string | null | undefined): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-/** Local-time absolute rendering ("04/08/2026, 10:32:32"). */
-export function formatServerDate(raw: string | null | undefined): string {
-  return parseServerDate(raw)?.toLocaleString() ?? "";
+/** Local-time absolute rendering ("04/08/2026, 10:32:32"); `opts` narrows it,
+ *  e.g. SHORT_DATE_TIME for a card that doesn't need seconds. */
+export function formatServerDate(
+  raw: string | null | undefined,
+  opts?: Intl.DateTimeFormatOptions,
+): string {
+  return parseServerDate(raw)?.toLocaleString(undefined, opts) ?? "";
 }
+
+/** Date and minute, no seconds ("Oct 27, 2026, 2:50 PM"). */
+export const SHORT_DATE_TIME: Intl.DateTimeFormatOptions = { dateStyle: "medium", timeStyle: "short" };
 
 /** Forward countdown: "in 5m" / "in 3h" / "in 7d", or "expired" once past. */
 export function untilTime(raw: string | null | undefined): string {

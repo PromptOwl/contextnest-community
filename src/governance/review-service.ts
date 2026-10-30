@@ -43,6 +43,7 @@ import type {
   ResolvedSteward,
 } from "./types.js";
 import { insertNotification } from "../notify/inbox.js";
+import { withWriteStats } from "../nodes/io-stats.js";
 
 // ─── Submit for Review ──────────────────────────────────────────────────
 // Ported from PromptOwl submitForReview()
@@ -289,6 +290,10 @@ export async function approve(params: {
   /** The reviewer edited the document just before approving (approve-with-edits). */
   withEdits?: boolean;
 }): Promise<ReviewRequest> {
+  return withWriteStats(params.nestId, "approve", () => approveInner(params));
+}
+
+async function approveInner(params: Parameters<typeof approve>[0]): Promise<ReviewRequest> {
   // Serialize against a concurrent author edit of the same node. Authors can
   // now revise their own pending submission, so an autosave/save and this
   // approval could otherwise interleave — resolving the review against a stale

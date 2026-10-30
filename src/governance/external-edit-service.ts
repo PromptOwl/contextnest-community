@@ -7,7 +7,7 @@
  * scan / list / approve / reject.
  */
 
-import { readFile, readdir } from "fs/promises";
+import { readFile, readdir, stat } from "fs/promises";
 import { join, relative, sep } from "path";
 import {
   detectDrift,
@@ -326,6 +326,7 @@ const warnedViewCollisions = new Set<string>();
  */
 export async function documentsWithSuggestions(
   nestId: string,
+  retries = 3,
 ): Promise<Set<string>> {
   const root = resolveNestPath(nestId);
   const ids = new Set<string>();
@@ -333,6 +334,11 @@ export async function documentsWithSuggestions(
   try {
     entries = await readdir(root, { recursive: true, withFileTypes: true });
   } catch (err: any) {
+    // ENOENT while the nest is still there: an entry vanished mid-walk (a
+    // write's lock folder, a temp file — seals run beside reads now). Walk again.
+    if (err?.code === "ENOENT" && retries > 0 && (await stat(root).catch(() => null))) {
+      return documentsWithSuggestions(nestId, retries - 1);
+    }
     // A missing folder genuinely means nothing is staged. Anything else
     // (permissions, descriptor exhaustion) is NOT that, and this one walk
     // covers every document — so a swallowed failure drops pending-edit

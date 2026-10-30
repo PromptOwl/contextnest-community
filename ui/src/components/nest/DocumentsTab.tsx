@@ -592,10 +592,15 @@ export function DocumentsTab({
   //
   // Unfiltered, the levels on screen ARE the answer; filtered, the answer
   // spans the nest, so use the full listing as soon as it lands.
+  // Grid view lists the whole nest — it has no folders to expand. Metadata
+  // only, the read (and cache) the Board shares; list view stays lazy.
+  const gridQuery = useQuery({ ...reads.nodesMeta(nestId), enabled: viewMode === "cards" });
+  const gridNodes = viewMode === "cards" ? (gridQuery.data?.nodes ?? null) : null;
   const filtered = visibleDocuments({
     ...filter,
     levelNodes: nodes,
     fullNodes,
+    gridNodes,
     folderFilter,
     updatedAfter,
     contentHits,
@@ -1138,7 +1143,7 @@ export function DocumentsTab({
                   Select all ({selectableVisible.length})
                 </label>
               )}
-              {initialLoad || loadingFolders.has(baseFolder) ? (
+              {initialLoad || loadingFolders.has(baseFolder) || (viewMode === "cards" && gridQuery.isLoading) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
@@ -1257,7 +1262,9 @@ export function DocumentsTab({
                   // Cards: collapse every row action into a 3-dot menu kept on
                   // the title line. List keeps inline hover buttons below.
                   const actionMenu = (
-                    <div onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                      {/* Same pin control the list rows and document header use (CU-wdqcq06256). */}
+                      <DocPinControl nestId={nestId} nodeId={node.id} />
                       <DropdownMenu modal={false}>
                         <DropdownMenuTrigger asChild>
                           <Button

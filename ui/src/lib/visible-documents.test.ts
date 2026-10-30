@@ -49,6 +49,20 @@ describe("visibleDocuments", () => {
     expect(ids(visibleDocuments(base))).toEqual(["nodes/root-one", "nodes/root-two"]);
   });
 
+  it("grid view shows documents in folders nobody expanded", () => {
+    // A flat grid has no folders to open: the loaded levels alone left an
+    // imported nest (everything one folder down) looking empty.
+    expect(ids(visibleDocuments({ ...base, gridNodes: WHOLE }))).toEqual(ids(WHOLE));
+    expect(ids(visibleDocuments({ ...base, gridNodes: WHOLE, folderFilter: "gtm/deals" }))).toEqual([
+      "nodes/gtm/deals/deal-one",
+      "nodes/gtm/deals/deal-two",
+    ]);
+  });
+
+  it("grid view falls back to the loaded levels until its read lands", () => {
+    expect(ids(visibleDocuments({ ...base, gridNodes: null }))).toEqual(["nodes/root-one", "nodes/root-two"]);
+  });
+
   it("searches the whole nest, not just what happens to be expanded", () => {
     // Without this, a document in a collapsed folder is silently unfindable —
     // the regression lazy loading most easily introduces.

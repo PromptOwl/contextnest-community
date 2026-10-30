@@ -34,6 +34,10 @@ import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } f
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 import { assertWritable, DataDirError } from "./shared/data-dir-check.js";
+import { installJsonLogs } from "./shared/json-logs.js";
+import { startUpdateCheck } from "./ops/update-check.js";
+
+if (config.LOG_FORMAT === "json") installJsonLogs();
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
@@ -180,6 +184,7 @@ async function main() {
 
   // Start telemetry
   startTelemetryLoop();
+  startUpdateCheck();
   trackEvent("server.start", {
     tier: license.tier,
     org: license.org,
@@ -298,6 +303,23 @@ ${config.AUTH_MODE === "key" ? `
   // workflow plane — that loop above is a no-op unless its flag is on, and
   // review governance isn't. Inert while no nest sets an SLA.
   startReviewSlaLoop();
+
+  // Writes defer their checkpoint and index update to the seal queue; seal
+  // what a previous process queued and never got to.
+  void import("./nodes/seal-queue.js")
+    .then((m) => m.resumeSeals())
+    .then((n) => n && console.log(`[seal] resuming queued writes in ${n} nest(s)`))
+    .catch((err) => console.error("[seal] resume failed", err));
+
+  // Cloud Run sends SIGTERM, then kills after 10s. Let a running seal finish
+  // and release its lease, so the next instance does not wait out a dead one;
+  // the rest stays queued for it. Exits itself: a listener replaces Node's
+  // default exit on SIGTERM.
+  process.once("SIGTERM", () => {
+    const exit = () => process.exit(0);
+    setTimeout(exit, 8_000).unref();
+    void import("./nodes/seal-queue.js").then((m) => m.stopSeals()).finally(exit);
+  });
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.

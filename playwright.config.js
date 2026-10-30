@@ -199,6 +199,30 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
+  {
+    // Nest page → New Document (CN-CREATE-001 … CN-CREATE-018). Serial: each
+    // case creates documents through the editor in a nest it then deletes.
+    file: 'new-document/new_document.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests
+  },
+  {
+    // Nest page → New Folder (CN-FOLDER-001 … CN-FOLDER-012). Serial: each
+    // case creates folders through the dialog in a nest it then deletes.
+    file: 'new-folder/new_folder.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → Import (CN-NIMP-001 … CN-NIMP-014). Serial: each case
+    // imports files through the dialog into a nest it then deletes.
+    file: 'nest-import/nest_import.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -282,7 +306,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -575,6 +599,39 @@ export default defineConfig({
           name: 'archive',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/archive/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'new-document',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/new-document/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'new-folder',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/new-folder/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-import',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-import/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
