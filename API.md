@@ -514,7 +514,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
-| Document uploads — MCP `context_upload` (pdf/pptx/docx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
+| Document uploads — MCP `context_upload` (pdf/pptx/docx/xlsx), `POST /nodes/pdf` and `/nodes/office` with an API key | **Refused** (`403` / `UNAUTHORIZED_ACTION`) unless the key is always-allowed: a held push can't carry a file. Image/video assets are not gated. |
 | `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
@@ -1340,19 +1340,22 @@ A `type: "view"` node (§1.12) is a governed layout over other nodes: its body i
 - `?format=raw` of a view node is its stored body (the intro); `/hosted` stays artifact-only (`404` for a view).
 
 ### POST `/nests/:nestId/nodes/office`
-Upload a PowerPoint (`.pptx`) or Word (`.docx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+Upload a PowerPoint (`.pptx`), Word (`.docx`) or Excel (`.xlsx`) file as a governed markdown `document`. Multipart: `file` (required), optional `title` (default: the file name without its extension), `folder`, `tags` (repeat the field or comma-separate). Or the JSON body from [Uploading files](#uploading-files) with the same fields. Write permission (nest-scope steward editors too, as for `POST /nodes`).
 
 The text is extracted into the document body:
 - **pptx** — one `## Slide N: <title>` section per slide, in presentation order, with the slide's text (body placeholders as bullets, text boxes as paragraphs, tables as markdown tables) and a `### Speaker notes` subsection when the slide has notes. Hidden slides are included and marked `(hidden)`.
 - **docx** — headings (`Title`, `Heading 1…6` or an outline level) as `#` headings, paragraphs, bulleted and numbered lists, and tables as markdown tables. Deleted tracked changes and field codes are left out.
+- **xlsx** — one `## Sheet: <name>` section per worksheet, in workbook order, holding a markdown table whose first non-empty row is the header. Shared and inline strings, numbers, booleans and errors as shown in the cell; formulas show their last calculated value; numbers in a date format become `YYYY-MM-DD` (or `YYYY-MM-DD HH:MM`), honouring the 1904 date system. Empty rows are skipped. Each sheet shows at most 500 rows and 50 columns, with a `_Truncated: …_` note naming what was cut. Chart sheets, charts and pivot tables are left out.
 
-The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned; re-uploading creates a new document.
+The body starts with a line naming the source file and linking the original (`[Download the original](/nests/:nestId/originals/<uuid>.pptx)`). The original is stored once, under a server-minted name, and bound to the document as `metadata.original` — returned on the node as `original: { file, filename, kind, bytes, sha256, body_sha256 }`. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes. The result is an ordinary document — editable, movable, versioned.
 
-- `400` — no `file`; not `.pptx`/`.docx` (legacy `.ppt`/`.doc` and macro-enabled `.pptm`/`.docm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped (only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+**Re-upload as a new version.** Send `nodeId` (an id an earlier Office upload created) and the file becomes that document's next version instead of a new document: new body, new `original`, through the same path as an edit (permission, review lock, and a draft in a governed nest), with `changeNote` defaulting to `Replaced the PowerPoint file` (Word / Excel). The file must be the same kind as the one the document came from (`400` otherwise, and for a document that didn't come from an upload). Earlier originals are kept in `metadata.previous_originals`, so each version's file stays downloadable. When the body was edited by hand since the last upload, the response carries `warnings: ["Edits made to the document since the last upload were replaced. …"]` — the edits remain in version history. Answers `200` `{ node, version, stewards?, warnings? }`. MCP `context_upload` takes the same as `node_id`.
+
+- `400` — no `file`; not `.pptx`/`.docx`/`.xlsx` (legacy `.ppt`/`.doc`/`.xls` and macro-enabled `.pptm`/`.docm`/`.xlsm` included); not a zip package (checked by bytes, not the name); the package doesn't match the extension; malformed XML; an XML part with a DTD (entities are never expanded); more than 10,000 zip entries; or more than 32 MB of XML once unzipped or more than 500,000 XML elements (a very large sheet is refused, not truncated; only the text-bearing parts are ever unzipped, and that cap is enforced while inflating). `413` — larger than `OFFICE_MAX_MB` (default 25 MB). Nothing is written on any refusal.
 - Returns `201` `{ node, version, stewards? }`.
 
 ### GET `/nests/:nestId/originals/:file`
-The original file behind an Office document. Read permission, and the caller must be able to read the document that binds it (the same gate as `GET /nodes/:nodeId`, so a public reader needs an approved version). Only server-minted `<uuid>.pptx` / `<uuid>.docx` names are accepted; a name that isn't bound to a document the caller can read is a `404`. The bytes are verified against the recorded sha256 before they are served.
+The original file behind an Office document. Read permission, and the caller must be able to read the document that binds it (the same gate as `GET /nodes/:nodeId`, so a public reader needs an approved version). A document names its current file and, after re-uploads, its earlier ones; a public reader gets only the file the approved version names — never a draft re-upload's. Only server-minted `<uuid>.pptx` / `<uuid>.docx` / `<uuid>.xlsx` names are accepted; a name that isn't bound to a document the caller can read is a `404`. The bytes are verified against the recorded sha256 before they are served.
 
 Headers: the Office `Content-Type`, `Content-Disposition: attachment` (always — never inline), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). The link survives a move of the document, since it names the file, not the node.
 
@@ -1394,7 +1397,7 @@ Three routes take files, by what the file becomes. One allowlist and one set of 
 | Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB | `POST /nests/:id/assets` | an asset; reference it with the returned `markdown` |
 | Video | `mp4`, `webm` | 30 MB (`VIDEO_MAX_MB`) | `POST /nests/:id/assets` | an asset; the returned `markdown` is its URL on its own line |
 | PDF | `pdf` (judged by its `%PDF-` bytes on the PDF route) | 25 MB (`PDF_MAX_MB`) | `POST /nests/:id/nodes/pdf` | a governed `pdf` document with its text extracted |
-| PowerPoint / Word | `pptx`, `docx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
+| PowerPoint / Word / Excel | `pptx`, `docx`, `xlsx` | 25 MB (`OFFICE_MAX_MB`) | `POST /nests/:id/nodes/office` | a governed markdown document, original kept as a download |
 
 SVG, HTML, executables, legacy `.ppt`/`.doc` and everything else are refused with a `400` listing the types above. Document uploads are governed exactly like `POST /nodes` (a draft in a governed nest).
 
@@ -2753,6 +2756,9 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 
 Experimental features: `experimental` — one boolean per switch, e.g. `{ "doc_pins": false }` (`EXPERIMENTAL_DOC_PINS`, superadmin-switchable as `experimental_doc_pins` on `/admin/settings`). Off → that feature's routes `404` and its UI stays hidden.
 
+### GET `/livez` and GET `/readyz` (no auth)
+Orchestrator probes. `/livez` answers `200 { "status": "ok" }` whenever the process does. `/readyz` also checks that the database answers and nest storage is writable: `200 { "status": "ok", "checks": { "db": true, "storage": true } }`, or `503 { "status": "unavailable", "checks": { … } }` naming the failed check. Point liveness at `/livez` and readiness at `/readyz` (the Helm chart does), so a database outage takes the pod out of rotation without restarting it.
+
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 
@@ -2927,6 +2933,9 @@ The per-nest steward slice of the activity trace. Same response shape, paginatio
 Authorization mirrors the grants / steward-roster rule (`canManageStewards`): the nest owner, an `admin` collaborator, the license admin, or an `access.yaml` `super_admin` (open mode: always allowed). Read/write collaborators get `403`; callers with no access to the nest get `404`.
 
 Surfaced in the UI from the nest view's overflow menu → **Activity trace** (owner/nest-admin only), which renders `ActivityTracePage` in nest-scoped mode (nest column hidden).
+
+### GET `/admin/update-status` (server admin)
+Whether a newer release is on npm, and the command that updates this install: `{ "enabled", "current", "latest", "update_available", "checked_at", "install": "npm" | "container", "command" }`. The server reads `registry.npmjs.org` at startup and every 12 hours (`UPDATE_CHECK=false` turns it off); `latest` is `null` until a check succeeds, so an offline server simply reports no update. The server never updates itself. Server admin only — `403` otherwise. The UI shows it as a badge next to the footer version.
 
 ### GET `/admin/status` (server admin)
 Health and network report behind **Settings → Network & status**. Server admin only (license admin or superadmin; anyone in open mode) — `401` without credentials, `403` otherwise. Never returns a secret: connection strings lose their userinfo, webhooks and SMTP are reported as host and port only.

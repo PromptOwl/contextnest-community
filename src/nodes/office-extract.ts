@@ -1,5 +1,5 @@
 /**
- * Office files (pptx / docx) → markdown, for the governed-document upload
+ * Office files (pptx / docx / xlsx) → markdown, for the governed-document upload
  * (office-routes.ts).
  *
  * An Office file is an attacker-controlled zip of XML, so everything here is
@@ -36,7 +36,7 @@ export const OFFICE_MAX_ELEMENTS = 500_000;
 /** Deepest element nesting accepted in a part. */
 export const OFFICE_MAX_DEPTH = 256;
 
-export type OfficeKind = "pptx" | "docx";
+export type OfficeKind = "pptx" | "docx" | "xlsx";
 
 export class OfficeFileError extends Error {
   constructor(message: string) {
@@ -49,8 +49,10 @@ export interface OfficeExtraction {
   kind: OfficeKind;
   /** The markdown body, without the provenance line the caller adds. */
   markdown: string;
-  /** Slides for a deck; undefined for a docx. */
+  /** Slides for a deck; undefined otherwise. */
   slides?: number;
+  /** Sheets for a workbook; undefined otherwise. */
+  sheets?: number;
 }
 
 // ─── Minimal non-resolving XML parser ──────────────────────────────────────
@@ -260,7 +262,7 @@ class OfficeZip {
     // A zip starts with a local file header ("PK\x03\x04"). A renamed .exe,
     // a legacy .ppt/.doc (OLE compound file) or anything else stops here.
     if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
-      throw new OfficeFileError("That file is not a .pptx or .docx (it is not a zip package).");
+      throw new OfficeFileError("That file is not a .pptx, .docx or .xlsx (it is not a zip package).");
     }
     const entries = declaredEntryCount(bytes);
     if (entries === null) throw new OfficeFileError("That file is not a readable zip package.");
@@ -695,10 +697,118 @@ async function extractDocx(zip: OfficeZip): Promise<OfficeExtraction> {
   return { kind: "docx", markdown: markdown || "_No text was found in this document._" };
 }
 
+// ─── xlsx ──────────────────────────────────────────────────────────────────
+
+/** Rows and columns shown per sheet; the rest is counted in a note. */
+export const XLSX_MAX_ROWS = 500;
+export const XLSX_MAX_COLS = 50;
+
+/** All text below an element (a shared string's runs, an inline string). */
+function textOf(el: XmlElement): string {
+  return el.children.map((c) => (typeof c === "string" ? c : c.name === "rPh" ? "" : textOf(c))).join("");
+}
+
+/** Built-in number formats that are dates or times (ECMA-376 §18.8.30). */
+const BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
+
+/** Which cell styles (cellXfs index) format their number as a date. */
+function dateStyles(styles: XmlElement | null): Set<number> {
+  const out = new Set<number>();
+  if (!styles) return out;
+  const custom = new Map<number, string>();
+  for (const f of kids(child(styles, "numFmts") ?? styles, "numFmt")) {
+    custom.set(Number(attr(f, "numFmtId")), attr(f, "formatCode") ?? "");
+  }
+  // A custom format is a date when d/m/y/h appear outside quotes and [colour] tags.
+  const isDate = (code: string) => /[dmyh]/i.test(code.replace(/"[^"]*"|\[[^\]]*\]|\\./g, ""));
+  kids(child(styles, "cellXfs") ?? styles, "xf").forEach((xf, i) => {
+    const id = Number(attr(xf, "numFmtId") ?? 0);
+    if (BUILTIN_DATE_FORMATS.has(id) || (custom.has(id) && isDate(custom.get(id)!))) out.add(i);
+  });
+  return out;
+}
+
+/** Excel serial day → ISO date (with HH:MM when it has a time part). */
+function serialDate(serial: number, date1904: boolean): string {
+  // Day 25569 is 1970-01-01 in the 1900 system; the 1904 system is 1462 days later.
+  const iso = new Date(Math.round((serial - (date1904 ? 24107 : 25569)) * 86_400_000)).toISOString();
+  return Number.isInteger(serial) ? iso.slice(0, 10) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
+/** "BC12" → 54 (0-based column), or null. */
+function columnIndex(ref: string | undefined): number | null {
+  const letters = ref?.match(/^[A-Z]+/)?.[0];
+  if (!letters) return null;
+  let n = 0;
+  for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n - 1;
+}
+
+function cellValue(c: XmlElement, shared: string[], dates: Set<number>, date1904: boolean): string {
+  const type = attr(c, "t") ?? "n";
+  if (type === "inlineStr") return cleanSpaces(textOf(child(c, "is") ?? c));
+  const v = child(c, "v");
+  const raw = v ? textOf(v) : "";
+  if (raw === "") return "";
+  if (type === "s") return cleanSpaces(shared[Number(raw)] ?? "");
+  if (type === "b") return raw === "1" ? "TRUE" : "FALSE";
+  if (type === "n" && dates.has(Number(attr(c, "s") ?? -1))) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return serialDate(n, date1904);
+  }
+  return cleanSpaces(raw);
+}
+
+function sheetSection(name: string, sheet: XmlElement, shared: string[], dates: Set<number>, date1904: boolean): string {
+  const rows: string[][] = [];
+  for (const row of kids(child(sheet, "sheetData") ?? sheet, "row")) {
+    const cells: string[] = [];
+    let next = 0;
+    for (const c of kids(row, "c")) {
+      const col = columnIndex(attr(c, "r")) ?? next;
+      next = col + 1;
+      cells[col] = cellValue(c, shared, dates, date1904);
+    }
+    if (cells.some((s) => s)) rows.push(Array.from(cells, (s) => s ?? ""));
+  }
+  const heading = `## Sheet: ${escapeLine(cleanSpaces(name))}`;
+  if (!rows.length) return `${heading}\n\n_Empty sheet._`;
+  const width = Math.max(...rows.map((r) => r.length));
+  const shown = rows.slice(0, XLSX_MAX_ROWS + 1).map((r) => r.slice(0, XLSX_MAX_COLS));
+  const cut: string[] = [];
+  // The header row is not counted against the row cap.
+  if (rows.length - 1 > XLSX_MAX_ROWS) cut.push(`the first ${XLSX_MAX_ROWS} of ${rows.length - 1} rows`);
+  if (width > XLSX_MAX_COLS) cut.push(`the first ${XLSX_MAX_COLS} of ${width} columns`);
+  const note = cut.length ? `\n\n_Truncated: showing ${cut.join(" and ")}._` : "";
+  return `${heading}\n\n${markdownTable(shown)}${note}`;
+}
+
+async function extractXlsx(zip: OfficeZip): Promise<OfficeExtraction> {
+  const workbook = await zip.xml("xl/workbook.xml");
+  const rels = await zip.rels("xl/workbook.xml");
+  const date1904 = ["1", "true"].includes(attr(child(workbook, "workbookPr") ?? workbook, "date1904") ?? "");
+  const sharedXml = await zip.optionalXml("xl/sharedStrings.xml");
+  const shared = sharedXml ? kids(sharedXml, "si").map(textOf) : [];
+  const dates = dateStyles(await zip.optionalXml("xl/styles.xml"));
+  const sections: string[] = [];
+  for (const s of kids(child(workbook, "sheets") ?? workbook, "sheet")) {
+    const rid = prefixedAttr(s, "id");
+    const rel = rid ? rels.get(rid) : undefined;
+    // Chart sheets and dialog sheets have no cell grid.
+    if (!rel || !rel.type.endsWith("/worksheet") || !zip.has(rel.target)) continue;
+    sections.push(sheetSection(attr(s, "name") ?? `Sheet ${sections.length + 1}`, await zip.xml(rel.target), shared, dates, date1904));
+  }
+  return {
+    kind: "xlsx",
+    markdown: sections.length ? sections.join("\n\n") : "_This workbook has no sheets._",
+    sheets: sections.length,
+  };
+}
+
 // ─── Entry point ───────────────────────────────────────────────────────────
 
 /**
- * Extract a pptx or docx. `kind` is what the file name claims; the package
+ * Extract a pptx, docx or xlsx. `kind` is what the file name claims; the package
  * has to agree (a docx renamed .pptx is refused, not guessed at).
  */
 export async function extractOffice(bytes: Uint8Array, kind: OfficeKind): Promise<OfficeExtraction> {
@@ -708,6 +818,12 @@ export async function extractOffice(bytes: Uint8Array, kind: OfficeKind): Promis
       throw new OfficeFileError("That file is not a PowerPoint presentation (.pptx).");
     }
     return extractPptx(zip);
+  }
+  if (kind === "xlsx") {
+    if (!zip.has("xl/workbook.xml")) {
+      throw new OfficeFileError("That file is not an Excel workbook (.xlsx).");
+    }
+    return extractXlsx(zip);
   }
   if (!zip.has("word/document.xml")) {
     throw new OfficeFileError("That file is not a Word document (.docx).");

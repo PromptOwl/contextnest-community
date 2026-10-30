@@ -459,6 +459,21 @@ export async function getAdminSettings() {
   return request<AdminSettings>("/admin/settings");
 }
 
+/** Admin: is a newer release on npm, and the command that updates this install. */
+export interface UpdateStatus {
+  enabled: boolean;
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+  install: "container" | "npm";
+  command: string;
+}
+
+export async function getUpdateStatus() {
+  return request<UpdateStatus>("/admin/update-status");
+}
+
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
   patch: Partial<AdminSettings>,
@@ -2050,7 +2065,7 @@ export async function createPdfNode(
 }
 
 /**
- * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * Upload a .pptx, .docx or .xlsx as a governed markdown document (multipart). The
  * server extracts the slides/text into the body and keeps the original file
  * as a download linked from it.
  */
@@ -3608,6 +3623,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
+    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    waiting_on_me_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }

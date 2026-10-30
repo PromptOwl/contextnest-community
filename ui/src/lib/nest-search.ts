@@ -1,3 +1,5 @@
+import { fold } from "./node-filter";
+
 /** Client-side nest matching for the search palette.
  *
  * The server searches documents; nests are already in the cached list, so
@@ -19,12 +21,11 @@ export function matchNests(
   }>,
   query: string,
 ): NestMatch[] {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = fold(query).split(/\s+/).filter(Boolean);
   if (terms.length === 0) return [];
   return nests
     .filter((n) => {
-      const haystack = `${n.name ?? ""} ${n.description ?? ""} ${n.id ?? ""}`
-        .toLowerCase();
+      const haystack = fold(`${n.name ?? ""} ${n.description ?? ""} ${n.id ?? ""}`);
       return terms.every((t) => haystack.includes(t));
     })
     // Pinned nests lead among matches, so the palette and the dashboard agree

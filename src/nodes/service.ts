@@ -17,6 +17,7 @@ import {
   pdfSidecarPath,
   viewMetaSchema,
   TITLE_MAX_LENGTH,
+  withVaultLock,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -24,7 +25,7 @@ import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
-import { withIoStats } from "./io-stats.js";
+import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -59,7 +60,7 @@ import {
   documentAlwaysIncludeFlag,
 } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
-import { notifyMentions } from "../governance/mention-notify.js";
+import { notifyMentions as sendMentions } from "../governance/mention-notify.js";
 import {
   resolveUserRoles,
   stewardDocumentCreator,
@@ -92,7 +93,7 @@ import {
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { nestDoneTags } from "../nests/service.js";
-import { notifyAssigned } from "../governance/assign-notify.js";
+import { notifyAssigned as sendAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
@@ -117,6 +118,24 @@ import {
   type FieldDefinition,
   type FieldsPatch,
 } from "./custom-fields.js";
+
+/**
+ * The document as the write just left it. The discovery cache folds every
+ * write in on the spot (engine.ts), so only a cold cache reads it back — a
+ * round trip a network mount charges ~0.5 s for. A copy, so a caller that
+ * shapes the result can't edit the cached set.
+ */
+async function writtenDocument(nestId: string, id: string): Promise<ContextNode> {
+  const engine = await engineCache.get(nestId);
+  const cached = engine.cachedDocument(id);
+  return cached ? structuredClone(cached) : engine.storage.readDocument(id);
+}
+
+// Awaited inside a write, so timed as part of it (io-stats).
+const notifyMentions = (p: Parameters<typeof sendMentions>[0]) =>
+  timed(p.nestId, "notify:mentions", () => sendMentions(p));
+const notifyAssigned = (p: Parameters<typeof sendAssigned>[0]) =>
+  timed(p.nestId, "notify:assigned", () => sendAssigned(p));
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -548,13 +567,15 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 export interface OriginalFile {
   file: string;
   filename: string;
-  kind: "pptx" | "docx";
+  kind: "pptx" | "docx" | "xlsx";
   bytes: number;
   sha256: string;
+  /** Hash of the body this file produced, to tell hand edits apart on re-upload. */
+  body_sha256?: string;
 }
 
 /** Server-minted original names only — the traversal defense for the route. */
-export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx)$/;
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx|xlsx)$/;
 
 export function isOriginalFile(v: unknown): v is OriginalFile {
   const o = v as OriginalFile | null | undefined;
@@ -1687,6 +1708,10 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   prime?: boolean | null;
   /** Document-scope always-include flag. `null` clears it back to the tags. */
   alwaysInclude?: boolean | null;
+  /** A re-uploaded Office file (office-service.ts): the new `metadata.original`,
+   *  and every earlier one, so each version's file stays downloadable. */
+  original?: OriginalFile;
+  previousOriginals?: OriginalFile[];
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1929,7 +1954,7 @@ export async function createNode(
   const generatedId = !input.id && !slugify(input.title);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await createNodeOnce(nestId, input, userEmail, opts);
+      return await withWriteStats(nestId, "create", () => createNodeOnce(nestId, input, userEmail, opts));
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
         // A rule refusing the document is the caller's to fix — kept as a 400
@@ -2231,7 +2256,7 @@ async function createNodeOnce(
       throw err;
     }
 
-    const node = await storage.readDocument(id);
+    const node = await writtenDocument(nestId, id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
@@ -2651,7 +2676,7 @@ async function stagePdfImport(
     try {
       await storage.writeDocument(nodeId, priorRaw);
       if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId] });
     } catch (err) {
       console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
     }
@@ -2695,7 +2720,7 @@ export async function updateNode(
   userEmail: string,
   opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+  return withWriteStats(nestId, "update", () => withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
@@ -2922,6 +2947,11 @@ export async function updateNode(
           always_include: patch.alwaysInclude,
         };
       }
+      if (patch.original) {
+        const files = { original: patch.original, previous_originals: patch.previousOriginals ?? [] };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: { ...(node.frontmatter.metadata as any), ...files } } };
+        opInput.metadata = { ...(opInput.metadata as object), ...files };
+      }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
           { ...((node.frontmatter.metadata as Record<string, unknown>) ?? {}) },
@@ -3075,7 +3105,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // A draft revision is NOT appended to the engine's history chain. That
@@ -3141,7 +3171,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
@@ -3204,7 +3234,7 @@ export async function updateNode(
         "Couldn't save your changes. Please reload the document and try again."
       );
     }
-  });
+  }));
 }
 
 /**
@@ -3376,7 +3406,16 @@ export interface MoveNodeResult {
  * prefix, so a doc moved out of a shared folder leaves that share and a
  * doc moved into one joins it. That asymmetry is the feature.
  */
-export async function moveNode(
+export function moveNode(
+  nestId: string,
+  nodeId: string,
+  folder: string,
+  userEmail: string,
+): Promise<MoveNodeResult> {
+  return withWriteStats(nestId, "move", () => moveNodeInner(nestId, nodeId, folder, userEmail));
+}
+
+async function moveNodeInner(
   nestId: string,
   nodeId: string,
   folder: string,
@@ -3414,8 +3453,12 @@ export async function moveNode(
 
   // Destination check through write under the destination's lock — same
   // check-then-write race create takes it for, and the same key, so a
-  // concurrent create at that id can't slip in between either.
-  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+  // concurrent create at that id can't slip in between either. The vault lock
+  // inside it is the one every engine write op takes: a move rewrites the doc,
+  // its .versions chain and the index outside the catalog, so without it a
+  // concurrent publish could checkpoint the nest mid-move. Node lock first,
+  // vault lock second — the order create and update take them in.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), () => withVaultLock(storage.root, async () => {
     try {
       await storage.readDocument(newId);
       throw new ConflictError(
@@ -3533,14 +3576,14 @@ export async function moveNode(
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
     try {
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
     } catch (err) {
       console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });
     return { node: moved, previousId: nodeId };
-  });
+  }));
 }
 
 /**
@@ -3604,7 +3647,7 @@ export async function discardDraft(
     // Same move rejectSuggestion makes, and for the same reason — a discard
     // must not cost a version.
     await storage.writeDocument(nodeId, raw);
-    await storage.regenerateIndex();
+    await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
@@ -3714,7 +3757,7 @@ export async function deleteNodeIfUnchanged(
   });
 }
 
-export async function deleteNode(
+export function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
@@ -3723,6 +3766,15 @@ export async function deleteNode(
      *  leaves, so it is where "which agent deleted this" has to live. */
     client?: ClientMetadata;
   } = {},
+): Promise<void> {
+  return withWriteStats(nestId, "delete", () => deleteNodeInner(nestId, nodeId, userEmail, opts));
+}
+
+async function deleteNodeInner(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { client?: ClientMetadata },
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 

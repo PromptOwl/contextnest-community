@@ -39,6 +39,9 @@ import AccountPage from '../page_factory/app/account_page.js';
 import SidebarRailPage from '../page_factory/app/sidebar_rail_page.js';
 import ImportFolderPage from '../page_factory/app/import_folder_page.js';
 import NestArchivePage from '../page_factory/app/nest_archive_page.js';
+import NewDocumentPage from '../page_factory/app/new_document_page.js';
+import NewFolderPage from '../page_factory/app/new_folder_page.js';
+import NestImportPage from '../page_factory/app/nest_import_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -63,6 +66,15 @@ import ImportFolderApi from './import_folder_api.js';
 
 // REST helper used to arrange Nest archive preconditions (nests, links, requests)
 import NestArchiveApi from './nest_archive_api.js';
+
+// REST helper used to arrange New Document preconditions (nests, folders, governance)
+import NewDocumentApi from './new_document_api.js';
+
+// REST helper used to arrange New Folder preconditions (nests, shares, archive)
+import NewFolderApi from './new_folder_api.js';
+
+// REST helper used to arrange Nest Import preconditions (nests, documents, shares)
+import NestImportApi from './nest_import_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -348,6 +360,48 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get nestArchiveApi() {
         if (!this._nestArchiveApi) this._nestArchiveApi = new NestArchiveApi(this.page);
         return this._nestArchiveApi;
+      },
+
+      // Nest page → New Document editor
+      get newDocumentPage() {
+        return new NewDocumentPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the New Document suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get newDocumentApi() {
+        if (!this._newDocumentApi) this._newDocumentApi = new NewDocumentApi(this.page);
+        return this._newDocumentApi;
+      },
+
+      // Nest page → New Folder dialog, Contents tree
+      get newFolderPage() {
+        return new NewFolderPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the New Folder suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get newFolderApi() {
+        if (!this._newFolderApi) this._newFolderApi = new NewFolderApi(this.page);
+        return this._newFolderApi;
+      },
+
+      // Nest page → Import dialog (Files, Upload PDF, Whole vault)
+      get nestImportPage() {
+        return new NestImportPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Import suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestImportApi() {
+        if (!this._nestImportApi) this._nestImportApi = new NestImportApi(this.page);
+        return this._nestImportApi;
       },
 
       /**

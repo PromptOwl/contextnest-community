@@ -60,7 +60,10 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" \
             -v "$RUNNER_TEMP/rendered:/out:ro" \
-            "$KUBECONFORM_IMAGE" -strict -summary /out
+            "$KUBECONFORM_IMAGE" -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /out
 
   kind:
     name: kind install smoke test

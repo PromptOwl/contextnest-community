@@ -29,6 +29,12 @@ export interface NodeFilters {
   type?: string;
 }
 
+/** Lowercase with accents stripped, so "cafe" finds "Café" — same rule as the
+ *  server's search (src/nodes/search.ts). For comparing only. */
+export function fold(s: string): string {
+  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
 function normTag(t: string): string {
   return t.replace(/^#/, "").toLowerCase();
 }
@@ -53,10 +59,10 @@ export function matchesFilters(
   }
 
   if (search) {
-    const needle = search.toLowerCase();
-    const inTitle = node.title?.toLowerCase().includes(needle) ?? false;
+    const needle = fold(search);
+    const inTitle = node.title ? fold(node.title).includes(needle) : false;
     const inTags = Array.isArray(node.tags)
-      ? node.tags.some((t) => t.toLowerCase().includes(needle))
+      ? node.tags.some((t) => fold(t).includes(needle))
       : false;
     if (!inTitle && !inTags) return false;
   }

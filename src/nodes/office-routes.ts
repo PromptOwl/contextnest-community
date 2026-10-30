@@ -1,5 +1,5 @@
 /**
- * Office documents — a .pptx or .docx uploaded as a governed markdown
+ * Office documents — a .pptx, .docx or .xlsx uploaded as a governed markdown
  * document (office-service.ts has the model).
  *
  *   POST /nests/:nestId/nodes/office        multipart `file` or JSON
@@ -10,7 +10,7 @@
  * Security posture of the served original:
  *   - read tier through the nest middleware, then canReadNode on every
  *     document that binds the file (office-service.ts readOriginal);
- *   - only server-minted `<uuid>.(pptx|docx)` names reach the filesystem;
+ *   - only server-minted `<uuid>.(pptx|docx|xlsx)` names reach the filesystem;
  *   - `Content-Disposition: attachment` always, the Office content type,
  *     nosniff and CSP `sandbox`, so the response is never rendered as a page;
  *   - Cache-Control `private, no-cache` + a sha256 ETag, as for PDFs.
@@ -81,8 +81,9 @@ officeNodeRoutes.post(
         node: toNodeResponse(saved.node),
         version: saved.version,
         stewards: await stewardsFor(nestId, saved.node.id),
+        ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
       },
-      201,
+      saved.created ? 201 : 200,
     );
   },
 );

@@ -5,8 +5,8 @@
  * check the sealed chain hashes against a fresh read from disk.
  */
 import { it, expect, beforeEach, afterEach } from "vitest";
-import { NestStorage, publishDocument, serializeDocument } from "@promptowl/contextnest-engine";
-import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers";
+import { NestStorage, publishDocument, serializeDocument, withVaultLock } from "@promptowl/contextnest-engine";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest, settleSeals } from "./helpers";
 
 let env: ReturnType<typeof setupTestEnv>;
 beforeEach(() => {
@@ -45,6 +45,7 @@ async function setup() {
 
 /** Each (version, hash) pair the head sealed must exist in the history on disk. */
 async function expectHeadMatchesDisk(storage: NestStorage) {
+  await settleSeals();
   const fresh = await storage.findAllHistories(() => {}); // the callback bypasses the cache
   const last = (await storage.readCheckpointHistory())!.checkpoints.at(-1)!;
   for (const [id, hash] of Object.entries(last.document_chain_hashes)) {
@@ -75,12 +76,17 @@ it("stays consistent when another process publishes to the same nest", async () 
   const b = await create("Beta");
   await approve(b); // warms the cache
 
-  // A second process: its own storage instance on the same folder.
+  // A second process: its own storage instance on the same folder. It writes
+  // under the vault lock, as every engine operation does, so it cannot land in
+  // the middle of this process's queued seal.
+  await settleSeals();
   const other = new NestStorage(nestPath);
-  const node = await other.readDocument(b);
-  node.body = "\n# Beta\n\nedited elsewhere\n";
-  await other.writeDocument(b, serializeDocument(node));
-  await publishDocument(other, b, { editedBy: "other" });
+  await withVaultLock(nestPath, async () => {
+    const node = await other.readDocument(b);
+    node.body = "\n# Beta\n\nedited elsewhere\n";
+    await other.writeDocument(b, serializeDocument(node));
+    await publishDocument(other, b, { editedBy: "other" });
+  });
   // Discovery picks the new version up on its next refresh (its TTL). Drop it
   // now, but leave the history cache alone: that is the case under test.
   engine.dropDiscoveryCache();

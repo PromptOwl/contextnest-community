@@ -40,3 +40,13 @@ export function nestNameProblem(name: string): string | null {
  * deleted (CU-wdqcq01e6u).
  */
 export const confirmableName = (s: string) => s.trim().replace(/\s+/g, " ");
+
+/**
+ * `view` with its nest name swapped for `name` when it shows nest `nestId`;
+ * otherwise `view` itself. A rename has to reach the app's view state — the
+ * breadcrumb, Connect, Settings and Board read the name from there (CU-wdqcq06a1p).
+ */
+export function withNestName<V extends object>(view: V, nestId: string, name: string): V {
+  const v = view as { nestId?: string; nestName?: string };
+  return v.nestId === nestId && typeof v.nestName === "string" ? { ...view, nestName: name } : view;
+}

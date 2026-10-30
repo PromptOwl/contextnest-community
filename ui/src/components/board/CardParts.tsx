@@ -13,6 +13,7 @@
  */
 import { useState, type ReactNode } from "react";
 import {
+  AlertTriangle,
   Ban,
   CalendarDays,
   ListTree,
@@ -187,12 +188,15 @@ export function DueChip({
   onChange: (d: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Overdue carries a warning icon and label, not only red (CU-wdqcq06a1x).
+  const overdue = !!due && dueState(due, today) === "overdue";
   const chip = due ? (
     <span
       className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${DUE_TONES[dueState(due, today)]}`}
-      title={`Due ${due}${dueState(due, today) === "overdue" ? " — overdue" : ""}`}
+      title={`Due ${due}${overdue ? " — overdue" : ""}`}
     >
-      <CalendarDays className="h-3 w-3" />
+      {overdue ? <AlertTriangle className="h-3 w-3" aria-hidden /> : <CalendarDays className="h-3 w-3" />}
+      {overdue && <span className="sr-only">Overdue:</span>}
       {formatDue(due, today)}
     </span>
   ) : (
