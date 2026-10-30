@@ -177,8 +177,10 @@ describe("capFolderDocs (first few documents per folder, then 'View all')", () =
   it("leaves a short folder alone", () => {
     expect(capFolderDocs(groups, 5).find((x) => x.folder === "policies")!.items).toHaveLength(2);
   });
-  it("never caps the loose root documents — they are the top of the index", () => {
-    expect(capFolderDocs(groups, 5).find((x) => x.folder === "Root")!.items).toHaveLength(7);
+  it("caps the loose root documents too, so Overview isn't a flat list (CU-wdqcq06a1q)", () => {
+    const root = capFolderDocs(groups, 5).find((x) => x.folder === "Root")!;
+    expect(root.items).toHaveLength(6);
+    expect(root.items[5]).toMatchObject({ more: { folder: "Root", hidden: 2, total: 7 } });
   });
   it("does not mutate the input groups", () => {
     capFolderDocs(groups, 5);

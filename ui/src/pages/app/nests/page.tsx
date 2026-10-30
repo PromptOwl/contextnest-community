@@ -60,6 +60,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { DeleteNestDialog } from "../../../components/DeleteNestDialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { selectionState, toggleMany } from "../../../lib/bulk-select";
 import { RenameNestDialog } from "../../../components/RenameNestDialog";
 import { ImportFolderModal } from "../../../components/ImportFolderModal";
 
@@ -190,6 +192,20 @@ export default function NestsPage() {
     });
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
+  // Mirror server delete rule: real owner, or admin caretaker on the
+  // ungoverned commons in key mode. Open-mode anon nests already report
+  // is_owner=true via effectivePermission.
+  const canDeleteNest = (nest: any) =>
+    (nest.is_owner ?? (nest.permission ?? "owner") === "owner") ||
+    (nest.user_id === ANON_USER_ID && authMode !== "open" && isAdmin);
+  // Bulk archive/delete (CU-wdqcq06a1u): only nests you could delete one by
+  // one, and only those on screen — a filter never hides what an action hits.
+  const [bulkSelected, setBulkSelected] = useState<Map<string, any>>(() => new Map());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState("");
+  const selectableNests = nests.filter(canDeleteNest);
+  const bulkTargets = selectableNests.filter((n) => bulkSelected.has(n.id));
   // The Documents browser offers a clear affordance whenever a control is
   // narrowing its list; the Dashboard only offered one once nothing matched,
   // leaving a filtered-but-non-empty grid with no way back.
@@ -379,6 +395,24 @@ export default function NestsPage() {
         return next;
       });
     }
+  };
+
+  const runBulk = async (kind: "archive" | "delete") => {
+    const targets = bulkTargets;
+    setBulkBusy(true);
+    const results = await Promise.allSettled(
+      targets.map((n) => (kind === "archive" ? api.archiveNest(n.id) : api.deleteNest(n.id))),
+    );
+    const failed = targets.filter((_, i) => results[i].status === "rejected");
+    const done = targets.length - failed.length;
+    const s = (n: number) => `${n} nest${n === 1 ? "" : "s"}`;
+    if (done) toast.success(kind === "archive" ? `${s(done)} archived — find them under Archived` : `${s(done)} deleted`);
+    if (failed.length) toast.error(`${s(failed.length)} couldn't be ${kind}d: ${failed.map((n) => n.name).join(", ")}`);
+    // Keep the failures selected so a retry is one click.
+    setBulkSelected(new Map(failed.map((n) => [n.id, n])));
+    setBulkBusy(false);
+    setBulkDeleteOpen(false);
+    await fetchNests();
   };
 
   const requestDelete = (nestId: string, nestName: string, isImported = false) => {
@@ -626,6 +660,36 @@ export default function NestsPage() {
                 >
                   Clear filters
                 </Button>
+              )}
+              {bulkTargets.length > 0 && (
+                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1 text-sm" data-testid="nest-bulk-bar">
+                  <Checkbox
+                    checked={selectionState(bulkSelected, selectableNests)}
+                    onCheckedChange={() => setBulkSelected((prev) => toggleMany(prev, selectableNests))}
+                    aria-label="Select all nests you can delete"
+                  />
+                  <span>{bulkTargets.length} selected</span>
+                  <Button size="sm" variant="outline" className="h-7" disabled={bulkBusy} onClick={() => void runBulk("archive")}>
+                    <Archive className="h-3.5 w-3.5 mr-1.5" />
+                    Archive
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-destructive hover:text-destructive"
+                    disabled={bulkBusy}
+                    onClick={() => {
+                      setBulkConfirm("");
+                      setBulkDeleteOpen(true);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                    Delete
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-7" disabled={bulkBusy} onClick={() => setBulkSelected(new Map())}>
+                    Clear
+                  </Button>
+                </div>
               )}
               </>
               )}
@@ -971,12 +1035,7 @@ export default function NestsPage() {
                   const relation = nestRelation(nest);
                   const isShared = relation === "shared";
                   const isDiscovered = relation === "discovered";
-                  // Mirror server delete rule: real owner, or admin caretaker
-                  // on the ungoverned commons in key mode. Open-mode anon
-                  // nests already report is_owner=true via effectivePermission.
-                  const canDelete =
-                    isOwner ||
-                    (isAnonymous && authMode !== "open" && isAdmin);
+                  const canDelete = canDeleteNest(nest);
                   // Mirror server rename rule (PATCH /nests/:nestId — owner or
                   // nest-admin), plus the same admin-caretaker carve-out for the
                   // anon commons in key mode. Gate on the caller's RAW grant
@@ -1063,6 +1122,16 @@ export default function NestsPage() {
                       All three share ONE row: two absolutely-positioned groups
                       drifted apart as the gated icons came and went. */}
                       <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        {canDelete && (
+                          <span className="p-1.5 flex" onClick={(e) => e.stopPropagation()}>
+                            <Checkbox
+                              checked={bulkSelected.has(nest.id)}
+                              onCheckedChange={() => setBulkSelected((prev) => toggleMany(prev, [nest]))}
+                              aria-label={`Select nest ${nest.name}`}
+                              data-testid="nest-bulk-select"
+                            />
+                          </span>
+                        )}
                         {canRename && (
                           <button
                             type="button"
@@ -1136,9 +1205,9 @@ export default function NestsPage() {
                         </button>
                       </div>
 
-                      {/* Reserve room for up to three icons — a long nest name
+                      {/* Reserve room for up to four controls — a long nest name
                           ran under them once pinning added a third. */}
-                      <div className="flex items-start gap-3 pr-20">
+                      <div className="flex items-start gap-3 pr-28">
                         <div
                           className={`p-2 rounded-md ${isAnonymous ? "bg-amber-100" : "bg-primary/10"
                             }`}
@@ -1420,6 +1489,41 @@ export default function NestsPage() {
           }
         />
       )}
+
+      {/* Bulk delete: irreversible, so typed confirmation like the single
+          delete — the count, since there is no one name to type. */}
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={(open) => !bulkBusy && setBulkDeleteOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {bulkTargets.length} nests?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {bulkTargets.map((n) => n.name).join(", ")} — every document, version and setting in them is
+              removed for good. Archive instead if you might need them again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="bulk-delete-confirm">Type {bulkTargets.length} to confirm</Label>
+            <Input
+              id="bulk-delete-confirm"
+              value={bulkConfirm}
+              onChange={(e) => setBulkConfirm(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkBusy}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={bulkBusy || bulkConfirm.trim() !== String(bulkTargets.length)}
+              onClick={() => void runBulk("delete")}
+              data-testid="nest-bulk-delete-confirm"
+            >
+              {bulkBusy && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              Delete {bulkTargets.length} nests
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Editor (or non-owner nest admin) asking for the nest to be archived
           or deleted — the card-grid equivalent of NestView's overflow-menu

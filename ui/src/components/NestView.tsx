@@ -542,7 +542,8 @@ export function NestView({
 
 
   const openFolderInDocuments = (folder: string) => {
-    setFolderFilter(folder);
+    // "Root" is the loose top-level bucket — its "View all" is the unscoped list.
+    setFolderFilter(folder && folder !== "Root" ? folder : null);
     setActiveTab("documents");
   };
 
