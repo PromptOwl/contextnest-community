@@ -30,6 +30,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { BetaBadge } from "@/components/ui/beta-badge";
 import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../../../lib/api";
@@ -675,7 +685,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setSaving(false);
     }
   };
+  // Discard asks first — it throws away every unsaved edit (CU-wdqcq06a1t).
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const discard = () => {
+    setConfirmDiscard(false);
     if (settings) setDraft(settings);
     setOidcPick(null);
     setSaveError(null);
@@ -743,7 +756,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={discard}
+                onClick={() => setConfirmDiscard(true)}
                 disabled={!isDirty || saving}
               >
                 Discard
@@ -756,6 +769,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           )
         }
       />
+
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your edits go back to the last saved settings. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={discard} data-testid="settings-discard-confirm">
+              Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {saveError && (
         <div
