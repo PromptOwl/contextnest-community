@@ -101,6 +101,9 @@ describe("node row cleanup", () => {
       // Public docs-site URLs: move repoints them; delete keeps each path as a
       // detached 410 marker (node_id ''). Handled beside the loop.
       ["site_paths.node_id", "kept as a 410 marker on delete"],
+      // Seal queue: a row lives only until its batch is sealed, and sealing an
+      // id that was deleted or moved just refreshes its old folder's index.
+      ["nest_write_jobs.node_id", "transient; sealed and dropped right after the write"],
     ]);
     const NODE_ID_COLUMNS = new Set([
       "node_id",

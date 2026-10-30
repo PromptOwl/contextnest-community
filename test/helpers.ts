@@ -9,6 +9,16 @@ import { _reset as resetRateLimits } from "../src/shared/rate-limit.js";
  *  more than REGISTER_LIMIT (3) users from the same IP. Dynamic import grabs
  *  the post-resetModules instance the running app actually uses (the top-level
  *  import above is stale after createTestApp's vi.resetModules). */
+/** Finish every queued seal. Writes return before their checkpoint and index
+ *  update (src/nodes/seal-queue.ts); a test that reads either waits here first.
+ *  Dynamic imports, for the post-resetModules instances the app runs on. */
+export async function settleSeals() {
+  const { getDb } = await import("../src/db/client.js");
+  const { scheduleSeal } = await import("../src/nodes/seal-queue.js");
+  const rows = (await getDb().all("SELECT DISTINCT nest_id FROM nest_write_jobs")) as Array<{ nest_id: string }>;
+  await Promise.all(rows.map((r) => scheduleSeal(r.nest_id)));
+}
+
 export async function resetAuthRateLimit() {
   const rl = await import("../src/shared/rate-limit.js");
   rl._reset();

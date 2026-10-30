@@ -2676,7 +2676,7 @@ async function stagePdfImport(
     try {
       await storage.writeDocument(nodeId, priorRaw);
       if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId] });
     } catch (err) {
       console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
     }
@@ -3576,7 +3576,7 @@ async function moveNodeInner(
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
     try {
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
     } catch (err) {
       console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
@@ -3647,7 +3647,7 @@ export async function discardDraft(
     // Same move rejectSuggestion makes, and for the same reason — a discard
     // must not cost a version.
     await storage.writeDocument(nodeId, raw);
-    await storage.regenerateIndex();
+    await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
