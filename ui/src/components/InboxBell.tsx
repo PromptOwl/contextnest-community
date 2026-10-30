@@ -1,7 +1,6 @@
 /**
- * Header bell for My Work: what waits on you, from any page. The rail's My
- * Work entry shows the same count, so the header hides this while the rail is
- * open on a desktop.
+ * Header bell for My Work: what waits on you, from any page — whether the
+ * rail is open or not (CU-wdqcq067ub).
  */
 import { useQuery } from "@tanstack/react-query";
 import { Bell } from "lucide-react";

@@ -1471,7 +1471,6 @@ export default function App() {
 
             {adminStatus?.me && (
               <InboxBell
-                className={showSidebar ? "md:hidden" : ""}
                 onOpen={() => setView({ page: "dashboard", tab: "my-work" })}
               />
             )}
