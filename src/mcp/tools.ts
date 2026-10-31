@@ -4,6 +4,8 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { approvedOnlyForSurfaceEdit, surfaceEditsHiddenFor, isHidden as isSurfaceHidden } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
@@ -1735,6 +1737,19 @@ async function resolveLlmBody(
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
   if (!stewardship) {
+    // A pending Surfaces edit is a chat-derived draft: below write, the
+    // approved body only (security round 2, M1d).
+    if (await approvedOnlyForSurfaceEdit(ctx.nestId, node.id, ctx.userId)) {
+      const approvedV = await versions.getApprovedVersion(ctx.nestId, node.id);
+      if (approvedV == null) return null;
+      try {
+        const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approvedV)).raw;
+        ctx.servedVersions?.set(node.id, approvedV);
+        return raw;
+      } catch {
+        return null;
+      }
+    }
     // Ungoverned: the live body, which is the document's current version.
     const live = Number(node.frontmatter?.version);
     if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
@@ -2704,12 +2719,23 @@ async function runTool(
       // timeout on a 444-node governed nest while REST answered at once.
       const matches = matchDocuments(await discoverForSearch(storage), query)
         .filter((n) => !isDerivedAnnotationsNode(n.id));
-      const accessible = await filterAccessible(
+      let accessible = await filterAccessible(
         nestId,
         userId,
         userEmail,
         matches,
       );
+      // A hit on a pending Surfaces edit must not reveal it matched only the
+      // chat-derived draft: re-match those on the approved body (round 2, M1d).
+      const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+      if (accessible.some((n) => isSurfaceHidden(surfaceEdits, n.id))) {
+        const rebodied = await Promise.all(
+          accessible.map(async (n) =>
+            isSurfaceHidden(surfaceEdits, n.id) ? { ...n, body: await approvedReadableBody(nestId, n.id) } : n,
+          ),
+        );
+        accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
+      }
       const count = accessible.length;
       if (count === 0)
         return {

@@ -209,7 +209,7 @@ describe("guard against the real permission model", () => {
     expect(r.data.guard.detail.non_user_principals).toEqual([]);
   });
 
-  it("AC-GRD-05: another agent reading N blocks capture; this binding's own listener does not", async () => {
+  it("AC-GRD-05 (amended by S2a carry-forward 2): another agent reading N blocks capture; only the server-tied listener of a binding does not", async () => {
     const n = await newNest(alice);
     await S.db.getDb().run(
       "INSERT INTO metacognition_agents (nest_id, node_id, persona_user_id, created_by) VALUES (?, 'nodes/listener', ?, ?)",
@@ -219,17 +219,17 @@ describe("guard against the real permission model", () => {
     const other = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-05", nest_id: n }, alice.apiKey);
     expect(other.data.guard.capture_ok).toBe(false);
     expect(other.data.guard.detail.non_user_principals).toContain("agent");
-    // The listener is recorded server-side when Surfaces creates the binding
-    // (round-2 M3: never client-supplied), so this goes through the service.
-    const own = await S.bindings.createBinding({
-      actorUserId: alice.userId,
-      installId,
-      conversationId: "C-05",
-      nestId: n,
-      listenerAgentNodeId: "nodes/listener",
-    });
-    expect(own.binding.capture_ok).toBe(true);
-    expect(own.binding.listener_agent_node_id).toBe("nodes/listener");
+    // Naming an existing agent as the listener no longer exempts it: the tie
+    // must be one Surfaces created for this binding.
+    await expect(
+      S.bindings.createBinding({ actorUserId: alice.userId, installId, conversationId: "C-05", nestId: n, listenerAgentNodeId: "nodes/listener" }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await S.db.getDb().run("DELETE FROM metacognition_agents WHERE nest_id = ? AND node_id = 'nodes/listener'", [n]);
+    const { createBindingWithListener } = await import("../src/surfaces/services/listener-service.js");
+    const own = await createBindingWithListener({ actorUserId: alice.userId, installId, conversationId: "C-05", nestId: n });
+    expect(own.binding.listener_agent_node_id).toMatch(/^nodes\/nest-listener-/);
+    const again = await S.bindings.recheckBinding(own.binding.id);
+    expect(again.capture_ok).toBe(1);
   });
 
   it("AC-GRD-06: an enabled outbound connector on N → capture_ok false with connector", async () => {
@@ -251,7 +251,7 @@ describe("guard against the real permission model", () => {
     expect(v.status).toBeLessThan(300);
     const linked = await newNest(alice);
     await S.db.getDb().run(
-      "INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by) VALUES (?, ?, 'nodes/x', ?, 'public', ?)",
+      "INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by, created_at) VALUES (?, ?, 'nodes/x', ?, 'public', ?, '2026-10-30T00:00:00.000Z')",
       [randomUUID(), linked, `s-${randomUUID()}`, alice.userId],
     );
     setConv("C-07", ["SA"]);

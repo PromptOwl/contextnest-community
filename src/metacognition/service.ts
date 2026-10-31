@@ -32,7 +32,7 @@ import {
 } from "../shared/model-credential.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { engineCache } from "../nodes/engine.js";
-import { resolveExportBody } from "../nodes/readable-body.js";
+import { resolveExportBody, agentInstructionsBody } from "../nodes/readable-body.js";
 import { discardDraft } from "../nodes/service.js";
 import { appendRunStep, closeRun } from "../workflow/run-service.js";
 import { storedEnvValues } from "../workflow/env-routes.js";
@@ -302,7 +302,8 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   let instructions: string | null = null;
   try {
     const doc = await storage.readDocument(agent.node_id);
-    instructions = await resolveExportBody(nestId, agent.node_id, doc.body || "");
+    // Approved text only — and never a pending Surfaces edit (security N6).
+    instructions = await agentInstructionsBody(nestId, agent.node_id, doc.body || "");
   } catch (err) {
     // Only a missing document is "no instructions"; a storage error fails the run.
     if (!(err instanceof DocumentNotFoundError)) {

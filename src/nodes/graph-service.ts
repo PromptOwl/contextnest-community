@@ -6,6 +6,7 @@
  * governance gaps.
  */
 
+import { swapSurfaceEditBodies } from "./readable-body.js";
 import {
   contextLinkTarget,
   extractContextLinks,
@@ -184,7 +185,9 @@ export async function buildNestGraph(
   const docs: ContextNode[] = (await storage.discoverDocuments()).filter(
     (d) => !isDerivedAnnotationsNode(d.id),
   );
-  const accessible = await filterAccessible(nestId, userId, userEmail, docs);
+  // A pending Surfaces edit's working copy is a chat-derived draft: below
+  // write, every edge is drawn from the approved body (round 3, N4).
+  const accessible = await swapSurfaceEditBodies(nestId, userId, await filterAccessible(nestId, userId, userEmail, docs));
 
   const idSet = new Set(accessible.map((d) => d.id));
   const allNodes: GraphNode[] = accessible.map((d) => ({

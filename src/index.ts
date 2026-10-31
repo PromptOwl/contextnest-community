@@ -26,6 +26,7 @@ import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { startSurfacesGuardLoop } from "./surfaces/services/guard-runner.js";
+import { startSurfacesIngestLoops } from "./surfaces/services/lifecycle-service.js";
 import { startRunRetention } from "./workflow/run-retention.js";
 import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
@@ -302,6 +303,7 @@ ${config.AUTH_MODE === "key" ? `
 
   // Surfaces guard re-check loop (no-op unless FEATURE_SURFACES is on).
   startSurfacesGuardLoop();
+  startSurfacesIngestLoops();
 
   // Review SLA escalation (per-nest review_sla_hours). Independent of the
   // workflow plane — that loop above is a no-op unless its flag is on, and

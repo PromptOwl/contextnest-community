@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2388,6 +2389,17 @@ export function runMigrations(db: Database.Database): void {
       db.exec(surfacesS1Ddl("(datetime('now'))"));
     })();
     recordMigration("079_surfaces_core");
+  }
+
+  // 080: Surfaces ingestion (S2a): install secrets, OAuth state, event dedup,
+  //   the encrypted buffer, windows/verdicts, fetch queue, proposals,
+  //   fingerprints, counters, purge runs, spend budgets. Shared DDL with
+  //   Postgres (src/surfaces/schema-ddl-s2a.ts).
+  if (!hasMigration("080_surfaces_ingest")) {
+    db.transaction(() => {
+      db.exec(surfacesS2aDdl("(datetime('now'))"));
+    })();
+    recordMigration("080_surfaces_ingest");
   }
 }
 

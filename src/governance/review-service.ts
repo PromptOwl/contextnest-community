@@ -807,6 +807,44 @@ export async function cancelReview(params: {
   });
 }
 
+/**
+ * Withdraw a pending review as the SYSTEM (Surfaces: the binding that
+ * proposed it was paused, removed or uninstalled). Unlike cancelReview it
+ * needs no person's rights and no proposer identity to still exist, so a
+ * withdrawal can't be stranded by a deleted agent (security round 2, M2).
+ *
+ * Compare-and-set on this exact review id while still pending, under the
+ * node lock approve/reject take: a review a person already decided is left
+ * alone. Returns the review's submitter and node so the caller can discard
+ * the draft, or null when there was nothing (left) to withdraw.
+ */
+export const SYSTEM_WITHDRAWER = "system:surfaces";
+
+export async function withdrawReviewAsSystem(params: {
+  nestId: string;
+  reviewId: string;
+  reason: string;
+}): Promise<{ nodeId: string; version: number; requestedBy: string } | null> {
+  const db = getDb();
+  const row = (await db.get("SELECT node_id FROM review_requests WHERE id = ? AND nest_id = ?", [params.reviewId, params.nestId])) as
+    | { node_id: string }
+    | undefined;
+  if (!row) return null;
+  return withNodeWriteLock(nodeWriteKey(params.nestId, row.node_id), async () => {
+    const pending = (await db.get("SELECT * FROM review_requests WHERE id = ? AND nest_id = ? AND status = 'pending'", [params.reviewId, params.nestId])) as any;
+    if (!pending) return null;
+    const r = await db.run(
+      `UPDATE review_requests SET status = 'cancelled', resolved_by = ?, resolution_note = ?, resolved_at = ${nowExpr(db)}
+        WHERE id = ? AND status = 'pending'`,
+      [SYSTEM_WITHDRAWER, params.reason.slice(0, 200), pending.id],
+    );
+    if (r.changes === 0) return null;
+    await markReviewNotificationsRead(pending.id);
+    await db.run("UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?", [params.nestId, pending.node_id, pending.version]);
+    return { nodeId: String(pending.node_id), version: Number(pending.version), requestedBy: String(pending.requested_by) };
+  });
+}
+
 // ─── Queue ──────────────────────────────────────────────────────────────
 
 export async function getReviewQueue(params: {

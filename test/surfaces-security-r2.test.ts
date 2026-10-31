@@ -350,7 +350,7 @@ describe("M4: explicit_public_bind relaxes only the user-reader subset rule", ()
     const pub = await newNest(root);
     await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, root.apiKey);
     const linked = await newNest(root);
-    await S.db.getDb().run("INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by) VALUES (?, ?, 'nodes/x', ?, 'public', ?)", [
+    await S.db.getDb().run("INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by, created_at) VALUES (?, ?, 'nodes/x', ?, 'public', ?, '2026-10-30T00:00:00.000Z')", [
       randomUUID(), linked, `s-${randomUUID()}`, root.userId,
     ]);
     const hooked = await newNest(root);
