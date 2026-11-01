@@ -15,6 +15,7 @@ import { resolveNestAccess, resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { personalNestRefusal, surfacesPersonalOwner, type PersonalNestOwner } from "../surfaces/draft-visibility.js";
+import { adminFolderRefusal, adminFolderRefusedMany, ADMIN_FOLDER_REFUSAL } from "../surfaces/admin-folders.js";
 import { sealedAgainstEmail } from "../surfaces/sealed.js";
 
 /**
@@ -962,6 +963,9 @@ export async function canUserApprove(
 ): Promise<PermissionResult> {
   const personal = await surfacesPersonalOwner(nestId);
   if (personal) return personalVerdict(personal, userEmail);
+  // A seed's admin-only folders: nest admins only (S7-R2 L4).
+  const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+  if (adminOnly) return { allowed: false, reason: adminOnly, role: "viewer" };
   const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   const allowSelf = await nestAllowsSelfApprove(nestId);
   // The actor is the user who SUBMITTED the version for review (or the version
@@ -1008,6 +1012,9 @@ export async function canUserApproveMany(
     }
     out.set(id, decideApproval([...roles], userEmail, allowSelf, actors.get(id) ?? null));
   }
+  // A seed's admin-only folders: nest admins only (S7-R2 L4).
+  const refused = await adminFolderRefusedMany(nestId, ids.filter((id) => out.get(id)?.allowed), userEmail);
+  for (const id of refused) out.set(id, { allowed: false, reason: ADMIN_FOLDER_REFUSAL, role: "viewer" });
   return out;
 }
 

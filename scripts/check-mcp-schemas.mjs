@@ -51,7 +51,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   does not model, so no engine op exists.
 //   93->94 Surfaces S2b round 4: context_surfaces_binding_invite — twin of POST /surfaces/bindings/:id/invite (/nest invite);
 //   Community-only binding state the engine does not model.
-const BASELINE = 94;
+//   94->97 Surfaces S3 (src/mcp/surfaces-tools.ts): context_surfaces_seed_apply, seed_list, seed_status — twins of
+//   POST /surfaces/seeds/apply, GET /surfaces/seeds, GET /surfaces/seeds/status; Community-only seed state
+//   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
+const BASELINE = 97;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

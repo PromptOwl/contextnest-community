@@ -157,7 +157,7 @@ export async function createProposal(input: {
         item.op === "edit" && item.target_node_id
           ? await proposeEditDraft(ctx, { id: item.target_node_id, content, note }, { bypassHold: forced })
           : p.expectedId
-            ? await proposeNewDraft(ctx, { folder: p.folder, title: item.title, content, note }, { id: p.expectedId, bypassHold: forced })
+            ? await proposeNewDraft(ctx, { folder: p.folder, title: item.title, content, note, ...(item.tags?.length ? { tags: item.tags } : {}) }, { id: p.expectedId, bypassHold: forced })
             : { ok: false as const, message: "no free id" };
     } catch {
       r = { ok: false as const, message: "error" };

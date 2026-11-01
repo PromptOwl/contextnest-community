@@ -3,6 +3,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
+import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2421,6 +2422,18 @@ export function runMigrations(db: Database.Database): void {
     if (pcols.length && !pcols.some((c) => c.name === "sealed")) {
       db.exec("ALTER TABLE surface_personal_nests ADD COLUMN sealed INTEGER NOT NULL DEFAULT 1");
     }
+  }
+
+  // 082: Surfaces seeds (S3, PRD §13): seed applications and apply claims,
+  //   the seed_origin / seed_hash record of everything a seed wrote, org-mirror
+  //   proposals made, and the default_seed / seed_library_nests settings.
+  //   Shared DDL with Postgres (src/surfaces/schema-ddl-s3.ts).
+  if (!hasMigration("082_surfaces_seeds")) {
+    db.transaction(() => {
+      db.exec(surfacesS3Ddl("(datetime('now'))"));
+      db.exec(surfacesS3AlterSqlite());
+    })();
+    recordMigration("082_surfaces_seeds");
   }
 }
 

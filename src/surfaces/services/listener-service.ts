@@ -33,7 +33,28 @@ export interface SurfacesListenerMarker {
   folders: string[];
   /** Folders whose drafts are people facts (role/owns/contact/team). */
   people_folders: string[];
+  /** §13, from the applied seed's manifest.listener: tags offered to the judge. */
+  domain_tags?: string[];
+  /** §13: categories added to the judge's must-never list. */
+  never_propose?: string[];
+  /** S7-R2 L5: the seed's plain-word synonyms for those categories. */
+  never_terms?: string[];
+  /** §13: folders only nest admins may approve into (the seed's admin_only). */
+  admin_folders?: string[];
+  /** §13: the seed's thesis document, read by the judge as its north star. */
+  thesis_node_id?: string | null;
 }
+
+/** The seed-derived listener settings beyond the folders. */
+export interface ListenerSeedSettings {
+  domainTags?: string[];
+  neverPropose?: string[];
+  neverTerms?: string[];
+  adminFolders?: string[];
+  thesisNodeId?: string | null;
+}
+const TERM = /^[\p{L}\p{N}][\p{L}\p{N}' -]{0,59}$/u;
+const terms = (v: unknown): string[] => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string" && TERM.test(x)))] : []);
 
 export type ListenerConfig = MetacognitionConfig & { surfaces_listener: SurfacesListenerMarker };
 
@@ -53,14 +74,28 @@ export function listenerConfig(bindingId: string, folders: readonly string[] = D
   };
 }
 
-/** The listener's folders, sanitised; the default when unset or malformed. */
-export function listenerFolders(agent: MetacognitionAgent): { folders: string[]; people: string[] } {
+const SLUG = /^[a-z0-9][a-z0-9_-]{0,40}$/;
+const slugs = (v: unknown): string[] => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string" && SLUG.test(x)))] : []);
+
+/** The listener's folders (and seed settings), sanitised; the default when unset or malformed. */
+export function listenerFolders(agent: MetacognitionAgent): {
+  folders: string[];
+  people: string[];
+  domainTags: string[];
+  neverPropose: string[];
+  neverTerms: string[];
+  adminFolders: string[];
+  thesisNodeId: string | null;
+} {
   const m = (agent.config as Partial<ListenerConfig>).surfaces_listener;
   const ok = (f: unknown): f is string => typeof f === "string" && (f === ROOT_FOLDER || /^[a-z0-9][a-z0-9_-]{0,60}\/$/i.test(f));
   const folders = Array.isArray(m?.folders) && m!.folders.every(ok) ? [...m!.folders] : [...DEFAULT_LISTENER_FOLDERS];
   const people = Array.isArray(m?.people_folders) ? m!.people_folders.filter((f) => ok(f) && folders.includes(f)) : [];
-  return { folders, people };
+  const adminFolders = Array.isArray(m?.admin_folders) ? m!.admin_folders.filter((f) => typeof f === "string" && FOLDER_PATH_RE.test(f)) : [];
+  const thesis = typeof m?.thesis_node_id === "string" && /^nodes\/[a-z0-9][a-z0-9/_-]{0,300}$/.test(m.thesis_node_id) && !m.thesis_node_id.includes("..") ? m.thesis_node_id : null;
+  return { folders, people, domainTags: slugs(m?.domain_tags), neverPropose: slugs(m?.never_propose), neverTerms: terms(m?.never_terms), adminFolders, thesisNodeId: thesis };
 }
+const FOLDER_PATH_RE = /^(?:[a-z0-9][a-z0-9_-]{0,60}\/){1,4}$/;
 
 /** Is this agent the server-created listener of exactly this binding? */
 export function isListenerOf(agent: MetacognitionAgent | null, bindingId: string): agent is MetacognitionAgent {
@@ -84,6 +119,9 @@ export async function ensureListener(bindingId: string, actorEmail: string): Pro
   ]);
   if (r.changes === 0) return (await getBindingRow(bindingId))?.listener_agent_node_id ?? null;
   await upsertAgent({ nestId: row.nest_id, nodeId, config: listenerConfig(bindingId), enabled: false, savedBy: actorEmail });
+  // §13: a binding on a seeded nest proposes into that seed's folders from the start.
+  const { configureListenerFromSeeds } = await import("./seed-service.js");
+  await configureListenerFromSeeds(bindingId);
   return nodeId;
 }
 
@@ -124,15 +162,31 @@ const FOLDER_RE = /^[a-z0-9][a-z0-9_-]{0,60}\/$/i;
  * people facts). Called by a seed when it is applied (S3) — the only way a
  * listener gets folders. "/" is the nest root. Keeps the server tie intact.
  */
-export async function setListenerFolders(bindingId: string, folders: string[], peopleFolders: string[] = []): Promise<void> {
+export async function setListenerFolders(bindingId: string, folders: string[], peopleFolders: string[] = [], seed: ListenerSeedSettings = {}): Promise<void> {
   const ok = (f: unknown): f is string => typeof f === "string" && (f === ROOT_FOLDER || FOLDER_RE.test(f));
   if (!folders.every(ok) || !peopleFolders.every((f) => ok(f) && folders.includes(f))) throw new Error("invalid listener folders");
+  const tagsOk = (v: string[] | undefined) => v === undefined || v.every((t) => typeof t === "string" && SLUG.test(t));
+  if (!tagsOk(seed.domainTags) || !tagsOk(seed.neverPropose)) throw new Error("invalid listener seed settings");
+  if (seed.neverTerms && !seed.neverTerms.every((t) => typeof t === "string" && TERM.test(t))) throw new Error("invalid listener seed settings");
+  if (seed.adminFolders && !seed.adminFolders.every((f) => typeof f === "string" && FOLDER_PATH_RE.test(f))) throw new Error("invalid listener seed settings");
   const row = await getBindingRow(bindingId);
   if (!row?.listener_agent_node_id) throw new Error("binding has no listener");
   const agent = await getAgent(row.nest_id, row.listener_agent_node_id);
   if (!isListenerOf(agent, bindingId)) throw new Error("binding has no listener");
   const cfg = agent.config as ListenerConfig;
-  const next = { ...cfg, surfaces_listener: { ...cfg.surfaces_listener, folders: [...new Set(folders)], people_folders: [...new Set(peopleFolders)] } };
+  const next = {
+    ...cfg,
+    surfaces_listener: {
+      ...cfg.surfaces_listener,
+      folders: [...new Set(folders)],
+      people_folders: [...new Set(peopleFolders)],
+      ...(seed.domainTags ? { domain_tags: [...new Set(seed.domainTags)] } : {}),
+      ...(seed.neverPropose ? { never_propose: [...new Set(seed.neverPropose)] } : {}),
+      ...(seed.neverTerms ? { never_terms: [...new Set(seed.neverTerms)] } : {}),
+      ...(seed.adminFolders ? { admin_folders: [...new Set(seed.adminFolders)] } : {}),
+      ...(seed.thesisNodeId !== undefined ? { thesis_node_id: seed.thesisNodeId } : {}),
+    },
+  };
   await getDb().run("UPDATE metacognition_agents SET config_json = ?, updated_at = ? WHERE nest_id = ? AND node_id = ? AND enabled = 0", [
     JSON.stringify(next),
     new Date().toISOString(),

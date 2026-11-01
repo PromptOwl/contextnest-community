@@ -15,13 +15,13 @@
  *    by them, and binds the DM through the normal guard: EffectiveReaders
  *    must be exactly {them} (server admins excluded and disclosed, R1).
  *    If it can't be, capture is refused and nothing is buffered (AC-DM-06).
- *  - No folders are created (Project November, §14): until a seed is applied
- *    (S3, `surfaces.default_seed`) the listener has none, so DM windows end
- *    `no_target_folder` and the counts-only alert goes to the OWNER (the nest
- *    is sealed), not to admins.
+ *  - The personal nest gets `surfaces.default_seed` (§13), applied as its
+ *    owner on first use. With no default seed (or one that fails) the
+ *    listener has no folders, so DM windows end `no_target_folder` and the
+ *    counts-only alert goes to the OWNER (the nest is sealed), not to admins.
  */
 import { getDb } from "../../db/client.js";
-import { createNest } from "../../nests/service.js";
+import { createNest, isStewardshipEnabled } from "../../nests/service.js";
 import { ORG_ID } from "../flags.js";
 import { getConnector } from "../registry.js";
 import { PRIVATE_NEST_DISCLOSURE } from "../core/card-model.js";
@@ -32,7 +32,7 @@ import { createBindingWithListener } from "./listener-service.js";
 import { getSettings, updateSettings } from "./settings-service.js";
 import { recordNotice } from "./notices.js";
 import { withdrawBindingCards } from "./expiry-service.js";
-import type { SurfaceSettings } from "../core/settings.js";
+import { SettingsError, type SurfaceSettings } from "../core/settings.js";
 
 export const DM_NOTICE_EVERY_MS = 7 * 24 * 3600_000;
 export const DM_OFF_NOTE =
@@ -120,6 +120,11 @@ export async function prepareDm(install: InstallRow, conversation: string, autho
     return null;
   }
   if (!binding || binding.conversation_kind !== "dm" || !binding.capture_ok || !binding.surface_ok) return null;
+  // §13: the personal nest gets the workspace's default seed, applied as its
+  // OWNER (sealed nests refuse server admins), once; it configures this
+  // binding's listener. No seed (or a failed one) leaves it unseeded.
+  const { applyDefaultSeed } = await import("./seed-service.js");
+  await applyDefaultSeed(nestId, userId);
   const nest = (await getDb().get("SELECT name FROM nests WHERE id = ?", [nestId])) as { name: string };
   await direct(install, author, dmIntro(nest.name), conversation);
   return binding;
@@ -138,6 +143,18 @@ async function purgeDmBindings(where: string, params: string[]): Promise<string[
  */
 export async function updateSettingsWithEffects(patch: Record<string, unknown>, actorUserId: string): Promise<SurfaceSettings> {
   const before = await getSettings();
+  // §13: a library must be a nest that exists (reads still follow each caller's access).
+  if (Array.isArray(patch.seed_library_nests)) {
+    for (const id of patch.seed_library_nests) {
+      if (typeof id === "string" && !(await getDb().get("SELECT 1 AS x FROM nests WHERE id = ?", [id]))) {
+        throw new SettingsError("seed_library_nests must name existing nests");
+      }
+      // S7-R2 M2: a library serves approved text, so it must have review on.
+      if (typeof id === "string" && !(await isStewardshipEnabled(id))) {
+        throw new SettingsError("a seed library must be a nest with review turned on (governed), so its seeds are approved text");
+      }
+    }
+  }
   const turningOff = before.dm_capture && patch.dm_capture === false;
   const turningOn = !before.dm_capture && patch.dm_capture === true;
   let next: SurfaceSettings;

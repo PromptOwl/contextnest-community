@@ -4,7 +4,7 @@
  * field by field (any violation → `error_schema`, no proposal), then every
  * item must clear the bar on words, not on the model's self-report.
  */
-import { hasDateExpression, leakedShingles, longestVerbatimRun, peopleBodyOk, sensitiveHit } from "./filters.js";
+import { categoryHit, hasDateExpression, leakedShingles, longestVerbatimRun, peopleBodyOk, sensitiveHit } from "./filters.js";
 
 export const VERBATIM_CAP = 15;
 
@@ -39,6 +39,8 @@ export interface VerdictItem {
   sensitive: boolean;
   conflict: { node_id: string; on_record_claim: string; thread_claim: string } | null;
   agent?: { name: string; description: string; read_folders: string[] } | null;
+  /** §13: domain tags from the seed's listener.domain_tags (0–3). */
+  tags?: string[];
 }
 
 export interface Verdict {
@@ -62,7 +64,13 @@ export interface NestIndex {
    *  root, or a top-level folder "<name>/"). From the listener config —
    *  never hard-coded here. */
   folders: string[];
+  /** §13: the tags an item may carry (the seed's domain_tags); none when unset. */
+  domainTags?: string[];
+  /** §13: admin-only folders: only agent suggestions may target them. */
+  adminFolders?: string[];
 }
+
+export const MAX_ITEM_TAGS = 3;
 
 type V = { ok: true; verdict: Verdict } | { ok: false; error: string };
 const fail = (error: string): V => ({ ok: false, error });
@@ -105,6 +113,13 @@ export function validateVerdict(raw: unknown, w: JudgeWindowView, n: NestIndex):
     if (x.op === "agent" && x.kind !== "agent_suggestion") return fail("op=agent only for agent_suggestion");
     if (typeof x.target_folder !== "string") return fail("target_folder");
     if (!n.folders.includes(x.target_folder)) return fail("target_folder");
+    if ((n.adminFolders ?? []).includes(x.target_folder) && x.kind !== "agent_suggestion") return fail("target_folder");
+    let tags: string[] = [];
+    if (x.tags !== undefined && x.tags !== null) {
+      const allowed = new Set(n.domainTags ?? []);
+      if (!Array.isArray(x.tags) || x.tags.length > MAX_ITEM_TAGS || !x.tags.every((t) => typeof t === "string" && allowed.has(t))) return fail("tags");
+      tags = [...new Set(x.tags as string[])];
+    }
     let target: string | null = null;
     if (x.op === "edit") {
       if (typeof x.target_node_id !== "string" || !n.nodeIds.has(x.target_node_id) || folderOf(x.target_node_id) !== x.target_folder) {
@@ -162,6 +177,7 @@ export function validateVerdict(raw: unknown, w: JudgeWindowView, n: NestIndex):
       sensitive: x.sensitive,
       conflict,
       agent,
+      tags,
     });
   }
   return { ok: true, verdict: { verdict: r.verdict, reason_code: r.reason_code, items, ask_signature: ask } };
@@ -177,6 +193,8 @@ export interface BarContext {
   /** Folders whose drafts hold people facts (role/owns/contact/team only);
    *  from the listener config, default none. */
   peopleFolders?: string[];
+  /** §13: the seed's never_propose categories and their synonyms (blocked like the lexicon, never waived). */
+  neverPropose?: string[];
   /** The dedup match for this item (service-computed), or null. */
   duplicate: { held_on?: string | null; source: string } | null;
 }
@@ -188,8 +206,19 @@ export function applyBar(item: VerdictItem, ctx: BarContext): BarResult {
   // 1. confidence (waived when forced)
   if (!ctx.forced && item.confidence < ctx.threshold) return { pass: false, reason: "low_confidence" };
   // 2. sensitive (never waived)
-  const allText = [item.title, item.summary, item.body, item.why, item.owner ?? ""].join("\n");
-  if (item.sensitive || sensitiveHit(allText)) return { pass: false, reason: "sensitive" };
+  // Every text field a card or a draft can carry (S7-R2 L5).
+  const allText = [
+    item.title,
+    item.summary,
+    item.body,
+    item.why,
+    item.owner ?? "",
+    item.agent?.name ?? "",
+    item.agent?.description ?? "",
+    item.conflict?.on_record_claim ?? "",
+    item.conflict?.thread_claim ?? "",
+  ].join("\n");
+  if (item.sensitive || sensitiveHit(allText) || categoryHit(allText, ctx.neverPropose ?? [])) return { pass: false, reason: "sensitive" };
   // 3. people-folder rules
   if ((ctx.peopleFolders ?? []).includes(item.target_folder)) {
     if (item.kind !== "fact" && item.kind !== "owner_deadline") return { pass: false, reason: "people_rules" };
