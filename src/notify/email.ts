@@ -368,12 +368,43 @@ export function deliverableRecipients(to: string | string[]): string[] {
  *  fire and forget can ignore it; an agent's notify reports it honestly. */
 export type EmailOutcome = "sent" | "failed" | "skipped" | "off";
 
+import { anySealedNest, nestIdFromLink, sealedNest } from "../surfaces/sealed.js";
+
 export async function sendEmailToRecipient(
   rawTo: string | string[],
   details: EmailEventDetails,
   ctx: OutboundContext = {},
 ): Promise<EmailOutcome> {
   const from = config.NOTIFY_EMAIL_FROM;
+  // A sealed personal nest (re-review R3-H1a/b): only its owner is emailed,
+  // and the message log keeps metadata only (recordOutbound, via nestId).
+  const sealedNestId = ctx.nestId ?? nestIdFromLink(details.link);
+  // Round 8 (re-review R4-L1): a send that names no nest (and has no
+  // `?nest=` link) on a server WITH sealed nests fails closed — it might be
+  // about one. Nothing is sent and the log keeps metadata only. A send that
+  // isn't about any nest says so with `noNest`.
+  if (!sealedNestId && !ctx.noNest && (await anySealedNest())) {
+    const { noNest: _n, ...logCtx } = ctx;
+    void _n;
+    await recordOutbound({
+      channel: "email",
+      ...logCtx,
+      recipients: Array.isArray(rawTo) ? rawTo : [rawTo],
+      subject: null,
+      status: "skipped",
+      error: "Not sent: the message didn't say which nest it is about.",
+    });
+    return "skipped";
+  }
+  if (sealedNestId) {
+    const sealed = await sealedNest(sealedNestId);
+    if (sealed) {
+      const owner = sealed.ownerEmail.toLowerCase();
+      rawTo = (Array.isArray(rawTo) ? rawTo : [rawTo]).filter((e) => e.toLowerCase() === owner);
+      if (!rawTo.length) return "skipped";
+      ctx = { ...ctx, nestId: sealedNestId };
+    }
+  }
   const to = deliverableRecipients(rawTo);
   const hasRecipient = to.length > 0;
   if (!transportSettings() || !from) return "off";
@@ -436,6 +467,33 @@ export async function sendEmailToRecipient(
         err instanceof Error ? err.message : err,
       );
     }
+    return "failed";
+  }
+}
+
+
+/**
+ * A plain one-off email (re-review R3-M1: the sealed-nest owner's password
+ * reset link). `secrets` are redacted from the message log, so the link's
+ * token never lands in an admin-visible store.
+ */
+/**
+ * A plain email that bypasses the sealed-nest recipient check (R5 INFO). Only
+ * for messages that carry no nest content: the sealed-owner reset link and the
+ * owner alerts in surfaces/signin-alerts.ts. Anything about a nest goes through
+ * sendEmailToRecipient with its nestId.
+ */
+export async function sendPlainEmail(to: string, subject: string, text: string, secrets: string[] = []): Promise<EmailOutcome> {
+  const from = config.NOTIFY_EMAIL_FROM;
+  if (!transportSettings() || !from) return "off";
+  try {
+    const transporter = await getTransporter();
+    if (!transporter) return "off";
+    const info = await sendMailWithRetry(transporter, { from, ...recipientEnvelope([to], from), subject, text, disableFileAccess: true, disableUrlAccess: true });
+    await recordOutbound({ channel: "email", recipients: [to], subject, body: text, status: "sent", providerId: info?.messageId ?? null, secrets });
+    return "sent";
+  } catch (err) {
+    await recordOutbound({ channel: "email", recipients: [to], subject, status: "failed", error: err instanceof Error ? err.message : String(err), secrets });
     return "failed";
   }
 }

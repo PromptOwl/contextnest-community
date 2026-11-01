@@ -45,7 +45,14 @@ import { getProfile } from "./identity-service.js";
 import { listenerFor, listenerFolders } from "./listener-service.js";
 import { reservationMicros, reserve, settle, costMicros } from "./spend-service.js";
 import { decryptWindow, getWindow, type WindowRow } from "./window-service.js";
-import { createProposal, postForcedCard, withdrawProposalItems, type CreatedProposal } from "./proposal-service.js";
+import { createProposal, withdrawProposalItems, type CreatedProposal } from "./proposal-service.js";
+import { annotateProposal } from "./card-service.js";
+import { dmCaptureAllowed } from "./dm-service.js";
+import { sealedNest } from "../sealed.js";
+import { fingerprintHasher } from "./fingerprint-hash.js";
+import { routeNewProposal } from "./routing-service.js";
+import { guardKey } from "./window-guard-key.js";
+import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
 
 export const PROMPT_VERSION = "surfaces-judge-v1";
@@ -278,7 +285,7 @@ async function renderWindow(
     const id = `m${i + 1}`;
     idMap.set(id, r);
     let text = r.text;
-    for (const m of [...text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g)]) {
+    for (const m of [...text.matchAll(/<@([A-Z0-9_]+)(?:\|[^>]*)?>/g)]) {
       const nm = await nameOf(m[1]);
       mentions.add(nm);
       text = text.split(m[0]).join(`@${nm}`);
@@ -433,7 +440,9 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
   const forced = !!w.forced;
   const binding = (await getBindingRow(w.binding_id)) as BindingRow | null;
   const end = (f: Finalize) => finalize(w, token, f, nowMs);
-  if (!binding || binding.status !== "active" || !binding.capture_ok) {
+  // S2b security M2: a DM window is judged only while DM capture is still
+  // allowed (the setting, the owner's opt-out) — re-checked under the claim.
+  if (!binding || binding.status !== "active" || !binding.capture_ok || !(await dmCaptureAllowed(binding))) {
     await end({ status: "discarded", verdict: "discarded", reason_code: null });
     return;
   }
@@ -551,8 +560,10 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
   const candidatesFor = await dedupCandidates(binding.nest_id, nowMs, nv);
   const passing: Array<{ item: VerdictItem; heldOn: string | null }> = [];
   const blocked: Record<string, number> = {};
+  // Sealed personal nests keep hashed hold tokens (re-review R3 INFO).
+  const sealedHasher = (await sealedNest(binding.nest_id)) ? fingerprintHasher(binding.nest_id) : null;
   for (const item of verdict.items) {
-    let dup: DedupCandidate | null = findDuplicate(item, candidatesFor(item));
+    let dup: DedupCandidate | null = findDuplicate(item, candidatesFor(item), sealedHasher ?? undefined);
     if (!dup) {
       // The existing metacognition 7-day hold, as an extra guard (V7).
       const nodeId =
@@ -601,12 +612,26 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
   // Still ours and still capturing? Then create the proposal.
   const fresh = await getBindingRow(binding.id);
   const still = await getWindow(w.id);
-  if (!fresh || fresh.status !== "active" || !fresh.capture_ok || still?.status !== "judging" || still.claim_token !== token) {
+  if (!fresh || fresh.status !== "active" || !fresh.capture_ok || !(await dmCaptureAllowed(fresh)) || still?.status !== "judging" || still.claim_token !== token) {
     await end({ status: "discarded", verdict: "discarded", reason_code: null, model, cost_micros: cost });
     return;
   }
   let created: CreatedProposal | null = null;
   created = await createProposal({ window: w, binding: fresh, install, ctx, items: passing, rows: idMap, folders, nowMs });
+  // S2b: what the card needs after the buffer is purged (never text).
+  if (created.items.length) {
+    const texts = view.messages.map((m) => m.text);
+    const gk = guardKey();
+    await annotateProposal({
+      proposalId: created.proposalId,
+      items: created.items,
+      verdictItems: passing.map((x) => x.item),
+      windowTexts: texts,
+      tss: [...idMap.values()].map((r) => r.ts),
+      requestedBy: w.forced_by_surface_user_id ?? null,
+      guard: gk ? buildWindowGuard(texts, gk) : null,
+    });
+  }
   for (const d of created.dropped) blocked[d] = (blocked[d] ?? 0) + 1;
   const ok = await end({
     status: "judged",
@@ -623,7 +648,9 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
     await withdrawProposalItems(created.proposalId, "discarded");
     return;
   }
-  if (forced && created.items.length) await postForcedCard(created.proposalId, w);
+  // S2b: route — explicit asks post at once; organic proposals go through
+  // reviewer routing, budgets and the queue (§4.8).
+  if (created.items.length) await routeNewProposal(created.proposalId);
 }
 
 async function noteRequester(binding: BindingRow, w: WindowRow, text: string): Promise<void> {
@@ -673,10 +700,29 @@ async function recordRun(nestId: string, agentNode: string, model: string, cost:
   }
 }
 
+/** Round 10 (§14): the owner's notice when their unseeded private nest can't take a DM proposal. */
+export const NO_TARGET_FOLDER_DM_TEXT =
+  "Nest can't file this yet: your private nest has no folders set up. Nothing from this conversation was kept. Folders are added when a starter set is applied to your nest.";
+
 async function alertNoTargetFolder(binding: BindingRow): Promise<void> {
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   const recent = await getDb().get("SELECT 1 AS x FROM surface_notices WHERE kind = 'no_target_folder' AND binding_id = ? AND created_at > ?", [binding.id, since]);
   if (recent) return;
+  // A DM binding's nest is the owner's sealed private nest: the alert is
+  // theirs, not the admins' (round 10, §14 — no default folders anywhere).
+  if (binding.conversation_kind === "dm" && binding.dm_owner_user_id) {
+    await recordNotice({
+      kind: "no_target_folder",
+      audience: "user",
+      recipientUserId: binding.dm_owner_user_id,
+      bindingId: binding.id,
+      nestId: binding.nest_id,
+      detail: { windows: 1 },
+      subject: "Nest can't file this yet",
+      text: NO_TARGET_FOLDER_DM_TEXT,
+    }).catch(() => "");
+    return;
+  }
   await recordNotice({
     kind: "no_target_folder",
     audience: "admins",

@@ -64,10 +64,13 @@ async function optedOut(installId: string, userId: string | null): Promise<boole
   return !!(await getDb().get("SELECT 1 AS x FROM surface_optouts WHERE install_id = ? AND surface_user_id = ?", [installId, userId]));
 }
 
-/** DM capture is an S2b setting (default OFF, §12 R2): until it lands, DMs are not captured. */
+/** DM bindings capture only through prepareDm (S2b, §12 R2: setting default OFF). */
 function captureBinding(b: BindingRow | null): BindingRow | null {
   return b && b.conversation_kind === "dm" ? null : b;
 }
+
+/** "remember: …" in a DM is an explicit ask (AC-DM-03). */
+export const DM_REMEMBER_RE = /^\s*remember\b[:,]?\s*/i;
 
 const lite = (b: BindingRow): BindingLite => ({ id: b.id, install_id: b.install_id, nest_id: b.nest_id });
 
@@ -94,6 +97,18 @@ export async function ingest(install: InstallRow, msgs: SurfaceMessage[], opts: 
 }
 
 async function ingestMessage(install: InstallRow, m: SurfaceMessage, duplicate: boolean): Promise<void> {
+  if (m.dm || (await bindingFor(install.id, m.conversation))?.conversation_kind === "dm") {
+    if (duplicate || m.subtype || m.bot_id || !m.author.id || m.author.id === install.bot_user_id) return;
+    const { prepareDm } = await import("./dm-service.js");
+    const dmBinding = await prepareDm(install, m.conversation, m.author.id);
+    if (!dmBinding) {
+      await count("drop_dm_not_captured", null, install.id);
+      return;
+    }
+    const { dmTestHooks } = await import("./dm-service.js");
+    await dmTestHooks.afterPrepare?.();
+    return ingestDm(install, dmBinding, m);
+  }
   const binding = captureBinding(await bindingFor(install.id, m.conversation));
   const settings = await getSettings();
   const base = {
@@ -291,4 +306,38 @@ async function openAsk(
   }
   const wid = await openForcedWindow(lite(binding), { threadKey, requestedBy: requester, targetId: target.id, messages });
   await judgeInBackground(wid);
+}
+
+/** A DM from its owner into their private nest: the gate, then the buffer —
+ *  or, for "remember: …", a forced window judged at once (AC-DM-03). */
+async function ingestDm(install: InstallRow, binding: BindingRow, m: SurfaceMessage): Promise<void> {
+  const settings = await getSettings();
+  const r = gate({
+    duplicate: false,
+    binding: { status: binding.status, capture_ok: !!binding.capture_ok, conversation_kind: binding.conversation_kind },
+    message: { subtype: m.subtype ?? null, bot_id: m.bot_id ?? null, author_id: m.author.id || null, text: m.text },
+    ourBotUserId: install.bot_user_id,
+    author: await authorStatus(install, m.author.id),
+    optedOut: await optedOut(install.id, m.author.id),
+    minMeaningfulChars: settings.min_meaningful_chars,
+    explicitAsk: DM_REMEMBER_RE.test(m.text),
+  });
+  if (!r.keep) {
+    await count(`drop_${r.reason}`, binding, install.id);
+    return;
+  }
+  const msg = { id: m.id ?? m.ts, author: m.author.id, ts: m.ts, text: r.text, meaningful: r.meaningful };
+  try {
+    if (DM_REMEMBER_RE.test(m.text)) {
+      if (!(await takeAsk(install.id, m.author.id))) return;
+      const wid = await openForcedWindow(lite(binding), { threadKey: "channel", requestedBy: m.author.id, targetId: msg.id, messages: [msg] });
+      await count("buffered", binding, install.id);
+      await judgeInBackground(wid);
+      return;
+    }
+    await bufferMessage(lite(binding), { ...msg, thread: m.thread });
+    await count("buffered", binding, install.id);
+  } catch {
+    await count("drop_buffer_error", binding, install.id);
+  }
 }

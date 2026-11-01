@@ -11,13 +11,22 @@
   "features": {
     "app_home": {
       "home_tab_enabled": true,
-      "messages_tab_enabled": false,
+      "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
     },
     "bot_user": {
       "display_name": "nest",
       "always_online": false
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/nest",
+        "url": "https://YOUR-NEST-HOST/surfaces/slack/INSTALL_ID/commands",
+        "description": "Remove Nest from this conversation, or turn your DM capture off/on",
+        "usage_hint": "leave | invite | dm off | dm on",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "redirect_urls": [
@@ -35,7 +44,9 @@
         "users:read",
         "users:read.email",
         "chat:write",
-        "app_mentions:read"
+        "app_mentions:read",
+        "im:history",
+        "commands"
       ]
     }
   },
@@ -45,6 +56,7 @@
       "bot_events": [
         "message.channels",
         "message.groups",
+        "message.im",
         "app_mention",
         "reaction_added",
         "member_joined_channel",

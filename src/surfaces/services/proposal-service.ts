@@ -10,8 +10,9 @@
  *  - The draft carries provenance — surface, conversation, time range and a
  *    permalink — never copied thread text.
  *  - Items of one window are ONE surface_proposals row (one card).
- *  - Explicit asks post their card at once (§4.8). Organic proposals wait
- *    as `held` until S2b's routing posts them. What a card may say when
+ *  - Every proposal is created `held`; S2b's routing-service posts it
+ *    (explicit asks at once, organic ones through budgets and the queue;
+ *    S2b's card-service does the posting). What a card may say when
  *    the room holds non-readers is decided here, at judge time, while the
  *    window text still exists (H1).
  *  - Withdraw is a SYSTEM action (M2): the review is cancelled by
@@ -23,20 +24,16 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../../db/client.js";
-import { config } from "../../config.js";
 import { proposeEditDraft, proposeNewDraft, type ToolContext } from "../../metacognition/tools.js";
 import { withdrawReviewAsSystem } from "../../governance/review-service.js";
 import { discardDraft, derivedNodeId } from "../../nodes/service.js";
 import { engineCache } from "../../nodes/engine.js";
 import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
-import { docLink } from "../../governance/title-resolver.js";
 import { titleTokens } from "../core/dedup.js";
 import { ROOT_FOLDER, isPlainDocumentType, type VerdictItem } from "../core/judge-schema.js";
-import { guardView } from "../core/card-model.js";
 import { fixedCardText } from "../core/card-text.js";
-import type { ProposalView } from "../contract.js";
 import { getConnector } from "../registry.js";
-import { getBindingRow, type BindingRow } from "./binding-service.js";
+import type { BindingRow } from "./binding-service.js";
 import { installRef, type InstallRow } from "./install-store.js";
 import { recordNotice } from "./notices.js";
 import type { WindowRow } from "./window-service.js";
@@ -226,68 +223,6 @@ export async function editTargetIsDocument(nestId: string, nodeId: string): Prom
   }
 }
 
-/** The S2a card for an explicit ask, posted in the asker's thread. */
-export async function postForcedCard(proposalId: string, w: WindowRow): Promise<void> {
-  const db = getDb();
-  const p = (await db.get("SELECT * FROM surface_proposals WHERE id = ?", [proposalId])) as
-    | { id: string; binding_id: string; nest_id: string; state: string; card_ref: string | null; card_title: string | null; card_summary: string | null }
-    | undefined;
-  if (!p || p.card_ref || p.state !== "held") return;
-  const binding = await getBindingRow(p.binding_id);
-  // Never post into a conversation that stopped capturing (round 2, L2).
-  if (!binding || binding.status !== "active" || !binding.capture_ok) return;
-  const install = (await db.get("SELECT * FROM surface_installs WHERE id = ?", [binding.install_id])) as InstallRow | undefined;
-  const connector = install ? getConnector(install.surface) : null;
-  if (!install || !connector) return;
-  const items = (await db.all("SELECT * FROM surface_proposal_items WHERE proposal_id = ? AND state = 'pending' ORDER BY created_at", [proposalId])) as Array<{
-    title: string;
-    node_id: string;
-    target_folder: string;
-    previously_held_on: string | null;
-  }>;
-  if (!items.length) return;
-  const nest = (await db.get("SELECT name FROM nests WHERE id = ?", [binding.nest_id])) as { name?: string } | undefined;
-  const held = items.find((i) => i.previously_held_on)?.previously_held_on ?? null;
-  // H1: when the room holds people who can't read the nest, only the text
-  // decided safe at judge time (or a fixed sentence) is posted.
-  const surfaceOk = !!binding.surface_ok;
-  const view: ProposalView = {
-    proposal_id: proposalId,
-    kind: items.length > 1 ? "merged" : "single",
-    title: surfaceOk ? (items.length > 1 ? `${items.length} things worth keeping` : items[0].title) : (p.card_title ?? "A proposal from this conversation is waiting for review"),
-    summary: surfaceOk ? (items.length > 1 ? items.map((i) => `• ${i.title}`).join("\n") : DRAFT_SUMMARY) : (p.card_summary ?? ""),
-    folder: items[0].target_folder,
-    nest_name: nest?.name ?? "the nest",
-    draft_url: docLink(binding.nest_id, items[0].node_id, config.PUBLIC_BASE_URL),
-    // "Previously not kept" is nest history: only for a room of readers.
-    note: held && surfaceOk ? `Previously not kept on ${held}` : undefined,
-    thread_ref: w.thread_key !== "channel" ? w.thread_key : w.forced_target_id,
-  };
-  const g = guardView(view, { capture_ok: !!binding.capture_ok, surface_ok: surfaceOk });
-  if (!g.post || !g.view) return;
-  // Claim the post: one card per proposal, and only while it is still held.
-  const claim = await db.run("UPDATE surface_proposals SET card_ref = 'posting', updated_at = ? WHERE id = ? AND card_ref IS NULL AND state = 'held'", [
-    iso(Date.now()),
-    proposalId,
-  ]);
-  if (claim.changes === 0) return;
-  try {
-    const ref = await connector.postProposal(
-      { id: binding.id, install_id: binding.install_id, conversation_id: binding.conversation_id, nest_id: binding.nest_id },
-      g.view,
-    );
-    // Never overwrites a withdrawal that landed meanwhile (round 2, L2).
-    await db.run("UPDATE surface_proposals SET state = 'posted', card_ref = ?, posted_at = ?, updated_at = ? WHERE id = ? AND card_ref = 'posting' AND state = 'held'", [
-      JSON.stringify(ref),
-      iso(Date.now()),
-      iso(Date.now()),
-      proposalId,
-    ]);
-  } catch {
-    await db.run("UPDATE surface_proposals SET card_ref = NULL WHERE id = ? AND card_ref = 'posting'", [proposalId]);
-  }
-}
-
 /**
  * Withdraw every pending item of a proposal (system path, M2). Returns how
  * many were fully withdrawn; anything that couldn't be stays pending (and
@@ -355,8 +290,9 @@ export async function withdrawProposalItems(proposalId: string, reason = "bindin
   return done;
 }
 
-/** Discard the draft only while it is still the submitter's own head (never a person's later edit). */
-async function discardDraftIfOurs(nestId: string, nodeId: string, author: string): Promise<void> {
+/** Discard the draft only while it is still the submitter's own head (never a person's later edit).
+ *  Shared with S2b's reject/expire purge (draft-purge.ts). */
+export async function discardDraftIfOurs(nestId: string, nodeId: string, author: string): Promise<void> {
   const head = (await getDb().get("SELECT version, author FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1", [nestId, nodeId])) as
     | { version: number; author: string }
     | undefined;

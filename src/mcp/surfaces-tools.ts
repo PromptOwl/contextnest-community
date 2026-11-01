@@ -47,7 +47,12 @@ import { config } from "../config.js";
 import { createBindingWithListener } from "../surfaces/services/listener-service.js";
 import { createInstall } from "../surfaces/services/install-store.js";
 import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
-import { getSettings, updateSettings } from "../surfaces/services/settings-service.js";
+import { getSettings } from "../surfaces/services/settings-service.js";
+import { updateSettingsWithEffects } from "../surfaces/services/dm-service.js";
+import { listCommits, listProposals } from "../surfaces/services/report-service.js";
+import { myPending } from "../surfaces/services/home-service.js";
+import { budgetView, getBudget, setCap } from "../surfaces/services/spend-service.js";
+import { disconnectInstall } from "../surfaces/services/lifecycle-service.js";
 import { SettingsError } from "../surfaces/core/settings.js";
 import { listWindows } from "../surfaces/services/report-service.js";
 
@@ -175,13 +180,13 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_settings_get",
-    description: "Read the Surfaces settings (quiet window, window age, buffer TTL, gate minimum, propose threshold, card limits, timezone). Server admin only.",
+    description: "Read the Surfaces settings (quiet window, window age, buffer TTL, gate minimum, propose threshold, card limits, timezone, DM capture). Server admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
   {
     name: "context_surfaces_settings_update",
     description:
-      "Change Surfaces settings. Ranges: quiet_minutes 5–240, window_max_age_hours 1–12 and below buffer_ttl_hours, buffer_ttl_hours 1–24, min_meaningful_chars 1–50, propose_threshold 0.5–0.95. Server admin only.",
+      "Change Surfaces settings. Ranges: quiet_minutes 5–240, window_max_age_hours 1–12 and below buffer_ttl_hours, buffer_ttl_hours 1–24, min_meaningful_chars 1–50, propose_threshold 0.5–0.95. dm_capture (default false) turns DM capture on or off for connected workspaces; turning it off deletes every DM buffer and withdraws pending DM proposals. signin_alerts (default true) sends sealed-nest owners a Slack DM and email on new sign-ins and on sign-in or email configuration changes; turning it off notifies every sealed-nest owner. Server admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -191,6 +196,8 @@ export const SURFACES_TOOL_DEFINITIONS = [
         min_meaningful_chars: { type: "number" },
         propose_threshold: { type: "number" },
         reviewer_daily_cards: { type: "number" },
+        dm_capture: { type: "boolean", description: "DM capture on (true) or off (false, the default)." },
+        signin_alerts: { type: "boolean", description: "Sign-in alerts for sealed-nest owners on (true, the default) or off; turning off notifies every owner." },
         conversation_daily_cards: { type: "number" },
         timezone: { type: "string" },
       },
@@ -209,9 +216,65 @@ export const SURFACES_TOOL_DEFINITIONS = [
       required: [] as string[],
     },
   },
+  // ─── S2b ─────────────────────────────────────────────────────────────────
+  {
+    name: "context_surfaces_proposals_list",
+    description:
+      "Proposals Nest made from conversations bound to this nest, with their state (posted / held / queued / decided / expired / withdrawn) and per-item outcome. " +
+      "Personal (DM) nests are redacted for anyone but their owner. Never message text.",
+    inputSchema: { type: "object", properties: { state: { type: "string", description: "Filter by proposal state." } }, required: [] as string[] },
+  },
+  {
+    name: "context_surfaces_my_pending",
+    description:
+      "Your My pending: proposals waiting for a reviewer, only from nests you already read and can review — in threads, held (not posted), and queued for you — " +
+      "plus your daily card limit. Approving goes through the existing review tools as you (context_approve / context_reject); MCP never commits for a Slack user.",
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
+  },
+  {
+    name: "context_surfaces_commits_list",
+    description:
+      "The commit audit for this nest: every proposal approved from a surface — the approving Community user, the surface, the Slack user id kept for audit, " +
+      "the window and its message count, the proposal — proposed by the Nest listener.",
+    inputSchema: {
+      type: "object",
+      properties: { node_id: { type: "string", description: "Only commits of this node." }, proposal_id: { type: "string", description: "Only commits of this proposal." } },
+      required: [] as string[],
+    },
+  },
+  {
+    name: "context_surfaces_budget_get",
+    description: "This nest's monthly model-spend budget for Surfaces (cap, spent, reserved, in micros) and whether the 90% / 100% alerts fired. Owner/admin only.",
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
+  },
+  {
+    name: "context_surfaces_budget_update",
+    description: "Set this nest's monthly Surfaces model-spend cap in micros ($0–$10,000 → 0–10000000000). Owner/admin only.",
+    inputSchema: { type: "object", properties: { cap_micros: { type: "number", description: "The new cap, in micros of a dollar." } }, required: ["cap_micros"] as string[] },
+  },
+  {
+    name: "context_surfaces_binding_invite",
+    description:
+      "Bring Nest back to a conversation a MEMBER removed it from (the /nest invite twin). You must be a current member of that conversation, linked to it. " +
+      "The safety guard is re-checked first; if the member who removed Nest is still there and isn't you, they're asked to agree first. Never resumes a binding paused by the guard, by DM settings, or removed.",
+    inputSchema: { type: "object", properties: { binding_id: BINDING_ID }, required: ["binding_id"] as string[] },
+  },
+  {
+    name: "context_surfaces_disconnect",
+    description:
+      "Disconnect a workspace install: pending cards are marked Withdrawn first, the token is revoked, then secrets, bindings, buffers, drafts and identity links " +
+      "for it are deleted. Approved nodes and the commit audit stay. Server administrators only.",
+    inputSchema: { type: "object", properties: { install_id: { type: "string", description: "The install to disconnect (context_surfaces_status lists them)." } }, required: ["install_id"] as string[] },
+  },
 ];
 
 export const SURFACES_TOOL_NAMES = new Set(SURFACES_TOOL_DEFINITIONS.map((t) => t.name));
+/** Every Surfaces tool but My pending (any reviewer may read their own) is admin-gated. */
+export const SURFACES_ADMIN_TOOL_NAMES = new Set(
+  [...SURFACES_TOOL_NAMES].filter((n) => n !== "context_surfaces_my_pending" && n !== "context_surfaces_binding_invite"),
+);
+/** Read-only Surfaces tools a read-only key is offered. */
+export const SURFACES_READ_TOOL_NAMES = ["context_surfaces_my_pending", "context_surfaces_proposals_list", "context_surfaces_commits_list", "context_surfaces_budget_get"];
 
 export function isSurfacesTool(name: string): boolean {
   return SURFACES_TOOL_NAMES.has(name);
@@ -374,11 +437,11 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       case "context_surfaces_settings_update": {
         await requireOrgAdmin(ctx);
         const patch: Record<string, unknown> = {};
-        for (const k of ["quiet_minutes", "window_max_age_hours", "buffer_ttl_hours", "min_meaningful_chars", "propose_threshold", "reviewer_daily_cards", "conversation_daily_cards", "timezone"]) {
+        for (const k of ["quiet_minutes", "window_max_age_hours", "buffer_ttl_hours", "min_meaningful_chars", "propose_threshold", "reviewer_daily_cards", "conversation_daily_cards", "timezone", "dm_capture", "signin_alerts"]) {
           if (args[k] !== undefined) patch[k] = args[k];
         }
         try {
-          const settings = await updateSettings(patch);
+          const settings = await updateSettingsWithEffects(patch, ctx.userId);
           return { text: `Saved. ${JSON.stringify(settings)}`, data: { settings } };
         } catch (err) {
           if (err instanceof SettingsError) throw new ValidationError(err.message);
@@ -393,6 +456,57 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
           verdict: typeof args.verdict === "string" ? args.verdict : undefined,
         });
         return { text: `${windows.length} window(s).`, data: { windows } };
+      }
+      case "context_surfaces_proposals_list": {
+        if (!(await canAdministerNest(ctx.nestId, ctx.userId))) throw new ForbiddenError("Owner/admin only.");
+        const proposals = await listProposals(ctx.userId, { nestId: ctx.nestId, state: typeof args.state === "string" ? args.state : undefined });
+        return { text: `${proposals.length} proposal(s).`, data: { proposals } };
+      }
+      case "context_surfaces_my_pending": {
+        const mine = await myPending(ctx.userId, { nestId: ctx.nestId });
+        return {
+          text: `In threads: ${mine.in_thread.length} · not posted: ${mine.held.length} · queued for you: ${mine.queued.length} · ${mine.used_today} of your ${mine.daily_limit} cards today.`,
+          data: mine,
+        };
+      }
+      case "context_surfaces_commits_list": {
+        if (!(await canAdministerNest(ctx.nestId, ctx.userId))) throw new ForbiddenError("Owner/admin only.");
+        const commits = await listCommits(ctx.userId, {
+          nestId: ctx.nestId,
+          nodeId: typeof args.node_id === "string" ? args.node_id : undefined,
+          proposalId: typeof args.proposal_id === "string" ? args.proposal_id : undefined,
+        });
+        return { text: `${commits.length} commit(s).`, data: { commits } };
+      }
+      case "context_surfaces_budget_get": {
+        if (!(await canAdministerNest(ctx.nestId, ctx.userId))) throw new ForbiddenError("Owner/admin only.");
+        const budget = budgetView(await getBudget(ctx.nestId));
+        return { text: JSON.stringify(budget), data: { budget } };
+      }
+      case "context_surfaces_budget_update": {
+        if (!(await canAdministerNest(ctx.nestId, ctx.userId))) throw new ForbiddenError("Owner/admin only.");
+        try {
+          const budget = await setCap(ctx.nestId, args.cap_micros);
+          return { text: `Saved. ${JSON.stringify(budget)}`, data: { budget } };
+        } catch (err) {
+          if (err instanceof SettingsError) throw new ValidationError(err.message);
+          throw err;
+        }
+      }
+      case "context_surfaces_binding_invite": {
+        // People only (re-review INFO): never an agent / scoped / read-only key.
+        if (ctx.contributorCredential !== true) throw new ForbiddenError("Inviting Nest back needs your own full credential, not an agent or scoped key.");
+        const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
+        const { inviteBackAsUser } = await import("../surfaces/services/invite-service.js");
+        const out = await inviteBackAsUser(row.id, ctx.userId);
+        const after = await getBindingRow(row.id);
+        if (!out.ok) return { text: out.message, isError: true, data: { code: out.reason === "not_member" ? "FORBIDDEN" : "CONFLICT", message: out.message } };
+        return { text: `${out.message} (${after?.status ?? "unknown"})`, data: { status: out.status, binding_status: after?.status ?? null } };
+      }
+      case "context_surfaces_disconnect": {
+        await requireOrgAdmin(ctx);
+        const out = await disconnectInstall(reqStr(args.install_id, "install_id"));
+        return { text: `Disconnected. ${out.withdrawn} pending proposal item(s) withdrawn. Approved nodes and the commit audit stay.`, data: { disconnected: true, ...out } };
       }
       default:
         return { text: `Unknown surfaces tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown surfaces tool: ${toolName}` } };

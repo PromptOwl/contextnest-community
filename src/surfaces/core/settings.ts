@@ -13,6 +13,10 @@ export interface SurfaceSettings {
   reviewer_daily_cards: number;
   conversation_daily_cards: number;
   timezone: string;
+  /** §12 R2: DM capture, default OFF. */
+  dm_capture: boolean;
+  /** Round 8: sign-in alerts for sealed-nest owners, default ON. Turning it off notifies every owner. */
+  signin_alerts: boolean;
 }
 
 export const DEFAULT_SETTINGS: SurfaceSettings = {
@@ -24,13 +28,15 @@ export const DEFAULT_SETTINGS: SurfaceSettings = {
   reviewer_daily_cards: 2,
   conversation_daily_cards: 3,
   timezone: "UTC",
+  dm_capture: false,
+  signin_alerts: true,
 };
 
 export const BUFFER_TTL_CEILING_HOURS = 24;
 
 export class SettingsError extends Error {}
 
-const RANGES: Record<Exclude<keyof SurfaceSettings, "timezone">, { min: number; max: number; integer: boolean }> = {
+const RANGES: Record<Exclude<keyof SurfaceSettings, "timezone" | "dm_capture" | "signin_alerts">, { min: number; max: number; integer: boolean }> = {
   quiet_minutes: { min: 5, max: 240, integer: true },
   window_max_age_hours: { min: 1, max: 12, integer: true },
   buffer_ttl_hours: { min: 1, max: BUFFER_TTL_CEILING_HOURS, integer: true },
@@ -48,6 +54,16 @@ export function applySettingsPatch(current: SurfaceSettings, patch: Record<strin
     if (k === "timezone") {
       if (typeof v !== "string" || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$|^UTC$/.test(v)) throw new SettingsError("timezone must be an IANA name like Europe/Berlin");
       next.timezone = v;
+      continue;
+    }
+    if (k === "dm_capture") {
+      if (typeof v !== "boolean") throw new SettingsError("dm_capture must be true or false");
+      next.dm_capture = v;
+      continue;
+    }
+    if (k === "signin_alerts") {
+      if (typeof v !== "boolean") throw new SettingsError("signin_alerts must be true or false");
+      next.signin_alerts = v;
       continue;
     }
     const r = RANGES[k as keyof typeof RANGES];

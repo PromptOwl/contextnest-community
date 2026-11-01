@@ -424,18 +424,18 @@ describe("install", () => {
     expect(m.settings.interactivity.is_enabled).toBe(true);
     expect(m.settings.interactivity.request_url).toBe(`${BASE}/surfaces/slack/${id}/interactions`);
     expect([...m.oauth_config.scopes.bot].sort()).toEqual(
-      ["channels:history", "groups:history", "channels:read", "groups:read", "im:read", "im:write", "reactions:read", "users:read", "users:read.email", "chat:write", "app_mentions:read"].sort(),
+      ["channels:history", "groups:history", "im:history", "channels:read", "groups:read", "im:read", "im:write", "reactions:read", "users:read", "users:read.email", "chat:write", "app_mentions:read", "commands"].sort(),
     );
     expect(m.oauth_config.scopes.user).toBeUndefined();
     expect([...m.settings.event_subscriptions.bot_events].sort()).toEqual(
       [
-        "message.channels", "message.groups", "app_mention", "reaction_added", "member_joined_channel", "member_left_channel", "channel_left", "group_left",
+        "message.channels", "message.groups", "message.im", "app_mention", "reaction_added", "member_joined_channel", "member_left_channel", "channel_left", "group_left",
         "channel_shared", "channel_unshared", "channel_archive", "group_archive", "channel_deleted", "group_deleted", "user_change", "app_home_opened", "app_uninstalled", "tokens_revoked",
       ].sort(),
     );
     expect(m.oauth_config.redirect_urls).toEqual([`${BASE}/surfaces/slack/oauth/callback`]);
     expect(m.features.app_home.home_tab_enabled).toBe(true);
-    expect(m.features.app_home.messages_tab_enabled).toBe(false); // DM capture is S2b (security round 2 INFO)
+    expect(m.features.app_home.messages_tab_enabled).toBe(true); // S2b: DM capture (a setting, default OFF)
     expect([...S.manifest.BOT_SCOPES].sort()).toEqual([...m.oauth_config.scopes.bot].sort());
   });
 

@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
+import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2400,6 +2401,26 @@ export function runMigrations(db: Database.Database): void {
       db.exec(surfacesS2aDdl("(datetime('now'))"));
     })();
     recordMigration("080_surfaces_ingest");
+  }
+
+  // 081: Surfaces cards and commit (S2b): interaction idempotency, the commit
+  //   audit, reviewer/conversation daily usage, personal (DM) nests, DM
+  //   opt-outs, plus the card columns on proposals/items and the DM capture
+  //   setting. Shared DDL with Postgres (src/surfaces/schema-ddl-s2b.ts).
+  if (!hasMigration("081_surfaces_cards")) {
+    db.transaction(() => {
+      db.exec(surfacesS2bDdl("(datetime('now'))"));
+      db.exec(surfacesS2bAlterSqlite());
+    })();
+    recordMigration("081_surfaces_cards");
+  }
+  // Guarded (re-review R3-L2): a database that ran an earlier 081 lacks
+  // surface_personal_nests.sealed — add it (default sealed).
+  {
+    const pcols = db.prepare("PRAGMA table_info(surface_personal_nests)").all() as Array<{ name: string }>;
+    if (pcols.length && !pcols.some((c) => c.name === "sealed")) {
+      db.exec("ALTER TABLE surface_personal_nests ADD COLUMN sealed INTEGER NOT NULL DEFAULT 1");
+    }
   }
 }
 

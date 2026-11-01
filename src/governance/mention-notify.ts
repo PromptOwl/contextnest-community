@@ -238,7 +238,7 @@ async function deliverMentionMessages(params: {
       link: ctx.link,
       actor: actorEmail,
       note: excerpt || null,
-    });
+    }, { nestId });
   }
   if (throttled > 0) {
     // Logged, not silent: the inbox rows landed, so nobody lost the mention —
@@ -533,7 +533,7 @@ async function notifyThreadParticipants(params: {
         link: ctx.link,
         actor: actorEmail,
         note: excerpt || null,
-      });
+      }, { nestId });
     }
     if (throttled > 0) {
       console.warn(
@@ -674,7 +674,7 @@ async function notifyCommentFollowers(params: {
         link: ctx.link,
         actor: actorEmail,
         note: excerpt || null,
-      });
+      }, { nestId });
     }
     if (throttled > 0) {
       console.warn(

@@ -26,6 +26,49 @@ export function onBindingPaused(hook: Hook): () => void {
   };
 }
 
+/**
+ * §4.17: `surface_ok` true → false on a binding that stays live. Cards already
+ * posted there are re-rendered to the redacted variant (S2b registers this).
+ */
+type SurfaceOkHook = (binding: PausedBinding) => Promise<void> | void;
+const surfaceOkHooks: SurfaceOkHook[] = [];
+export function onSurfaceOkLost(hook: SurfaceOkHook): () => void {
+  surfaceOkHooks.push(hook);
+  return () => {
+    const i = surfaceOkHooks.indexOf(hook);
+    if (i >= 0) surfaceOkHooks.splice(i, 1);
+  };
+}
+export async function runSurfaceOkLostHooks(binding: PausedBinding): Promise<void> {
+  for (const h of surfaceOkHooks) {
+    try {
+      await h(binding);
+    } catch (err) {
+      console.error(`[surfaces] surface_ok hook failed for binding ${binding.id}:`, err instanceof Error ? err.name : "error");
+    }
+  }
+}
+
+/** Work that rides every guard sweep (S2b: retrying card redactions). */
+type SweepHook = () => Promise<unknown> | unknown;
+const sweepHooks: SweepHook[] = [];
+export function onGuardSweep(hook: SweepHook): () => void {
+  sweepHooks.push(hook);
+  return () => {
+    const i = sweepHooks.indexOf(hook);
+    if (i >= 0) sweepHooks.splice(i, 1);
+  };
+}
+export async function runGuardSweepHooks(): Promise<void> {
+  for (const h of sweepHooks) {
+    try {
+      await h();
+    } catch (err) {
+      console.error("[surfaces] guard sweep hook failed:", err instanceof Error ? err.name : "error");
+    }
+  }
+}
+
 export async function runPauseHooks(binding: PausedBinding, reason: PauseReason): Promise<void> {
   for (const h of hooks) {
     try {

@@ -540,6 +540,12 @@ export async function revokeLink(input: { linkId: string; byUserId: string | nul
   const link = (await getDb().get("SELECT * FROM surface_identity_links WHERE id = ?", [input.linkId])) as LinkRow | undefined;
   if (!link) throw new NotFoundError("Link not found");
   if (link.status === "active") {
+    // Round 9 (R5-L1): someone else (an admin) removing a sealed-nest owner's
+    // link removes their Slack alert channel — tell them first, while it works.
+    if (input.byUserId && input.byUserId !== link.community_user_id) {
+      const { alertSealedOwnerSlackRemoval } = await import("../signin-alerts.js");
+      await alertSealedOwnerSlackRemoval(link.community_user_id, link.install_id, "link");
+    }
     await getDb().run(
       `UPDATE surface_identity_links SET status = 'revoked', auto_match_blocked = 1, revoked_at = ?, revoked_by = ?, revoke_reason = ?, updated_at = ?
        WHERE id = ?`,

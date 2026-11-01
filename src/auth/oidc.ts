@@ -21,6 +21,7 @@
  * Every failure redirects to "/?sso_error=<code>" so the SPA surfaces a
  * friendly toast and falls back to the normal sign-in options.
  */
+import { signInAlertSoon } from "../surfaces/signin-alerts.js";
 import { Hono } from "hono";
 import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
@@ -504,6 +505,8 @@ oidcRoutes.get("/callback", async (c) => {
     // non-secret SSO marker so the SPA routes logout through the IdP.
     const sessionId = await createSession(user.id, c.req.header("User-Agent"));
     clearFlowCookies();
+    // Round 8: a sealed-nest owner hears about every OIDC session.
+    signInAlertSoon(user.id, "oidc", c.req.header("User-Agent"));
     c.header("Set-Cookie", buildSessionCookie(sessionId, { secure }), {
       append: true,
     });

@@ -31,6 +31,12 @@ export async function insertNotification(
   ctx: OutboundContext & { from?: string | null } = {},
 ): Promise<void> {
   const email = row.userEmail.toLowerCase();
+  // A sealed personal nest notifies its owner only (re-review R3-H1a).
+  if (row.nestId) {
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    const sealed = await sealedNest(row.nestId);
+    if (sealed && sealed.ownerEmail.toLowerCase() !== email) return;
+  }
   await getDb().run(
     `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,

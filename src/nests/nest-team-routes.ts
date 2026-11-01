@@ -43,6 +43,12 @@ nestTeamRoutes.post("/", async (c) => {
     throw new ValidationError("team_id is required");
   }
   const userId = c.get("userId");
+  // A sealed personal nest can't be shared with a team (re-review R3-L1): a
+  // license admin can edit any team's roster, which would reopen it to them.
+  const { sealedNest } = await import("../surfaces/sealed.js");
+  if (await sealedNest(c.req.param("nestId")!)) {
+    return c.json({ error: "Private nests can't be shared with a team" }, 403);
+  }
   const teams = await shareTeamWithNest({
     nestId: c.req.param("nestId")!,
     teamId: body.team_id,

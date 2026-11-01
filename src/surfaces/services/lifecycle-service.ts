@@ -12,7 +12,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../../db/client.js";
 import { surfacesEnabled } from "../flags.js";
-import { onBindingPaused } from "./pause-hooks.js";
+import { onBindingPaused, onGuardSweep, onSurfaceOkLost } from "./pause-hooks.js";
 import { discardBindingWindows, windowTick } from "./window-service.js";
 import { withdrawForBinding, retryWithdrawals } from "./proposal-service.js";
 import { removeListener } from "./listener-service.js";
@@ -32,12 +32,30 @@ export function registerSurfacesLifecycle(): void {
   hooked = true;
   onBindingPaused(async (b, reason) => {
     await discardBindingWindows(b.id);
+    // S2b: cards are updated to "Withdrawn" in place (while a token exists)
+    // before the drafts are purged; no 7-day hold.
+    const { withdrawBindingCards } = await import("./expiry-service.js");
+    await withdrawBindingCards(b.id);
     await withdrawForBinding(b.id);
     // A removed binding's listener has nothing left to do: remove it, so it
     // never lingers on the nest as an untied agent (which would block every
     // other binding's guard). Its persona stays for history. A paused binding
     // keeps its listener for a resume.
     if (reason === "removed") await removeListener(b.id);
+  });
+  // §4.17: surface_ok lost → re-render posted cards to the redacted variant;
+  // failures stay `redaction_pending` and are retried by every guard sweep.
+  onSurfaceOkLost(async (b) => {
+    const { redactBindingCards } = await import("./card-service.js");
+    await redactBindingCards(b.id);
+  });
+  onGuardSweep(async () => {
+    const { retryRedactions, reconcileStuckClaims } = await import("./card-service.js");
+    await reconcileStuckClaims(); // L6: stuck claims first, then card retries
+    await retryRedactions();
+    // Round 9: owner alerts waiting for a channel are retried here.
+    const { drainAlertOutbox } = await import("../signin-alerts.js");
+    await drainAlertOutbox();
   });
 }
 
@@ -53,6 +71,8 @@ export async function uninstall(installId: string, signal: "uninstalled" | "toke
   await db.run("DELETE FROM surface_identity_links WHERE install_id = ?", [installId]);
   await db.run("DELETE FROM surface_users_cache WHERE install_id = ?", [installId]);
   await db.run("DELETE FROM surface_link_tokens WHERE install_id = ?", [installId]);
+  await db.run("DELETE FROM surface_dm_notices WHERE install_id = ?", [installId]);
+  await db.run("DELETE FROM surface_dm_optouts WHERE install_id = ?", [installId]);
   await db.run("UPDATE surface_fetch_queue SET status = 'failed' WHERE install_id = ? AND status IN ('queued', 'running')", [installId]);
 }
 
@@ -138,9 +158,47 @@ export function startSurfacesIngestLoops(): void {
   every(60_000, () => windowTick(), "window tick");
   every(5 * 60_000, () => purgeSweep(), "purge");
   every(15_000, () => runFetchQueue(), "fetch queue");
+  // S2b: expiry every 15 min; the queue release hourly (it posts what is due
+  // at 09:00 org time); held proposals created before routing existed.
+  every(15 * 60_000, async () => (await import("./expiry-service.js")).expireDue(), "expiry");
+  every(60 * 60_000, async () => (await import("./routing-service.js")).releaseQueue(), "queue release");
+  every(5 * 60_000, async () => (await import("./routing-service.js")).routeHeldBacklog(), "held backlog");
 }
 
 export function stopSurfacesIngestLoops(): void {
   for (const t of timers) clearInterval(t);
   timers = [];
+}
+
+/**
+ * Admin disconnect (§4.16 order, AC-EXP-04): 1. every pending card →
+ * "Withdrawn" (the token still works); 2. auth.revoke; 3. secrets, bindings,
+ * buffer, drafts and identity links go (the uninstall path); 4. approved
+ * nodes, surface_commits and the audit history stay.
+ */
+export async function disconnectInstall(installId: string): Promise<{ withdrawn: number }> {
+  const db = getDb();
+  const { withdrawBindingCards } = await import("./expiry-service.js");
+  const bindings = (await db.all("SELECT id FROM surface_bindings WHERE install_id = ?", [installId])) as Array<{ id: string }>;
+  let withdrawn = 0;
+  for (const b of bindings) withdrawn += await withdrawBindingCards(b.id);
+  // Round 9 (R5-L1): linked sealed-nest owners are told before the bot token
+  // (their alert channel) is revoked — by DM while it still works, and email.
+  {
+    const { sealedOwnersLinkedTo, alertSealedOwnerSlackRemoval } = await import("../signin-alerts.js");
+    for (const ownerId of await sealedOwnersLinkedTo(installId)) await alertSealedOwnerSlackRemoval(ownerId, installId, "install");
+  }
+  const { getSecret } = await import("./secret-store.js");
+  const token = await getSecret(installId, "bot_token").catch(() => null);
+  if (token) {
+    const { slackCall } = await import("../adapters/slack/api.js");
+    await slackCall("auth.revoke", {}, { token }).catch(() => {});
+  }
+  await uninstall(installId, "uninstalled");
+  await db.run("UPDATE surface_installs SET status = 'disconnected', revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE id = ?", [
+    new Date().toISOString(),
+    new Date().toISOString(),
+    installId,
+  ]);
+  return { withdrawn };
 }

@@ -781,7 +781,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
     docTitle: "A document has been shared with you",
     path: "PromptOwl · ContextNest",
     link,
-  });
+  }, { nestId: row.nest_id });
   return c.html(sentPage());
 });
 

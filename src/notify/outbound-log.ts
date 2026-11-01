@@ -33,6 +33,8 @@ export interface OutboundContext {
   nestId?: string | null;
   nodeId?: string | null;
   runId?: string | null;
+  /** Round 8: this email is about no nest (an account invite, a system notice). */
+  noNest?: boolean;
 }
 
 export interface OutboundMessage extends OutboundContext {
@@ -160,6 +162,12 @@ function clean(value: string | null | undefined, secrets: OutboundMessage["secre
 export async function recordOutbound(m: OutboundMessage): Promise<void> {
   try {
     const db = getDb();
+    // A sealed personal nest (Surfaces): metadata only — channel, status,
+    // time, counts. Never a subject, body or node id (re-review R3-H1a).
+    if (m.nestId) {
+      const { sealedNest } = await import("../surfaces/sealed.js");
+      if (await sealedNest(m.nestId)) m = { ...m, subject: null, body: null, nodeId: null };
+    }
     const body = config.MESSAGE_LOG_STORE_BODIES ? clean(m.body, m.secrets) : null;
     await db.run(
       `INSERT INTO outbound_messages

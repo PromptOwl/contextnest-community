@@ -50,14 +50,18 @@ export function jaccard(a: string[], b: string[]): number {
 export function findDuplicate(
   item: { kind: string; op: string; title: string; target_node_id: string | null },
   candidates: DedupCandidate[],
+  /** Sealed nests store holds as keyed hashes ("h:…"); compare hashed tokens to them. */
+  hashToken?: (t: string) => string,
 ): DedupCandidate | null {
-  const mine = titleTokens(item.title);
+  const plain = titleTokens(item.title);
+  const hashed = hashToken ? plain.map(hashToken) : null;
+  const tokensFor = (c: DedupCandidate) => (hashed && c.title_tokens.some((t) => t.startsWith("h:")) ? hashed : plain);
   for (const c of candidates) {
     if (item.op === "edit" && item.target_node_id && c.op === "edit" && c.target_node_id === item.target_node_id && c.source !== "published") return c;
   }
   for (const c of candidates) {
     if (c.kind !== null && c.kind !== item.kind) continue;
-    if (jaccard(mine, c.title_tokens) >= JACCARD_DUP) return c;
+    if (jaccard(tokensFor(c), c.title_tokens) >= JACCARD_DUP) return c;
   }
   return null;
 }

@@ -650,7 +650,9 @@ describe("L2: binding status is compare-and-set at attach, open and post", () =>
       [randomUUID(), pid, N, new Date().toISOString(), new Date().toISOString()],
     );
     const n = slack.posted.length;
-    await R.proposals.postForcedCard(pid, { id: wid, thread_key: "channel", forced_target_id: "1.2" } as any);
+    // S2b replaced S2a's postForcedCard with card-service.postCard (same compare-and-set rule).
+    const { postCard } = await import("../src/surfaces/services/card-service.js");
+    expect(await postCard(pid)).toBe(false);
     expect(slack.posted.length).toBe(n);
     expect((await one("SELECT state FROM surface_proposals WHERE id = ?", [pid])).state).toBe("withdrawn");
   });
@@ -801,10 +803,12 @@ describe("INFO items", () => {
     expect(r.result?.isError).toBe(true);
   });
 
-  it("INFO: the manifest asks for no DM or team scopes in S2a", () => {
+  it("INFO: the manifest asks for no team scope; DM scopes arrive with S2b's DM capture (a setting, default OFF)", () => {
     expect(S.manifest.BOT_SCOPES).not.toContain("team:read");
-    expect(S.manifest.BOT_SCOPES).not.toContain("im:history");
-    expect(S.manifest.BOT_EVENTS).not.toContain("message.im");
+    // Amended by S2b: DM capture (§12 R2) needs im:history + message.im, as
+    // S2a's manifest comment anticipated. The setting still defaults to OFF.
+    expect(S.manifest.BOT_SCOPES).toContain("im:history");
+    expect(S.manifest.BOT_EVENTS).toContain("message.im");
   });
 
   it("INFO: one tie predicate — a marked listener with notify channels is not exempt", async () => {

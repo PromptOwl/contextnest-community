@@ -45,7 +45,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   83->87 Surfaces S2a (src/mcp/surfaces-tools.ts): context_surfaces_slack_install_create, settings_get, settings_update,
 //   windows_list — REST twins of POST /surfaces/slack/installs, GET/PATCH /surfaces/settings, GET /surfaces/windows; Community-only
 //   tables (surface_installs, surface_settings, surface_windows) the engine does not model, so no engine op exists.
-const BASELINE = 87;
+//   87->93 Surfaces S2b (src/mcp/surfaces-tools.ts): context_surfaces_proposals_list, my_pending, commits_list, budget_get,
+//   budget_update, disconnect — REST twins of GET /surfaces/proposals, /pending, /commits, GET/PATCH /surfaces/nests/:id/budget,
+//   DELETE /surfaces/installs/:id; Community-only tables (surface_proposals, surface_commits, surface_nest_budgets) the engine
+//   does not model, so no engine op exists.
+//   93->94 Surfaces S2b round 4: context_surfaces_binding_invite — twin of POST /surfaces/bindings/:id/invite (/nest invite);
+//   Community-only binding state the engine does not model.
+const BASELINE = 94;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

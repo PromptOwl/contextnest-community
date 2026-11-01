@@ -8,6 +8,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
+import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
 import { ConflictError } from "../shared/errors.js";
 import { assertDeletionRequestable } from "../structure/writes.js";
 import {
@@ -212,7 +213,7 @@ export async function submitForReview(params: {
         actor: params.requestedBy,
         version,
         note: params.note || null,
-      });
+      }, { nestId: params.nestId });
     }
   } catch (err) {
     console.error(
@@ -311,6 +312,13 @@ async function approveInner(params: Parameters<typeof approve>[0]): Promise<Revi
 
     if (!pending) {
       throw new Error("No pending review for this node");
+    }
+
+    // A Surfaces personal (DM) nest is reviewed by its owner only — no
+    // override, not even a super admin's (Misha, 2026-11-01).
+    const personal = await surfacesPersonalOwner(params.nestId);
+    if (personal && personal.email.toLowerCase() !== params.approvedBy.toLowerCase()) {
+      throw new Error(personalNestRefusal(personal));
     }
 
     // Check permissions (unless override by super admin)
@@ -644,7 +652,7 @@ async function notifyApproved(p: {
       actor: p.approvedBy,
       version: p.version,
       note: p.note || null,
-    });
+    }, { nestId: p.nestId });
   }
 }
 
@@ -735,7 +743,7 @@ export async function reject(params: {
       actor: params.rejectedBy,
       version: version,
       note: params.note || null,
-    });
+    }, { nestId: params.nestId });
   }
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
@@ -1173,7 +1181,7 @@ async function notifyDeletionRequested(
         link: ctx.link,
         actor: request.requestedBy,
         note: request.reason,
-      });
+      }, { nestId: request.nestId });
     }
   } catch (err) {
     console.error(
@@ -1278,7 +1286,7 @@ export async function notifyDeletionResolved(params: {
         link: outcome === "deleted" ? link : undefined,
         actor: resolvedBy,
         note: note || null,
-      });
+      }, { nestId: params.nestId });
     }
   } catch (err) {
     console.error(

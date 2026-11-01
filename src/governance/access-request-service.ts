@@ -711,7 +711,7 @@ async function notifyAccessRequested(request: AccessRequest, baseUrl?: string): 
         actor: request.requested_by,
         permission: request.level,
         note: request.note,
-      });
+      }, { nestId: request.nest_id });
     }
   } catch (err) {
     console.error("[notify] access request fan-out failed", request.nest_id, request.id, err);
@@ -745,7 +745,7 @@ async function notifyAccessDecided(request: AccessRequest, baseUrl?: string): Pr
         actor: by,
         permission: request.level,
         note: request.resolution_note,
-      });
+      }, { nestId: request.nest_id });
     }
     void dispatchEvent({
       kind: approved ? "access_approved" : "access_denied",
