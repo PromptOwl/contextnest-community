@@ -192,7 +192,9 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
   }
   // §13 / S7-R2 L4: a seed's admin_only folders take approvals from nest
   // admins only — read from the nest's seeds (never the listener row), fail closed.
-  for (const it of target) {
+  // Reject / keep-record write nothing, so any reviewer may (as on the web).
+  const writes = req.verb !== "reject" && req.verb !== "keep_record";
+  for (const it of writes ? target : []) {
     const refusal = it.node_id ? await adminFolderRefusal(p.nest_id, it.node_id, u.email) : ADMIN_FOLDER_REFUSAL;
     if (refusal) {
       await req.responder.note(refusal);

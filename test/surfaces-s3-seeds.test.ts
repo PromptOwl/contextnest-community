@@ -1600,6 +1600,22 @@ describe("S7-R3 R2-L3: admin-only folders on move, rename, delete and external-e
     await expect(approveExternalEdit({ nestId: N1, documentId: adminDoc, suggestionId: "x", actor: carol.email })).rejects.toThrow(/admins/i);
   });
 
+  it("REV-1: a non-admin can't delete an EMPTY folder inside the admin folder (e.g. via an approved deletion request); an admin can", async () => {
+    const empty = `${ADMIN}empty-sub`;
+    await NODES.createEmptyFolder(N1, empty);
+    await expect(NODES.deleteFolder(N1, empty, carol.email)).rejects.toThrow(/admins/i);
+    expect(await NODES.vaultFolderExists(N1, empty.replace(/\/$/, ""))).toBe(true);
+    await NODES.deleteFolder(N1, empty, alice.email);
+    expect(await NODES.vaultFolderExists(N1, empty.replace(/\/$/, ""))).toBe(false);
+  });
+
+  it("REV-2: a non-admin can't create an empty folder inside the admin folder (case-folded too); an admin can", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${N1}/folders`, { folder: `${ADMIN.toUpperCase()}sneaky` }, carol.apiKey);
+    expect(r.status).toBe(403);
+    expect(await NODES.vaultFolderExists(N1, `${ADMIN}sneaky`)).toBe(false);
+    expect((await jsonRequest(app, "POST", `/nests/${N1}/folders`, { folder: `${ADMIN}by-admin` }, alice.apiKey)).status).toBe(201);
+  });
+
   it("R2-L3: an admin may move and delete there", async () => {
     const r = await jsonRequest(app, "POST", `/nests/${N1}/nodes/${carolDoc}/move`, { folder: ADMIN.replace(/\/$/, "") }, alice.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);

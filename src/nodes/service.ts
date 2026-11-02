@@ -3999,6 +3999,9 @@ export async function deleteFolder(
     throw new ValidationError("folder is required");
   }
   const rel = segments.join("/");
+  // A seed's admin-only folders: also when empty (no per-node check runs then).
+  const adminOnly = await adminFolderPathRefusal(nestId, [rel], userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
