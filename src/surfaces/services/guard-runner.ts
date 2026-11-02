@@ -132,10 +132,12 @@ export async function guardTick(now: number = Date.now()): Promise<string[] | "s
   }
 }
 
-/** Start the loop (no-op unless FEATURE_SURFACES is on). */
+/** Start the loop. Always runs; each tick is a no-op while Surfaces is off, so
+ *  turning metacognition on at runtime can't leave live bindings unchecked. */
 export function startSurfacesGuardLoop(): void {
-  if (timer || !surfacesEnabled()) return;
+  if (timer) return;
   timer = setInterval(() => {
+    if (!surfacesEnabled()) return;
     void guardTick().catch((err) => console.error("[surfaces] guard sweep failed", err));
   }, GUARD_TICK_MS);
   timer.unref?.();

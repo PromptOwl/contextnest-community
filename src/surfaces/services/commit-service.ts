@@ -88,7 +88,7 @@ export interface CommitRequest {
 export type Authorized = { ok: true; p: ProposalRow; binding: BindingRow; install: InstallRow; items: ItemRow[]; userId: string; email: string; name: string | null } | { ok: false };
 
 export const ORG_ONLY = (org: string) => `Only ${org} members can act on this.`;
-const orgName = () => process.env.SURFACES_ORG_NAME || "this workspace's";
+const orgName = () => config.SURFACES_ORG_NAME || "this workspace's";
 
 async function userRow(id: string) {
   return (await getDb().get("SELECT id, email, name, is_service FROM users WHERE id = ?", [id])) as

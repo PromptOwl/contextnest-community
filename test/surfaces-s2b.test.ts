@@ -878,7 +878,7 @@ describe("commit", () => {
     };
     walk(join(__dirname, "..", "src", "surfaces"));
     const callers = files.filter((f) => /from\s+"[./]*governance\/review-service\.js"/.test(readFileSync(f, "utf8")) && /\b(approve|reject)\b[^;]*from\s+"[./]*governance\/review-service\.js"/s.test(readFileSync(f, "utf8").match(/import\s*\{[^}]*\}\s*from\s+"[./]*governance\/review-service\.js"/s)?.[0] ?? ""));
-    expect(callers.map((f) => f.split("/src/surfaces/")[1])).toEqual(["services/commit-service.ts"]);
+    expect(callers.map((f) => f.replace(/\\/g, "/").split("/src/surfaces/")[1])).toEqual(["services/commit-service.ts"]);
     const src = readFileSync(join(__dirname, "..", "src", "surfaces", "services", "commit-service.ts"), "utf8");
     expect(src).toMatch(/approvedBy: a\.email/);
     expect(src).toMatch(/rejectedBy: a\.email/);
@@ -2619,6 +2619,41 @@ describe("round 7: sealed side channels", () => {
     expect(typeof other.data.temporary_password).toBe("string");
   });
 
+  it("REV-H1: with no PUBLIC_BASE_URL the owner reset link is refused, never built from the request Host", async () => {
+    const saved = process.env.PUBLIC_BASE_URL;
+    delete process.env.PUBLIC_BASE_URL;
+    sentMail.length = 0;
+    try {
+      const r = await app.request(`http://evil.example/auth/admin/reset-password/${dana.userId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Host: "evil.example", Authorization: `Bearer ${root.apiKey}` },
+        body: "{}",
+      });
+      expect(r.status).toBe(409);
+      expect((await r.json()).error).toMatch(/PUBLIC_BASE_URL/);
+      expect(sentMail.length).toBe(0);
+    } finally {
+      process.env.PUBLIC_BASE_URL = saved;
+    }
+  });
+
+  it("REV-M1: a server admin can't change a sealed nest's settings (the nest gate 404s them); a normal nest is unchanged", async () => {
+    const sealedPatch = await jsonRequest(app, "PATCH", `/nests/${PN}/settings`, { allow_self_approve: true }, root.apiKey);
+    expect(sealedPatch.status).toBe(404);
+    const normal = (await jsonRequest(app, "POST", "/nests", { name: `Normal ${rnd()}` }, frank.apiKey)).data.nest.id;
+    expect((await jsonRequest(app, "PATCH", `/nests/${normal}/settings`, { allow_self_approve: true }, root.apiKey)).status).toBe(200);
+  });
+
+  it("REV-M2: deleting a sealed nest removes its marker, so the owner is no longer treated as sealed", async () => {
+    const pn = (await jsonRequest(app, "POST", "/nests", { name: `Frank private ${rnd()}` }, frank.apiKey)).data.nest.id;
+    await db().run("INSERT INTO surface_personal_nests (install_id, community_user_id, nest_id) VALUES (?, ?, ?)", [installId, frank.userId, pn]);
+    const sealed = await import("../src/surfaces/sealed.js");
+    expect(await sealed.ownsSealedNest(frank.userId)).toBe(true);
+    expect((await jsonRequest(app, "DELETE", `/nests/${pn}`, undefined, frank.apiKey)).status).toBe(200);
+    expect(await one("SELECT 1 AS x FROM surface_personal_nests WHERE nest_id = ?", [pn])).toBeUndefined();
+    expect(await sealed.ownsSealedNest(frank.userId)).toBe(false);
+  });
+
   it("R7-L1: a sealed personal nest can't be shared with a team; an owner-added collaborator is allowed with a warning", async () => {
     const team = await jsonRequest(app, "POST", "/teams", { name: `T ${rnd()}` }, dana.apiKey);
     const teamId = team.data.team?.id ?? team.data.id;
@@ -2825,7 +2860,7 @@ describe("round 8: reset link, email fail-closed, sign-in alerts", () => {
           }
           const call = src.slice(i, j + 1);
           n++;
-          if (!/nestId|noNest/.test(call.slice(call.lastIndexOf("}", call.length - 3) - 200))) missing.push(`${f.replace(/.*src\//, "src/")}: ${call.slice(0, 60).replace(/\s+/g, " ")}`);
+          if (!/nestId|noNest/.test(call.slice(Math.max(0, call.lastIndexOf("}", call.length - 3) - 200)))) missing.push(`${f.replace(/.*src\//, "src/")}: ${call.slice(0, 60).replace(/\s+/g, " ")}`);
         }
         i = src.indexOf("sendEmailToRecipient(", i + 1);
       }

@@ -39,15 +39,15 @@ import { handleCommand, handleInteraction } from "./interactions.js";
 type C = Context<AuthEnv>;
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
-export const hostedEnabled = () => surfacesEnabled() && process.env.FEATURE_SURFACES_SLACK_HOSTED === "true";
+export const hostedEnabled = () => surfacesEnabled() && config.FEATURE_SURFACES_SLACK_HOSTED;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function hostedCreds() {
   return {
-    clientId: process.env.SURFACES_SLACK_HOSTED_CLIENT_ID || null,
-    clientSecret: process.env.SURFACES_SLACK_HOSTED_CLIENT_SECRET || null,
-    signing: process.env.SURFACES_SLACK_HOSTED_SIGNING_SECRET || null,
+    clientId: config.SURFACES_SLACK_HOSTED_CLIENT_ID,
+    clientSecret: config.SURFACES_SLACK_HOSTED_CLIENT_SECRET,
+    signing: config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
   };
 }
 

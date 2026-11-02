@@ -1398,6 +1398,12 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   {
     const { ownsSealedNest } = await import("../surfaces/sealed.js");
     if (await ownsSealedNest(target.id)) {
+      // Never build this link from the request Host: an admin could point it
+      // at their own site and capture the owner's token.
+      if (!config.PUBLIC_BASE_URL) {
+        const msg = "Set PUBLIC_BASE_URL before resetting the password of a private-nest owner. Nothing was changed.";
+        return c.json({ ok: false, reset_link_sent: false, error: msg, message: msg }, 409);
+      }
       const { createHash, randomBytes } = await import("crypto");
       const token = randomBytes(32).toString("base64url");
       const now = Date.now();
@@ -1407,7 +1413,7 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
         new Date(now + 60 * 60_000).toISOString(),
         new Date(now).toISOString(),
       ]);
-      const base = (config.PUBLIC_BASE_URL || requestBaseUrl(c.req.url)).replace(/\/$/, "");
+      const base = config.PUBLIC_BASE_URL.replace(/\/$/, "");
       const { sendPlainEmail } = await import("../notify/email.js");
       const outcome = await sendPlainEmail(
         target.email,
@@ -1417,13 +1423,15 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
       );
       trackEvent("admin.reset_password_link", { adminId: callerId, userId: target.id });
       const sent = outcome === "sent";
+      const message = sent
+        ? "This person owns a sealed private nest, so their password can't be set by an admin. They've been emailed a reset link at their own address."
+        : "This person owns a sealed private nest, so their password can't be set by an admin, and email isn't configured to send them a reset link. Nothing was changed.";
       return c.json({
         ok: sent,
         email: target.email,
         reset_link_sent: sent,
-        message: sent
-          ? "This person owns a sealed private nest, so their password can't be set by an admin. They've been emailed a reset link at their own address."
-          : "This person owns a sealed private nest, so their password can't be set by an admin, and email isn't configured to send them a reset link. Nothing was changed.",
+        message,
+        ...(sent ? {} : { error: message }),
       }, sent ? 200 : 409);
     }
   }

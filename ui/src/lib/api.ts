@@ -961,6 +961,8 @@ export async function resetUserPassword(userId: string, password?: string) {
     email: string;
     keys_revoked?: boolean;
     temporary_password?: string;
+    reset_link_sent?: boolean;
+    message?: string;
   }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify(password ? { password } : {}),
@@ -1054,8 +1056,34 @@ export async function disconnectApp(clientId: string) {
 
 // ─── Nest settings ─────────────────────────────────────────────────────
 
+/** A product area. Sorts and filters tasks; never part of the ticket number. */
+export interface TaskSurface {
+  name: string;
+  tags: string[];
+}
+
+export interface TaskRules {
+  /** Tag namespaces a task holds only one tag from (e.g. "stage"). */
+  exclusive_namespaces: string[];
+  /** Tag a new task gets when it arrives with none from an exclusive namespace. */
+  default_stage_tag: string | null;
+  surfaces: TaskSurface[];
+  /** Name of the surface the create dialog preselects; null = none. */
+  default_surface: string | null;
+  ticket_numbering: boolean;
+  /** The nest's single ticket prefix ("PO"); required for numbering. */
+  ticket_prefix?: string | null;
+  /** First number issued; null = 1. */
+  ticket_start_at?: number | null;
+  /** Stage columns in workflow order (bare values). Empty: alphabetical. */
+  stage_order?: string[];
+  /** Priority levels, most urgent first. Empty: the built-in four. */
+  priorities?: { key: string; label: string }[];
+}
+
 export interface NestSettings {
   stewardship_enabled: boolean;
+  task_rules?: TaskRules;
   allow_self_approve: boolean;
   /** Review only prime documents; everything else self-publishes. */
   prime_only_review: boolean;
@@ -1149,6 +1177,8 @@ export async function updateNestSettings(
     prime_only_review?: boolean;
     prime_tags?: string[];
     always_include_tags?: string[];
+    /** Replaces the whole object. */
+    task_rules?: TaskRules;
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
@@ -4642,4 +4672,13 @@ export async function runMetacognitionAgent(nestId: string, nodeId: string) {
     method: "POST",
     body: "{}",
   });
+}
+
+export async function backfillTickets(nestId: string, body: { limit?: number; dry_run?: boolean } = {}) {
+  return request<{
+    numbered: number;
+    failed: number;
+    remaining: number;
+    results: { id: string; ticket?: string; outcome: string; reason?: string }[];
+  }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }

@@ -10,6 +10,7 @@
  * one email to the nest's admins, once per threshold per month: the alerted_*
  * flags flip by compare-and-set, so concurrent judges can't double-send.
  */
+import { config } from "../../config.js";
 import { getDb } from "../../db/client.js";
 import { estimateCostUsd } from "../../metacognition/model.js";
 import { nestAdminEmails } from "../../governance/review-service.js";
@@ -40,7 +41,7 @@ export function reservationMicros(model: string): number {
 }
 
 async function ensureRow(nestId: string, month: string): Promise<void> {
-  const cap = Number(process.env.SURFACES_DEFAULT_CAP_MICROS) > 0 ? Number(process.env.SURFACES_DEFAULT_CAP_MICROS) : DEFAULT_CAP_MICROS;
+  const cap = config.SURFACES_DEFAULT_CAP_MICROS > 0 ? config.SURFACES_DEFAULT_CAP_MICROS : DEFAULT_CAP_MICROS;
   await getDb().run(
     `INSERT INTO surface_nest_budgets (nest_id, month, cap_micros, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (nest_id, month) DO NOTHING`,
