@@ -30,11 +30,13 @@ listener:
   domain_tags: [decision, customer, process]
   # Categories the listener must never propose, with plain-word synonyms the
   # deterministic filter also checks (plurals and simple inflections match).
+  # Every term also blocks the seed's own folders, so business words that double
+  # as private ones ("customer relationship", "equity round") are phrases here.
   never_propose:
-    - { category: compensation, terms: [wage, payroll, paycheck, pay rise, pay cut, equity, stock option] }
-    - { category: health, terms: [medical, illness, sick, diagnosis, pregnancy, therapy] }
+    - { category: compensation, terms: [salary, wage, payroll, paycheck, pay rise, pay cut, my equity, equity grant, stock option] }
+    - { category: health, terms: [medical, illness, off sick, sick leave, diagnosis, pregnancy, in therapy, therapist] }
     - { category: performance-review, terms: [underperforming, disciplinary, warning letter, improvement plan] }
-    - { category: personal-life, terms: [divorce, dating, relationship, religion, family problem] }
+    - { category: personal-life, terms: [divorce, dating someone, romantic relationship, relationship problems, religion, family problem] }
     - { category: gossip, terms: [rumour, rumor, between us, off the record] }
     - { category: credentials, terms: [password, api key, private key, access token] }
 nodes:

@@ -194,6 +194,27 @@ describe("S7-R2 L2: a seeded item a person deleted is not re-created", () => {
   });
 });
 
+describe("generic-team never_propose terms don't eat the seed's own business content", () => {
+  const terms = () => {
+    const l = parseManifest(manifestOf("generic-team")).listener as { never_propose: string[]; never_terms: string[] };
+    return [...l.never_propose, ...l.never_terms];
+  };
+  it.each([
+    "Priya is the relationship owner for the Globex account",
+    "We agreed to protect the customer relationship during the renewal",
+    "Decision: close the Series A equity round by March",
+    "The build was sick after the dependency bump",
+  ])("passes: %s", (text) => expect(categoryHit(text, terms())).toBe(false));
+  it.each([
+    "Sam is off sick until Thursday",
+    "she mentioned she is in therapy",
+    "he is dating someone from sales",
+    "their romantic relationship ended",
+    "my equity grant vests next year",
+    "salary bands for next year",
+  ])("blocks: %s", (text) => expect(categoryHit(text, terms())).toBe(true));
+});
+
 describe("S7-R2 L5: never_propose is normalised, has seed-data synonyms, and covers every text field", () => {
   it("L5: plurals and simple inflections match on both sides", () => {
     expect(categoryHit("two leaked credential files", ["credentials"])).toBe(true);
