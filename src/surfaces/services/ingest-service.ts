@@ -194,7 +194,7 @@ async function note(install: InstallRow, b: BindingRow, user: string, text: stri
 }
 
 async function orgName(): Promise<string> {
-  return config.SURFACES_ORG_NAME;
+  return config.SURFACES_ORG_NAME || "your organization";
 }
 
 /** One more ask today for this requester, atomically; false when at the limit. */

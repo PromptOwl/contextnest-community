@@ -42,7 +42,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   70->83 Surfaces S1 (src/mcp/surfaces-tools.ts): context_surfaces_status, bindings_list, binding_preview/create/update/
 //   delete/recheck/resume, links_list, link_revoke/unblock, link_reviews_list, link_review_decide — REST twins of /surfaces/*;
 //   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists
-//   (ContextNest#238: promote upstream or confirm Community-only; covers S2a's tools below too).
+//   (ContextNest#238: promote upstream or confirm Community-only; covers the S2a and S2b tools below too).
 //   83->87 Surfaces S2a (src/mcp/surfaces-tools.ts): context_surfaces_slack_install_create, settings_get, settings_update,
 //   windows_list — REST twins of POST /surfaces/slack/installs, GET/PATCH /surfaces/settings, GET /surfaces/windows; Community-only
 //   tables (surface_installs, surface_settings, surface_windows) the engine does not model, so no engine op exists.

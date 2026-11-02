@@ -15,6 +15,7 @@
  *  - `response_url` is only ever a hooks.slack.com URL (SSRF fence).
  */
 import { createHmac, timingSafeEqual } from "crypto";
+import { config } from "../../../config.js";
 import { getDb } from "../../../db/client.js";
 import { track } from "../../services/work.js";
 import type { InstallRow } from "../../services/install-store.js";
@@ -249,7 +250,7 @@ async function onBlockAction(install: InstallRow, p: Record<string, any>): Promi
   const interactionId = `${p.trigger_id ?? ""}:${action.action_ts ?? ""}`;
   // The workspace must be this install's for every action, home included.
   if ((origin.team_id ?? null) !== (install.team_id ?? null) || (origin.enterprise_id ?? null) !== (install.enterprise_id ?? null)) {
-    await r.note(`Only ${process.env.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
+    await r.note(`Only ${config.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
     return;
   }
   const after = async () => {
@@ -307,7 +308,7 @@ async function onBlockAction(install: InstallRow, p: Record<string, any>): Promi
       const prop = await getProposal(sel.p);
       const b = prop ? await getBindingRow(prop.binding_id) : null;
       if (!b || b.install_id !== install.id || b.conversation_id !== origin.channel_id) {
-        await r.note(`Only ${process.env.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
+        await r.note(`Only ${config.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
         return;
       }
       return startBoot(install, b, user, String(p.trigger_id ?? ""), (t) => r.note(t));
@@ -469,7 +470,7 @@ export async function handleCommand(install: InstallRow, raw: string): Promise<H
   const channel = f.get("channel_id") ?? "";
   const team = f.get("team_id") ?? null;
   const say = (t: string): HandlerResult => ({ status: 200, body: { response_type: "ephemeral", text: t } });
-  if ((install.team_id ?? null) !== team) return say(`Only ${process.env.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
+  if ((install.team_id ?? null) !== team) return say(`Only ${config.SURFACES_ORG_NAME || "this workspace's"} members can act on this.`);
   if (text === "leave") {
     const b = (await getDb().get("SELECT * FROM surface_bindings WHERE install_id = ? AND conversation_id = ?", [install.id, channel])) as BindingRow | undefined;
     if (!b || (b.status !== "active" && b.status !== "paused_guard")) return say("Nest isn't listening in this conversation.");

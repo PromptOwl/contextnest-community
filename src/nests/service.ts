@@ -1219,6 +1219,9 @@ export async function deleteNest(nestId: string): Promise<void> {
     // reason as the rows above. No try/catch: the migration always creates the
     // table, and on Postgres a failed statement aborts the transaction anyway.
     await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
+    // Surfaces private (sealed) nest marker (migration 081, no FK): left behind
+    // it would keep the owner "sealed" forever (no admin reset, alerts on).
+    await tx.run("DELETE FROM surface_personal_nests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 
