@@ -8,7 +8,7 @@ export function surfacesEnabled(): boolean {
   // Never in AUTH_MODE=open: every caller there is an anonymous admin, and
   // Surfaces binds conversations and links identities (security L5).
   if (config.AUTH_MODE === "open") return false;
-  return process.env.FEATURE_SURFACES === "true" && config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION;
+  return config.FEATURE_SURFACES && config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION;
 }
 
 /** Community is one organization per deployment; Surfaces rows carry this id

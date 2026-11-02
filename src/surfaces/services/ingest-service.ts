@@ -6,6 +6,7 @@
  * Every drop increments surface_counters with its reason. No text is stored
  * for a dropped message, and nothing here logs message text.
  */
+import { config } from "../../config.js";
 import { getDb } from "../../db/client.js";
 import { ORG_ID } from "../flags.js";
 import type { SurfaceMessage } from "../contract.js";
@@ -193,7 +194,7 @@ async function note(install: InstallRow, b: BindingRow, user: string, text: stri
 }
 
 async function orgName(): Promise<string> {
-  return process.env.SURFACES_ORG_NAME || "your organization";
+  return config.SURFACES_ORG_NAME;
 }
 
 /** One more ask today for this requester, atomically; false when at the limit. */

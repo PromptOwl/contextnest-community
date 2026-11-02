@@ -228,7 +228,7 @@ export async function editTargetIsDocument(nestId: string, nodeId: string): Prom
  * many were fully withdrawn; anything that couldn't be stays pending (and
  * hidden) for the sweep to retry.
  */
-export async function withdrawProposalItems(proposalId: string, reason = "binding_stopped"): Promise<number> {
+export async function withdrawProposalItems(proposalId: string, reason = "binding_stopped", resolvedOnly = false): Promise<number> {
   const db = getDb();
   const p = (await db.get("SELECT id, nest_id, binding_id FROM surface_proposals WHERE id = ?", [proposalId])) as
     | { id: string; nest_id: string; binding_id: string }
@@ -247,7 +247,12 @@ export async function withdrawProposalItems(proposalId: string, reason = "bindin
     if (it.state === "creating") continue; // its creator finishes or drops it; the sweep comes back
     try {
       if (proposalTestHooks.failWithdraw) throw new Error("injected withdraw failure");
+      if (resolvedOnly && !it.review_id) continue;
       if (it.review_id) {
+        if (resolvedOnly) {
+          const rs = (await db.get("SELECT status FROM review_requests WHERE id = ?", [it.review_id])) as { status?: string } | undefined;
+          if (!rs || rs.status === "pending") continue; // still a live review: leave it
+        }
         const w = await withdrawReviewAsSystem({ nestId: p.nest_id, reviewId: it.review_id, reason });
         const author = w?.requestedBy ?? ((await db.get("SELECT requested_by FROM review_requests WHERE id = ?", [it.review_id])) as { requested_by?: string } | undefined)?.requested_by;
         const review = (await db.get("SELECT status FROM review_requests WHERE id = ?", [it.review_id])) as { status?: string } | undefined;
@@ -356,5 +361,12 @@ export async function retryWithdrawals(nowMs = Date.now()): Promise<number> {
   )) as Array<{ id: string }>;
   let n = 0;
   for (const r of rows) n += await withdrawProposalItems(r.id);
+  // Reviews a person decided outside the surface (web queue, MCP): settle
+  // approved items, discard rejected/cancelled drafts, stop hiding them.
+  const decided = (await db.all(
+    `SELECT DISTINCT i.proposal_id AS id FROM surface_proposal_items i JOIN review_requests r ON r.id = i.review_id
+      WHERE i.state = 'pending' AND r.status <> 'pending'`,
+  )) as Array<{ id: string }>;
+  for (const r of decided) n += await withdrawProposalItems(r.id, "review_resolved", true);
   return n;
 }

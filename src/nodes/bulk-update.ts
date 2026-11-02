@@ -24,7 +24,13 @@ import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { engineCache, sealedFor } from "./engine.js";
 import { updateNode } from "./service.js";
 import * as versions from "../governance/version-service.js";
-import { isDueDate, taskFieldsOf, TASK_PRIORITIES } from "./task-fields.js";
+import { isDueDate, taskFieldsOf } from "./task-fields.js";
+import { nestTaskRules } from "../nests/service.js";
+import { effectivePriorities } from "./task-rules.js";
+
+/** The keys of the nest's priority levels, most urgent first. */
+const nestPriorityKeys = async (nestId: string): Promise<string[]> =>
+  effectivePriorities(await nestTaskRules(nestId)).map((p) => p.key);
 import { canReadNode } from "../governance/access-guard.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
 import { listNestPeople } from "../nests/people-service.js";
@@ -48,6 +54,7 @@ export const BULK_UPDATE_MAX = 100;
 /** Most raw selector matches one call will permission-check. */
 const BULK_SELECTOR_SCAN_MAX = 2000;
 const MAX_TAGS = 50;
+const MAX_PATCH_FIELDS = 20;
 
 export interface BulkPatch {
   /** Tags to add (with or without "#"). */
@@ -63,6 +70,10 @@ export interface BulkPatch {
   assignee?: string | null;
   /** YYYY-MM-DD; null clears. */
   due?: string | null;
+  /** Custom field values, field key → value (null clears one) — the same map
+   *  `context_update` takes as `fields`, validated against the nest's
+   *  definitions per node. */
+  fields?: Record<string, unknown>;
   change_note?: string;
 }
 
@@ -113,7 +124,7 @@ export function cleanBulkPatch(raw: unknown): BulkPatch {
     throw new ValidationError("patch must be an object");
   }
   const r = raw as Record<string, unknown>;
-  const known = ["add_tags", "remove_tags", "board_id", "column", "priority", "assignee", "due", "change_note"];
+  const known = ["add_tags", "remove_tags", "board_id", "column", "priority", "assignee", "due", "fields", "change_note"];
   const unknown = Object.keys(r).filter((k) => !known.includes(k));
   if (unknown.length > 0) {
     throw new ValidationError(`patch has unknown field(s): ${unknown.join(", ")} — allowed: ${known.join(", ")}`);
@@ -132,8 +143,10 @@ export function cleanBulkPatch(raw: unknown): BulkPatch {
     out.column = r.column;
   }
   if (r.priority !== undefined) {
-    if (r.priority !== null && !(TASK_PRIORITIES as readonly unknown[]).includes(r.priority)) {
-      throw new ValidationError(`patch.priority must be one of ${TASK_PRIORITIES.join(", ")} or null`);
+    // Shape only here — the nest's own levels are checked against its settings
+    // in bulkUpdateNodes, before any node is touched.
+    if (r.priority !== null && (typeof r.priority !== "string" || !/^[a-z0-9][a-z0-9-]{0,19}$/.test(r.priority))) {
+      throw new ValidationError("patch.priority must be one of the nest's priority keys, or null");
     }
     out.priority = r.priority as string | null;
   }
@@ -149,11 +162,22 @@ export function cleanBulkPatch(raw: unknown): BulkPatch {
     }
     out.assignee = r.assignee === null || !String(r.assignee).trim() ? null : String(r.assignee).trim().toLowerCase();
   }
+  if (r.fields !== undefined) {
+    if (!r.fields || typeof r.fields !== "object" || Array.isArray(r.fields)) {
+      throw new ValidationError("patch.fields must be an object of field key → value");
+    }
+    const keys = Object.keys(r.fields);
+    if (keys.length === 0) throw new ValidationError("patch.fields is empty");
+    if (keys.length > MAX_PATCH_FIELDS) {
+      throw new ValidationError(`patch.fields sets more than ${MAX_PATCH_FIELDS} fields`);
+    }
+    out.fields = r.fields as Record<string, unknown>;
+  }
   if (r.change_note !== undefined) {
     if (typeof r.change_note !== "string") throw new ValidationError("patch.change_note must be a string");
     out.change_note = r.change_note.slice(0, 500);
   }
-  const ops = ["add_tags", "remove_tags", "column", "priority", "assignee", "due"] as const;
+  const ops = ["add_tags", "remove_tags", "column", "priority", "assignee", "due", "fields"] as const;
   if (!ops.some((k) => out[k] !== undefined)) {
     throw new ValidationError(`patch changes nothing — set one of ${ops.join(", ")}`);
   }
@@ -177,7 +201,7 @@ async function columnOp(nestId: string, userId: string, boardId: string, column:
     case "assignee":
       return { drop: new Set(), fields: { assignee: none ? null : column.toLowerCase() } };
     case "priority":
-      if (!none && !(TASK_PRIORITIES as readonly string[]).includes(column)) {
+      if (!none && !(await nestPriorityKeys(nestId)).includes(column)) {
         throw new ValidationError(`"${column}" isn't a priority column`);
       }
       return { drop: new Set(), fields: { priority: none ? null : column } };
@@ -292,6 +316,12 @@ export async function bulkUpdateNodes(
   } = {},
 ): Promise<BulkUpdateResult> {
   const patch = cleanBulkPatch(input.patch);
+  if (typeof patch.priority === "string") {
+    const keys = await nestPriorityKeys(nestId);
+    if (!keys.includes(patch.priority)) {
+      throw new ValidationError(`patch.priority must be one of ${keys.join(", ")} or null`);
+    }
+  }
   const ids = await resolveTargets(nestId, caller, input);
   const col = patch.board_id ? await columnOp(nestId, caller.userId, patch.board_id, patch.column!) : null;
   const fields = { ...col?.fields };
@@ -376,7 +406,14 @@ export async function bulkUpdateNodes(
     for (const [k, v] of Object.entries(fields)) {
       if ((current[k] ?? null) !== (v ?? null)) changedFields[k] = v as string | null;
     }
-    if (!tagsChanged && Object.keys(changedFields).length === 0) {
+    // Custom fields: only the keys whose value actually differs are sent, so a
+    // re-run is `unchanged` and writes no version.
+    const storedFields = ((node.frontmatter.metadata as Record<string, unknown> | undefined)?.fields ?? {}) as Record<string, unknown>;
+    const changedCustom: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch.fields ?? {})) {
+      if (JSON.stringify(storedFields[k] ?? null) !== JSON.stringify(v ?? null)) changedCustom[k] = v;
+    }
+    if (!tagsChanged && Object.keys(changedFields).length === 0 && Object.keys(changedCustom).length === 0) {
       results.push({ id, title, outcome: "unchanged", status: String(node.frontmatter.status ?? "") });
       continue;
     }
@@ -387,6 +424,7 @@ export async function bulkUpdateNodes(
         {
           ...(tagsChanged ? { tags: next } : {}),
           ...changedFields,
+          ...(Object.keys(changedCustom).length > 0 ? { fields: changedCustom } : {}),
           changeNote: patch.change_note || "Bulk edit",
           client: opts.client,
         },

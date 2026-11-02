@@ -138,12 +138,13 @@ export async function purgeSweep(nowMs: number = Date.now()): Promise<{ rows_del
 
 let timers: Array<ReturnType<typeof setInterval>> = [];
 
+/** Always runs; each tick is a no-op while Surfaces is off (it can be turned on at runtime). */
 export function startSurfacesIngestLoops(): void {
-  if (timers.length || !surfacesEnabled()) return;
+  if (timers.length) return;
   const every = (ms: number, fn: () => Promise<unknown>, label: string) => {
     let busy = false;
     const t = setInterval(() => {
-      if (busy) return;
+      if (busy || !surfacesEnabled()) return;
       busy = true;
       track(
         fn().finally(() => {

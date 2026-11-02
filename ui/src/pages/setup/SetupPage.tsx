@@ -3,7 +3,7 @@
  * loopback ?cb; the chosen options go back to the terminal. Opened by hand,
  * it builds the equivalent `ctx init` line instead. See lib/setup-page.ts.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -19,6 +19,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { getHealth } from "@/lib/api";
+import { PLUGIN_SETUP_COMMANDS, setupSignInCommand } from "@/lib/connect";
 import {
   ALIAS_PATTERN,
   CHOICES_KEY,
@@ -35,6 +37,30 @@ import {
   loopbackCallback,
   type SetupChoices,
 } from "@/lib/setup-page";
+
+/** One quick way to connect: a label, a short note, a copyable command. */
+function Choice({
+  title,
+  command,
+  children,
+}: {
+  title: string;
+  command: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border bg-card p-4">
+      <p className="font-medium">{title}</p>
+      <p className="text-sm text-muted-foreground">{children}</p>
+      <div className="flex items-start gap-2">
+        <pre className="flex-1 overflow-x-auto rounded-md bg-muted p-3 text-xs">
+          {command}
+        </pre>
+        <CopyButton text={command} size="icon" aria-label={`Copy: ${title}`} />
+      </div>
+    </div>
+  );
+}
 
 function savedChoices(): SetupChoices | null {
   try {
@@ -74,6 +100,14 @@ export function SetupPage() {
     () => (cloud ? cloudGuides(c.server, c.alias) : connectGuides(c.alias)),
     [cloud, c.server, c.alias]
   );
+  // Unknown (null) until /health answers; the sign-in box waits for it.
+  const [authMode, setAuthMode] = useState<string | null>(null);
+  useEffect(() => {
+    getHealth().then((h) => setAuthMode(h.auth_mode), () => {});
+  }, []);
+  // /setup is served by this server, so the page's own origin is the one to sign
+  // in to; the Connect dialogs, inside the app, use the configured serverUrl.
+  const loginCmd = setupSignInCommand(window.location.origin, authMode, cloud);
 
   const send = () => {
     if (!cb || !ready) return;
@@ -352,7 +386,31 @@ export function SetupPage() {
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">2. Connect your agent</h2>
           <p className="text-sm text-muted-foreground">
-            Open the tool you use. Each one has its own steps.
+            The quickest ways in:
+          </p>
+          <Choice title="Claude Code plugin" command={PLUGIN_SETUP_COMMANDS}>
+            Type each line inside Claude Code. The last one asks where your
+            notes should live: only on this computer, or online (to use{" "}
+            {window.location.host}, choose Other and enter{" "}
+            <code>{window.location.origin}</code>), and connects everything.
+            From then on the plugin looks up matching notes on each prompt and
+            saves notes when you ask.
+          </Choice>
+          {loginCmd && (
+            <Choice
+              title={`Sign in to ${window.location.host} from a terminal`}
+              command={`npm i -g @promptowl/contextnest-cli\n${loginCmd}`}
+            >
+              The first line installs or updates the <code>ctx</code> CLI
+              (needs Node 20 or later). The second opens your browser to
+              approve; then the notes you can open on {window.location.host}{" "}
+              appear in <code>ctx vault list</code>. Signing in uploads
+              nothing. No browser sign-in on this server? Add{" "}
+              <code>--key-stdin</code> and paste a key from its Connect page.
+            </Choice>
+          )}
+          <p className="text-sm text-muted-foreground">
+            Or open the tool you use. Each one has its own steps.
           </p>
           {guides.map((g) => (
             <details

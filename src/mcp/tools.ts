@@ -535,7 +535,7 @@ const TASK_FIELD_PROPERTIES = {
   },
   priority: {
     type: ["string", "null"],
-    description: 'One of "urgent", "high", "medium", "low". null or "" clears it.',
+    description: 'One of the nest\'s priority keys (default: "urgent", "high", "medium", "low"; a nest can define its own). null or "" clears it.',
   },
   parent: {
     type: ["string", "null"],
@@ -711,7 +711,7 @@ export const TOOL_DEFINITIONS = [
         },
         priority: {
           type: "string",
-          description: 'Only nodes with this priority: urgent | high | medium | low | none.',
+          description: "Only nodes with this priority key (default levels: urgent | high | medium | low), or 'none'.",
         },
         due_before: {
           type: "string",
@@ -1143,7 +1143,7 @@ export const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description:
-            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: one of the nest\'s priority keys (default urgent|high|medium|low), or null. assignee: email|null. due: YYYY-MM-DD|null. fields: custom field values by key (null clears). change_note: recorded in each version.",
           properties: {
             board_id: { type: "string" },
             column: { type: "string" },
@@ -1152,6 +1152,7 @@ export const TOOL_DEFINITIONS = [
             priority: { type: ["string", "null"] },
             assignee: { type: ["string", "null"] },
             due: { type: ["string", "null"] },
+            fields: { type: "object" },
             change_note: { type: "string" },
           },
         },

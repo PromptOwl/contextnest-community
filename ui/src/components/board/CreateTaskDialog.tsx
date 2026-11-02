@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AssigneeMenu, type Person } from "./CardParts";
-import { PRIORITIES, PRIORITY_LABELS } from "../../lib/board-tasks";
+import { usePriorityLevels } from "../../lib/priorities";
 
 export interface NewTask {
   title: string;
@@ -24,6 +24,8 @@ export interface NewTask {
   assignee?: string;
   priority?: string;
   due?: string;
+  /** Tag (no `#`) of the surface picked; the caller adds it to the task. */
+  surfaceTag?: string;
 }
 
 /** What the dialog sends: trimmed title, blank optional fields left out (so the
@@ -37,6 +39,7 @@ export function newTaskPayload(f: NewTask): NewTask | null {
     ...(f.assignee ? { assignee: f.assignee } : {}),
     ...(f.priority ? { priority: f.priority } : {}),
     ...(f.due ? { due: f.due } : {}),
+    ...(f.surfaceTag ? { surfaceTag: f.surfaceTag } : {}),
   };
 }
 
@@ -45,6 +48,8 @@ export function CreateTaskDialog({
   initial,
   people,
   me,
+  surfaces = [],
+  defaultSurface,
   onSubmit,
   onClose,
 }: {
@@ -53,18 +58,24 @@ export function CreateTaskDialog({
   initial?: { assignee?: string; priority?: string };
   people: Person[];
   me?: string;
+  /** The nest's surfaces, each with the tag it adds. Empty: no picker. */
+  surfaces?: { name: string; tag: string }[];
+  /** Tag preselected in the picker. */
+  defaultSurface?: string;
   onSubmit: (task: NewTask) => Promise<void>;
   onClose: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [assignee, setAssignee] = useState(initial?.assignee);
+  const levels = usePriorityLevels();
   const [priority, setPriority] = useState(initial?.priority ?? "");
   const [due, setDue] = useState("");
+  const [surfaceTag, setSurfaceTag] = useState(defaultSurface ?? "");
   const [saving, setSaving] = useState(false);
 
   const submit = async () => {
-    const task = newTaskPayload({ title, content, assignee, priority, due });
+    const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag });
     if (!task || saving) return;
     setSaving(true);
     try {
@@ -120,12 +131,28 @@ export function CreateTaskDialog({
               className="h-8 rounded-md border border-input bg-background px-2 text-sm"
             >
               <option value="">No priority</option>
-              {PRIORITIES.map((p) => (
-                <option key={p} value={p}>
-                  {PRIORITY_LABELS[p]}
+              {levels.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
                 </option>
               ))}
             </select>
+            {surfaces.length > 0 && (
+              <select
+                value={surfaceTag}
+                onChange={(e) => setSurfaceTag(e.target.value)}
+                aria-label="Surface"
+                disabled={saving}
+                className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">No surface</option>
+                {surfaces.map((sf) => (
+                  <option key={sf.tag} value={sf.tag}>
+                    {sf.name}
+                  </option>
+                ))}
+              </select>
+            )}
             <Input
               type="date"
               value={due}

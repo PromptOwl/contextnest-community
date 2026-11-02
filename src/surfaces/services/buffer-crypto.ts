@@ -7,6 +7,7 @@
  * and the ingest path treats that as "drop").
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { config } from "../../config.js";
 
 export class BufferKeyError extends Error {}
 
@@ -19,7 +20,7 @@ function parseKey(raw: string | undefined): Buffer {
 }
 
 export function bufferKey(): Buffer {
-  return parseKey(process.env.SURFACES_BUFFER_KEY);
+  return parseKey(config.SURFACES_BUFFER_KEY);
 }
 
 export function bufferKeyConfigured(): boolean {

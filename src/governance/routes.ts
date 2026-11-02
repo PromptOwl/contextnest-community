@@ -867,6 +867,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
 governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+  // Review notes can carry draft-derived text (e.g. a hidden Surfaces draft).
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ error: "Access denied — no steward assignment for this node" }, 403);
+  }
 
   const history = await reviews.getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });

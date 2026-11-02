@@ -471,7 +471,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
     await end({ status: "judged", verdict: "error", reason_code: "no_model" });
     return;
   }
-  const model = await resolveGatewayModel(credential, process.env.SURFACES_JUDGE_MODEL || listener.config.model || hootieModel(credential));
+  const model = await resolveGatewayModel(credential, config.SURFACES_JUDGE_MODEL || listener.config.model || hootieModel(credential));
   const nv = await nestView(binding.nest_id, owner.userId);
   const install = await getInstall(binding.install_id);
   if (!nv || !install) {
