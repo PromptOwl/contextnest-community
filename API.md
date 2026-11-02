@@ -2669,7 +2669,7 @@ Every route `404`s unless `FEATURE_SURFACES`, `FEATURE_WORKFLOW_PLANE` and `FEAT
 Personal keys and MCP tokens act as their user, so they add no reader. Server administrators can read every nest and can't be removed. They are left out of the check, and every response carries `disclosure: "This server's administrators can read every nest."`. `surface_ok` means that everyone in the conversation can read the nest. Nest text is posted only when it holds. Guard detail is counts only, with no names.
 
 Binding states: `active | paused_guard | paused_by_member | removed`.
-- The guard re-checks within 60 s of any membership or permission change.
+- The guard re-checks every 30 s, so a membership or permission change applies within 60 s at most.
 - A binding whose capture stops being safe becomes `paused_guard`. Its buffer is purged, its pending cards are withdrawn and admins are alerted with counts only.
 - It stays paused until an admin resumes it.
 - A member can remove Nest from a non-general conversation (`paused_by_member`). It comes back only through an admin resume, and only once that member has agreed or has left.

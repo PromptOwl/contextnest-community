@@ -41,7 +41,8 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   server state the engine does not model, so there is no engine op to consume).
 //   70->83 Surfaces S1 (src/mcp/surfaces-tools.ts): context_surfaces_status, bindings_list, binding_preview/create/update/
 //   delete/recheck/resume, links_list, link_revoke/unblock, link_reviews_list, link_review_decide — REST twins of /surfaces/*;
-//   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists.
+//   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists
+//   (ContextNest#238: promote upstream or confirm Community-only).
 const BASELINE = 83;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;

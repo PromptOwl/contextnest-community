@@ -385,6 +385,12 @@ describe("admin revoke over REST and MCP", () => {
     expect(await activeLink("U_BOB2")).toBeUndefined();
   });
 
+  it("the /link page is no-store and no-referrer (the token is in the URL)", async () => {
+    const res = await app.request("/link/garbage", { headers: { Authorization: `Bearer ${alice.apiKey}` } });
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Referrer-Policy")).toBe("no-referrer");
+  });
+
   it("link reviews: approving onto an already-linked account is a 409 that leaves the review pending", async () => {
     const r3 = await person("Rev Three");
     fake.profiles.set("U_R3", profile("U_R3", { email: r3.email }));
