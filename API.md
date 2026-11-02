@@ -2697,9 +2697,38 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
   - At most 5 links per surface user per 15 minutes. Expired links are purged by the hourly retention sweep.
   - Linking never runs the action that was clicked: `{ linked: true, executed: false, message }`.
 
+#### Slack install, ingestion and judgement (S2a)
+
+The workspace installs a customer-owned Slack app made from our manifest (`docs/surfaces/slack-app-manifest.json`; scopes are justified in `docs/surfaces`). Nest listens to events only and never pulls channel history during normal listening. Messages that pass a deterministic gate are held in an encrypted buffer (`SURFACES_BUFFER_KEY`; with no key, nothing is stored). The window is judged after `quiet_minutes` without new messages, or when it hits its size or age cap. Proposals become review-queue drafts that readers can't see until a person approves them. Approving in the web review queue unhides the draft immediately. Within 5 minutes the purge sweep marks the item approved, or discards a rejected or cancelled draft.
+
+- `POST /surfaces/slack/installs` `{ home_nest_id }` (server admin, own credential): `201 { install_id, manifest, disclosure }`. `422` if the nest doesn't exist.
+- `GET /surfaces/slack/installs/:id` (server admin): install state plus `credentials` as booleans. Values are never returned.
+- `PUT /surfaces/slack/installs/:id/credentials` `{ client_id?, client_secret?, signing_secret? }` (server admin): stored encrypted. Returns `{ stored, credentials }`, again as booleans.
+- `GET /surfaces/slack/installs/:id/oauth/start` (server admin, **signed-in browser session**; a bearer key gets `403`): `302` to Slack. The state is single use, bound to the session, and expires in 10 minutes.
+- `GET /surfaces/slack/oauth/callback`: completes the install. It refuses a reused or foreign state, and a different Slack workspace than the install's. On refusal the new token is revoked. It returns a small HTML page, or JSON for `Accept: application/json`.
+- `GET /surfaces/slack/hosted/oauth/start?home_nest_id=`: hosted one-click install. It exists only while `FEATURE_SURFACES_SLACK_HOSTED` is on.
+- `POST /surfaces/slack/:installId/events`, `POST /surfaces/slack/:installId/interactions` (and `/surfaces/slack/hosted/*` for hosted): Slack calls these.
+  - Unauthenticated, but the Slack signature on the raw body is required. A bad or missing signature, a timestamp outside 300 s, or no signing secret gives `401`.
+  - Bodies over 1 MB give `413`.
+  - Retries are deduplicated by `event_id`.
+  - `url_verification` is answered only after the signature passes.
+- `GET /surfaces/settings`, `PATCH /surfaces/settings` (server admin; PATCH needs your own credential): server-wide Surfaces settings. Defaults:
+
+  | Setting | Default | Range |
+  |---|---|---|
+  | `quiet_minutes` | 20 | 5–240 |
+  | `window_max_age_hours` | 6 | 1–12, and below `buffer_ttl_hours` |
+  | `buffer_ttl_hours` | 24 | — |
+  | `min_meaningful_chars` | 6 | 1–50 |
+  | `propose_threshold` | 0.7 | 0.5–0.95 |
+
+  An out-of-range value gives `422`.
+- `GET /surfaces/windows?binding_id=&verdict=&from=&to=`: the verdict log. Lists windows with their verdicts and counts, never message text, scoped to what the caller can see.
+
 MCP twins (per-nest endpoint, advertised to nest owners/admins while the flags are on):
 - bindings: `context_surfaces_status`, `context_surfaces_bindings_list`, `context_surfaces_binding_preview`, `_binding_create`, `_binding_update`, `_binding_delete`, `_binding_recheck`, `_binding_resume`;
 - identity links (server admin): `context_surfaces_links_list`, `_link_revoke`, `_link_unblock`, `_link_reviews_list`, `_link_review_decide`.
+- Slack and judgement (S2a): `context_surfaces_slack_install_create`, `_settings_get`, `_settings_update` (server admin), `_windows_list`.
 
 ## 9. MCP
 

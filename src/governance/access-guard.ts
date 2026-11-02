@@ -4,6 +4,7 @@
  * unaffected.
  */
 
+import { hiddenSurfaceDrafts, seesSurfaceDrafts, isHidden, anyHidden } from "../surfaces/draft-visibility.js";
 import { getDb } from "../db/client.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import {
@@ -47,6 +48,18 @@ export async function resolveCallerEmail(userId: string | undefined): Promise<st
  *      on a governed nest (the middleware already let them in).
  */
 export async function canReadNode(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+): Promise<boolean> {
+  // A pending Surfaces draft (a new document proposed from chat) is unseen
+  // until approved, except by the nest's editors and admins (AC-JDG-13).
+  if (isHidden(await hiddenSurfaceDrafts(nestId), nodeId) && !(await seesSurfaceDrafts(nestId, userId))) return false;
+  return canReadNodeBase(nestId, nodeId, userId, userEmail);
+}
+
+async function canReadNodeBase(
   nestId: string,
   nodeId: string,
   userId: string,
@@ -141,6 +154,21 @@ export async function filterAccessible<T extends { id: string }>(
   userEmail: string,
   nodes: T[],
   /** Approved versions already read by the caller, to avoid a second scan. */
+  approvedVersions?: Map<string, number>,
+): Promise<T[]> {
+  const hidden = await hiddenSurfaceDrafts(nestId);
+  const visible =
+    anyHidden(hidden) && nodes.some((n) => isHidden(hidden, n.id)) && !(await seesSurfaceDrafts(nestId, userId))
+      ? nodes.filter((n) => !isHidden(hidden, n.id))
+      : nodes;
+  return filterAccessibleBase(nestId, userId, userEmail, visible, approvedVersions);
+}
+
+async function filterAccessibleBase<T extends { id: string }>(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  nodes: T[],
   approvedVersions?: Map<string, number>,
 ): Promise<T[]> {
   if (await isPublicReader(nestId, userId)) {

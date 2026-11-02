@@ -77,11 +77,11 @@ export async function runGuardSweep(now: number = Date.now()): Promise<string[]>
   const fingerprints = new Map<string, string | null>();
   const due: string[] = [];
   for (const b of live) {
-    const key = `${b.nest_id}\u0000${b.listener_agent_node_id ?? ""}`;
+    const key = `${b.nest_id}\u0000${b.listener_agent_node_id ?? ""}\u0000${b.id}`;
     if (!fingerprints.has(key)) {
       try {
         await guardRunnerTestHooks.beforeFingerprint?.(b.nest_id);
-        fingerprints.set(key, (await effectiveReaders(b.nest_id, { listenerAgentNodeId: b.listener_agent_node_id })).fingerprint);
+        fingerprints.set(key, (await effectiveReaders(b.nest_id, { listenerAgentNodeId: b.listener_agent_node_id, bindingId: b.id })).fingerprint);
       } catch (err) {
         // This nest's readers can't be computed: fail its bindings closed and
         // carry on with every other nest (M1).

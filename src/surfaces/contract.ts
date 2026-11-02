@@ -3,7 +3,7 @@
  * implement `SurfaceConnector`; the judgement pipeline, the binding guard and
  * the commit path depend only on these types, never on an adapter.
  *
- * Types only — no runtime imports — so `core/` can import it and stay pure.
+ * Types (plus one error class) — no imports — so `core/` can import it and stay pure.
  */
 
 export type Surface = "slack" | "teams" | "email";
@@ -51,6 +51,16 @@ export interface SurfaceMessage {
   text: string;
   ts: string;
   kind: "message" | "edit" | "delete" | "explicit_ask" | "optout";
+  /** The surface's own message id (Slack ts). Defaults to `ts`. */
+  id?: string;
+  /** Surface subtype (Slack `subtype`), for the gate's G3. */
+  subtype?: string | null;
+  /** Set when an integration/bot posted it (Slack `bot_id`). */
+  bot_id?: string | null;
+  /** Explicit asks: what the ask points at (a reacted-to message, or the
+   *  thread a mention was made in) and how it was asked. */
+  target?: { id: string; author: string | null; thread: string | null } | null;
+  ask_via?: "reaction" | "mention" | "dm";
 }
 
 /** Membership / lifecycle events that feed the guard re-check (§4.17). */
@@ -133,6 +143,10 @@ export interface ProposalView {
   draft_url: string;
   disclosure?: string;
   outcome?: string;
+  /** Extra context line, e.g. "Previously not kept on <date>". */
+  note?: string;
+  /** Post in this thread (Slack thread_ts) when set. */
+  thread_ref?: string | null;
   /** Strings read from the nest. Posted only when surface_ok. */
   nest_sourced?: {
     on_record?: string;
@@ -165,6 +179,29 @@ export interface SurfaceConnector {
   resolveIdentity(install: SurfaceInstallRef, surfaceUserId: string): Promise<string | null>;
   sendPrivate(binding: BindingRef, surfaceUserId: string, view: ProposalView): Promise<void>;
   publishPending(install: SurfaceInstallRef, surfaceUserId: string, items: unknown[]): Promise<void>;
+  /** A short private status/refusal line to one person (Slack ephemeral). */
+  sendNote?(binding: BindingRef, surfaceUserId: string, text: string, threadRef?: string | null): Promise<void>;
+  /** A stable link to a message (Slack chat.getPermalink); null if unavailable. */
+  permalink?(install: SurfaceInstallRef, conversation: string, messageId: string): Promise<string | null>;
+  /** Explicit-ask fetch (§4.3): one rate-aware history/replies call. */
+  fetchMessages?(install: SurfaceInstallRef, method: string, params: Record<string, string>): Promise<FetchedMessage[]>;
+}
+
+export interface FetchedMessage {
+  id: string;
+  ts: string;
+  thread: string | null;
+  author: string | null;
+  text: string;
+  subtype: string | null;
+  bot_id: string | null;
+}
+
+/** Thrown by a connector call the surface rate-limited; the caller retries after. */
+export class SurfaceRateLimited extends Error {
+  constructor(public readonly retryAfterSec: number) {
+    super("rate limited");
+  }
 }
 
 /** Every method a conforming connector must implement (§5.2 + userProfile). */

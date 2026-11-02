@@ -24,6 +24,7 @@
  * principal (AC-GRD-04). No hosted support-access grant exists in this
  * codebase (VERIFY: none found), so `support` is never produced.
  */
+import { isTiedListenerConfig } from "../core/listener-tie.js";
 import { createHash } from "crypto";
 import { getDb } from "../../db/client.js";
 import { config } from "../../config.js";
@@ -40,7 +41,41 @@ export interface EffectiveReaders extends ReaderSet {
   fingerprint: string;
 }
 
-export async function effectiveReaders(nestId: string, opts: { listenerAgentNodeId?: string | null } = {}): Promise<EffectiveReaders> {
+/**
+ * Surfaces listener agents that are tied to a live binding on this nest by
+ * the server (carry-forward 2 / S1 security M3 residual): the agent's config
+ * carries `surfaces_listener.binding_id`, that binding row is on this nest and
+ * records this exact agent as its listener, the agent is switched off for
+ * the generic metacognition runner (so it never gets write tools) and has no
+ * feeds, MCP servers or notify. Only such an agent may be exempted — a
+ * client can never create that tie.
+ */
+async function tiedListeners(nestId: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const rows = (await getDb().all(
+    `SELECT m.node_id, m.config_json, m.enabled, b.id AS binding_id
+       FROM metacognition_agents m
+       JOIN surface_bindings b ON b.nest_id = m.nest_id AND b.listener_agent_node_id = m.node_id AND b.status <> 'removed'
+      WHERE m.nest_id = ?`,
+    [nestId],
+  ).catch(() => [])) as Array<{ node_id: string; config_json: string; enabled: number; binding_id: string }>;
+  for (const r of rows) {
+    let c: unknown = null;
+    try {
+      c = JSON.parse(r.config_json);
+    } catch {
+      c = null;
+    }
+    const ok = isTiedListenerConfig(c, r.enabled, r.binding_id);
+    if (ok) out.set(r.node_id, r.binding_id);
+  }
+  return out;
+}
+
+export async function effectiveReaders(
+  nestId: string,
+  opts: { listenerAgentNodeId?: string | null; bindingId?: string | null } = {},
+): Promise<EffectiveReaders> {
   const db = getDb();
   const nest = (await db.get("SELECT user_id, visibility, shared_teams, headless FROM nests WHERE id = ?", [nestId])) as
     | { user_id: string; visibility: string; shared_teams: string | null; headless: number | null }
@@ -60,6 +95,12 @@ export async function effectiveReaders(nestId: string, opts: { listenerAgentNode
       node_id: string;
     }>).map((r) => [r.persona_user_id, r.node_id]),
   );
+  // Exempt: this binding's own listener, and the server-tied listeners of the
+  // nest's other live bindings (each one's output reaches only its own
+  // conversation, through the card model's leak filter and surface_ok).
+  // Nothing else — naming an agent without a verified tie exempts nothing.
+  const tied = await tiedListeners(nestId);
+  const exempt = (node: string) => tied.has(node) && (opts.bindingId ? true : false);
   const addUser = async (userId: string) => {
     if (userId === ANON_USER_ID) {
       nonUser.push({ kind: "anon", id: "anon" });
@@ -69,7 +110,7 @@ export async function effectiveReaders(nestId: string, opts: { listenerAgentNode
     if (u?.is_service) {
       const agentNode = personas.get(userId);
       if (agentNode) {
-        if (agentNode !== opts.listenerAgentNodeId) nonUser.push({ kind: "agent", id: agentNode });
+        if (!exempt(agentNode)) nonUser.push({ kind: "agent", id: agentNode });
       } else {
         nonUser.push({ kind: "key", id: userId });
       }
@@ -162,7 +203,7 @@ export async function effectiveReaders(nestId: string, opts: { listenerAgentNode
   }
   // metacognition agents configured on the nest (their persona reads it)
   for (const [, node] of personas) {
-    if (node !== opts.listenerAgentNodeId && !nonUser.some((p) => p.kind === "agent" && p.id === node)) {
+    if (!exempt(node) && !nonUser.some((p) => p.kind === "agent" && p.id === node)) {
       nonUser.push({ kind: "agent", id: node });
     }
   }

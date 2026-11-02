@@ -42,6 +42,7 @@ import {
   revokeLink,
 } from "./services/identity-service.js";
 import { listInstalls } from "./services/install-store.js";
+import { createBindingWithListener } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
 
@@ -170,7 +171,7 @@ surfacesRoutes.post("/bindings/preview", async (c) => {
 
 surfacesRoutes.post("/bindings", async (c) => {
   try {
-    return c.json(await createBinding(bindInput(c, await readBody(c))), 201);
+    return c.json(await createBindingWithListener(bindInput(c, await readBody(c))), 201);
   } catch (err) {
     return handleError(c, err);
   }
@@ -384,4 +385,51 @@ linkPageRoutes.post("/:token", async (c) => {
   const status = r.ok ? 200 : r.reason === "mismatch" || r.reason === "already_linked" ? 409 : 410;
   if (wantsHtml(c)) return c.html(page("Link", `<p>${esc(r.message)}</p>`), status as any);
   return c.json(r.ok ? { linked: true, executed: false, message: r.message } : { linked: false, reason: r.reason, message: r.message }, status as any);
+});
+
+// ─── S2a: Slack install routes, settings, verdict log ──────────────────────
+
+import { slackAdminRoutes } from "./adapters/slack/routes.js";
+import { getSettings, updateSettings } from "./services/settings-service.js";
+import { SettingsError } from "./core/settings.js";
+import { listWindows } from "./services/report-service.js";
+
+surfacesRoutes.route("/slack", slackAdminRoutes);
+
+surfacesRoutes.get("/settings", async (c) => {
+  try {
+    if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Administrators only.");
+    return c.json({ settings: await getSettings() });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+surfacesRoutes.patch("/settings", async (c) => {
+  try {
+    assertPersonCredential(c);
+    if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Administrators only.");
+    return c.json({ settings: await updateSettings(await readBody(c)) });
+  } catch (err) {
+    if (err instanceof SettingsError) return c.json({ error: err.message }, 422);
+    return handleError(c, err);
+  }
+});
+
+/** The verdict log: windows with verdicts and counts — never text. */
+surfacesRoutes.get("/windows", async (c) => {
+  try {
+    const scope = c.get("nestScope");
+    return c.json({
+      windows: await listWindows(c.get("userId"), {
+        bindingId: c.req.query("binding_id") || undefined,
+        verdict: c.req.query("verdict") || undefined,
+        from: c.req.query("from") || undefined,
+        to: c.req.query("to") || undefined,
+        nestId: scope ?? undefined,
+      }),
+    });
+  } catch (err) {
+    return handleError(c, err);
+  }
 });

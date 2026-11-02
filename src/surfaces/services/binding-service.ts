@@ -142,11 +142,14 @@ async function evaluate(input: {
   explicitPublicBind: boolean;
   extCaptureEnabled: boolean;
   listenerAgentNodeId: string | null;
+  /** The binding being evaluated ("new" while creating): its own and the
+   *  nest's other server-tied listeners are exempt (readers.ts). */
+  bindingId: string;
   fallbackKind: ConversationKind;
 }): Promise<Evaluation> {
   const { install } = input;
   const members = await safeMembers(getConnector(install.surface), installRef(install), input.conversationId);
-  const readers = await effectiveReaders(input.nestId, { listenerAgentNodeId: input.listenerAgentNodeId });
+  const readers = await effectiveReaders(input.nestId, { listenerAgentNodeId: input.listenerAgentNodeId, bindingId: input.bindingId });
   const home = homeTenant(install);
   const guardInstall = { bot_user_id: install.bot_user_id, home_tenant: home };
   const mapped: MappedMember[] = [];
@@ -330,6 +333,7 @@ export async function previewBinding(input: BindInput) {
     explicitPublicBind: !!input.explicitPublicBind,
     extCaptureEnabled: !!input.extCaptureEnabled,
     listenerAgentNodeId: input.listenerAgentNodeId ?? null,
+    bindingId: "new",
     fallbackKind: "private_channel",
   });
   await assertMayInspect(input.actorUserId, ev);
@@ -358,6 +362,7 @@ export async function createBinding(input: BindInput) {
     explicitPublicBind,
     extCaptureEnabled,
     listenerAgentNodeId: input.listenerAgentNodeId ?? null,
+    bindingId: "new",
     fallbackKind: "private_channel",
   });
   await assertMayInspect(input.actorUserId, ev);
@@ -537,6 +542,7 @@ export async function recheckBinding(id: string): Promise<BindingRow> {
       explicitPublicBind: !!row.explicit_public_bind,
       extCaptureEnabled: !!row.ext_capture_enabled,
       listenerAgentNodeId: row.listener_agent_node_id,
+      bindingId: row.id,
       fallbackKind: row.conversation_kind,
     });
     await bindingTestHooks.afterEvaluate?.(id);

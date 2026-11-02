@@ -3,6 +3,8 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "./readable-body.js";
 import { assertFolderCreatable, assertFolderMovable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
@@ -1316,6 +1318,16 @@ export async function listNodesForCaller(
     }
   }
 
+  // A pending Surfaces edit is a chat-derived draft: callers below write get
+  // the approved body in listings too (security round 2, M1d).
+  const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+  if (surfaceEdits.size || (surfaceEdits as any)[SURFACE_HIDE_ALL]) {
+    for (const r of enriched as Array<{ id: string; content?: string }>) {
+      if (isSurfaceHidden(surfaceEdits, r.id) && typeof r.content === "string" && r.content) {
+        r.content = await approvedReadableBody(nestId, r.id);
+      }
+    }
+  }
   return addComputedFields(enriched, fieldDefs);
 }
 

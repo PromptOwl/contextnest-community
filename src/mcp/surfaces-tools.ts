@@ -23,7 +23,6 @@ import {
   SERVER_ADMIN_DISCLOSURE,
   bindingView,
   canAdministerNest,
-  createBinding,
   getBindingRow,
   isOrgAdmin,
   listBindings,
@@ -42,6 +41,15 @@ import {
   revokeLink,
 } from "../surfaces/services/identity-service.js";
 import type { McpToolContext, ToolResult } from "./tools.js";
+import { randomBytes } from "crypto";
+import { getDb } from "../db/client.js";
+import { config } from "../config.js";
+import { createBindingWithListener } from "../surfaces/services/listener-service.js";
+import { createInstall } from "../surfaces/services/install-store.js";
+import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
+import { getSettings, updateSettings } from "../surfaces/services/settings-service.js";
+import { SettingsError } from "../surfaces/core/settings.js";
+import { listWindows } from "../surfaces/services/report-service.js";
 
 const BINDING_ID = { type: "string", description: "Binding id (context_surfaces_bindings_list shows them)." } as const;
 const BIND_FIELDS = {
@@ -155,6 +163,52 @@ export const SURFACES_TOOL_DEFINITIONS = [
       required: ["review_id", "decision"],
     },
   },
+  {
+    name: "context_surfaces_slack_install_create",
+    description:
+      "Start connecting a Slack workspace (customer-owned app): returns the install id and the app manifest to create the Slack app from. Then save the app's credentials in Surfaces and finish OAuth in a browser. Server admin only.",
+    inputSchema: {
+      type: "object",
+      properties: { home_nest_id: { type: "string", description: "The nest that owns this install (usually this nest)." } },
+      required: [] as string[],
+    },
+  },
+  {
+    name: "context_surfaces_settings_get",
+    description: "Read the Surfaces settings (quiet window, window age, buffer TTL, gate minimum, propose threshold, card limits, timezone). Server admin only.",
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
+  },
+  {
+    name: "context_surfaces_settings_update",
+    description:
+      "Change Surfaces settings. Ranges: quiet_minutes 5–240, window_max_age_hours 1–12 and below buffer_ttl_hours, buffer_ttl_hours 1–24, min_meaningful_chars 1–50, propose_threshold 0.5–0.95. Server admin only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        quiet_minutes: { type: "number" },
+        window_max_age_hours: { type: "number" },
+        buffer_ttl_hours: { type: "number" },
+        min_meaningful_chars: { type: "number" },
+        propose_threshold: { type: "number" },
+        reviewer_daily_cards: { type: "number" },
+        conversation_daily_cards: { type: "number" },
+        timezone: { type: "string" },
+      },
+      required: [] as string[],
+    },
+  },
+  {
+    name: "context_surfaces_windows_list",
+    description: "The judgement verdict log for this nest: one row per conversation window (verdict, reason, counts, model, cost). Never message text.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        binding_id: BINDING_ID,
+        verdict: { type: "string", description: "Filter: no_op, proposed, forced, filtered, budget_exhausted, error_schema…" },
+      },
+      required: [] as string[],
+    },
+  },
 ];
 
 export const SURFACES_TOOL_NAMES = new Set(SURFACES_TOOL_DEFINITIONS.map((t) => t.name));
@@ -247,7 +301,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         return { text: `Dry run — nothing saved. capture_ok=${out.guard.capture_ok}, surface_ok=${out.guard.surface_ok}`, data: out };
       }
       case "context_surfaces_binding_create": {
-        const out = await createBinding(bindArgs());
+        const out = await createBindingWithListener(bindArgs());
         return { text: `Bound ${out.binding.conversation_id} → this nest (${out.binding.status}). ${SERVER_ADMIN_DISCLOSURE}`, data: out };
       }
       case "context_surfaces_binding_update": {
@@ -303,6 +357,42 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         if (decision !== "approve" && decision !== "deny") throw new ValidationError('decision must be "approve" or "deny"');
         const out = await decideLinkReview({ reviewId: reqStr(args.review_id, "review_id"), decision, byUserId: ctx.userId });
         return { text: `Review ${decision === "approve" ? "approved" : "denied"}.`, data: out };
+      }
+      case "context_surfaces_slack_install_create": {
+        await requireOrgAdmin(ctx);
+        const nestId = typeof args.home_nest_id === "string" && args.home_nest_id ? args.home_nest_id : ctx.nestId;
+        if (!(await getDb().get("SELECT 1 AS x FROM nests WHERE id = ?", [nestId]))) throw new ValidationError("home_nest_id must name a nest");
+        const install = await createInstall({ surface: "slack", mode: "manifest", tenantKey: `pending:${randomBytes(8).toString("hex")}`, homeNestId: nestId, installedByUserId: ctx.userId });
+        const manifest = buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: install.id });
+        return { text: `Install ${install.id} created. Create the Slack app from the manifest, then save its credentials in Surfaces.`, data: { install_id: install.id, manifest } };
+      }
+      case "context_surfaces_settings_get": {
+        await requireOrgAdmin(ctx);
+        const settings = await getSettings();
+        return { text: JSON.stringify(settings), data: { settings } };
+      }
+      case "context_surfaces_settings_update": {
+        await requireOrgAdmin(ctx);
+        const patch: Record<string, unknown> = {};
+        for (const k of ["quiet_minutes", "window_max_age_hours", "buffer_ttl_hours", "min_meaningful_chars", "propose_threshold", "reviewer_daily_cards", "conversation_daily_cards", "timezone"]) {
+          if (args[k] !== undefined) patch[k] = args[k];
+        }
+        try {
+          const settings = await updateSettings(patch);
+          return { text: `Saved. ${JSON.stringify(settings)}`, data: { settings } };
+        } catch (err) {
+          if (err instanceof SettingsError) throw new ValidationError(err.message);
+          throw err;
+        }
+      }
+      case "context_surfaces_windows_list": {
+        if (!(await canAdministerNest(ctx.nestId, ctx.userId))) throw new ForbiddenError("Owner/admin only.");
+        const windows = await listWindows(ctx.userId, {
+          nestId: ctx.nestId,
+          bindingId: typeof args.binding_id === "string" ? args.binding_id : undefined,
+          verdict: typeof args.verdict === "string" ? args.verdict : undefined,
+        });
+        return { text: `${windows.length} window(s).`, data: { windows } };
       }
       default:
         return { text: `Unknown surfaces tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown surfaces tool: ${toolName}` } };

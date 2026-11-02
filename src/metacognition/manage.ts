@@ -20,7 +20,7 @@ import { parseConfig, CAPS, type MetacognitionConfig } from "./config.js";
 import { suggestConfig } from "./suggest.js";
 import { notifyMembers } from "./notify.js";
 import { listNestFolders } from "../nodes/service.js";
-import { resolveExportBody } from "../nodes/readable-body.js";
+import { resolveExportBody, agentInstructionsBody } from "../nodes/readable-body.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { agentStats } from "./stats.js";
 
@@ -152,7 +152,7 @@ async function readAgentDoc(nestId: string, nodeId: string) {
 export async function suggestAgentConfig(nestId: string, rawNodeId: string) {
   const nodeId = assertSafeNodeId(rawNodeId);
   const doc = await readAgentDoc(nestId, nodeId);
-  const instructions = await resolveExportBody(nestId, nodeId, doc.body || "");
+  const instructions = await agentInstructionsBody(nestId, nodeId, doc.body || "");
   const folders = (await listNestFolders(nestId)).map((f) => f.path);
   const suggestion = suggestConfig({
     title: String(doc.frontmatter.title || nodeId.replace(/^nodes\//, "")),

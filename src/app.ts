@@ -84,6 +84,10 @@ import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
+import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
+import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
+import { registerConnector, getConnector } from "./surfaces/registry.js";
+import { registerSurfacesLifecycle } from "./surfaces/services/lifecycle-service.js";
 import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
@@ -2269,6 +2273,13 @@ export function createApp(): Hono<AuthEnv> {
   // Surfaces (Slack / Teams / email → governed nest). Org-level router like
   // /teams; every route 404s while FEATURE_SURFACES is off. /link/:token is
   // the one-time identity link page (signed-in user; CSRF in the form).
+  // Slack's own requests (events, interactions) carry no session: the
+  // request signature is the credential, so this router is mounted BEFORE
+  // the auth middleware. Its first middleware 404s everything under
+  // /surfaces/slack while FEATURE_SURFACES is off.
+  if (!getConnector("slack")) registerConnector(createSlackConnector());
+  registerSurfacesLifecycle();
+  app.route("/surfaces/slack", slackPublicRoutes);
   app.use("/surfaces/*", flexAuthMiddleware);
   app.route("/surfaces", surfacesRoutes);
   app.use("/link/*", flexAuthMiddleware);

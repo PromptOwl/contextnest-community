@@ -23,6 +23,8 @@ export interface NoticeInput {
   /** Plain subject + text for the email (no names of other people, no message text). */
   subject: string;
   text: string;
+  /** Explicit recipients (e.g. a nest's admins) instead of the audience default. */
+  to?: string[];
 }
 
 /** Every server admin (license admin + superadmins): the org admins here. */
@@ -34,7 +36,9 @@ export async function serverAdminUsers(): Promise<Array<{ id: string; email: str
 export async function recordNotice(n: NoticeInput): Promise<string> {
   const id = uuid();
   let to: string[] = [];
-  if (n.audience === "user" && n.recipientUserId) {
+  if (n.to) {
+    to = n.to.filter((e) => typeof e === "string" && e.includes("@"));
+  } else if (n.audience === "user" && n.recipientUserId) {
     const u = (await getDb().get("SELECT email FROM users WHERE id = ?", [n.recipientUserId])) as { email?: string } | undefined;
     if (u?.email) to = [u.email];
   } else if (n.audience === "admins") {
