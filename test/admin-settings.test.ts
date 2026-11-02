@@ -45,6 +45,15 @@ const SETTING_ENV = [
   "TELEMETRY_ENABLED",
   "FEATURE_METACOGNITION",
   "EXPERIMENTAL_DOC_STREAM",
+  "FEATURE_SURFACES",
+  "SURFACES_BUFFER_KEY",
+  "SURFACES_JUDGE_MODEL",
+  "SURFACES_DEFAULT_CAP_MICROS",
+  "SURFACES_ORG_NAME",
+  "FEATURE_SURFACES_SLACK_HOSTED",
+  "SURFACES_SLACK_HOSTED_CLIENT_ID",
+  "SURFACES_SLACK_HOSTED_CLIENT_SECRET",
+  "SURFACES_SLACK_HOSTED_SIGNING_SECRET",
 ];
 
 beforeEach(() => {
@@ -311,6 +320,79 @@ describe("/admin/settings — validation", () => {
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: false }, admin.apiKey);
     expect(off.data.settings.metacognition_enabled).toBe(false);
     expect(await persistedSetting("FEATURE_METACOGNITION")).toBeNull();
+  });
+
+  it("Surfaces: needs plane + metacognition, applies live (/surfaces/status), settings round-trip, secrets write-only and encrypted", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const stranger = await registerUser(app, "stranger@example.com");
+
+    const refused = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_enabled: true }, admin.apiKey);
+    expect(refused.status).toBe(400);
+    expect(refused.data.fieldErrors).toHaveProperty("surfaces_enabled");
+    expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
+
+    const key = Buffer.alloc(32, 7).toString("base64");
+    const on = await jsonRequest(app, "PATCH", "/admin/settings", {
+      workflow_plane_enabled: true,
+      metacognition_enabled: true,
+      surfaces_enabled: true,
+      surfaces_buffer_key: key,
+      surfaces_judge_model: "claude-haiku-5-5",
+      surfaces_default_cap_usd: "25",
+      surfaces_org_name: "Acme",
+      surfaces_slack_hosted_client_id: "123.456",
+      surfaces_slack_hosted_client_secret: "cs-secret-value",
+      surfaces_slack_hosted_signing_secret: "sig-secret-value",
+    }, admin.apiKey);
+    expect(on.status, JSON.stringify(on.data)).toBe(200);
+    const s = on.data.settings;
+    expect(s).toMatchObject({
+      surfaces_enabled: true,
+      surfaces_buffer_key_set: true,
+      surfaces_judge_model: "claude-haiku-5-5",
+      surfaces_default_cap_usd: 25,
+      surfaces_org_name: "Acme",
+      surfaces_slack_hosted_client_id: "123.456",
+      surfaces_slack_hosted_client_secret_set: true,
+      surfaces_slack_hosted_signing_secret_set: true,
+    });
+    // Secrets never come back, and are encrypted at rest.
+    expect(JSON.stringify(on.data)).not.toMatch(new RegExp(`${key.slice(0, 12)}|cs-secret-value|sig-secret-value`));
+    expect(await persistedSetting("SURFACES_BUFFER_KEY")).not.toBe(key);
+    expect(await persistedSetting("SURFACES_DEFAULT_CAP_MICROS")).toBe("25000000");
+    // Live: no restart needed.
+    expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(200);
+
+    // Hosted Slack needs Surfaces on; bad values are refused per field.
+    const bad = await jsonRequest(app, "PATCH", "/admin/settings", {
+      surfaces_buffer_key: "too-short",
+      surfaces_judge_model: "two words",
+      surfaces_default_cap_usd: "-1",
+      surfaces_slack_hosted_client_id: "has space",
+    }, admin.apiKey);
+    expect(bad.status).toBe(400);
+    expect(Object.keys(bad.data.fieldErrors).sort()).toEqual(
+      ["surfaces_buffer_key", "surfaces_default_cap_usd", "surfaces_judge_model", "surfaces_slack_hosted_client_id"],
+    );
+
+    // Clearing falls back (nothing stored, defaults reported).
+    const cleared = await jsonRequest(app, "PATCH", "/admin/settings", {
+      surfaces_buffer_key: null,
+      surfaces_default_cap_usd: "",
+      surfaces_org_name: "",
+    }, admin.apiKey);
+    expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "" });
+
+    // Turning Surfaces off disables it live; hosted Slack can't be on without it.
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_enabled: false }, admin.apiKey);
+    expect(off.data.settings.surfaces_enabled).toBe(false);
+    expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
+    const hosted = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_enabled: true }, admin.apiKey);
+    expect(hosted.data.fieldErrors).toHaveProperty("surfaces_slack_hosted_enabled");
+
+    // Non-admins can't change any of it.
+    expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_org_name: "Evil" }, stranger.apiKey)).status).toBe(403);
   });
 
   it("experimental doc stream: its own switch beside plane + metacognition, each reported as set", async () => {

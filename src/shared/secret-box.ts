@@ -57,6 +57,9 @@ const SECRET_SETTINGS = new Set([
   "MSTEAMS_WEBHOOK_URL",
   "SES_SECRET_ACCESS_KEY",
   "PROMPTOWL_KEY",
+  "SURFACES_BUFFER_KEY",
+  "SURFACES_SLACK_HOSTED_CLIENT_SECRET",
+  "SURFACES_SLACK_HOSTED_SIGNING_SECRET",
 ]);
 
 export function isSecretSetting(name: string): boolean {

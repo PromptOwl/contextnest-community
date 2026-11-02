@@ -375,6 +375,24 @@ export interface AdminSettings {
   hootie_model: string;
   subagent_runs_enabled: boolean;
   metacognition_enabled: boolean;
+  /** Surfaces (Slack → nest), FEATURE_SURFACES. Needs the plane and metacognition. */
+  surfaces_enabled?: boolean;
+  /** Whether SURFACES_BUFFER_KEY is set; the key itself is never returned. */
+  surfaces_buffer_key_set?: boolean;
+  /** Write-only: the buffer key to set, or null to clear. */
+  surfaces_buffer_key?: string | null;
+  surfaces_judge_model?: string;
+  /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
+  surfaces_default_cap_usd?: number | string | null;
+  surfaces_org_name?: string;
+  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
+  surfaces_slack_hosted_enabled?: boolean;
+  surfaces_slack_hosted_client_id?: string;
+  surfaces_slack_hosted_client_secret_set?: boolean;
+  surfaces_slack_hosted_signing_secret_set?: boolean;
+  /** Write-only: set, or null to clear. */
+  surfaces_slack_hosted_client_secret?: string | null;
+  surfaces_slack_hosted_signing_secret?: string | null;
   /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
