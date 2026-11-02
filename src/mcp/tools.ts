@@ -4334,25 +4334,68 @@ async function runTool(
 
     case "context_review_queue": {
       const status = args.status || "pending";
+      // The same gate as REST /review-queue (CU-wdqcq05rz6): a visibility-only
+      // reader sees their OWN requests, not everyone's — a request names an
+      // unapproved draft. Everyone else sees only the rows whose document
+      // they can read (a share-only caller, for one). Enforced here, in the
+      // op, so every MCP caller and Hootie get the same answer.
+      const ownOnly = await isPublicReader(nestId, ctx.userId);
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : {}),
       });
+      let requests = result.requests;
+      if (!ownOnly && requests.length > 0) {
+        const readable = new Set(
+          (
+            await filterAccessible(
+              nestId,
+              ctx.userId,
+              userEmail,
+              requests.map((r) => ({ id: r.nodeId })),
+            )
+          ).map((n) => n.id),
+        );
+        requests = requests.filter((r) => readable.has(r.nodeId));
+      }
+      // A filtered page, or a page short of the queue (getReviewQueue pages
+      // at 50): count only the rows shown. The queue's total could include
+      // requests past this page the caller may not see (security r2 N2).
+      const filtered = requests.length !== result.requests.length || result.total > requests.length;
 
-      if (result.requests.length === 0) {
+      if (requests.length === 0) {
         return status === "pending"
           ? "No documents pending review. All caught up!"
           : `No reviews with status "${status}".`;
       }
 
-      const list = result.requests
+      const list = requests
         .map(
           (r, i) =>
             `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
-      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+      return {
+        // A filtered page counts only what is shown: the queue's total would
+        // count rows this caller may not know about.
+        text: `# Review Queue (${status})\n**${filtered ? requests.length : result.total} item(s)**\n\n${list}`,
+        // The rows the prose lists, by node id — only rows this caller may
+        // see (above), so a caller can act on them without parsing prose.
+        data: {
+          total: filtered ? requests.length : result.total,
+          requests: requests.map((r) => ({
+            nodeId: r.nodeId,
+            title: r.title ?? null,
+            version: r.version,
+            priority: r.priority,
+            requestedBy: r.requestedBy,
+            requestedAt: r.requestedAt,
+            ...(r.requestNote ? { requestNote: r.requestNote } : {}),
+          })),
+        },
+      };
     }
 
     case "context_my_drafts": {

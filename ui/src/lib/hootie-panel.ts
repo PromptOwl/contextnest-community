@@ -180,3 +180,21 @@ export function withDelta<M extends Streaming>(m: M, text: string): M {
 export function pendingLabel(m: Streaming): string {
   return m.status || "Reading the nest…";
 }
+
+/**
+ * The one line the panel's live region announces when an answer finishes
+ * (AC-H1-09). The feed itself is never a live region: streamed tokens are
+ * not read out one by one.
+ */
+export function answerReadyLine(d: { actions: number; proposals: number; answerOnly: boolean }): string {
+  if (d.answerOnly) return "Answer ready, answer-only mode.";
+  if (d.actions === 0 && d.proposals === 0) return "Answer ready.";
+  const n = (k: number, one: string) => `${k} ${one}${k === 1 ? "" : "s"}`;
+  return `Answer ready, ${n(d.actions, "action")} and ${n(d.proposals, "proposal")}.`;
+}
+
+/** Fixed copy over an answer given without tools because the model
+ *  connection refused them (AC-H1-11). */
+export function answerOnlyBanner(name: string): string {
+  return `Answer-only mode. This model connection can't use tools right now, so ${name} answered from what it found without opening anything or looking again. An admin can switch models in Settings.`;
+}

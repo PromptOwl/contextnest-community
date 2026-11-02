@@ -285,6 +285,9 @@ export async function registerUser(
     apiKey: keyData.api_key as string,
     userId: registerData.user.id as string,
     email,
+    /** The browser session registration set — for routes only a signed-in
+     *  person may call (Hootie's chat refuses every API key). */
+    cookie: sessionCookie.split(";")[0],
   };
 }
 
