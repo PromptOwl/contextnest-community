@@ -20,8 +20,6 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
   Loader2,
@@ -43,12 +41,12 @@ import {
   type HootieTurn,
 } from "@/lib/api";
 import { MentionTextarea } from "./MentionTextarea";
+import { HootieAnswerMarkdown } from "./HootieAnswer";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import hootieIcon from "../assets/hootie.svg";
 import {
   HOOTIE_PANEL_DEFAULT,
   clampPanelWidth,
-  linkCitations,
   hootieAccentStyle,
   hootieGreeting,
   pushesContent,
@@ -692,7 +690,9 @@ function Welcome({
 /**
  * An answer with its citations. `[[X]]` in the text becomes a chip for a
  * cited node; a wiki link the server didn't resolve becomes plain text
- * without its brackets, so nothing reads as clickable that isn't.
+ * without its brackets. Images and other links never render as such — see
+ * HootieAnswer.tsx: nothing in an answer is fetched or clickable unless the
+ * server cited it.
  */
 function AnswerBubble({
   name,
@@ -706,14 +706,6 @@ function AnswerBubble({
   onOpenNode: (nestId: string, nodeId: string) => void;
 }) {
   const cited = message.cited ?? [];
-  // [[X]] → a chip for a cited node (by title, id or slug — the server's
-  // rules), plain text for anything else; the link renderer below turns the
-  // #cite: hrefs into chips.
-  const source = useMemo(
-    () => linkCitations(message.content, message.cited),
-    [message.content, message.cited],
-  );
-
   if (message.failed) {
     return (
       <div className="flex items-start gap-2 rounded-2xl rounded-tl-md border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-sm text-destructive">
@@ -740,33 +732,12 @@ function AnswerBubble({
           </span>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ href, children }) => {
-                  if (href?.startsWith("#cite:")) {
-                    const id = decodeURIComponent(href.slice(6));
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => onOpenNode(nestId, id)}
-                        className="inline-flex items-center rounded-md border border-primary/20 bg-primary/5 px-1.5 py-0.5 align-baseline text-xs font-medium text-primary no-underline hover:bg-primary/10"
-                        data-testid="hootie-citation"
-                      >
-                        {children}
-                      </button>
-                    );
-                  }
-                  return (
-                    <a href={href} target="_blank" rel="noreferrer">
-                      {children}
-                    </a>
-                  );
-                },
-              }}
-            >
-              {source}
-            </ReactMarkdown>
+            <HootieAnswerMarkdown
+              content={message.content}
+              cited={message.cited}
+              nestId={nestId}
+              onOpenNode={onOpenNode}
+            />
           </div>
         )}
       </div>
