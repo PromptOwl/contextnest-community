@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.js";
 import { isLicenseAdminUserId, isLicenseAdminEmail } from "../auth/license.js";
+import { auditSealedRefusal, sealedNest } from "../surfaces/sealed.js";
 import { isSuperAdmin } from "../governance/access-service.js";
 import {
   resolveTeamRolesFromShared,
@@ -102,6 +103,9 @@ export interface NestAccess {
    * governance/org-contribution.ts) — this row can't see the credential.
    */
   orgContributor: boolean;
+  /** A server admin on a SEALED personal nest (Surfaces): no content access;
+   *  may only see it exists, delete it and see quota. */
+  sealedAdmin?: boolean;
 }
 
 const higher = (
@@ -328,7 +332,16 @@ async function resolveNestAccessRaw(
 
   // 3. Server admins administer every nest, but stay below the owner tier so
   //    delete/transfer remain the real owner's.
+  //    EXCEPT a sealed personal nest (Surfaces, Misha 2026-11-01): there a
+  //    server admin who isn't the owner (the owner returned at step 1) gets no
+  //    content access at all — `none`, flagged `sealedAdmin` — and every such
+  //    resolution is audit-logged (counts only). Nothing below step 3 changes,
+  //    and non-sealed nests are exactly as before.
   if (licenseAdmin || (email && isSuperAdmin(email))) {
+    if (await sealedNest(nestId)) {
+      void auditSealedRefusal(nestId, userId);
+      return { ...base, permission: "none", isPublicReader: false, sealedAdmin: true };
+    }
     return { ...base, permission: "admin", isPublicReader: false };
   }
 

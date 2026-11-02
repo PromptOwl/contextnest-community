@@ -10,6 +10,8 @@
 export const BOT_SCOPES: readonly string[] = [
   "channels:history",
   "groups:history",
+  // S2b: DM capture (§12 R2, default OFF) needs message.im + im:history.
+  "im:history",
   "channels:read",
   "groups:read",
   "im:read",
@@ -19,11 +21,15 @@ export const BOT_SCOPES: readonly string[] = [
   "users:read.email",
   "chat:write",
   "app_mentions:read",
+  // S2b: the /nest slash command (leave, dm off|on — §12 R2/R3). Not in the
+  // PRD §5.4 list; slash commands can't be registered without it.
+  "commands",
 ];
 
 export const BOT_EVENTS: readonly string[] = [
   "message.channels",
   "message.groups",
+  "message.im",
   "app_mention",
   "reaction_added",
   "member_joined_channel",
@@ -48,6 +54,7 @@ export function slackUrls(baseUrl: string, installId: string | "hosted") {
   return {
     events: `${prefix}/events`,
     interactions: `${prefix}/interactions`,
+    commands: `${prefix}/commands`,
     redirect: `${base}/surfaces/slack/oauth/callback`,
   };
 }
@@ -63,9 +70,12 @@ export function buildManifest(opts: { baseUrl: string; installId: string | "host
       background_color: "#1f2937",
     },
     features: {
-      // Messages tab off until S2b adds DM capture (with im:history / message.im).
-      app_home: { home_tab_enabled: true, messages_tab_enabled: false, messages_tab_read_only_enabled: false },
+      // S2b: DM capture (a setting, default OFF) — the Messages tab is on.
+      app_home: { home_tab_enabled: true, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
       bot_user: { display_name: name.toLowerCase().replace(/[^a-z0-9._-]/g, "-"), always_online: false },
+      slash_commands: [
+        { command: "/nest", url: urls.commands, description: "Remove Nest from this conversation, or turn your DM capture off/on", usage_hint: "leave | invite | dm off | dm on", should_escape: false },
+      ],
     },
     oauth_config: {
       redirect_urls: [urls.redirect],

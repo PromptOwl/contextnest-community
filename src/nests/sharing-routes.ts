@@ -87,6 +87,15 @@ sharingRoutes.post("/collaborators", async (c) => {
     callerPermission: c.get("nestPermission"),
     baseUrl: requestBaseUrl(c.req.url),
   });
+  // A sealed personal nest (Surfaces): sharing it is the owner's choice — say
+  // plainly that it is no longer private to them alone (re-review R3-L1).
+  const { sealedNest } = await import("../surfaces/sealed.js");
+  if (await sealedNest(c.req.param("nestId")!)) {
+    return c.json(
+      { collaborator: collab, warning: "This private nest is no longer private to you alone: the person you added can now open it." },
+      201,
+    );
+  }
   return c.json({ collaborator: collab }, 201);
 });
 

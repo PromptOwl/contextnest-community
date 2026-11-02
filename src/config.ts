@@ -818,9 +818,9 @@ export const config = {
   get SURFACES_DEFAULT_CAP_MICROS(): number {
     return Number(process.env.SURFACES_DEFAULT_CAP_MICROS) || 0;
   },
-  /** Organization name Surfaces uses in chat copy. */
-  get SURFACES_ORG_NAME(): string {
-    return process.env.SURFACES_ORG_NAME || "your organization";
+  /** Organization name Surfaces uses in chat copy (callers pick their own fallback wording). */
+  get SURFACES_ORG_NAME(): string | undefined {
+    return process.env.SURFACES_ORG_NAME || undefined;
   },
   /** Hosted one-click Slack install (behind Slack Marketplace approval) and its app credentials. */
   get FEATURE_SURFACES_SLACK_HOSTED(): boolean {

@@ -85,7 +85,7 @@ publishRoutes.post("/", async (c) => {
         path: "PromptOwl · ContextNest",
         permission: "view",
         link,
-      });
+      }, { nestId });
     }
   }
   return c.json({ publish: toPublishResponse(row), link }, 201);

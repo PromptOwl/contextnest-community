@@ -34,6 +34,7 @@ import { buildManifest, BOT_SCOPES, slackUrls } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
 import { slackCall } from "./api.js";
+import { handleCommand, handleInteraction } from "./interactions.js";
 
 type C = Context<AuthEnv>;
 
@@ -72,6 +73,14 @@ function signed(c: C, secret: string | null, raw: string): boolean {
 
 /** Map a Slack event to the work it implies; runs after the ack. */
 export async function processSlackEvent(install: InstallRow, payload: Record<string, any>): Promise<void> {
+  // S2b: App Home "My pending" is published when the person opens it — never as a nudge.
+  if (payload.event?.type === "app_home_opened") {
+    if (payload.event.tab === "home" && typeof payload.event.user === "string") {
+      const { publishHome } = await import("../../services/home-service.js");
+      await publishHome(install.id, payload.event.user);
+    }
+    return;
+  }
   const out = normalizeSlack(payload);
   if (!Array.isArray(out)) {
     if (out.kind === "uninstalled" || out.kind === "tokens_revoked") {
@@ -133,14 +142,25 @@ async function eventsHandler(c: C, install: InstallRow | null, secret: string | 
 
 async function interactionsHandler(c: C, install: InstallRow | null, secret: string | null, raw: string) {
   if (!install || !signed(c, secret, raw)) return c.json({ error: "bad signature" }, 401);
-  // Cards, commit and modals are S2b; a verified interaction is acknowledged.
-  return c.body(null, 200);
+  if (install.status !== "active") return c.body(null, 200);
+  // S2b: block actions ack at once (work deferred); dialog submissions answer
+  // with field errors or "clear" (AC-CMT-12).
+  const out = await handleInteraction(install, raw);
+  return out.body === null ? c.body(null, out.status as any) : c.json(out.body as any, out.status as any);
+}
+
+async function commandsHandler(c: C, install: InstallRow | null, secret: string | null, raw: string) {
+  if (!install || !signed(c, secret, raw)) return c.json({ error: "bad signature" }, 401);
+  if (install.status !== "active") return c.body(null, 200);
+  const out = await handleCommand(install, raw);
+  return out.body === null ? c.body(null, out.status as any) : c.json(out.body as any, out.status as any);
 }
 
 async function hostedInstall(raw: string, ct: string): Promise<InstallRow | null> {
   let team: string | null = null;
   try {
-    const p = ct.includes("application/json") ? JSON.parse(raw) : JSON.parse(new URLSearchParams(raw).get("payload") ?? "{}");
+    const form = ct.includes("application/json") ? null : new URLSearchParams(raw);
+    const p = form ? (form.get("payload") ? JSON.parse(form.get("payload")!) : { team_id: form.get("team_id") }) : JSON.parse(raw);
     team = p.team_id ?? p.team?.id ?? null;
   } catch {
     team = null;
@@ -180,6 +200,22 @@ slackPublicRoutes.post("/:installId/events", async (c) => {
   const install = await getInstall(c.req.param("installId"));
   const ok = install && install.surface === "slack" && install.mode !== "hosted" && (install.status === "pending" || install.status === "active");
   return eventsHandler(c, ok ? install : null, ok ? await getSecret(install!.id, "signing_secret") : null, raw);
+});
+
+slackPublicRoutes.post("/hosted/commands", async (c) => {
+  if (!hostedEnabled()) return c.json({ error: "Not found" }, 404);
+  const raw = await c.req.text();
+  // Security L2 (as S2a L4): verify before ANY parsing or DB access.
+  const secret = hostedCreds().signing;
+  if (!signed(c, secret, raw)) return c.json({ error: "bad signature" }, 401);
+  return commandsHandler(c, await hostedInstall(raw, c.req.header("content-type") ?? ""), secret, raw);
+});
+
+slackPublicRoutes.post("/:installId/commands", async (c) => {
+  const raw = await c.req.text();
+  const install = await getInstall(c.req.param("installId"));
+  const ok = install && install.surface === "slack" && install.mode !== "hosted" && install.status === "active";
+  return commandsHandler(c, ok ? install : null, ok ? await getSecret(install!.id, "signing_secret") : null, raw);
 });
 
 slackPublicRoutes.post("/:installId/interactions", async (c) => {

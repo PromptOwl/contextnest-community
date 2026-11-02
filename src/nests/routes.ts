@@ -745,7 +745,10 @@ async function requireNestCaretaker(nestId: string, userId: string, verb: string
     config.AUTH_MODE !== "open" &&
     nest.user_id === ANON_USER_ID &&
     (await isLicenseAdminUserId(userId));
-  if (access.rawPermission !== "owner" && !adminCaretaker) {
+  // A sealed personal nest (Surfaces): a server admin keeps DELETE — and only
+  // delete — though they can't open it (Misha, 2026-11-01).
+  const sealedDelete = verb === "delete" && access.sealedAdmin === true && (await isServerAdminUserId(userId));
+  if (access.rawPermission !== "owner" && !adminCaretaker && !sealedDelete) {
     throw new ForbiddenError(
       `You don't have permission to ${verb} this nest. Only the nest owner can ${verb} it.`,
     );

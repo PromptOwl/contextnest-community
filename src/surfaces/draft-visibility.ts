@@ -26,7 +26,7 @@ export type HiddenSet = Set<string> & { [HIDE_ALL]?: true };
 const HIDING_STATES = "('creating', 'pending')";
 
 /** Tests only: force the next reads to fail (fail-closed check). */
-export const draftVisibilityTestHooks: { fail?: boolean } = {};
+export const draftVisibilityTestHooks: { fail?: boolean; failLookup?: boolean } = {};
 
 function missingTable(err: unknown): boolean {
   const m = String((err as Error)?.message ?? err);
@@ -93,3 +93,45 @@ export async function surfaceEditsHiddenFor(nestId: string, userId: string): Pro
   if (!anyHidden(edits)) return edits;
   return (await seesSurfaceDrafts(nestId, userId)) ? new Set() : edits;
 }
+
+/**
+ * Round 4 (Misha, 2026-11-01): a personal (DM) nest Surfaces created belongs
+ * to its owner for review — only they may approve, reject or edit its drafts,
+ * on every path. The marker is the surface_personal_nests row. A database
+ * without the Surfaces tables has no personal nests.
+ */
+export interface PersonalNestOwner {
+  userId: string;
+  email: string;
+  name: string;
+}
+
+/** An owner nobody matches: what a failed lookup yields (fail closed). */
+const UNKNOWN_OWNER: PersonalNestOwner = { userId: "\u0000unknown", email: "\u0000unknown", name: "the owner" };
+
+/**
+ * The owner of a Surfaces personal nest, or null for any other nest. Fails
+ * CLOSED (re-review N1): only a database WITHOUT the Surfaces tables means
+ * "not personal"; any other error treats the nest as personal with an
+ * unknown owner, so nobody may review for that call. Logs counts only.
+ */
+export async function surfacesPersonalOwner(nestId: string): Promise<PersonalNestOwner | null> {
+  try {
+    if (draftVisibilityTestHooks.failLookup) throw new Error("injected lookup failure");
+    const r = (await getDb().get(
+      "SELECT u.id, u.email, u.name FROM surface_personal_nests p JOIN users u ON u.id = p.community_user_id WHERE p.nest_id = ? LIMIT 1",
+      [nestId],
+    )) as { id: string; email: string; name: string | null } | undefined;
+    if (r) return { userId: r.id, email: r.email, name: r.name?.trim() || r.email };
+    // A marker whose owner row is gone stays personal (no owner can act).
+    const orphan = await getDb().get("SELECT 1 AS x FROM surface_personal_nests WHERE nest_id = ? LIMIT 1", [nestId]);
+    return orphan ? UNKNOWN_OWNER : null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (/no such table|does not exist/i.test(msg)) return null;
+    console.error("[surfaces] personal-nest lookup failed; failing closed (1)");
+    return UNKNOWN_OWNER;
+  }
+}
+
+export const personalNestRefusal = (owner: PersonalNestOwner) => `Only ${owner.name} can review items in their private nest`;

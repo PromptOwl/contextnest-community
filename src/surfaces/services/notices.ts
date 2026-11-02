@@ -50,7 +50,7 @@ export async function recordNotice(n: NoticeInput): Promise<string> {
       outcome = await sendEmailToRecipient(
         to,
         { status: "agent_notify", docTitle: n.subject, path: "Surfaces", actor: "ContextNest Surfaces", note: n.text, link: "" },
-        { senderKind: "system", senderId: null },
+        { senderKind: "system", senderId: null, noNest: true },
       );
     } catch {
       outcome = "failed";

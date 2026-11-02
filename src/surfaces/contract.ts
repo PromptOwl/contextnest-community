@@ -61,6 +61,8 @@ export interface SurfaceMessage {
    *  thread a mention was made in) and how it was asked. */
   target?: { id: string; author: string | null; thread: string | null } | null;
   ask_via?: "reaction" | "mention" | "dm";
+  /** S2b: the message was sent in a 1:1 DM with the bot (Slack channel_type "im"). */
+  dm?: boolean;
 }
 
 /** Membership / lifecycle events that feed the guard re-check (§4.17). */
@@ -154,6 +156,9 @@ export interface ProposalView {
     existing_agent_config?: string;
     agent_answer?: string;
   };
+  /** S2b: the full interactive card (core/card-model.ts CardModel). Typed
+   *  loosely here so this module keeps no imports; adapters render it. */
+  card?: unknown;
 }
 
 export interface CardRef {
@@ -175,12 +180,18 @@ export interface SurfaceConnector {
   /** Idempotent per view.proposal_id. */
   postProposal(binding: BindingRef, view: ProposalView): Promise<CardRef>;
   updateProposal(ref: CardRef, view: ProposalView): Promise<void>;
+  /** S2b security round M1: last-resort removal of a card that can't be redacted. */
+  deleteProposal?(install: SurfaceInstallRef, ref: CardRef): Promise<void>;
   /** Link, else auto-match (§4.11) — adapters delegate to the identity service. */
   resolveIdentity(install: SurfaceInstallRef, surfaceUserId: string): Promise<string | null>;
   sendPrivate(binding: BindingRef, surfaceUserId: string, view: ProposalView): Promise<void>;
   publishPending(install: SurfaceInstallRef, surfaceUserId: string, items: unknown[]): Promise<void>;
   /** A short private status/refusal line to one person (Slack ephemeral). */
   sendNote?(binding: BindingRef, surfaceUserId: string, text: string, threadRef?: string | null): Promise<void>;
+  /** S2b: a plain bot message in the conversation (the one-time enable notice, DM replies). */
+  postNotice?(binding: BindingRef, text: string): Promise<void>;
+  /** S2b: open a direct message with a user and post `text` (DM-capture notices). */
+  sendDirect?(install: SurfaceInstallRef, surfaceUserId: string, text: string, channel?: string | null): Promise<void>;
   /** A stable link to a message (Slack chat.getPermalink); null if unavailable. */
   permalink?(install: SurfaceInstallRef, conversation: string, messageId: string): Promise<string | null>;
   /** Explicit-ask fetch (§4.3): one rate-aware history/replies call. */

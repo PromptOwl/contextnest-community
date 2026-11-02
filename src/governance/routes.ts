@@ -35,6 +35,7 @@ import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { isPrimeDocument } from "./prime-service.js";
+import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
 import {
   updateNode,
   bodyOnly,
@@ -1278,6 +1279,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
   }
   const userEmail = await getUserEmail(c);
 
+  // Surfaces personal (DM) nests: the owner alone reviews (Misha, 2026-11-01).
+  const personal = await surfacesPersonalOwner(nestId);
+  if (personal && personal.email.toLowerCase() !== userEmail.toLowerCase()) throw new ForbiddenError(personalNestRefusal(personal));
   const pending = await reviews.getPendingReview(nestId, nodeId);
   if (!pending) throw new ConflictError("No pending review for this document");
   if (pending.requestedBy.toLowerCase() === userEmail.toLowerCase()) {

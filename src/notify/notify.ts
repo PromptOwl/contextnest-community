@@ -83,6 +83,12 @@ export async function notifyNestEvent(
   details?: EmailEventDetails,
   opts?: { skipEmail?: boolean },
 ): Promise<void> {
+  // A sealed personal nest sends nothing to server-wide / team channels
+  // (re-review R3-H1b): only the owner's own notifications exist for it.
+  {
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    if (await sealedNest(nestId)) return;
+  }
   // Nothing configured → don't even buffer.
   if (
     !config.SLACK_WEBHOOK_URL &&

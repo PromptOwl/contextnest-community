@@ -134,3 +134,29 @@ export async function setBudgetForTest(
     await getDb().run(`UPDATE surface_nest_budgets SET ${k} = ? WHERE nest_id = ? AND month = ?`, [val as number, nestId, month]);
   }
 }
+
+/** §4.1: the per-nest monthly cap is $0–$10,000 (micros); outside → SettingsError (422). */
+export const MAX_CAP_MICROS = 10_000 * 1_000_000;
+
+export async function setCap(nestId: string, capMicros: unknown, now = Date.now()) {
+  const { SettingsError } = await import("../core/settings.js");
+  if (typeof capMicros !== "number" || !Number.isInteger(capMicros) || capMicros < 0 || capMicros > MAX_CAP_MICROS) {
+    throw new SettingsError("cap_micros must be a whole number of micros between 0 and 10000000000 ($0–$10,000)");
+  }
+  const month = monthKey(now);
+  await ensureRow(nestId, month);
+  await getDb().run("UPDATE surface_nest_budgets SET cap_micros = ?, updated_at = ? WHERE nest_id = ? AND month = ?", [capMicros, new Date(now).toISOString(), nestId, month]);
+  return budgetView(await getBudget(nestId, now));
+}
+
+export function budgetView(b: Awaited<ReturnType<typeof getBudget>>) {
+  return {
+    nest_id: b.nest_id,
+    month: b.month,
+    cap_micros: Number(b.cap_micros),
+    spent_micros: Number(b.spent_micros),
+    reserved_micros: Number(b.reserved_micros),
+    alerted_90: !!b.alerted_90,
+    alerted_100: !!b.alerted_100,
+  };
+}

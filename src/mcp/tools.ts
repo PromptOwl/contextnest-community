@@ -134,7 +134,7 @@ import {
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
-import { SURFACES_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
+import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -449,6 +449,8 @@ export interface McpToolContext {
  * read-tier workflow-plane tools.
  */
 export const MCP_READ_TOOLS = new Set<string>([
+  // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
+  ...SURFACES_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -510,7 +512,7 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_remove",
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
-  ...SURFACES_TOOL_NAMES,
+  ...SURFACES_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool

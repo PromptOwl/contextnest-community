@@ -218,7 +218,10 @@ export async function effectiveReaders(
   // Server admins (§12 R1): only the server-admin path itself is exempt, so
   // they are never added above for being admins — but one who is ALSO the
   // owner / a collaborator / team member / steward / grantee stays a reader.
-  const serverAdmins = await serverAdminIds();
+  // A SEALED personal nest (Misha, 2026-11-01): server admins can't open it,
+  // so the server-admin exception doesn't apply — EffectiveReaders = {owner}.
+  const { sealedNest } = await import("../sealed.js");
+  const serverAdmins = (await sealedNest(nestId)) ? [] : await serverAdminIds();
 
   const userList = [...users].sort();
   const fp = createHash("sha256")

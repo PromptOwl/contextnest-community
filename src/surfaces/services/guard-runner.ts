@@ -109,6 +109,9 @@ export async function runGuardSweep(now: number = Date.now()): Promise<string[]>
       await failClosedBinding(id).catch(() => {});
     }
   }
+  // S2b: retry any card redaction that failed (§4.17, redaction_pending).
+  const { runGuardSweepHooks } = await import("./pause-hooks.js");
+  await runGuardSweepHooks();
   return done;
 }
 

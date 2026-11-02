@@ -53,7 +53,7 @@ export default function TeammatesPage() {
   const [newKey, setNewKey] = useState<{ email: string; password: string; promptowl: boolean; emailed: boolean } | null>(null);
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
-  const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
+  const [resetPw, setResetPw] = useState<{ email: string; password: string | null; notice?: string } | null>(null);
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -289,6 +289,8 @@ export default function TeammatesPage() {
                                 setResetPw({
                                   email: t.email,
                                   password: r.temporary_password || "",
+                                  // Sealed private-nest owner: a link was emailed, no password.
+                                  notice: r.reset_link_sent ? r.message : undefined,
                                 });
                                 await fetchTeammates();
                               } catch (e: any) {
@@ -403,8 +405,17 @@ export default function TeammatesPage() {
             className="w-full max-w-sm rounded-lg border bg-background p-5 shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="font-semibold mb-1">Temporary password</h3>
-            {resetPw.password === null ? (
+            <h3 className="font-semibold mb-1">{resetPw.notice ? "Reset link sent" : "Temporary password"}</h3>
+            {resetPw.notice ? (
+              <>
+                <p className="text-sm text-muted-foreground">{resetPw.notice}</p>
+                <div className="mt-4 text-right">
+                  <Button variant="outline" size="sm" onClick={() => setResetPw(null)}>
+                    Done
+                  </Button>
+                </div>
+              </>
+            ) : resetPw.password === null ? (
               <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">

@@ -961,6 +961,8 @@ export async function resetUserPassword(userId: string, password?: string) {
     email: string;
     keys_revoked?: boolean;
     temporary_password?: string;
+    reset_link_sent?: boolean;
+    message?: string;
   }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify(password ? { password } : {}),

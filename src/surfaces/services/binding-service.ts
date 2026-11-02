@@ -21,7 +21,7 @@ import { getInstall, homeTenant, installRef, type InstallRow } from "./install-s
 import { safeMembers } from "./members.js";
 import { effectiveReaders } from "./readers.js";
 import { resolveIdentity } from "./identity-service.js";
-import { runPauseHooks, type PauseReason } from "./pause-hooks.js";
+import { runPauseHooks, runSurfaceOkLostHooks, type PauseReason } from "./pause-hooks.js";
 import { recordNotice } from "./notices.js";
 
 export { SERVER_ADMIN_DISCLOSURE };
@@ -503,6 +503,7 @@ async function failClosed(row: BindingRow): Promise<void> {
     "UPDATE surface_bindings SET capture_ok = 0, surface_ok = 0, updated_at = ? WHERE id = ? AND status <> 'removed'",
     [now, row.id],
   );
+  if (row.surface_ok) await runSurfaceOkLostHooks({ id: row.id, install_id: row.install_id, nest_id: row.nest_id, conversation_id: row.conversation_id });
   if (moved.changes > 0) await pause(row, "paused_guard", "guard", { recheck_failed: true });
 }
 
@@ -587,6 +588,12 @@ export async function recheckBinding(id: string): Promise<BindingRow> {
   }
   await writeMembersSnapshot(id, ev);
   const updated = await rowOrThrow(id);
+  // §4.17 / security M1: when surface_ok drops, every posted card is put on
+  // the retrying redaction path FIRST — paused or not — so a failed Slack
+  // update can't leave nest or model text behind.
+  if (row.surface_ok && !ev.guard.surface_ok) {
+    await runSurfaceOkLostHooks({ id: row.id, install_id: row.install_id, nest_id: row.nest_id, conversation_id: row.conversation_id });
+  }
   if (next.paused) await pause(updated, next.status, "guard");
   return updated;
 }
@@ -669,7 +676,7 @@ export async function bootBinding(
     const now = nowIso();
     const claimed = await getDb().run(
       `UPDATE surface_bindings SET status = 'paused_by_member', status_changed_at = ?, booted_by_surface_user_id = ?, booted_at = ?,
-         boot_consent_at = NULL, version = version + 1, updated_at = ? WHERE id = ? AND status = ? AND version = ?`,
+         boot_consent_at = NULL, pause_reason = NULL, version = version + 1, updated_at = ? WHERE id = ? AND status = ? AND version = ?`,
       [now, input.surfaceUserId, now, now, current.id, current.status, current.version],
     );
     if (claimed.changes === 0) {

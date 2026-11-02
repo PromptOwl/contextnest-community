@@ -234,6 +234,21 @@ surfacesRoutes.post("/bindings/:id/resume", async (c) => {
     await scopedRow(c, c.req.param("id"));
     return c.json(await resumeBinding(c.req.param("id"), c.get("userId")));
   } catch (err) {
+    // AC-BOOT-04: refused while the booting member is still there without
+    // consent — send them the one-tap "Allow Nest back" prompt.
+    if (err instanceof AppError && err.statusCode === 409 && /hasn't agreed/.test(err.message)) {
+      const { askBooterConsent: ask } = await import("./services/boot-consent.js");
+      const sent = await ask(c.req.param("id")).catch(() => false);
+      return c.json(
+        {
+          error: sent
+            ? `${err.message} They've been sent a one-tap "Allow Nest back" prompt.`
+            : `${err.message} Nest couldn't send them the "Allow Nest back" prompt (check that the app has the im:write scope), so ask them directly.`,
+          consent_prompt: sent ? "sent" : "failed",
+        },
+        409,
+      );
+    }
     return handleError(c, err);
   }
 });
@@ -390,7 +405,7 @@ linkPageRoutes.post("/:token", async (c) => {
 // ─── S2a: Slack install routes, settings, verdict log ──────────────────────
 
 import { slackAdminRoutes } from "./adapters/slack/routes.js";
-import { getSettings, updateSettings } from "./services/settings-service.js";
+import { getSettings } from "./services/settings-service.js";
 import { SettingsError } from "./core/settings.js";
 import { listWindows } from "./services/report-service.js";
 
@@ -409,7 +424,7 @@ surfacesRoutes.patch("/settings", async (c) => {
   try {
     assertPersonCredential(c);
     if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Administrators only.");
-    return c.json({ settings: await updateSettings(await readBody(c)) });
+    return c.json({ settings: await updateSettingsWithEffects(await readBody(c), c.get("userId")) });
   } catch (err) {
     if (err instanceof SettingsError) return c.json({ error: err.message }, 422);
     return handleError(c, err);
@@ -428,6 +443,156 @@ surfacesRoutes.get("/windows", async (c) => {
         to: c.req.query("to") || undefined,
         nestId: scope ?? undefined,
       }),
+    });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+// ─── S2b: proposals, My pending, the commit audit, budgets, disconnect, drafts ─
+
+import { listCommits, listProposals } from "./services/report-service.js";
+import { myPending } from "./services/home-service.js";
+import { budgetView, getBudget, setCap } from "./services/spend-service.js";
+import { disconnectInstall } from "./services/lifecycle-service.js";
+import { updateSettingsWithEffects } from "./services/dm-service.js";
+import { getInstall } from "./services/install-store.js";
+import { draftPage } from "./services/draft-page.js";
+import { getDb } from "../db/client.js";
+
+/** Proposals and outcomes (N1-redacted; admins / nest admins). */
+surfacesRoutes.get("/proposals", async (c) => {
+  try {
+    const scope = c.get("nestScope");
+    const nestId = c.req.query("nest_id") || scope || undefined;
+    if (nestId) assertScope(c, nestId);
+    return c.json({ proposals: await listProposals(c.get("userId"), { nestId, state: c.req.query("state") || undefined }) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** The caller's My pending: only nests they read and review. */
+surfacesRoutes.get("/pending", async (c) => {
+  try {
+    return c.json(await myPending(c.get("userId"), { nestId: c.get("nestScope") ?? null }));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** The commit audit (AC-SRF-01). */
+surfacesRoutes.get("/commits", async (c) => {
+  try {
+    const scope = c.get("nestScope");
+    const nestId = c.req.query("nest_id") || scope || undefined;
+    if (nestId) assertScope(c, nestId);
+    return c.json({
+      commits: await listCommits(c.get("userId"), { nestId, nodeId: c.req.query("node_id") || undefined, proposalId: c.req.query("proposal_id") || undefined }),
+    });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+surfacesRoutes.get("/nests/:nestId/budget", async (c) => {
+  try {
+    const nestId = c.req.param("nestId");
+    assertScope(c, nestId);
+    if (!(await canAdministerNest(nestId, c.get("userId")))) throw new ForbiddenError("Only an owner or admin of this nest can see its budget.");
+    return c.json({ budget: budgetView(await getBudget(nestId)) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+surfacesRoutes.patch("/nests/:nestId/budget", async (c) => {
+  try {
+    const nestId = c.req.param("nestId");
+    assertScope(c, nestId);
+    if (!(await canAdministerNest(nestId, c.get("userId")))) throw new ForbiddenError("Only an owner or admin of this nest can change its budget.");
+    return c.json({ budget: await setCap(nestId, (await readBody(c)).cap_micros) });
+  } catch (err) {
+    if (err instanceof SettingsError) return c.json({ error: err.message }, 422);
+    return handleError(c, err);
+  }
+});
+
+/** Admin disconnect (§4.16 order). */
+surfacesRoutes.delete("/installs/:id", async (c) => {
+  try {
+    assertPersonCredential(c);
+    if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Only a server administrator can disconnect a workspace.");
+    const i = await getInstall(c.req.param("id"));
+    if (!i) throw new NotFoundError("Install not found");
+    const out = await disconnectInstall(i.id);
+    return c.json({ disconnected: true, withdrawn: out.withdrawn, kept: ["approved nodes", "surface_commits", "audit history"] });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** "/nest invite" twin: a member of the conversation brings Nest back after a member removed it. */
+surfacesRoutes.post("/bindings/:id/invite", async (c) => {
+  try {
+    // People only (re-review INFO): resuming listening is a person's act.
+    if (!credentialMayContribute(c)) throw new ForbiddenError("Inviting Nest back needs your own full credential, not an agent or scoped key.");
+    const row = await scopedRow(c, c.req.param("id"));
+    const { inviteBackAsUser } = await import("./services/invite-service.js");
+    const out = await inviteBackAsUser(row.id, c.get("userId"));
+    // Re-review N2: a non-admin learns only the outcome — no booter, name or guard counts.
+    const full = await canAdministerNest(row.nest_id, c.get("userId"));
+    const fresh = full ? await getBindingRow(row.id) : null;
+    if (!out.ok) {
+      return c.json({ error: out.message, reason: out.reason, ...(fresh ? { binding: await bindingView(fresh) } : {}) }, out.reason === "not_found" ? 404 : out.reason === "not_member" ? 403 : 409);
+    }
+    return c.json({ status: out.status, message: out.message, ...(fresh ? { binding: await bindingView(fresh) } : {}) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** The full draft behind a card: readers of the nest only, never indexed (AC-CRD-04). */
+surfacesRoutes.get("/drafts/:itemId", async (c) => {
+  try {
+    // Security L1: a nest-scoped key only reaches drafts of its own nest.
+    const it = (await getDb().get("SELECT nest_id FROM surface_proposal_items WHERE id = ?", [c.req.param("itemId")])) as { nest_id: string } | undefined;
+    if (!it) throw new NotFoundError("Not found");
+    const scope = c.get("nestScope");
+    if (scope && scope !== it.nest_id) throw new NotFoundError("Not found");
+    assertScope(c, it.nest_id);
+    const out = await draftPage(c.req.param("itemId"), c.get("userId"));
+    c.header("X-Robots-Tag", "noindex, nofollow");
+    c.header("Cache-Control", "private, no-store");
+    if (out.status !== 200) return c.json({ error: out.error }, out.status as any);
+    return c.html(out.html);
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/**
+ * Sealed personal nests a server admin may know about (Misha, 2026-11-01):
+ * existence, owner, size and created date — never titles or content.
+ */
+surfacesRoutes.get("/sealed-nests", async (c) => {
+  try {
+    assertPersonCredential(c);
+    if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Administrators only.");
+    const rows = (await getDb().all(
+      `SELECT p.nest_id, p.community_user_id, u.email, u.name, n.created_at,
+              (SELECT COUNT(*) FROM node_index ni WHERE ni.nest_id = p.nest_id) AS documents
+         FROM surface_personal_nests p JOIN nests n ON n.id = p.nest_id LEFT JOIN users u ON u.id = p.community_user_id
+        WHERE p.sealed = 1 ORDER BY n.created_at`,
+    )) as Array<{ nest_id: string; community_user_id: string; email: string | null; name: string | null; created_at: string; documents: number | string }>;
+    return c.json({
+      nests: rows.map((r) => ({
+        nest_id: r.nest_id,
+        owner: { user_id: r.community_user_id, email: r.email, name: r.name },
+        documents: Number(r.documents),
+        created_at: r.created_at,
+        sealed: true,
+      })),
     });
   } catch (err) {
     return handleError(c, err);

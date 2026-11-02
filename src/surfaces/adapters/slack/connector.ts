@@ -26,6 +26,21 @@ import { getInstall } from "../../services/install-store.js";
 import { slackCall } from "./api.js";
 import { verifySlackSignature } from "./verify.js";
 import { renderCard, renderCardText } from "./card.js";
+import { cardFallback, renderCardBlocks, validateBlocks, escapeMrkdwn } from "./blockkit.js";
+import type { CardModel } from "../../core/card-model.js";
+
+/** S2b cards: the full interactive card when the view carries a CardModel;
+ *  validated against every Block Kit limit before anything is sent (N5). */
+function blocksFor(view: ProposalView): { text: string; blocks: unknown[] } {
+  if (view.card) {
+    const m = view.card as CardModel;
+    const blocks = renderCardBlocks(m);
+    const bad = validateBlocks(blocks, "message");
+    if (bad.length) throw new Error(`card failed Block Kit validation (${bad.length})`);
+    return { text: cardFallback(m), blocks };
+  }
+  return { text: escapeMrkdwn(renderCardText(view)), blocks: renderCard(view) };
+}
 import { REMEMBER_RE, SKIP_ME_RE } from "../../core/gate.js";
 
 const MAX_MEMBER_PAGES = 50;
@@ -166,6 +181,7 @@ export function normalizeSlack(envelope: Record<string, any>): SurfaceMessage[] 
           kind: "message",
           subtype: st,
           bot_id: ev.bot_id ? String(ev.bot_id) : null,
+          ...(ev.channel_type === "im" ? { dm: true } : {}),
         },
       ];
     }
@@ -237,7 +253,8 @@ export function createSlackConnector(): SurfaceConnector {
             kind,
             is_private: kind !== "public_channel",
             is_ext_shared: !!(info.is_ext_shared || info.is_shared || info.is_pending_ext_shared),
-            is_general: !!info.is_general,
+            // Org-wide default and mandatory channels are general too (§12 R3; security L4).
+            is_general: !!(info.is_general || info.is_org_default || info.is_org_mandatory),
             enumerable: true,
           },
         };
@@ -251,13 +268,14 @@ export function createSlackConnector(): SurfaceConnector {
     },
 
     async postProposal(binding: BindingRef, view: ProposalView): Promise<CardRef> {
+      const out = blocksFor(view);
       const r = await slackCall(
         "chat.postMessage",
         {
           channel: binding.conversation_id,
           thread_ts: view.thread_ref ?? undefined,
-          text: renderCardText(view),
-          blocks: JSON.stringify(renderCard(view)),
+          text: out.text,
+          blocks: JSON.stringify(out.blocks),
           unfurl_links: false,
           unfurl_media: false,
         },
@@ -267,9 +285,19 @@ export function createSlackConnector(): SurfaceConnector {
     },
 
     async updateProposal(ref: CardRef, view: ProposalView): Promise<void> {
-      void ref;
-      void view;
-      // Card updates (outcomes) land with the commit path in S2b.
+      const binding = (await import("../../services/card-service.js")).getProposal;
+      const p = await binding(view.proposal_id);
+      if (!p) return;
+      const { getBindingRow } = await import("../../services/binding-service.js");
+      const b = await getBindingRow(p.binding_id);
+      if (!b) return;
+      const out = blocksFor(view);
+      // In place (AC-CMT-02): chat.update on the card's own channel + ts.
+      await slackCall("chat.update", { channel: ref.conversation, ts: ref.message_ref, text: out.text, blocks: JSON.stringify(out.blocks) }, { token: await token(b.install_id) });
+    },
+
+    async deleteProposal(install: SurfaceInstallRef, ref: CardRef): Promise<void> {
+      await slackCall("chat.delete", { channel: ref.conversation, ts: ref.message_ref }, { token: await token(install.id) });
     },
 
     async resolveIdentity(install: SurfaceInstallRef, surfaceUserId: string) {
@@ -280,13 +308,27 @@ export function createSlackConnector(): SurfaceConnector {
     async sendPrivate(binding: BindingRef, surfaceUserId: string, view: ProposalView): Promise<void> {
       await slackCall(
         "chat.postEphemeral",
-        { channel: binding.conversation_id, user: surfaceUserId, text: renderCardText(view), blocks: JSON.stringify(renderCard(view)) },
+        { channel: binding.conversation_id, user: surfaceUserId, text: blocksFor(view).text, blocks: JSON.stringify(blocksFor(view).blocks) },
         { token: await token(binding.install_id) },
       );
     },
 
-    async publishPending(): Promise<void> {
-      // App Home "My pending" is S2b.
+    async publishPending(install: SurfaceInstallRef, surfaceUserId: string, items: unknown[]): Promise<void> {
+      // `items` is the App Home view (home-service builds it from the same core as REST/MCP).
+      const view = items[0];
+      await slackCall("views.publish", { user_id: surfaceUserId, view: JSON.stringify(view) }, { token: await token(install.id) });
+    },
+
+    async postNotice(binding: BindingRef, text: string): Promise<void> {
+      await slackCall("chat.postMessage", { channel: binding.conversation_id, text, unfurl_links: false, unfurl_media: false }, { token: await token(binding.install_id) });
+    },
+
+    async sendDirect(install: SurfaceInstallRef, surfaceUserId: string, text: string, channel?: string | null): Promise<void> {
+      const tk = await token(install.id);
+      let ch = channel ?? null;
+      if (!ch) ch = String((await slackCall("conversations.open", { users: surfaceUserId }, { token: tk })).channel?.id ?? "");
+      if (!ch) return;
+      await slackCall("chat.postMessage", { channel: ch, text, unfurl_links: false, unfurl_media: false }, { token: tk });
     },
 
     async sendNote(binding: BindingRef, surfaceUserId: string, text: string, threadRef?: string | null): Promise<void> {
@@ -321,4 +363,9 @@ export function createSlackConnector(): SurfaceConnector {
       }));
     },
   };
+}
+
+/** A bot token for an install (S2b interactions). */
+export async function botToken(installId: string): Promise<string> {
+  return token(installId);
 }

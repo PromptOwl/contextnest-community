@@ -14,6 +14,21 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { resolveNestAccess, resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
+import { personalNestRefusal, surfacesPersonalOwner, type PersonalNestOwner } from "../surfaces/draft-visibility.js";
+import { sealedAgainstEmail } from "../surfaces/sealed.js";
+
+/**
+ * Surfaces personal (DM) nests (Misha, 2026-11-01): review belongs to the
+ * owner alone. The owner may approve (no self-approve flag needed — the
+ * listener submitted the draft); everyone else, server and license admins
+ * included, is refused. Applies to canUserApprove and canUserApproveMany,
+ * so the web review queue, REST, MCP and Surfaces all agree.
+ */
+function personalVerdict(owner: PersonalNestOwner, userEmail: string): PermissionResult {
+  return owner.email.toLowerCase() === userEmail.toLowerCase()
+    ? { allowed: true, reason: "owner of this private nest", role: "owner" }
+    : { allowed: false, reason: personalNestRefusal(owner), role: "viewer" };
+}
 import { config, isEmailish } from "../config.js";
 import { assertCanGrant, stewardClass } from "../auth/seats.js";
 import { resolveNodeGrant } from "./grants-service.js";
@@ -419,7 +434,7 @@ export async function createStewardRecord(params: {
         scopeLabel,
         by: params.assignedBy || undefined,
         link,
-      });
+      }, { nestId: params.nestId });
     }
   }
 
@@ -699,7 +714,8 @@ export async function resolveNestWideRoles(
   userEmail: string,
 ): Promise<EffectiveRole[]> {
   const roles = new Set<EffectiveRole>();
-  if (isSuperAdmin(userEmail)) roles.add("admin");
+  // A sealed personal nest gives a server admin nothing (Misha, 2026-11-01).
+  if (isSuperAdmin(userEmail) && !(await sealedAgainstEmail(nestId, userEmail))) roles.add("admin");
 
   const owner = await getNestOwnerEmail(nestId);
   if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
@@ -852,7 +868,7 @@ export async function canManageStewards(
  * that middleware (MCP) so the write gate doesn't depend on it alone.
  */
 export async function canCreateInNest(nestId: string, userEmail: string): Promise<boolean> {
-  if (config.AUTH_MODE === "open" || isSuperAdmin(userEmail)) return true;
+  if (config.AUTH_MODE === "open" || (isSuperAdmin(userEmail) && !(await sealedAgainstEmail(nestId, userEmail)))) return true;
   const userId = await userIdForEmail(userEmail);
   if (userId) {
     const perm = await resolveNestPermission(nestId, userId);
@@ -883,7 +899,7 @@ export async function canUserEdit(
   if (roles.includes("owner")) {
     return { allowed: true, reason: "nest owner", role: "owner" };
   }
-  if (isSuperAdmin(userEmail)) {
+  if (isSuperAdmin(userEmail) && !(await sealedAgainstEmail(nestId, userEmail))) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
   if (canEditWith(roles)) {
@@ -944,6 +960,8 @@ export async function canUserApprove(
   /** The latest pending review's requester, when the caller already loaded it. */
   opts: { requestedBy?: string } = {},
 ): Promise<PermissionResult> {
+  const personal = await surfacesPersonalOwner(nestId);
+  if (personal) return personalVerdict(personal, userEmail);
   const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   const allowSelf = await nestAllowsSelfApprove(nestId);
   // The actor is the user who SUBMITTED the version for review (or the version
@@ -971,6 +989,11 @@ export async function canUserApproveMany(
   const ids = [...new Set(nodeIds)];
   const out = new Map<string, PermissionResult>();
   if (ids.length === 0) return out;
+  const personal = await surfacesPersonalOwner(nestId);
+  if (personal) {
+    for (const id of ids) out.set(id, personalVerdict(personal, userEmail));
+    return out;
+  }
   const [nestRoles, allowSelf, stewards, actors] = await Promise.all([
     resolveNestWideRoles(nestId, userEmail),
     nestAllowsSelfApprove(nestId),
@@ -1154,7 +1177,7 @@ export async function canUserAccess(
   if (roles.includes("owner")) {
     return { allowed: true, reason: "nest owner", role: "owner" };
   }
-  if (isSuperAdmin(userEmail)) {
+  if (isSuperAdmin(userEmail) && !(await sealedAgainstEmail(nestId, userEmail))) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
   if (canViewWith(roles)) {

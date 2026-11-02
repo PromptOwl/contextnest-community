@@ -113,6 +113,7 @@ describe("node row cleanup", () => {
       // hold fingerprint, which expires on its own.
       ["surface_proposal_items.node_id", "Surfaces proposal audit record"],
       ["surface_fingerprints.node_id", "7-day hold; expires on its own"],
+      ["surface_commits.node_id", "Surfaces commit audit; survives the node (life of the nest)"],
     ]);
     const NODE_ID_COLUMNS = new Set([
       "node_id",

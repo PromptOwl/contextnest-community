@@ -2,6 +2,7 @@ import type { DatabaseAdapter } from "./adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
+import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -107,6 +108,7 @@ export const HISTORICAL_MIGRATIONS = [
   "078_task_rules_ticket_counters",
   "079_surfaces_core",
   "080_surfaces_ingest",
+  "081_surfaces_cards",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1324,6 +1326,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(surfacesS1Ddl(NOW));
   // Migration 080 parity: Surfaces ingestion tables (S2a).
   await db.exec(surfacesS2aDdl(NOW, "BIGINT"));
+  // Migration 081 parity: Surfaces cards, commit audit, usage, DM (S2b).
+  await db.exec(surfacesS2bDdl(NOW));
+  await db.exec(surfacesS2bAlterPostgres());
+  // Re-review R3-L2: an earlier 081 created surface_personal_nests without `sealed`.
+  await db.exec("ALTER TABLE surface_personal_nests ADD COLUMN IF NOT EXISTS sealed INTEGER NOT NULL DEFAULT 1");
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

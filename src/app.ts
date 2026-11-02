@@ -1,3 +1,4 @@
+import { signInAlertSoon } from "./surfaces/signin-alerts.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { getSessionIdFromRequest } from "./auth/sessions.js";
@@ -535,6 +536,13 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     const act = typeof claims.act === "string" ? claims.act.trim() : "";
     if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
       c.set("apiKeyLabel", `${act} via ${sub}'s agent`);
+    }
+    // Round 9 (R5-M1): an agent acting as a sealed-nest owner is a sign-in they
+    // hear about (once per 24 h, at once for a new agent identity).
+    {
+      const cl = claims as unknown as Record<string, unknown>;
+      const client = [act, cl.azp, cl.client_id, cl.iss].filter((v) => typeof v === "string" && v).join("|");
+      signInAlertSoon(resolved.userId, "agent", { client });
     }
     return next();
   },
@@ -1988,6 +1996,16 @@ export function createApp(): Hono<AuthEnv> {
     // 500 never leaves a live setting that was never durably stored. The store
     // is the database (durable + shared across instances) rather than a .env
     // file, which Cloud Run wipes on rebuild — see db/settings.ts.
+    // Round 8 (Misha's R4-M1 ruling): sign-in or email configuration that
+    // actually changes is announced to every sealed-nest owner.
+    const { authOrEmailSetting, alertSealedOwnersConfigChanged } = await import("./surfaces/signin-alerts.js");
+    const authChanges = [
+      ...new Set(
+        pending
+          .filter((p) => (process.env[p.name] ?? null) !== p.value && authOrEmailSetting(p.name))
+          .map((p) => authOrEmailSetting(p.name)!),
+      ),
+    ];
     for (const { name, value } of pending) {
       try {
         await persistSetting(name, value);
@@ -2003,6 +2021,9 @@ export function createApp(): Hono<AuthEnv> {
       if (value === null) delete process.env[name];
       else process.env[name] = value;
     }
+    // Round 9: queued once the save has committed (the outbox delivers and
+    // retries in the background; the Slack DM doesn't depend on mail settings).
+    if (authChanges.length) await alertSealedOwnersConfigChanged(authChanges.join(", "));
 
     // Own-provider keys go to PromptOwl, which tests each with the provider —
     // after the settings above are saved, so a refused key never strands them.
