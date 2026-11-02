@@ -598,3 +598,56 @@ surfacesRoutes.get("/sealed-nests", async (c) => {
     return handleError(c, err);
   }
 });
+
+// ─── S3: seeds (PRD §13, AC-SEED-10) ────────────────────────────────────────
+//
+// POST /surfaces/seeds/apply {nest_id, seed_id, library_nest_id?, upgrade?, dry_run?}
+// GET  /surfaces/seeds?nest_id=            seeds the caller may apply to N
+// GET  /surfaces/seeds/status?nest_id=     what N has applied
+// Nest admins only, on a person's own full credential (read-only keys are
+// refused by the middleware above, nest-scoped keys never reach /surfaces).
+// The MCP twins call the same service functions.
+
+import { applySeed, listSeedsForNest, seedStatus } from "./services/seed-service.js";
+
+surfacesRoutes.post("/seeds/apply", async (c) => {
+  try {
+    assertPersonCredential(c);
+    const b = await readBody(c);
+    const nestId = str(b.nest_id, "nest_id")!;
+    assertScope(c, nestId);
+    const out = await applySeed({
+      nestId,
+      seedId: str(b.seed_id, "seed_id")!,
+      libraryNestId: str(b.library_nest_id, "library_nest_id", false) ?? null,
+      upgrade: bool(b.upgrade, "upgrade") ?? false,
+      dryRun: bool(b.dry_run, "dry_run") ?? false,
+      actorUserId: c.get("userId"),
+      // S7-R2 M1: a key's writes honour the nest's push-confirmation gate.
+      credential: { keyId: c.get("apiKeyId") ?? null, agentSurface: false },
+    });
+    return c.json(out);
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+surfacesRoutes.get("/seeds", async (c) => {
+  try {
+    const nestId = str(c.req.query("nest_id"), "nest_id")!;
+    assertScope(c, nestId);
+    return c.json({ seeds: await listSeedsForNest(nestId, c.get("userId")) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+surfacesRoutes.get("/seeds/status", async (c) => {
+  try {
+    const nestId = str(c.req.query("nest_id"), "nest_id")!;
+    assertScope(c, nestId);
+    return c.json(await seedStatus(nestId, c.get("userId")));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});

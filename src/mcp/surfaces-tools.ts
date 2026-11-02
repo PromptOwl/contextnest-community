@@ -186,7 +186,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
   {
     name: "context_surfaces_settings_update",
     description:
-      "Change Surfaces settings. Ranges: quiet_minutes 5–240, window_max_age_hours 1–12 and below buffer_ttl_hours, buffer_ttl_hours 1–24, min_meaningful_chars 1–50, propose_threshold 0.5–0.95. dm_capture (default false) turns DM capture on or off for connected workspaces; turning it off deletes every DM buffer and withdraws pending DM proposals. signin_alerts (default true) sends sealed-nest owners a Slack DM and email on new sign-ins and on sign-in or email configuration changes; turning it off notifies every sealed-nest owner. Server admin only.",
+      "Change Surfaces settings. Ranges: quiet_minutes 5–240, window_max_age_hours 1–12 and below buffer_ttl_hours, buffer_ttl_hours 1–24, min_meaningful_chars 1–50, propose_threshold 0.5–0.95. dm_capture (default false) turns DM capture on or off for connected workspaces; turning it off deletes every DM buffer and withdraws pending DM proposals. signin_alerts (default true) sends sealed-nest owners a Slack DM and email on new sign-ins and on sign-in or email configuration changes; turning it off notifies every sealed-nest owner. default_seed is the seed a DM private nest gets; seed_library_nests marks nests as seed libraries. Server admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -200,6 +200,8 @@ export const SURFACES_TOOL_DEFINITIONS = [
         signin_alerts: { type: "boolean", description: "Sign-in alerts for sealed-nest owners on (true, the default) or off; turning off notifies every owner." },
         conversation_daily_cards: { type: "number" },
         timezone: { type: "string" },
+        default_seed: { type: "string", description: 'The seed a DM private nest gets: a bundled seed id (default "generic-team"), "<library nest id>:<seed id>", or "" for none.' },
+        seed_library_nests: { type: "array", items: { type: "string" }, description: "Nests whose seeds/<id>/seed nodes are offered as seeds (reads still follow each caller's access)." },
       },
       required: [] as string[],
     },
@@ -265,6 +267,34 @@ export const SURFACES_TOOL_DEFINITIONS = [
       "Disconnect a workspace install: pending cards are marked Withdrawn first, the token is revoked, then secrets, bindings, buffers, drafts and identity links " +
       "for it are deleted. Approved nodes and the commit audit stay. Server administrators only.",
     inputSchema: { type: "object", properties: { install_id: { type: "string", description: "The install to disconnect (context_surfaces_status lists them)." } }, required: ["install_id"] as string[] },
+  },
+  {
+    name: "context_surfaces_seed_apply",
+    description:
+      "Apply a seed to this nest (the POST /surfaces/seeds/apply twin): its folders, documents, CONTEXT.md, glossary definitions and thesis, and the listener settings " +
+      "(folders it proposes into, domain tags, never-propose categories) for every conversation bound here. Idempotent: anything a person edited is kept (kept_human_edit); " +
+      "a newer seed version updates untouched items only with upgrade: true. With an org-mirror layer it also proposes people and areas from bound conversations, as reviews. " +
+      "On a nest that holds agent writes for confirmation, only an allowlisted credential may apply. dry_run: true previews without writing. Owner/admin only, on your own full credential.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        seed_id: { type: "string", description: "The seed id (context_surfaces_seed_list shows them)." },
+        library_nest_id: { type: "string", description: "Apply the seed from this seed-library nest instead of the bundled one." },
+        upgrade: { type: "boolean", description: "Update untouched seeded items to a newer seed version (default false)." },
+        dry_run: { type: "boolean", description: "Return what would be written (each item's planned action, title and an excerpt) and write nothing." },
+      },
+      required: ["seed_id"] as string[],
+    },
+  },
+  {
+    name: "context_surfaces_seed_list",
+    description: "The seeds you can apply to this nest: the bundled ones, and seeds in seed-library nests you can read. Owner/admin only.",
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
+  },
+  {
+    name: "context_surfaces_seed_status",
+    description: "Which seeds this nest has applied (id, version, source). no_seed = true means its conversations propose nowhere yet. Owner/admin only.",
+    inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
 ];
 
@@ -437,7 +467,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       case "context_surfaces_settings_update": {
         await requireOrgAdmin(ctx);
         const patch: Record<string, unknown> = {};
-        for (const k of ["quiet_minutes", "window_max_age_hours", "buffer_ttl_hours", "min_meaningful_chars", "propose_threshold", "reviewer_daily_cards", "conversation_daily_cards", "timezone", "dm_capture", "signin_alerts"]) {
+        for (const k of ["quiet_minutes", "window_max_age_hours", "buffer_ttl_hours", "min_meaningful_chars", "propose_threshold", "reviewer_daily_cards", "conversation_daily_cards", "timezone", "dm_capture", "signin_alerts", "default_seed", "seed_library_nests"]) {
           if (args[k] !== undefined) patch[k] = args[k];
         }
         try {
@@ -507,6 +537,36 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         await requireOrgAdmin(ctx);
         const out = await disconnectInstall(reqStr(args.install_id, "install_id"));
         return { text: `Disconnected. ${out.withdrawn} pending proposal item(s) withdrawn. Approved nodes and the commit audit stay.`, data: { disconnected: true, ...out } };
+      }
+      case "context_surfaces_seed_apply": {
+        // People only, never a read-only, scoped or system key (the REST rule).
+        if (ctx.contributorCredential !== true) throw new ForbiddenError("Applying a seed needs your own full credential, not a nest-scoped, read-only or system key.");
+        const { applySeed } = await import("../surfaces/services/seed-service.js");
+        if (args.upgrade !== undefined && typeof args.upgrade !== "boolean") throw new ValidationError("upgrade must be true or false");
+        if (args.dry_run !== undefined && typeof args.dry_run !== "boolean") throw new ValidationError("dry_run must be true or false");
+        if (args.library_nest_id !== undefined && args.library_nest_id !== null && typeof args.library_nest_id !== "string") throw new ValidationError("library_nest_id must be a string");
+        const out = await applySeed({
+          nestId: ctx.nestId,
+          seedId: reqStr(args.seed_id, "seed_id"),
+          libraryNestId: args.library_nest_id || null,
+          upgrade: args.upgrade === true,
+          dryRun: args.dry_run === true,
+          actorUserId: ctx.userId,
+          // MCP is an agent surface whatever it authenticated with (S7-R2 M1).
+          credential: { keyId: ctx.apiKeyId ?? null, agentSurface: true },
+        });
+        const kept = out.items.filter((i) => i.action === "kept_human_edit").length;
+        return { text: `Seed ${out.seed.id}@${out.seed.version}: ${out.status}. ${out.items.length} item(s), ${kept} kept as people edited them.`, data: out };
+      }
+      case "context_surfaces_seed_list": {
+        const { listSeedsForNest } = await import("../surfaces/services/seed-service.js");
+        const seeds = await listSeedsForNest(ctx.nestId, ctx.userId);
+        return { text: seeds.map((s) => `- ${s.id}@${s.version} (${s.source}): ${s.title}`).join("\n") || "No seeds available.", data: { seeds } };
+      }
+      case "context_surfaces_seed_status": {
+        const { seedStatus } = await import("../surfaces/services/seed-service.js");
+        const status = await seedStatus(ctx.nestId, ctx.userId);
+        return { text: status.no_seed ? "No seed applied: conversations bound here propose nowhere yet." : status.applied.map((a) => `${a.seed_id}@${a.version}`).join(", "), data: status };
       }
       default:
         return { text: `Unknown surfaces tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown surfaces tool: ${toolName}` } };

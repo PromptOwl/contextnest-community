@@ -36,6 +36,7 @@ import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { isPrimeDocument } from "./prime-service.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
+import { adminFolderRefusal } from "../surfaces/admin-folders.js";
 import {
   updateNode,
   bodyOnly,
@@ -1147,6 +1148,9 @@ governanceNodeRoutes.post(
       .json<{ comment?: string }>()
       .catch(() => ({}) as { comment?: string });
     const actor = await getUserEmail(c);
+    // A seed's admin-only folders: nest admins only (S7-R3 R2-L3).
+    const adminOnly = await adminFolderRefusal(nestId, nodeId, actor);
+    if (adminOnly) return c.json({ error: adminOnly }, 403);
     try {
       const result = await externalEdits.approveExternalEdit({
         nestId,
@@ -1282,6 +1286,8 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
   // Surfaces personal (DM) nests: the owner alone reviews (Misha, 2026-11-01).
   const personal = await surfacesPersonalOwner(nestId);
   if (personal && personal.email.toLowerCase() !== userEmail.toLowerCase()) throw new ForbiddenError(personalNestRefusal(personal));
+  const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const pending = await reviews.getPendingReview(nestId, nodeId);
   if (!pending) throw new ConflictError("No pending review for this document");
   if (pending.requestedBy.toLowerCase() === userEmail.toLowerCase()) {

@@ -41,6 +41,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  folderToSegments,
   moveFolder,
   isDerivedAnnotationsNode,
 } from "./service.js";
@@ -489,6 +490,11 @@ queryRoutes.post("/folders", async (c) => {
   if (typeof body.folder !== "string" || !body.folder.trim()) {
     throw new ValidationError('folder (a string like "gtm/deals") is required');
   }
+  // A seed's admin-only folders (e.g. agents/): no new subfolders by non-admins.
+  const { adminFolderPathRefusal } = await import("../surfaces/admin-folders.js");
+  const path = folderToSegments(body.folder).join("/");
+  const adminOnly = await adminFolderPathRefusal(c.req.param("nestId")!, [path], await resolveCallerEmail(c.get("userId")));
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
   return c.json({ folder }, 201);
 });

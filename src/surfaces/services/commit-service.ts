@@ -40,6 +40,7 @@ import { checkEdit, type EditedFields, type WindowGuard } from "./edit-guard.js"
 import { nameableReviewers } from "../core/reviewers.js";
 import { renderConfirm } from "../adapters/slack/blockkit.js";
 import { getBindingRow, type BindingRow } from "./binding-service.js";
+import { adminFolderRefusal, ADMIN_FOLDER_REFUSAL } from "../admin-folders.js";
 import { getInstall, homeTenant, type InstallRow } from "./install-store.js";
 import { resolveActor } from "./identity-service.js";
 import { listenerFolders, listenerFor } from "./listener-service.js";
@@ -188,6 +189,17 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
   if (!(await canReviewAll(p.nest_id, userId, pending))) {
     await req.responder.note(await notReviewerNote(p, binding, pending));
     return { ok: false };
+  }
+  // §13 / S7-R2 L4: a seed's admin_only folders take approvals from nest
+  // admins only — read from the nest's seeds (never the listener row), fail closed.
+  // Reject / keep-record write nothing, so any reviewer may (as on the web).
+  const writes = req.verb !== "reject" && req.verb !== "keep_record";
+  for (const it of writes ? target : []) {
+    const refusal = it.node_id ? await adminFolderRefusal(p.nest_id, it.node_id, u.email) : ADMIN_FOLDER_REFUSAL;
+    if (refusal) {
+      await req.responder.note(refusal);
+      return { ok: false };
+    }
   }
   // R2: approve-with-edits needs edit rights too (the existing rule) — checked
   // before any dialog opens.

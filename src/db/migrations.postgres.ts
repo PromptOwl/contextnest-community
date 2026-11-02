@@ -3,6 +3,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
+import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -109,6 +110,7 @@ export const HISTORICAL_MIGRATIONS = [
   "079_surfaces_core",
   "080_surfaces_ingest",
   "081_surfaces_cards",
+  "082_surfaces_seeds",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1331,6 +1333,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(surfacesS2bAlterPostgres());
   // Re-review R3-L2: an earlier 081 created surface_personal_nests without `sealed`.
   await db.exec("ALTER TABLE surface_personal_nests ADD COLUMN IF NOT EXISTS sealed INTEGER NOT NULL DEFAULT 1");
+  // Migration 082 parity: Surfaces seeds (S3).
+  await db.exec(surfacesS3Ddl(NOW));
+  await db.exec(surfacesS3AlterPostgres());
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

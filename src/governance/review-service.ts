@@ -9,6 +9,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
+import { adminFolderRefusal } from "../surfaces/admin-folders.js";
 import { ConflictError } from "../shared/errors.js";
 import { assertDeletionRequestable } from "../structure/writes.js";
 import {
@@ -320,6 +321,9 @@ async function approveInner(params: Parameters<typeof approve>[0]): Promise<Revi
     if (personal && personal.email.toLowerCase() !== params.approvedBy.toLowerCase()) {
       throw new Error(personalNestRefusal(personal));
     }
+    // A seed's admin-only folders: nest admins only, no override (S7-R2 L4).
+    const adminOnly = await adminFolderRefusal(params.nestId, params.nodeId, params.approvedBy);
+    if (adminOnly) throw new Error(adminOnly);
 
     // Check permissions (unless override by super admin)
     if (!params.override) {

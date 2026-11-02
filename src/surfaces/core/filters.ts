@@ -114,3 +114,30 @@ const DATE_EXPR = new RegExp(
 export function hasDateExpression(text: string): boolean {
   return DATE_EXPR.test(text);
 }
+
+/** A very small stemmer: lower-case word → a shared stem for simple inflections. */
+export function stem(w: string): string {
+  let x = w.toLowerCase();
+  if (x.length > 4 && x.endsWith("ies")) return `${x.slice(0, -3)}y`;
+  if (x.length > 5 && x.endsWith("ing")) x = x.slice(0, -3);
+  else if (x.length > 4 && x.endsWith("ed")) x = x.slice(0, -2);
+  else if (x.length > 4 && /(?:ses|xes|zes|ches|shes)$/.test(x)) x = x.slice(0, -2);
+  else if (x.length > 3 && x.endsWith("s") && !x.endsWith("ss")) x = x.slice(0, -1);
+  return x;
+}
+
+/**
+ * A seed's `never_propose` categories and their synonyms (AC-SEED-08, S7-R2
+ * L5) as a deterministic, lexical backstop: each term matches as whole words
+ * ("personal-life" → "personal life"), case-insensitive, after simple
+ * stemming on both sides ("credentials" ~ "credential", "salaries" ~
+ * "salary"). The prompt instruction and human review remain the main guard.
+ */
+export function categoryHit(text: string, categories: readonly string[]): boolean {
+  if (!categories.length) return false;
+  const hay = ` ${words(text).map(stem).join(" ")} `;
+  return categories.some((c) => {
+    const w = words(c.replace(/[-_]+/g, " ")).map(stem).join(" ");
+    return !!w && hay.includes(` ${w} `);
+  });
+}

@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { adminFolderRefusal, adminFolderPathRefusal } from "../surfaces/admin-folders.js";
 import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
 import { approvedReadableBody } from "./readable-body.js";
 import { assertFolderCreatable, assertFolderMovable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
@@ -2110,6 +2111,9 @@ async function createNodeOnce(
     // addresses. Generate one instead of refusing the title.
     id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
+  // A seed's admin-only folders take documents from nest admins only (S7-R2 L4).
+  const adminOnly = await adminFolderRefusal(nestId, id, userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const tags = requireTags(input.tags);
 
   // Content-type toggles: creation of a disabled type is refused here — the
@@ -2895,6 +2899,9 @@ export async function updateNode(
           patch = { ...patch, content: undefined };
         }
       }
+      // A seed's admin-only folders take edits from nest admins only (S7-R2 L4).
+      const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+      if (adminOnly) throw new ForbiddenError(adminOnly);
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
@@ -3571,6 +3578,9 @@ async function moveNodeInner(
   const segments = folderToSegments(folder);
   const newId =
     segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
+  // A seed's admin-only folders: non-admins may move nothing into or out of them (S7-R3 R2-L3).
+  const adminOnly = (await adminFolderRefusal(nestId, nodeId, userEmail)) ?? (await adminFolderRefusal(nestId, newId, userEmail));
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   if (newId === nodeId) return { node, previousId: nodeId };
 
   // Destination check through write under the destination's lock — same
@@ -3906,6 +3916,10 @@ async function deleteNodeInner(
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 
+  // A seed's admin-only folders: non-admins delete nothing there (S7-R3 R2-L3).
+  const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
+
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
@@ -3985,6 +3999,9 @@ export async function deleteFolder(
     throw new ValidationError("folder is required");
   }
   const rel = segments.join("/");
+  // A seed's admin-only folders: also when empty (no per-node check runs then).
+  const adminOnly = await adminFolderPathRefusal(nestId, [rel], userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
@@ -4049,6 +4066,9 @@ export async function moveFolder(
   if (to.startsWith(`${from}/`)) {
     throw new ValidationError("A folder can't be moved into itself.");
   }
+  // A seed's admin-only folders: no rename, move-out or move-in by non-admins (S7-R3 R2-L3).
+  const adminOnly = await adminFolderPathRefusal(nestId, [from, to], userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
   const all = (await storage.discoverDocuments()).map((d) => d.id);

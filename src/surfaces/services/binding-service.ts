@@ -338,7 +338,12 @@ export async function previewBinding(input: BindInput) {
   });
   await assertMayInspect(input.actorUserId, ev);
   assertApplicable(ev.conversation, !!input.explicitPublicBind);
+  // §13 / AC-SEED-09: an unseeded nest proposes nowhere — say so and offer seeds.
+  const { seedPreview } = await import("./seed-service.js");
+  const seed = await seedPreview(input.nestId, input.actorUserId);
   return {
+    no_seed: seed.no_seed,
+    seeds: seed.seeds,
     would_bind: ev.guard.capture_ok,
     guard: ev.guard,
     conversation_kind: ev.conversation?.kind ?? null,

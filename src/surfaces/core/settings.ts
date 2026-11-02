@@ -17,6 +17,10 @@ export interface SurfaceSettings {
   dm_capture: boolean;
   /** Round 8: sign-in alerts for sealed-nest owners, default ON. Turning it off notifies every owner. */
   signin_alerts: boolean;
+  /** §13: the seed a DM personal nest gets ("" = none). A bundled seed id, or "<library nest id>:<seed id>". */
+  default_seed: string;
+  /** §13: nests a server admin marks as seed libraries. */
+  seed_library_nests: string[];
 }
 
 export const DEFAULT_SETTINGS: SurfaceSettings = {
@@ -30,13 +34,18 @@ export const DEFAULT_SETTINGS: SurfaceSettings = {
   timezone: "UTC",
   dm_capture: false,
   signin_alerts: true,
+  default_seed: "generic-team",
+  seed_library_nests: [],
 };
+
+export const SEED_REF_RE = /^(?:[A-Za-z0-9_-]{1,64}:)?[a-z0-9][a-z0-9-]{0,62}$/;
+export const MAX_SEED_LIBRARIES = 20;
 
 export const BUFFER_TTL_CEILING_HOURS = 24;
 
 export class SettingsError extends Error {}
 
-const RANGES: Record<Exclude<keyof SurfaceSettings, "timezone" | "dm_capture" | "signin_alerts">, { min: number; max: number; integer: boolean }> = {
+const RANGES: Record<Exclude<keyof SurfaceSettings, "timezone" | "dm_capture" | "signin_alerts" | "default_seed" | "seed_library_nests">, { min: number; max: number; integer: boolean }> = {
   quiet_minutes: { min: 5, max: 240, integer: true },
   window_max_age_hours: { min: 1, max: 12, integer: true },
   buffer_ttl_hours: { min: 1, max: BUFFER_TTL_CEILING_HOURS, integer: true },
@@ -59,6 +68,18 @@ export function applySettingsPatch(current: SurfaceSettings, patch: Record<strin
     if (k === "dm_capture") {
       if (typeof v !== "boolean") throw new SettingsError("dm_capture must be true or false");
       next.dm_capture = v;
+      continue;
+    }
+    if (k === "default_seed") {
+      if (typeof v !== "string" || (v !== "" && !SEED_REF_RE.test(v))) throw new SettingsError('default_seed must be "" (none), a seed id, or "<library nest id>:<seed id>"');
+      next.default_seed = v;
+      continue;
+    }
+    if (k === "seed_library_nests") {
+      if (!Array.isArray(v) || v.length > MAX_SEED_LIBRARIES || !v.every((x) => typeof x === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x))) {
+        throw new SettingsError(`seed_library_nests must be a list of at most ${MAX_SEED_LIBRARIES} nest ids`);
+      }
+      next.seed_library_nests = [...new Set(v as string[])];
       continue;
     }
     if (k === "signin_alerts") {

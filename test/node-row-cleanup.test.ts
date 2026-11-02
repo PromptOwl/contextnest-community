@@ -113,6 +113,10 @@ describe("node row cleanup", () => {
       // hold fingerprint, which expires on its own.
       ["surface_proposal_items.node_id", "Surfaces proposal audit record"],
       ["surface_fingerprints.node_id", "7-day hold; expires on its own"],
+      // S3 seeds: provenance of what a seed wrote. A stale row is harmless: an absent node is
+      // re-created on the next apply, and a re-made node's hash differs, so it is kept as a human edit.
+      ["surface_seed_items.target", "seed provenance (seed_origin/seed_hash); stale rows are harmless by design"],
+      ["surface_seed_mirror.node_id", "org-mirror claim: keeps a person or area from being proposed twice"],
       ["surface_commits.node_id", "Surfaces commit audit; survives the node (life of the nest)"],
     ]);
     const NODE_ID_COLUMNS = new Set([
