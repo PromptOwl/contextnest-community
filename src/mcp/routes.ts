@@ -18,6 +18,8 @@ import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
+import { SURFACES_TOOL_DEFINITIONS } from "./surfaces-tools.js";
+import { surfacesEnabled } from "../surfaces/flags.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
@@ -85,6 +87,7 @@ function createMcpServerForNest(
         ...TOOL_DEFINITIONS,
         ...WORKFLOW_TOOL_DEFINITIONS,
         ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
+        ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
       ]
     : TOOL_DEFINITIONS;
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);

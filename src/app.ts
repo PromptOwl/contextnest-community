@@ -83,6 +83,7 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
@@ -2264,6 +2265,14 @@ export function createApp(): Hono<AuthEnv> {
   // suggestPeopleForUser — never the deployment's whole member list.
   app.use("/people/*", flexAuthMiddleware);
   app.route("/people", peopleRoutes);
+
+  // Surfaces (Slack / Teams / email → governed nest). Org-level router like
+  // /teams; every route 404s while FEATURE_SURFACES is off. /link/:token is
+  // the one-time identity link page (signed-in user; CSRF in the form).
+  app.use("/surfaces/*", flexAuthMiddleware);
+  app.route("/surfaces", surfacesRoutes);
+  app.use("/link/*", flexAuthMiddleware);
+  app.route("/link", linkPageRoutes);
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {

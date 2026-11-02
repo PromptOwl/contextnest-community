@@ -39,7 +39,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   68->69 context_upload (community-nest-upload-files-over-mcp-without-handling-binaries).
 //   69->70 context_set_visibility (twin of PATCH /nests/:id/visibility; Community-only: nest visibility is
 //   server state the engine does not model, so there is no engine op to consume).
-const BASELINE = 70;
+//   70->83 Surfaces S1 (src/mcp/surfaces-tools.ts): context_surfaces_status, bindings_list, binding_preview/create/update/
+//   delete/recheck/resume, links_list, link_revoke/unblock, link_reviews_list, link_review_decide — REST twins of /surfaces/*;
+//   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists
+//   (ContextNest#238: promote upstream or confirm Community-only).
+const BASELINE = 83;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

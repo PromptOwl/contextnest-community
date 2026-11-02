@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2402,6 +2403,16 @@ export function runMigrations(db: Database.Database): void {
       );
     `);
     recordMigration("078_task_rules_ticket_counters");
+  }
+
+  // 079: Surfaces core (conversation ↔ nest bindings with the two-flag guard,
+  //   identity links, one-time link tokens and reviews, opt-outs, notices).
+  //   The DDL is shared with Postgres (src/surfaces/schema-ddl.ts).
+  if (!hasMigration("079_surfaces_core")) {
+    db.transaction(() => {
+      db.exec(surfacesS1Ddl("(datetime('now'))"));
+    })();
+    recordMigration("079_surfaces_core");
   }
 }
 
