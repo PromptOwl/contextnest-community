@@ -138,6 +138,7 @@ const TABS: {
       "shared_deployment",
       "oidc_enabled",
       "sso_token_exchange_enabled",
+      "openai_apps_challenge",
     ],
   },
   {
@@ -1492,6 +1493,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   flat refusal. Existing API keys keep working exactly as
                   before.
                 </p>
+
+                <div className="space-y-1 pt-2">
+                  <Label htmlFor="openai-apps-challenge">OpenAI domain token</Label>
+                  <TextField
+                    id="openai-apps-challenge"
+                    error={fieldErrors.openai_apps_challenge}
+                    value={draft.openai_apps_challenge ?? ""}
+                    placeholder="Paste the token from OpenAI's app setup"
+                    onChange={(v) => set({ openai_apps_challenge: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    To publish this server as a ChatGPT app, OpenAI checks that
+                    you own the domain by reading this token at{" "}
+                    <code>/.well-known/openai-apps-challenge</code>. It is
+                    public by design. Leave empty to turn the check off.
+                  </p>
+                </div>
               </CardContent>
             </Card>
 

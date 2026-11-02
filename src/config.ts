@@ -91,6 +91,9 @@ function ownHost(): string {
   }
 }
 
+/** OpenAI's challenge token alphabet: URL-safe, 1–512 characters. */
+export const OPENAI_APPS_CHALLENGE_RE = /^[A-Za-z0-9._-]{1,512}$/;
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -594,6 +597,17 @@ export const config = {
    */
   get MCP_OAUTH_ENABLED(): boolean {
     return process.env.MCP_OAUTH_ENABLED === "true";
+  },
+  /**
+   * OpenAI's domain-verification token for publishing a ChatGPT app, served
+   * as plain text at /.well-known/openai-apps-challenge. Set in the deploy
+   * env or Settings → Agent OAuth. Only 1–512 URL-safe characters are ever
+   * served; anything else (or unset) leaves the path 404ing, so a bad value
+   * can't be echoed back as content from this domain.
+   */
+  get OPENAI_APPS_CHALLENGE(): string | null {
+    const v = process.env.OPENAI_APPS_CHALLENGE?.trim() ?? "";
+    return OPENAI_APPS_CHALLENGE_RE.test(v) ? v : null;
   },
   /**
    * Path to the .env file the server reads its config from and the license

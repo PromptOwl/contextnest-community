@@ -44,6 +44,12 @@ Everything else is **403** `{ "code": "headless_reader" }` — the folder tree a
 
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
+## OpenAI domain verification
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/.well-known/openai-apps-challenge` | No auth. `200 text/plain` with the `OPENAI_APPS_CHALLENGE` token, which OpenAI reads to verify the domain before a ChatGPT app can be published. `404` JSON when it is unset or malformed. Not gated on `MCP_OAUTH_ENABLED`. Set it in the deploy env or with `PATCH /admin/settings` `{ "openai_apps_challenge": "<token>" }` (server admin; `""` clears it; anything other than 1–512 URL-safe characters is a `400` field error). |
+
 ## OAuth (MCP client sign-in)
 
 Present only when `MCP_OAUTH_ENABLED` is on; every endpoint below returns `404` while it is off. See `CONFIGURATION.md` for the flag and why it requires `PUBLIC_BASE_URL`.

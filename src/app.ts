@@ -160,7 +160,7 @@ import {
   BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
-import { config, isEmailish, isEmailListish } from "./config.js";
+import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
 import {
   verifyEmailTransport,
   isEmailConfigured,
@@ -1052,6 +1052,8 @@ export function createApp(): Hono<AuthEnv> {
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
+    // Public by design: OpenAI reads it from /.well-known/openai-apps-challenge.
+    openai_apps_challenge: config.OPENAI_APPS_CHALLENGE ?? "",
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -1695,6 +1697,15 @@ export function createApp(): Hono<AuthEnv> {
           value: turningOn ? "true" : null,
         });
       }
+    }
+    // OpenAI's ChatGPT-app domain token. Empty clears it.
+    if ("openai_apps_challenge" in body) {
+      const v = typeof body.openai_apps_challenge === "string" ? body.openai_apps_challenge.trim() : null;
+      if (v === null) addError("openai_apps_challenge", "The OpenAI domain token must be text (or empty to clear it).");
+      else if (v === "") pending.push({ name: "OPENAI_APPS_CHALLENGE", value: null });
+      else if (!OPENAI_APPS_CHALLENGE_RE.test(v))
+        addError("openai_apps_challenge", "Paste the token exactly as OpenAI shows it: letters, digits, dashes, underscores or dots, no spaces.");
+      else pending.push({ name: "OPENAI_APPS_CHALLENGE", value: v });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
@@ -3851,6 +3862,16 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   app.route("/oauth", oauthRoutes);
+
+  // OpenAI domain verification for publishing a ChatGPT app: OpenAI fetches
+  // this path and expects the token it issued, as plain text. Independent of
+  // MCP OAuth. Unset or malformed → the same JSON 404 as any unknown path.
+  app.get("/.well-known/openai-apps-challenge", (c) => {
+    const token = config.OPENAI_APPS_CHALLENGE;
+    if (!token) return c.json({ error: "Not found" }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.text(token);
+  });
 
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 
