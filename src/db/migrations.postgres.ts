@@ -103,6 +103,7 @@ export const HISTORICAL_MIGRATIONS = [
   "075_node_index_manifest",
   "076_nest_write_jobs",
   "077_nest_seal_leases",
+  "078_task_rules_ticket_counters",
   "079_surfaces_core",
 ];
 
@@ -1303,6 +1304,17 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
       owner TEXT NOT NULL,
       expires_at BIGINT NOT NULL
+    );
+  `);
+
+  // Migration 078 parity: task rules + ticket counters (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS task_rules TEXT;
+    CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      prefix TEXT NOT NULL,
+      last_value INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (nest_id, prefix)
     );
   `);
 

@@ -118,6 +118,25 @@ describe("public docs site", () => {
     expect(html).not.toContain('id="root"');
   });
 
+  // The MCP endpoint answers agents with a key; a browser GET only gets the
+  // auth error, so the footer copies its URL instead of linking to it.
+  it("offers the MCP URL as a copy button, not a link", async () => {
+    const html = await (await get("/d/acme-docs/")).text();
+    expect(html).toContain(`data-copy-text="http://localhost/nests/${nestId}/mcp"`);
+    expect(html).not.toMatch(/<a [^>]*href="[^"]*\/mcp"/);
+    expect(html).toContain("[data-copy-text]");
+  });
+
+  // A dark brand accent stays readable on the dark page: lifted toward white there.
+  it("lightens a brand accent in dark mode only", async () => {
+    const id = homeNests["Home Slug"];
+    const res = await jsonRequest(app, "PATCH", `/nests/${id}/branding`, { accent_color: "#142a80" }, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    const html = await siteHome("Home Slug");
+    expect(html).toContain("--accent:#142a80;");
+    expect(html).toMatch(/prefers-color-scheme:dark\)\{:root\{[^}]*--accent:color-mix\(in srgb,#142a80 45%,#fff\)/);
+  });
+
   // CU-wdqcq05ran: home_node resolves on the site the way the reader resolves
   // it — full id or bare slug, case-insensitively — not by exact id only.
   const siteHome = async (name: string) => {

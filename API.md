@@ -405,6 +405,17 @@ Pins live in `node_pins` (migration 071). A deleted document takes its pins with
   "prime_tags": ["prime-document"],
   "always_include_tags": ["always-include"],
   "done_tags": ["done"],
+  "task_rules": {
+    "exclusive_namespaces": [],
+    "default_stage_tag": null,
+    "surfaces": [],
+    "default_surface": null,
+    "ticket_numbering": true,
+    "ticket_prefix": "PO",
+    "ticket_start_at": null,
+    "stage_order": [],
+    "priorities": []
+  },
   "require_push_confirmation": false,
   "creator_is_reviewer": false,
   "review_sla_hours": null,
@@ -426,6 +437,16 @@ Every field is optional; only the ones present are changed.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
 - `always_include_tags` — tags that mark a document **always-include** (default `["always-include"]`): its approved text is pushed to every agent and model that enters the nest — see [Always-include documents](#always-include-documents-standing-instructions). Same input and normalization as `prime_tags`; an empty list leaves only the per-document flag. Owner/admin, like every field here. Works with stewardship on or off.
 - `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
+- `task_rules` — how a nest keeps its task board tidy and numbered. PATCH replaces the whole object, so send every key you want kept. An unknown key or a bad value is `400` and nothing in the body is applied. Defaults leave everything off, so a nest that never sets it behaves as before. Nothing in it is specific to any organisation: the prefix and surfaces are yours to define.
+  - `exclusive_namespaces` — tag namespaces a task may hold only **one** tag from (`["stage"]`: `#stage:backlog` and `#stage:done` can never both be on a task). Adding a tag from the namespace swaps out the old one on create, update, bulk `add_tags` and board moves, so a board whose columns are that namespace never shows a card twice. A create that names two tags from one namespace is `400`.
+  - `default_stage_tag` — the tag a new task gets when it arrives with none from an exclusive namespace (`"stage:backlog"`), so every new card lands in a column.
+  - `surfaces` — the product areas a nest sorts its tasks into, in priority order: `[{ "name": "Community Nest", "tags": ["community"] }]`. `name` is unique. A task is in the first surface that has any of its tags. Surfaces drive filters, board lanes and the create dialog (which adds the surface's first tag). They are **not** part of the ticket number, so retagging a task between surfaces never changes it.
+  - `default_surface` — the `name` of the surface the create dialog preselects. `null`: none. It has no effect on numbering.
+  - `stage_order` — the columns of the stage group in workflow order, as bare values: `["backlog", "in-progress", "in-review", "done"]`. The group is the namespace of `default_stage_tag`, else the first of `exclusive_namespaces`. A board grouped by it opens in this order (until someone reorders it by hand), and so does `GET /boards/:id/items`. Empty means alphabetical.
+  - `priorities` — the nest's priority levels, most urgent first: `[{ "key": "p0", "label": "P0 — Drop everything" }, …]`, 2–8 levels. A level sent as only a label gets a key made from it. Empty or absent means the defaults (`urgent`, `high`, `medium`, `low`). Every write that sets a priority (REST, bulk update, MCP) is checked against this list, and priority boards, sorting and filters follow it. A task keeps the key it was given: removing a level never rewrites tasks, it just stops being offered.
+  - `ticket_prefix` — the nest's single ticket prefix: 2–6 capitals or digits starting with a letter (`"PO"`). Required to turn numbering on (`400` otherwise). A nest that has never saved `task_rules` gets one derived from its name (leading acronym, else initials, else the first three letters, else `TASK`), pinned the first time a ticket is issued so a later rename does not change it. Changing it only affects tickets issued afterwards: `PO-9` and `ENG-9` are different tickets, and issued ones keep their numbers.
+  - `ticket_start_at` — whole number ≥ 1, the first number issued. Saving it raises the counter to `start_at - 1`, never lowers it, so a team moving from another tracker keeps its sequence.
+  - `ticket_numbering` — number tasks as they are created. On by default: a nest with no saved `task_rules` numbers its tasks; opt out by saving `ticket_numbering: false`. One counter per nest, allocated in one atomic statement, so two people (or agents) creating tasks at the same moment always get different consecutive numbers. The number is stamped once as the tag `#ticket:po-12` (shown as `PO-12`) and never changes. The tag is the only place it is stored; searching `PO-12` (REST `/search`, MCP `context_search`) or listing with `tag=ticket:po-12` finds the task. The tag is server-assigned: a client cannot add, edit or remove it. Number the tasks a nest already has with the backfill below. Turning numbering on (and every backfill) first raises the counter to the highest number already on a task under the current prefix, so a nest imported with `#ticket:` tags already on its documents never repeats one. Settings do not travel in a nest export (only documents do), so the importing nest sets its own `task_rules`.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 - `review_sla_hours` — review SLA in whole hours (`1`–`8760`), or `null` (or `0`) for off, the default. When set, a review left pending that long escalates **one rung**: from the document's own reviewers to its **tag**-scope reviewers, then **nest**-scope reviewers, then the **nest owner** — each rung getting the same window before the next. Escalating notifies the new rung (a `review_escalated` inbox row linking the document, a Slack/Teams post — through the server-wide webhooks by default, in the same digest as review requests, and through any per-nest connector subscribed to `review_escalated` or `"*"` — and an email to each escalated reviewer when SMTP is configured); it never changes who may approve, and the submitter is never a recipient. Any other value → `400`, with nothing in the body applied. Inert while off and in ungoverned or archived nests. See `STEWARDSHIP.md → Review SLA escalation`.
@@ -852,7 +873,7 @@ Query: `sort` = `rank` (board card order, default) · `title` · `status` · `as
   "groups": [{ "key": "todo", "label": "todo", "count": 12 }, …],
   "items": [{
     "id": "nodes/ship-pricing", "title": "Ship pricing", "type": "task", "status": "published",
-    "tags": ["#todo", "#launch"], "group": "todo", "columns": ["todo"],
+    "tags": ["#todo", "#launch"], "group": "todo", "columns": ["todo"], "ticket": "PO-12",
     "assignee": "ann@acme.com", "priority": "high", "due": "2026-10-31",
     "parent": "nodes/launch", "parent_title": "Launch",
     "completed_at": null, "created_at": "…", "updated_at": "…"
@@ -869,6 +890,13 @@ Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes 
 ### Bulk move and delete — `POST /nests/:nestId/nodes/bulk-move`, `/bulk-delete`
 Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal or a PDF move is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
 
+### Ticket backfill — `POST /nests/:nestId/tickets/backfill` (admin/owner)
+Numbers the tasks a nest already has, oldest first (`created_at`, then id), once `task_rules.ticket_numbering` is on (which needs a `ticket_prefix`). Body `{ "limit"?: 1–100, "dry_run"?: boolean }` (default 100). Tasks that already have a ticket are skipped; every other task is numbered whatever surface it is in. A dry run writes nothing. Each numbered task is published as its own version (change note `Assigned ticket PO-1`) and never drafts. Call again until `remaining` is `0`.
+```json
+{ "numbered": 100, "failed": 0, "remaining": 263, "results": [ { "id": "projects/tasks/a", "ticket": "PO-1", "outcome": "numbered" } ] }
+```
+`400` when `ticket_numbering` is off. `403` for non-admins.
+
 ### Bulk update — `POST /nests/:nestId/nodes/bulk-update`
 One change applied to many nodes (the board List view's bulk actions; MCP `context_bulk_update`). Write tier at the nest; then **per node**: a node the caller can't read reports `not_found` (a `selector` only ever targets — and counts toward the cap — nodes the caller can read), one they can't edit is `skipped` (`forbidden`), and the write runs through the normal governed update — its own version, its own `moved_at` / `completed_at` stamps. It is **publish or nothing**: a node whose change would land as a draft for a reviewer (a prime document, a governed document without a self-approve/prime-only/task bypass, or the caller's own open review) is `skipped` with `needs_review` and left untouched — a bulk edit never creates drafts. A node under someone else's open review is `skipped` (`locked`). A node the patch wouldn't change is `unchanged` and not written. The change is computed from the head the call read; if someone saves the node in between, that row is `skipped` with `conflict` rather than overwriting their edit. Tags the patch doesn't touch are passed back as stored. Like `PATCH /nodes/:id`, the board fields (priority, assignee, due) can be set on any node type, not only tasks — narrow `ids`/`selector` if you mean tasks only.
 
@@ -878,9 +906,10 @@ One change applied to many nodes (the board List view's bulk actions; MCP `conte
   "patch": {
     "board_id": "…", "column": "done",      // move into a board column
     "add_tags": ["q4"], "remove_tags": ["sprint"],
-    "priority": "high",                     // urgent|high|medium|low|null
+    "priority": "high",                     // a nest priority key (default urgent|high|medium|low) or null
     "assignee": "ann@acme.com",             // on the nest's roster, or null
     "due": "2026-10-31",                    // or null
+    "fields": { "kind": "bug" },            // custom fields by key; null clears one
     "change_note": "Sprint close-out"       // recorded on each version
   }
 }
@@ -895,7 +924,7 @@ One change applied to many nodes (the board List view's bulk actions; MCP `conte
     { "id": "nodes/b", "title": "B", "outcome": "skipped", "code": "needs_review", "reason": "This document goes through review — …" }
   ] }
 ```
-`400`: no ids/selector, both, more than **100** nodes (split the batch or narrow the selector), an empty patch, an unknown patch field, a bad priority/date, an assignee not on the nest. `403`: read-only callers (nest middleware), or a caller who can edit none of the targets. The batch is not a transaction — rows written before a failure stay written, and the response names every row.
+`fields` sets custom field values by key (the map `PATCH /nodes/:id` takes, `null` clears one, at most 20 keys), checked per node against the nest's field definitions, so a bad value fails that row only. `400`: no ids/selector, both, more than **100** nodes (split the batch or narrow the selector), an empty patch, an unknown patch field, a bad priority/date, an assignee not on the nest. `403`: read-only callers (nest middleware), or a caller who can edit none of the targets. The batch is not a transaction — rows written before a failure stay written, and the response names every row.
 
 ### Custom fields — `/nests/:nestId/fields`
 Structured properties the nest defines once and every applicable node carries. **Definitions** live here; **values** live on each node in frontmatter `metadata.fields`, so a value change is an ordinary governed edit — a new version, a new link in the hash chain, the usual draft/review rules. Estimates and time-in-status are presets of this model, not separate features.
@@ -1172,7 +1201,7 @@ Optional query params, applied before the per-node enrichment:
 | `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
 | `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
 | `assignee` | Board field filter: only nodes assigned to this email (case-insensitive). `none` = unassigned. |
-| `priority` | `urgent` \| `high` \| `medium` \| `low` \| `none`. Anything else → `400`. |
+| `priority` | One of the nest's priority keys (default `urgent` \| `high` \| `medium` \| `low`) or `none`. Anything else → `400`. |
 | `due_before` | `YYYY-MM-DD`, inclusive. Nodes with no `due` are left out. A malformed date → `400`. |
 | `field.<key>` | Custom-field filter, repeatable (every one must match). select / user / date / url / number match exactly (case-insensitive), `multi_select` matches when the option is one of its values, `text` matches a substring, `checkbox` takes `true`/`false` (unset counts as `false`), and `none` matches an unset field. A node whose type the field doesn't apply to never matches. An unknown key → `400`. |
 ```json
@@ -2712,7 +2741,7 @@ The server guarantees **delivery**, not obedience: an outside client (Claude Cod
 
 **`context_search` is the REST search.** The tool runs the same index-backed match as `GET /nests/:id/search` — terms against the cached discovery set (title, body, type, tags), title hits first — and gates the *hits* with the same `filterAccessible` rule (public readers: approved-only; governed nests: steward coverage or a share grant), so the two surfaces return the same documents in the same order. It takes an optional `limit` (default 20, max 200) and answers `{ results, count }`: `count` is everything found, `results` the first `limit` hits, each with its LLM-visible body (approved version under stewardship; a hit with no approved version yet is listed but carries no body). It used to resolve every document's gated body *before* matching — one permission lookup plus one version reconstruction per node — which is what timed out `ctx search --vault <remote>` on large governed nests.
 
-**Tasks read AND write.** Board fields — `assignee` (an email on the nest's roster), `due` (`YYYY-MM-DD`), `priority` (`urgent` | `high` | `medium` | `low`) and `parent` (a node id in this nest) — are stored as frontmatter `metadata` on any node, the same store REST and the board use:
+**Tasks read AND write.** Board fields — `assignee` (an email on the nest's roster), `due` (`YYYY-MM-DD`), `priority` (one of the nest's priority keys — by default `urgent` | `high` | `medium` | `low`) and `parent` (a node id in this nest) — are stored as frontmatter `metadata` on any node, the same store REST and the board use:
 - `context_create` and `context_update` accept all four, validated exactly as REST validates them (off-roster assignee, malformed date, unknown priority, missing parent or a parent cycle → `VALIDATION_FAILED`, nothing written). On update, `null` or `""` clears a field and an absent one is left alone. Both echo the fields they left set.
 - `context_get`, `context_list` and `context_query` return them (structured and in prose) when set.
 - `context_list` filters by `assignee` (`none` = unassigned), `priority` (`none` = unset) and `due_before` (inclusive).
