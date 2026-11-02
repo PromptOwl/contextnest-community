@@ -88,6 +88,7 @@ import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
 import { registerConnector, getConnector } from "./surfaces/registry.js";
+import { parseKey } from "./surfaces/services/buffer-crypto.js";
 import { registerSurfacesLifecycle } from "./surfaces/services/lifecycle-service.js";
 import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
@@ -1038,6 +1039,17 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    // Surfaces (Slack → nest). The buffer key is write-only: presence only.
+    surfaces_enabled: config.FEATURE_SURFACES,
+    surfaces_buffer_key_set: !!config.SURFACES_BUFFER_KEY,
+    surfaces_judge_model: config.SURFACES_JUDGE_MODEL ?? "",
+    surfaces_default_cap_usd: config.SURFACES_DEFAULT_CAP_MICROS ? config.SURFACES_DEFAULT_CAP_MICROS / 1_000_000 : null,
+    surfaces_org_name: config.SURFACES_ORG_NAME ?? "",
+    // Hosted one-click Slack app (PromptOwl's own); secrets are presence only.
+    surfaces_slack_hosted_enabled: config.FEATURE_SURFACES_SLACK_HOSTED,
+    surfaces_slack_hosted_client_id: config.SURFACES_SLACK_HOSTED_CLIENT_ID ?? "",
+    surfaces_slack_hosted_client_secret_set: !!config.SURFACES_SLACK_HOSTED_CLIENT_SECRET,
+    surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
     experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -1480,6 +1492,61 @@ export function createApp(): Hono<AuthEnv> {
       } else {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
+    }
+    // Surfaces (Slack → nest) reuses the plane and metacognition, so it needs both on.
+    if ("surfaces_enabled" in body) {
+      const planeOn = "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      const metaOn = "metacognition_enabled" in body ? !!body.metacognition_enabled : config.FEATURE_METACOGNITION;
+      if (body.surfaces_enabled && !(planeOn && metaOn)) {
+        addError("surfaces_enabled", "Surfaces requires the Workflow plane and Metacognition agents to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_SURFACES", value: body.surfaces_enabled ? "true" : null });
+      }
+    }
+    // Write-only secret (encrypted at rest); empty or null clears it.
+    if ("surfaces_buffer_key" in body) {
+      const v = typeof body.surfaces_buffer_key === "string" ? body.surfaces_buffer_key.trim() : "";
+      if (!v) pending.push({ name: "SURFACES_BUFFER_KEY", value: null });
+      else {
+        try {
+          parseKey(v);
+          pending.push({ name: "SURFACES_BUFFER_KEY", value: v });
+        } catch {
+          addError("surfaces_buffer_key", "Buffer key must be 32 bytes, base64 or hex — e.g. the output of: openssl rand -base64 32");
+        }
+      }
+    }
+    if ("surfaces_judge_model" in body) {
+      const v = String(body.surfaces_judge_model ?? "").trim();
+      if (/\s/.test(v)) addError("surfaces_judge_model", "Model must be a single identifier with no spaces (or empty for the default).");
+      else pending.push({ name: "SURFACES_JUDGE_MODEL", value: v || null });
+    }
+    if ("surfaces_default_cap_usd" in body) {
+      const raw = body.surfaces_default_cap_usd;
+      const n = raw === null || raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > 10_000) addError("surfaces_default_cap_usd", "Monthly cap must be between $0 and $10,000 (empty or 0 uses the default).");
+      else pending.push({ name: "SURFACES_DEFAULT_CAP_MICROS", value: n > 0 ? String(Math.round(n * 1_000_000)) : null });
+    }
+    if ("surfaces_org_name" in body) {
+      const v = String(body.surfaces_org_name ?? "").trim();
+      if (v.length > 100) addError("surfaces_org_name", "Organization name must be 100 characters or fewer.");
+      else pending.push({ name: "SURFACES_ORG_NAME", value: v || null });
+    }
+    if ("surfaces_slack_hosted_enabled" in body) {
+      const surfacesOn = "surfaces_enabled" in body ? !!body.surfaces_enabled : config.FEATURE_SURFACES;
+      if (body.surfaces_slack_hosted_enabled && !surfacesOn) addError("surfaces_slack_hosted_enabled", "Turn Surfaces on first.");
+      else pending.push({ name: "FEATURE_SURFACES_SLACK_HOSTED", value: body.surfaces_slack_hosted_enabled ? "true" : null });
+    }
+    // Hosted Slack app id and secrets: single tokens; the secrets are write-only.
+    for (const [key, name] of [
+      ["surfaces_slack_hosted_client_id", "SURFACES_SLACK_HOSTED_CLIENT_ID"],
+      ["surfaces_slack_hosted_client_secret", "SURFACES_SLACK_HOSTED_CLIENT_SECRET"],
+      ["surfaces_slack_hosted_signing_secret", "SURFACES_SLACK_HOSTED_SIGNING_SECRET"],
+    ] as const) {
+      if (!(key in body)) continue;
+      const v = typeof body[key] === "string" ? body[key].trim() : "";
+      if (/\s/.test(v) || v.length > 256) addError(key, "Must be a single value with no spaces, up to 256 characters (or empty to clear it).");
+      else pending.push({ name, value: v || null });
     }
     // Experimental: the cross-nest document stream. Its own switch, no
     // dependencies. Off writes a tombstone (null): the switch is off now and

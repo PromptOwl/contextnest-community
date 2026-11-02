@@ -11,7 +11,7 @@ import { config } from "../../config.js";
 
 export class BufferKeyError extends Error {}
 
-function parseKey(raw: string | undefined): Buffer {
+export function parseKey(raw: string | undefined): Buffer {
   if (!raw) throw new BufferKeyError("SURFACES_BUFFER_KEY is not set");
   const t = raw.trim();
   const buf = /^[0-9a-f]{64}$/i.test(t) ? Buffer.from(t, "hex") : Buffer.from(t, "base64");
