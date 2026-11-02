@@ -172,6 +172,16 @@ export function ctxLoginCommand(serverUrl: string): string | null {
 }
 
 /**
+ * The terminal sign-in /setup offers, or null. Not in cloud mode (section 1
+ * already signs in), not while the auth mode is unknown (`authMode` null until
+ * /health answers, and after it fails), never in open mode (no sign-in there).
+ */
+export function setupSignInCommand(origin: string, authMode: string | null, cloud: boolean): string | null {
+  if (cloud || authMode === null || authMode === "open") return null;
+  return ctxLoginCommand(origin);
+}
+
+/**
  * The one-shot bootstrap brief for wiring an agent to ONE nest.
  *
  * The status-code branches are the load-bearing part of this text. An agent

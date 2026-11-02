@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { getHealth } from "@/lib/api";
-import { PLUGIN_SETUP_COMMANDS, ctxLoginCommand } from "@/lib/connect";
+import { PLUGIN_SETUP_COMMANDS, setupSignInCommand } from "@/lib/connect";
 import {
   ALIAS_PATTERN,
   CHOICES_KEY,
@@ -100,12 +100,14 @@ export function SetupPage() {
     () => (cloud ? cloudGuides(c.server, c.alias) : connectGuides(c.alias)),
     [cloud, c.server, c.alias]
   );
-  // AUTH_MODE=open has no sign-in, the same rule the Connect dialogs follow.
-  const [openMode, setOpenMode] = useState(false);
+  // Unknown (null) until /health answers; the sign-in box waits for it.
+  const [authMode, setAuthMode] = useState<string | null>(null);
   useEffect(() => {
-    getHealth().then((h) => setOpenMode(h.auth_mode === "open"), () => {});
+    getHealth().then((h) => setAuthMode(h.auth_mode), () => {});
   }, []);
-  const loginCmd = openMode ? null : ctxLoginCommand(window.location.origin);
+  // /setup is served by this server, so the page's own origin is the one to sign
+  // in to; the Connect dialogs, inside the app, use the configured serverUrl.
+  const loginCmd = setupSignInCommand(window.location.origin, authMode, cloud);
 
   const send = () => {
     if (!cb || !ready) return;
@@ -394,8 +396,7 @@ export function SetupPage() {
             From then on the plugin looks up matching notes on each prompt and
             saves notes when you ask.
           </Choice>
-          {/* Cloud mode already runs this exact sign-in (section 1 or the terminal). */}
-          {!cloud && loginCmd && (
+          {loginCmd && (
             <Choice
               title={`Sign in to ${window.location.host} from a terminal`}
               command={`npm i -g @promptowl/contextnest-cli\n${loginCmd}`}

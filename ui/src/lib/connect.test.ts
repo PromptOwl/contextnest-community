@@ -8,6 +8,7 @@ import {
   envFileContents,
   ctxCliConnectSnippet,
   ctxLoginCommand,
+  setupSignInCommand,
   slugify,
   claudeDesktopConfig,
   claudeCodeCommand,
@@ -575,5 +576,16 @@ describe("ctxLoginCommand", () => {
     expect(ctxLoginCommand("http://10.0.0.5:3838")).toBeNull();
     expect(ctxLoginCommand("http://nest.lan:3838")).toBeNull();
     expect(ctxLoginCommand("null")).toBeNull();
+  });
+});
+
+describe("setupSignInCommand", () => {
+  const origin = "https://nest.example.com";
+  it("waits for /health, and never offers sign-in in open or cloud mode", () => {
+    expect(setupSignInCommand(origin, null, false)).toBeNull();
+    expect(setupSignInCommand(origin, "open", false)).toBeNull();
+    expect(setupSignInCommand(origin, "key", true)).toBeNull();
+    expect(setupSignInCommand("http://10.0.0.5:3838", "key", false)).toBeNull();
+    expect(setupSignInCommand(origin, "key", false)).toBe("ctx login https://nest.example.com");
   });
 });
