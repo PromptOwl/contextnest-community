@@ -1,9 +1,10 @@
 /**
  * Hootie's model call — the one place this server talks to Claude.
  *
- * Kept to a single streaming function with a plain-text contract so the route
- * (and its tests) never touch the SDK: tests replace this module with a
- * scripted generator and exercise everything else for real. The key is the
+ * Kept to one streaming round with a plain contract — text chunks out, tool
+ * calls returned — so the route, the tool loop (agent.ts) and their tests
+ * never touch the SDK: tests replace this module with a scripted round and
+ * exercise everything else for real. The key is the
  * route's (the server's own gateway, PromptOwl's gateway, or the licence's
  * own-provider key); there is no per-user key.
  */
@@ -25,6 +26,43 @@ interface AnswerParams {
   signal?: AbortSignal;
 }
 
+/** A tool the model may call — declaration only; running it is the caller's
+ *  (see agent.ts). `input_schema` is a JSON Schema object. */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+/** A turn in a tool conversation: plain text, or content blocks (the
+ *  assistant's blocks as returned, or the user's tool results). */
+export interface ModelMessage {
+  role: "user" | "assistant";
+  content: string | unknown[];
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/** How a round ended: the tools the model asked for (empty = it answered),
+ *  and its content blocks verbatim, to send back with the tool results
+ *  (thinking blocks must go back unchanged). */
+export interface RoundResult {
+  toolCalls: ToolCall[];
+  assistant: unknown[];
+}
+
+export interface RoundParams extends Omit<AnswerParams, "turns"> {
+  messages: ModelMessage[];
+  /** Offered to the model; none → a plain request. */
+  tools?: ToolSpec[];
+  /** "none" on the last round: the model must answer now. */
+  toolChoice?: "auto" | "none";
+}
+
 /**
  * Models (per gateway) that rejected the tuned request and answered the bare
  * one. The model name is admin-set and may be an older Claude or a gateway
@@ -32,9 +70,31 @@ interface AnswerParams {
  * question pays the extra round trip.
  */
 const plainModels = new Set<string>();
+/** Models (per gateway) that refused a request with tools and then answered
+ *  one without: they are asked without tools from then on. */
+const noToolModels = new Set<string>();
+/** Refused a request with tools; confirmed tool-less once a plain request
+ *  to them works (a 400 can also mean no credit or bad input). */
+const toolSuspects = new Set<string>();
+
+/** The model or gateway refused a request because it carried tools. The
+ *  caller answers without them (Hootie: a deterministic broadening pass). */
+export class ToolsRejectedError extends Error {
+  constructor() {
+    super("The model refused a request with tools.");
+    this.name = "ToolsRejectedError";
+  }
+}
 
 /**
- * Stream the assistant's answer as text chunks.
+ * Stream the assistant's answer as text chunks — one plain round, no tools.
+ */
+export async function* streamAnswer(params: AnswerParams): AsyncGenerator<string> {
+  yield* streamRound({ ...params, messages: params.turns });
+}
+
+/**
+ * One model round: stream its text, return the tool calls it ended on.
  *
  * Adaptive thinking at `medium` effort: a grounded Q&A over a few documents
  * doesn't need more, and a chat panel is latency-sensitive. `max_tokens` caps
@@ -45,41 +105,80 @@ const plainModels = new Set<string>();
  * both; gateway models vary), so a 400 before any output retries once with
  * the bare request. The model is only remembered as plain when that retry
  * works — a 400 that fails both ways (no credit, bad input) changes nothing.
+ *
+ * Tools get the same treatment one level down: a request with tools that is
+ * still refused (400, before any output) bare throws ToolsRejectedError, and
+ * the caller retries without tools. A model is remembered as tool-less only
+ * once a tool-less request to it then works.
  */
-export async function* streamAnswer(params: AnswerParams): AsyncGenerator<string> {
+export async function* streamRound(params: RoundParams): AsyncGenerator<string, RoundResult> {
   const client = clientFor(params.apiKey, params.baseUrl ?? null);
   const key = `${params.baseUrl ?? ""}|${params.model}`;
+  const withTools = !!params.tools?.length;
+  if (withTools && noToolModels.has(key)) throw new ToolsRejectedError();
+  const confirm = (result: RoundResult) => {
+    if (!withTools && toolSuspects.delete(key)) noToolModels.add(key);
+    return result;
+  };
   if (plainModels.has(key)) {
-    yield* answer(client, params, false);
-    return;
+    const state = { started: false };
+    try {
+      return confirm(yield* answer(client, params, false, state));
+    } catch (err) {
+      throw toolRejection(err, withTools, key, state.started);
+    }
   }
   const state = { started: false };
   try {
-    yield* answer(client, params, true, state);
+    return confirm(yield* answer(client, params, true, state));
   } catch (err) {
     if (state.started || (err as { status?: number })?.status !== 400) throw err;
     console.log(`[hootie] model=${params.model} rejected the tuned request (400); retrying bare`);
-    yield* answer(client, params, false);
+    const bareState = { started: false };
+    let result: RoundResult;
+    try {
+      result = yield* answer(client, params, false, bareState);
+    } catch (bare) {
+      throw toolRejection(bare, withTools, key, bareState.started);
+    }
     plainModels.add(key);
+    return confirm(result);
   }
+}
+
+/** A bare request with tools refused before any output → ToolsRejectedError. */
+function toolRejection(err: unknown, withTools: boolean, key: string, started: boolean): unknown {
+  if (!withTools || started || (err as { status?: number })?.status !== 400) return err;
+  console.log(`[hootie] ${key} refused a request with tools (400); answering without`);
+  toolSuspects.add(key);
+  return new ToolsRejectedError();
 }
 
 async function* answer(
   client: Anthropic,
-  params: AnswerParams,
+  params: RoundParams,
   tuned: boolean,
   state = { started: false },
-): AsyncGenerator<string> {
+): AsyncGenerator<string, RoundResult> {
   const startedAt = Date.now();
-  const question = params.turns[params.turns.length - 1]?.content ?? "";
+  const last = params.messages[params.messages.length - 1]?.content ?? "";
+  const tools = params.tools?.length
+    ? {
+        tools: params.tools as Anthropic.Messages.Tool[],
+        tool_choice: { type: params.toolChoice ?? "auto" } as Anthropic.Messages.ToolChoice,
+      }
+    : {};
   console.log(
     `[hootie] → request model=${params.model} base=${params.baseUrl || "anthropic"} tuned=${tuned} ` +
-      `system=${params.system.length} chars turns=${params.turns.length} question=${question.length} chars`,
+      `system=${params.system.length} chars turns=${params.messages.length} ` +
+      `last=${typeof last === "string" ? `${last.length} chars` : "blocks"} tools=${params.tools?.length ?? 0}` +
+      (params.tools?.length ? `/${params.toolChoice ?? "auto"}` : ""),
   );
   if (config.HOOTIE_DEBUG_LOG) {
     console.log("[hootie][debug] system:\n" + params.system);
-    console.log("[hootie][debug] turns:\n" + JSON.stringify(params.turns, null, 2));
+    console.log("[hootie][debug] turns:\n" + JSON.stringify(params.messages, null, 2));
   }
+  const messages = params.messages as Anthropic.Messages.MessageParam[];
   const stream = client.messages.stream(
     tuned
       ? {
@@ -90,16 +189,18 @@ async function* answer(
           system: [
             { type: "text", text: params.system, cache_control: { type: "ephemeral" } },
           ],
-          messages: params.turns,
+          messages,
           thinking: { type: "adaptive" },
           output_config: { effort: "medium" },
+          ...tools,
         }
       : // The bare request every Messages-speaking model accepts.
         {
           model: params.model,
           max_tokens: 4096,
           system: params.system,
-          messages: params.turns,
+          messages,
+          ...tools,
         },
     { signal: params.signal },
   );
@@ -113,12 +214,16 @@ async function* answer(
     }
   }
   const final = await stream.finalMessage();
-  const text = (final.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("");
+  const content = (final.content ?? []) as Anthropic.Messages.ContentBlock[];
+  const text = content.map((b) => (b.type === "text" ? b.text : "")).join("");
+  const toolCalls: ToolCall[] = content
+    .filter((b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use")
+    .map((b) => ({ id: b.id, name: b.name, input: b.input }));
   const u = final.usage;
   console.log(
     `[hootie] ← response model=${final.model} stop=${final.stop_reason} in=${u?.input_tokens ?? "?"} ` +
       `out=${u?.output_tokens ?? "?"} cache_read=${u?.cache_read_input_tokens ?? 0} ` +
-      `text=${text.length} chars ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+      `text=${text.length} chars tool_calls=${toolCalls.length} ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
   );
   if (config.HOOTIE_DEBUG_LOG) console.log("[hootie][debug] answer:\n" + text);
   if (final.stop_reason === "refusal") {
@@ -126,6 +231,7 @@ async function* answer(
       final.stop_details?.explanation || "The model declined to answer that.",
     );
   }
+  return { toolCalls, assistant: content };
 }
 
 /**

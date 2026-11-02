@@ -10,11 +10,13 @@
  * src/hootie/model.ts is replaced with a scripted generator, so every test
  * exercises the real route, retrieval, comment and notification code.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import {
   describeModelError as realDescribeModelError,
   ModelRefusedError as RealModelRefusedError,
+  ToolsRejectedError as RealToolsRejectedError,
 } from "../src/hootie/model.js";
+import { flushAccessLog, resetAccessThrottle } from "../src/governance/access-log.js";
 import {
   setupTestEnv,
   createTestApp,
@@ -114,9 +116,112 @@ function safeJson(text: string): any {
  *  set, so a plain "claude-sonnet-5" needs no model-list call; nothing listens. */
 const TEST_GATEWAY = { baseUrl: "http://127.0.0.1:9", key: "sk-po-test", defaultModel: "default-claude/claude-sonnet-5" };
 
+/**
+ * Scripted tool rounds (ticket B). Each entry is one model round: the text
+ * it writes, and the tool calls it ends on. When the list runs out, a round
+ * answers with `scriptedAnswer` as before.
+ */
+let scriptedRounds: Array<{ text?: string; calls?: Array<{ name: string; input: unknown }> }> = [];
+/** Every round the route asked for, in order — what the model was sent. */
+let modelRounds: Array<{ system: string; messages: any[]; tools: string[]; toolChoice?: string }> = [];
+/** When true, any round offered tools is refused as a gateway would. */
+let rejectTools = false;
+/** When set, the mock parks at the start of round N (1-based) until the
+ *  signal aborts or 3s pass, and records which. */
+let holdAtRound = 0;
+let roundSawAbort: boolean | null = null;
+
+/** The default round: `scriptedAnswer` in two chunks (and the old
+ *  disconnect hold). */
+async function* scriptedText(signal?: AbortSignal): AsyncGenerator<string> {
+  if (scriptedError) throw scriptedError;
+  // Two chunks, so the route's delta framing is exercised.
+  const mid = Math.ceil(scriptedAnswer.length / 2);
+  yield scriptedAnswer.slice(0, mid);
+  if (holdAfterFirstChunkMs > 0) {
+    modelSawAbort = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), holdAfterFirstChunkMs);
+      if (!signal) return;
+      if (signal.aborted) {
+        clearTimeout(timer);
+        resolve(true);
+        return;
+      }
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    if (modelSawAbort) return;
+  }
+  yield scriptedAnswer.slice(mid);
+}
+
 // The model mock is file-wide: no describe in this file may reach the SDK.
 beforeAll(() => {
   vi.doMock("../src/hootie/model.js", () => ({
+    streamRound: async function* (params: {
+      system: string;
+      messages: any[];
+      model: string;
+      baseUrl?: string | null;
+      apiKey?: string;
+      signal?: AbortSignal;
+      tools?: Array<{ name: string }>;
+      toolChoice?: string;
+    }) {
+      const n = modelRounds.push({
+        system: params.system,
+        messages: JSON.parse(JSON.stringify(params.messages)),
+        tools: (params.tools ?? []).map((t) => t.name),
+        toolChoice: params.toolChoice,
+      });
+      lastModelCall = {
+        system: params.system,
+        turns: params.messages,
+        model: params.model,
+        baseUrl: params.baseUrl ?? null,
+        apiKey: params.apiKey,
+      };
+      if (rejectTools && params.tools?.length) throw new RealToolsRejectedError();
+      if (holdAtRound === n) {
+        const signal = params.signal;
+        roundSawAbort = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), 3000);
+          if (signal?.aborted) return resolve(true);
+          signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve(true);
+          });
+        });
+        if (roundSawAbort) {
+          // The SDK can still hand back a finished round after the abort:
+          // its tool calls must not run.
+          const r = scriptedRounds.shift();
+          const toolCalls = (r?.calls ?? []).map((c, i) => ({ id: `call_${n}_${i}`, name: c.name, input: c.input }));
+          return { toolCalls, assistant: toolCalls.map((c) => ({ type: "tool_use", ...c })) };
+        }
+      }
+      const round = scriptedRounds.shift();
+      if (!round) {
+        let text = "";
+        for await (const chunk of scriptedText(params.signal)) {
+          text += chunk;
+          yield chunk;
+        }
+        return { toolCalls: [], assistant: [{ type: "text", text }] };
+      }
+      if (round.text) yield round.text;
+      const toolCalls = (round.calls ?? []).map((c, i) => ({ id: `call_${n}_${i}`, name: c.name, input: c.input }));
+      return {
+        toolCalls,
+        assistant: [
+          ...(round.text ? [{ type: "text", text: round.text }] : []),
+          ...toolCalls.map((c) => ({ type: "tool_use", ...c })),
+        ],
+      };
+    },
+    // Kept for the pre-tool route (the red run of ticket B's tests).
     streamAnswer: async function* (params: {
       system: string;
       turns: any[];
@@ -132,33 +237,13 @@ beforeAll(() => {
         baseUrl: params.baseUrl ?? null,
         apiKey: params.apiKey,
       };
-      if (scriptedError) throw scriptedError;
-      // Two chunks, so the route's delta framing is exercised.
-      const mid = Math.ceil(scriptedAnswer.length / 2);
-      yield scriptedAnswer.slice(0, mid);
-      if (holdAfterFirstChunkMs > 0) {
-        const signal = params.signal;
-        modelSawAbort = await new Promise<boolean>((resolve) => {
-          const timer = setTimeout(() => resolve(false), holdAfterFirstChunkMs);
-          if (!signal) return;
-          if (signal.aborted) {
-            clearTimeout(timer);
-            resolve(true);
-            return;
-          }
-          signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve(true);
-          });
-        });
-        if (modelSawAbort) return;
-      }
-      yield scriptedAnswer.slice(mid);
+      yield* scriptedText(params.signal);
     },
     // Only the SDK call is scripted; the error wording is the real one, so a
     // test can assert what the panel would actually show.
     describeModelError: realDescribeModelError,
     ModelRefusedError: RealModelRefusedError,
+    ToolsRejectedError: RealToolsRejectedError,
   }));
 });
 afterAll(() => {
@@ -1265,5 +1350,264 @@ describe("POST /nests/:id/chat — artifact anchor and citation links", () => {
     expect(lastModelCall!.system).not.toContain("HIDDEN_SENTINEL");
     const done = events.find((e) => e.event === "done")!;
     expect(done.data.cited.map((n: any) => n.id)).toEqual([aId]);
+  });
+});
+
+// ─── Ticket B: Hootie searches again when the first retrieval doesn't answer ───
+// Engineering Ops task: community-nest-hootie-searches-again-when-the-first-
+// retrieval-does-not-answer.
+describe("POST /nests/:id/chat — searching again (search_nest)", () => {
+  let app: any;
+  let owner: { apiKey: string; email: string; userId: string };
+  let stranger: { apiKey: string; email: string; userId: string };
+  let nestId: string;
+  let hubId: string;
+  let budgetId: string;
+
+  beforeAll(async () => {
+    setupTestEnv();
+    process.env.HOOTIE_ENABLED = "true";
+    app = await createTestApp("key", { features: ["byok"], gateway: TEST_GATEWAY });
+    owner = await registerUser(app, "search-owner@acme.com", "Owner");
+    await resetAuthRateLimit();
+    stranger = await registerUser(app, "search-stranger@acme.com", "Stranger");
+    await resetAuthRateLimit();
+    nestId = (await jsonRequest(app, "POST", "/nests", { name: "Search Nest" }, owner.apiKey)).data.nest.id;
+    // Public, so a stranger is a reader: published documents yes, drafts no.
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    hubId = (
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+        title: "Project November Hub",
+        content: "# Hub\n\nGate G1 — pilot cohort onboarding — lands on Nov 6. HUB_SENTINEL",
+      }, owner.apiKey)
+    ).data.node.id;
+    budgetId = (
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+        title: "Quarterly Budget",
+        content: "# Budget\n\nWhen are we ready? The budget is ready in December. BUDGET_SENTINEL",
+      }, owner.apiKey)
+    ).data.node.id;
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    // A draft only the owner can read, matching the same searches.
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Pilot Cohort Secrets",
+      content: "# Secret\n\nPilot cohort onboarding salaries. DRAFT_SENTINEL",
+    }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/context`, { selector: "#none" }, owner.apiKey);
+  });
+
+  beforeEach(() => {
+    scriptedRounds = [];
+    modelRounds = [];
+    rejectTools = false;
+    holdAtRound = 0;
+    roundSawAbort = null;
+    scriptedError = null;
+  });
+
+  afterAll(() => {
+    scriptedRounds = [];
+    rejectTools = false;
+    delete process.env.HOOTIE_ENABLED;
+  });
+
+  const question = "when do we have to be ready to test with real people?";
+
+  it("a search the model asks for joins its context, shows as a status, and the answer cites what it found", async () => {
+    // The first retrieval can't see the hub: none of the question's words
+    // are in it.
+    scriptedRounds = [
+      { text: "Let me look that up.", calls: [{ name: "search_nest", input: { query: "pilot cohort gate" } }] },
+      { text: "Gate G1 is on Nov 6 — see [[Project November Hub]]; budget aside, [[Quarterly Budget]]." },
+    ];
+    const { status, events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(status).toBe(200);
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[0].tools).toEqual(["search_nest"]);
+    expect(modelRounds[0].toolChoice).toBe("auto");
+    expect(modelRounds[0].system).not.toContain("HUB_SENTINEL");
+    expect(modelRounds[0].system).toContain("search_nest");
+
+    // The panel hears which query is running, between the rounds.
+    const order = events.map((e) => e.event);
+    const st = events.find((e) => e.event === "status")!;
+    expect(st.data).toEqual({ tool: "search_nest", text: "Searching the nest for “pilot cohort gate”" });
+    expect(order.indexOf("status")).toBeLessThan(order.lastIndexOf("delta"));
+
+    // The second round got the search's documents as a tool result.
+    const results = modelRounds[1].messages.at(-1).content;
+    expect(results[0]).toEqual(expect.objectContaining({ type: "tool_result", tool_use_id: "call_1_0" }));
+    expect(results[0].content).toContain("HUB_SENTINEL");
+    expect(modelRounds[1].messages.at(-2).role).toBe("assistant");
+
+    // The thinking-aloud before the search is not the answer.
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.answer).toBe(scriptedRoundsAnswer());
+    expect(done.data.answer).not.toContain("Let me look");
+    // Citations cover every round: the search's hub AND the first retrieval's budget.
+    expect(done.data.cited.map((n: any) => n.id)).toEqual([hubId, budgetId]);
+  });
+  function scriptedRoundsAnswer() {
+    return "Gate G1 is on Nov 6 — see [[Project November Hub]]; budget aside, [[Quarterly Budget]].";
+  }
+
+  it("searches run as the caller — a draft they can't read never appears — and are logged as Hootie's reads", async () => {
+    resetAccessThrottle();
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "pilot cohort onboarding" } }] },
+      { text: "Nov 6, per [[Pilot Cohort Secrets]] and [[Project November Hub]]." },
+    ];
+    const { status, events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(status).toBe(200);
+    const result = modelRounds[1].messages.at(-1).content[0].content;
+    expect(result).toContain("HUB_SENTINEL");
+    expect(result).not.toContain("DRAFT_SENTINEL");
+    expect(modelRounds[1].system).not.toContain("DRAFT_SENTINEL");
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.cited.map((n: any) => n.id)).toEqual([hubId]);
+
+    await flushAccessLog();
+    const log = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/activity-log?node=${encodeURIComponent(hubId)}&type=retrieved`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(log.status).toBe(200);
+    expect(log.data.items).toContainEqual(
+      expect.objectContaining({ agent: "hootie", actor: stranger.email, nodeId: hubId }),
+    );
+  });
+
+  it("a model that keeps calling the tool gets at most 2 searches, then must answer", async () => {
+    const search = (q: string) => ({ name: "search_nest", input: { query: q } });
+    scriptedRounds = [
+      // Three in one round: two run, the third is told no.
+      { calls: [search("one"), search("two"), search("three")] },
+      { calls: [search("four")] },
+      { calls: [search("five")], text: "The nest doesn't say." },
+    ];
+    const { status, events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(status).toBe(200);
+    expect(events.filter((e) => e.event === "status").map((e) => e.data.text)).toEqual([
+      "Searching the nest for “one”",
+      "Searching the nest for “two”",
+    ]);
+    const third = modelRounds[1].messages.at(-1).content[2];
+    expect(third).toEqual(expect.objectContaining({ tool_use_id: "call_1_2", is_error: true }));
+    expect(third.content).toMatch(/No more searches/);
+    // Round 2 already had no searches left: it went out with tool_choice
+    // none, and its calls were not run.
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[1].toolChoice).toBe("none");
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("");
+  });
+
+  it("the round after the cap is tool_choice none, and its text is the answer", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "one" } }] },
+      { calls: [{ name: "search_nest", input: { query: "two" } }] },
+      { text: "The nest doesn't say." },
+    ];
+    const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
+    expect(events.filter((e) => e.event === "status")).toHaveLength(2);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("The nest doesn't say.");
+  });
+
+  it("a bad tool input or an unknown tool is an error result the model sees, not a failure", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "" } }, { name: "delete_everything", input: {} }] },
+      { text: "Done." },
+    ];
+    const { status, events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(status).toBe(200);
+    const [bad, unknown] = modelRounds[1].messages.at(-1).content;
+    expect(bad).toEqual(expect.objectContaining({ is_error: true }));
+    expect(unknown).toEqual(expect.objectContaining({ is_error: true }));
+    expect(unknown.content).toMatch(/no tool named delete_everything/);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
+  });
+
+  it("a model or gateway that rejects tools still answers — broadening a weak first retrieval itself", async () => {
+    rejectTools = true;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "No Tools" }, owner.apiKey)).data.nest.id;
+    const pilotId = (
+      await jsonRequest(app, "POST", `/nests/${nest}/nodes`, {
+        title: "Pilot Plan",
+        content: "# Pilot\n\nWe start tests with real customers on Nov 6. See [[Pilot Logistics]]. PILOT_SENTINEL",
+      }, owner.apiKey)
+    ).data.node.id;
+    await jsonRequest(app, "POST", `/nests/${nest}/nodes`, {
+      title: "Pilot Logistics",
+      content: "# Logistics\n\nRooms booked in Atlanta. LOGISTICS_SENTINEL",
+    }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nest}/context`, { selector: "#none" }, owner.apiKey);
+
+    scriptedAnswer = "Nov 6 — [[Pilot Plan]].";
+    // "testing" finds nothing as written; its stem "test" finds "tests".
+    const { status, events } = await chat(app, nest, { message: "when does testing begin?" }, owner.apiKey);
+    expect(status).toBe(200);
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[0].tools).toEqual(["search_nest"]);
+    expect(modelRounds[0].system).not.toContain("PILOT_SENTINEL");
+    // The answer round: no tools, and the broadened context — relaxed
+    // keywords, then the top hit's neighbours.
+    expect(modelRounds[1].tools).toEqual([]);
+    expect(modelRounds[1].system).toContain("PILOT_SENTINEL");
+    expect(modelRounds[1].system).toContain("LOGISTICS_SENTINEL");
+    expect(modelRounds[1].system).not.toContain("search_nest");
+    expect(events.find((e) => e.event === "status")!.data).toEqual({
+      tool: "broaden",
+      text: "Searching the nest more broadly",
+    });
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.answer).toBe("Nov 6 — [[Pilot Plan]].");
+    expect(done.data.cited.map((n: any) => n.id)).toEqual([pilotId]);
+  });
+
+  it("without tools and with a strong first retrieval, it just answers — no broadening", async () => {
+    rejectTools = true;
+    scriptedAnswer = "Nov 6.";
+    // Names the hub by title (a compiled match) and pulls in two documents.
+    const { events } = await chat(app, nestId, { message: "project november hub quarterly budget" }, stranger.apiKey);
+    expect(events.some((e) => e.event === "status")).toBe(false);
+    expect(modelRounds).toHaveLength(2);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Nov 6.");
+  });
+
+  it("a client that hangs up mid-round gets no search and no further model call", async () => {
+    // Round 1 writes, parks until the hang-up, then ends on a search call
+    // anyway — as a round the SDK finishes after the abort would.
+    scriptedRounds = [
+      { text: "Thinking…", calls: [{ name: "search_nest", input: { query: "pilot cohort gate" } }] },
+      { text: "never" },
+    ];
+    holdAtRound = 1;
+    resetAccessThrottle();
+    const res = await app.request(`/nests/${nestId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${stranger.apiKey}` },
+      body: JSON.stringify({ message: question }),
+    });
+    expect(res.status).toBe(200);
+    const reader_ = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    while (!seen.includes("event: meta")) {
+      const { value, done } = await reader_.read();
+      if (done) break;
+      seen += decoder.decode(value, { stream: true });
+    }
+    await reader_.cancel();
+    const started = Date.now();
+    while (roundSawAbort === null && Date.now() - started < 3500) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(roundSawAbort).toBe(true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(modelRounds).toHaveLength(1);
+    expect(scriptedRounds).toEqual([{ text: "never" }]); // round 2 never asked for
   });
 });
