@@ -4,7 +4,7 @@
  * gate() holds one members() call, and binding-service exposes test hooks
  * at its commit points. No sleeps.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { randomUUID } from "crypto";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
 import { createFakeConnector, conversation, member, profile, type FakeConnector } from "./surfaces-fake-connector.js";
@@ -508,6 +508,28 @@ describe("LOW findings", () => {
     expect(await S.runner.guardTick()).toBe("skipped");
     g.release();
     expect(await first).toContain(id);
+  });
+
+  it("guard loop started while Surfaces is off sweeps once metacognition is turned on at runtime", async () => {
+    await activeBinding("C-RT");
+    let hits = 0;
+    S.runner.guardRunnerTestHooks.beforeFingerprint = () => void hits++;
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      process.env.FEATURE_METACOGNITION = "false";
+      S.runner.startSurfacesGuardLoop();
+      vi.advanceTimersByTime(S.runner.GUARD_TICK_MS);
+      expect(hits).toBe(0);
+      process.env.FEATURE_METACOGNITION = "true";
+      vi.advanceTimersByTime(S.runner.GUARD_TICK_MS);
+      for (let i = 0; i < 100 && hits === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(hits).toBeGreaterThan(0);
+    } finally {
+      S.runner.stopSurfacesGuardLoop();
+      vi.useRealTimers();
+      process.env.FEATURE_METACOGNITION = "true";
+      delete S.runner.guardRunnerTestHooks.beforeFingerprint;
+    }
   });
 
   it("L4: one-time link issuance is rate-limited per surface user, and expired tokens are purged", async () => {

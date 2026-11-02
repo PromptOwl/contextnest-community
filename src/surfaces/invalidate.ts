@@ -18,8 +18,9 @@ async function mark(where: string, params: string[]): Promise<void> {
       new Date().toISOString(),
       ...params,
     ]);
-  } catch {
-    // table missing on a half-migrated DB, or a closed connection in teardown
+  } catch (err) {
+    // Best-effort: the guard sweep's reader fingerprint is the backstop.
+    console.warn("[surfaces] guard invalidation failed; the next sweep re-checks", (err as Error)?.message);
   }
 }
 

@@ -346,6 +346,9 @@ export const linkPageRoutes = new Hono<AuthEnv>();
 
 linkPageRoutes.use("*", async (c, next) => {
   if (!surfacesEnabled()) return c.json({ error: "Not found" }, 404);
+  // The one-time token is in the URL: keep it out of caches and Referer.
+  c.header("Cache-Control", "no-store");
+  c.header("Referrer-Policy", "no-referrer");
   return next();
 });
 

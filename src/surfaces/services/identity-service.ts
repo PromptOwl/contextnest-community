@@ -580,17 +580,18 @@ export async function decideLinkReview(input: { reviewId: string; decision: "app
   if (!r) throw new NotFoundError("Link review not found");
   if (r.status !== "pending") throw new ConflictError("This review was already decided.");
   if (input.decision !== "approve" && input.decision !== "deny") throw new ValidationError("decision must be approve or deny");
+  // Conflict check before the claim, so a 409 leaves the review pending (deniable).
+  const install = input.decision === "approve" ? await installOrThrow(r.install_id) : null;
+  if (install && ((await activeLink(install.id, r.surface_user_id)) || (await activeLinkForUser(install.id, r.community_user_id)))) {
+    throw new ConflictError("One of these accounts is already linked.");
+  }
   const claimed = await getDb().run(
     "UPDATE surface_link_reviews SET status = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
     [input.decision === "approve" ? "approved" : "denied", input.byUserId, nowIso(), nowIso(), r.id],
   );
   if (claimed.changes === 0) throw new ConflictError("This review was already decided.");
   let link: LinkRow | null = null;
-  if (input.decision === "approve") {
-    const install = await installOrThrow(r.install_id);
-    if ((await activeLink(install.id, r.surface_user_id)) || (await activeLinkForUser(install.id, r.community_user_id))) {
-      throw new ConflictError("One of these accounts is already linked.");
-    }
+  if (install) {
     link = await createLink({
       install,
       surfaceUserId: r.surface_user_id,

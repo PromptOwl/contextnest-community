@@ -26,11 +26,28 @@ import {
   matchesFieldFilter,
   type FieldDefinition,
 } from "../nodes/custom-fields.js";
+import { nestTaskRules } from "./service.js";
 import { getBoard, type Board, type BoardConfig as SavedBoardConfig } from "./board-service.js";
 
 /** A saved board's config plus the custom-field definitions it names: the
  *  field a "field" board groups by, and every definition for filterFields. */
-export type BoardConfig = SavedBoardConfig & { field?: FieldDefinition; fieldDefs?: FieldDefinition[] };
+export type BoardConfig = SavedBoardConfig & {
+  field?: FieldDefinition;
+  fieldDefs?: FieldDefinition[];
+  /** The nest's priority levels (task_rules), for a priority board's columns,
+   *  labels and sort. Absent: the built-in four. */
+  priorities?: readonly PriorityLevel[];
+  /** The nest's workflow order for its stage group (task_rules.stage_order). */
+  stageOrder?: { namespace: string; order: string[] };
+};
+/** `stage_order` applies to the namespace of the default stage tag, else the
+ *  first exclusive namespace. */
+function stageOrderOf(r: { default_stage_tag: string | null; exclusive_namespaces: string[]; stage_order: string[] }) {
+  const ns = (r.default_stage_tag?.split(":")[0] ?? r.exclusive_namespaces[0] ?? "").toLowerCase();
+  return ns && r.stage_order.length ? { namespace: ns, order: r.stage_order } : undefined;
+}
+const levelsOf = (c: { priorities?: readonly PriorityLevel[] }): readonly PriorityLevel[] =>
+  c.priorities ?? DEFAULT_PRIORITIES;
 
 export const UNCATEGORIZED = "__uncategorized__";
 const STATUS_ORDER = ["draft", "pending_review", "approved", "published", "rejected", "external_edit_pending"];
@@ -42,13 +59,8 @@ const STATUS_LABELS: Record<string, string> = {
   rejected: "Rejected",
   external_edit_pending: "External Edit",
 };
-export const PRIORITY_ORDER = ["urgent", "high", "medium", "low"];
-const PRIORITY_LABELS: Record<string, string> = {
-  urgent: "Urgent",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-};
+import { DEFAULT_PRIORITIES, effectivePriorities, ticketFromTag, ticketTagOf, type PriorityLevel } from "../nodes/task-rules.js";
+export const PRIORITY_ORDER = DEFAULT_PRIORITIES.map((p) => p.key);
 
 export const LIST_SORTS = [
   "rank",
@@ -138,10 +150,12 @@ export function resolvedColumns(c: BoardConfig): {
     a && (c.dimension === "tag" ? [...new Set(a.map(stripHash))] : a);
   const order =
     keys(layout.columnOrder) ??
-    (c.dimension === "status"
+    (c.dimension === "tag" && c.stageOrder && (c.tagNamespace ?? "").trim().replace(/^#/, "").split(":")[0]!.toLowerCase() === c.stageOrder.namespace
+      ? c.stageOrder.order
+      : c.dimension === "status"
       ? STATUS_ORDER
       : c.dimension === "priority"
-        ? PRIORITY_ORDER
+        ? levelsOf(c).map((p) => p.key)
         : c.dimension === "field"
           ? fieldColumnOrder(c.field)
           : undefined);
@@ -205,7 +219,7 @@ export function columnLabel(key: string, c: BoardConfig): string {
   if (key === UNCATEGORIZED) {
     return c.dimension === "assignee" ? "Unassigned" : c.dimension === "priority" ? "No priority" : "Uncategorized";
   }
-  if (c.dimension === "priority") return PRIORITY_LABELS[key] ?? key;
+  if (c.dimension === "priority") return levelsOf(c).find((p) => p.key === key)?.label ?? key;
   if (c.dimension === "status") return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
   if (c.dimension === "folder" && key === "") return "(root)";
   return key;
@@ -299,7 +313,12 @@ export function groupForBoard(
 }
 
 /** A comparable value per sort key. Empty values sort last in either direction. */
-function sortValue(n: NodeResponse, sort: ListSort, titles: Map<string, string>): string | number | null {
+function sortValue(
+  n: NodeResponse,
+  sort: ListSort,
+  titles: Map<string, string>,
+  priorityKeys: readonly string[],
+): string | number | null {
   switch (sort) {
     case "title":
       return String(n.title ?? "").toLowerCase();
@@ -308,7 +327,7 @@ function sortValue(n: NodeResponse, sort: ListSort, titles: Map<string, string>)
     case "assignee":
       return n.assignee?.toLowerCase() || null;
     case "priority": {
-      const i = PRIORITY_ORDER.indexOf(n.priority ?? "");
+      const i = priorityKeys.indexOf(n.priority ?? "");
       return i === -1 ? null : i;
     }
     case "due":
@@ -330,6 +349,7 @@ export function sortRows(
   dir: "asc" | "desc",
   titles: Map<string, string>,
   rank?: string[],
+  priorityKeys: readonly string[] = PRIORITY_ORDER,
 ): NodeResponse[] {
   if (sort === "rank") {
     // Board order: ranked cards first, the rest as listed (orderByRank).
@@ -340,7 +360,7 @@ export function sortRows(
   }
   const sign = dir === "desc" ? -1 : 1;
   return rows
-    .map((r, i) => ({ r, i, v: sortValue(r, sort, titles) }))
+    .map((r, i) => ({ r, i, v: sortValue(r, sort, titles, priorityKeys) }))
     .sort((a, b) => {
       if (a.v === null && b.v === null) return a.i - b.i;
       if (a.v === null) return 1;
@@ -361,6 +381,8 @@ export interface BoardListRow {
   group: string;
   /** Every board column the node sits in. */
   columns: string[];
+  /** The task's permanent number (`CMN-12`), when the nest numbers tasks. */
+  ticket?: string;
   assignee?: string;
   priority?: string;
   due?: string;
@@ -422,6 +444,8 @@ export async function listBoardItems(
     ...board.config,
     fieldDefs,
     field: board.config.dimension === "field" ? fieldDefs?.find((d) => d.key === board.config.fieldKey) : undefined,
+    priorities: effectivePriorities(await nestTaskRules(nestId)),
+    stageOrder: stageOrderOf(await nestTaskRules(nestId)),
   };
   // The caller-gated listing the board UI reads (metadata only, no bodies).
   const all = await listNodesForCaller(nestId, userId);
@@ -431,7 +455,7 @@ export async function listBoardItems(
   const lk = layoutKeyOf(c);
   const rows: BoardListRow[] = [];
   for (const g of groups) {
-    const sorted = sortRows(byGroup.get(g.key)!, sort, dir, titles, c.ranks?.[`${lk}::${g.key}`]);
+    const sorted = sortRows(byGroup.get(g.key)!, sort, dir, titles, c.ranks?.[`${lk}::${g.key}`], levelsOf(c).map((p) => p.key));
     for (const n of sorted) {
       rows.push({
         id: n.id,
@@ -441,6 +465,7 @@ export async function listBoardItems(
         tags: n.tags,
         group: g.key,
         columns: columnKeysOf(n, c),
+        ...(ticketTagOf(n.tags) && ticketFromTag(ticketTagOf(n.tags)!) ? { ticket: ticketFromTag(ticketTagOf(n.tags)!)! } : {}),
         ...(n.assignee ? { assignee: n.assignee } : {}),
         ...(n.priority ? { priority: n.priority } : {}),
         ...(n.due ? { due: n.due } : {}),

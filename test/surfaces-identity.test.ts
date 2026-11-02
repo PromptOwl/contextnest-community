@@ -384,4 +384,25 @@ describe("admin revoke over REST and MCP", () => {
     expect(dec.status).toBe(200);
     expect(await activeLink("U_BOB2")).toBeUndefined();
   });
+
+  it("the /link page is no-store and no-referrer (the token is in the URL)", async () => {
+    const res = await app.request("/link/garbage", { headers: { Authorization: `Bearer ${alice.apiKey}` } });
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Referrer-Policy")).toBe("no-referrer");
+  });
+
+  it("link reviews: approving onto an already-linked account is a 409 that leaves the review pending", async () => {
+    const r3 = await person("Rev Three");
+    fake.profiles.set("U_R3", profile("U_R3", { email: r3.email }));
+    await I.linkExplicit({ installId, surfaceUserId: "U_R3", communityUserId: r3.userId });
+    const id = randomUUID();
+    await DB.getDb().run(
+      "INSERT INTO surface_link_reviews (id, install_id, surface_user_id, community_user_id, status) VALUES (?, ?, 'U_R3', ?, 'pending')",
+      [id, installId, r3.userId],
+    );
+    const dec = await jsonRequest(app, "POST", `/surfaces/link-reviews/${id}`, { decision: "approve" }, root.apiKey);
+    expect(dec.status).toBe(409);
+    const row = (await DB.getDb().get("SELECT status FROM surface_link_reviews WHERE id = ?", [id])) as any;
+    expect(row.status).toBe("pending");
+  });
 });
