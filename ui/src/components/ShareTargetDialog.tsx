@@ -44,6 +44,8 @@ import {
   Folder,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { CopyLinkRow } from "./CopyLinkRow";
+import { documentLink } from "../lib/nest-url";
 
 interface ShareTargetDialogProps {
   nestId: string;
@@ -188,6 +190,14 @@ export function ShareTargetDialog({
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
+          )}
+
+          {/* Folders have no page of their own, so only documents get a link. */}
+          {targetType === "document" && (
+            <CopyLinkRow
+              url={documentLink(window.location.origin, nestId, target)}
+              hint="Anyone with the link still needs access: nest members and the people shared below can open it."
+            />
           )}
 
           {!archived && (

@@ -92,7 +92,19 @@ import {
 } from "./node-index.js";
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
-import { nestDoneTags } from "../nests/service.js";
+import { nestDoneTags, nestTaskRules, storeDefaultTaskRules } from "../nests/service.js";
+import {
+  applyExclusiveNamespaces,
+  bareTag,
+  effectivePriorities,
+  tagNamespace,
+  ticketPrefixOf,
+  ticketTag,
+  ticketTagOf,
+  TICKET_NAMESPACE,
+  type TaskRules,
+} from "./task-rules.js";
+import { allocateTicket } from "./ticket-numbers.js";
 import { notifyAssigned as sendAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
@@ -1767,6 +1779,12 @@ export function assertViewBlock(view: unknown, type: string): void {
 export interface WriteOptions {
   notifyMentions?: boolean;
   /**
+   * Allow this write to ADD a `ticket:` tag to a task that has none. Only the
+   * backfill (ticket-backfill.ts) sets it — everywhere else the server draws
+   * the number and a caller supplying one is refused.
+   */
+  assignTicket?: boolean;
+  /**
    * False keeps a create out of the nest's creator-reviews posture: the
    * author is not stewarded and v1 is not published on their authority. For
    * documents the system derives (the annotations projection), which nobody
@@ -1914,6 +1932,8 @@ function taskFieldsContext(
   return {
     nodeId,
     now: new Date().toISOString(),
+    priorities: async () =>
+      effectivePriorities(await nestTaskRules(nestId)).map((p) => p.key),
     roster: async () =>
       new Set((await listNestPeople(nestId)).map((p) => p.email.toLowerCase())),
     nodeExists: async (id: string) => {
@@ -1963,6 +1983,85 @@ export async function createNode(
       }
     }
   }
+}
+
+/**
+ * Task rules on CREATE (see task-rules.ts): at most one tag per exclusive
+ * namespace, a default stage when none was given, and a server-assigned ticket
+ * number. Mutates `tags` and `metadata` in place — the caller has not written
+ * anything yet, so a refusal here leaves nothing behind. Runs inside the node's
+ * write lock, right before the write, so a number is drawn only for a create
+ * that is going ahead.
+ */
+async function applyTaskRulesOnCreate(
+  nestId: string,
+  tags: string[],
+  rules: TaskRules,
+): Promise<void> {
+  const clash = applyExclusiveNamespaces([], tags, rules.exclusive_namespaces);
+  if (clash.ambiguous.length > 0) {
+    throw new ValidationError(
+      `A task takes one tag from each of: ${clash.ambiguous.map((n) => `${n}:`).join(", ")} — got several. Pick one.`,
+    );
+  }
+  tags.splice(0, tags.length, ...clash.tags);
+
+  if (rules.default_stage_tag) {
+    const ns = tagNamespace(rules.default_stage_tag);
+    const has = ns
+      ? tags.some((t) => tagNamespace(t) === ns)
+      : tags.some((t) => bareTag(t) === rules.default_stage_tag);
+    if (!has) tags.push(`#${rules.default_stage_tag}`);
+  }
+
+  if (rules.ticket_numbering) {
+    if (ticketTagOf(tags)) {
+      throw new ValidationError(
+        `Ticket numbers are assigned by the server — remove the ${TICKET_NAMESPACE}: tag and it will be given one.`,
+      );
+    }
+    const prefix = ticketPrefixOf(rules);
+    if (prefix) {
+      // First number in a nest on the default rules: pin them, so the prefix
+      // survives a rename of the nest.
+      await storeDefaultTaskRules(nestId);
+      const ticket = await allocateTicket(nestId, prefix);
+      tags.push(ticketTag(ticket));
+    }
+  }
+}
+
+/**
+ * Task rules on a tag EDIT. A tag the caller added replaces the existing one in
+ * the same exclusive namespace (so adding `stage:in-review` swaps the stage,
+ * never doubles it), and the ticket number can't be changed or removed — it is
+ * how everything outside the nest refers to this task.
+ */
+function enforceTaskTagRules(
+  priorTags: readonly string[],
+  nextTags: string[],
+  rules: TaskRules,
+  allowNewTicket = false,
+): string[] {
+  let tags = applyExclusiveNamespaces(priorTags, nextTags, rules.exclusive_namespaces).tags;
+  const priorTicket = ticketTagOf(priorTags);
+  const nextTicket = ticketTagOf(tags);
+  if (priorTicket) {
+    if (nextTicket && nextTicket !== priorTicket) {
+      throw new ValidationError(
+        `This task is ${priorTicket.slice(TICKET_NAMESPACE.length + 1).toUpperCase()}. Ticket numbers are assigned once and can't be changed.`,
+      );
+    }
+    // An editor echoing a stale tag set, or a caller that dropped the tag:
+    // keep the number rather than orphan the ticket.
+    tags = tags.filter((t) => tagNamespace(t) !== TICKET_NAMESPACE);
+    tags.push(`#${priorTicket}`);
+  } else if (nextTicket && rules.ticket_numbering && !allowNewTicket) {
+    throw new ValidationError(
+      `Ticket numbers are assigned by the server — remove the ${TICKET_NAMESPACE}: tag and it will be given one.`,
+    );
+  }
+  return tags;
 }
 
 async function createNodeOnce(
@@ -2100,6 +2199,9 @@ async function createNodeOnce(
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
     };
+    if (input.type === TASK_NODE_TYPE) {
+      await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
+    }
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
       if (tags.some((t) => done.has(String(t).toLowerCase().replace(/^#/, "")))) {
@@ -2805,7 +2907,15 @@ export async function updateNode(
         // save, so a union made removals impossible (CU: removed tag returns
         // after reopen). MCP context_update replaces too, per the engine
         // catalog; a caller wanting to add a tag sends the full set.
-        const nextTags = requireTags(patch.tags);
+        let nextTags = requireTags(patch.tags);
+        if (node.frontmatter.type === TASK_NODE_TYPE) {
+          nextTags = enforceTaskTagRules(
+            priorTags,
+            nextTags,
+            await nestTaskRules(nestId),
+            opts.assignTicket === true,
+          );
+        }
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
         // projection above only feeds the governance decisions below. It
@@ -3476,12 +3586,18 @@ async function moveNodeInner(
       new Set([nodeId]),
     );
 
+    // On a folder board a move IS the column change, so a task gets the same
+    // moved_at stamp a tag swap gives it (updateNode).
+    const movedAt = new Date().toISOString();
     const moved: ContextNode = {
       ...node,
       id: newId,
       frontmatter: {
         ...node.frontmatter,
-        updated_at: new Date().toISOString(),
+        updated_at: movedAt,
+        ...(node.frontmatter.type === TASK_NODE_TYPE
+          ? { metadata: { ...(node.frontmatter.metadata as object), moved_at: movedAt } }
+          : {}),
       },
     };
     // Under enforced rules a move is judged as a delete there and a create

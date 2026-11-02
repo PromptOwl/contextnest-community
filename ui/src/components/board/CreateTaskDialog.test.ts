@@ -22,6 +22,15 @@ describe("newTaskPayload", () => {
     });
   });
 
+  it("carries the surface picked, and leaves it out when none was", () => {
+    expect(newTaskPayload({ title: "A", content: "", surfaceTag: "community" })).toEqual({
+      title: "A",
+      content: "",
+      surfaceTag: "community",
+    });
+    expect(newTaskPayload({ title: "A", content: "", surfaceTag: "" })).toEqual({ title: "A", content: "" });
+  });
+
   it("refuses a blank title", () => {
     expect(newTaskPayload({ title: "   ", content: "notes" })).toBeNull();
   });
