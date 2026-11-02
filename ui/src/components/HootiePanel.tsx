@@ -48,6 +48,7 @@ import hootieIcon from "../assets/hootie.svg";
 import {
   HOOTIE_PANEL_DEFAULT,
   clampPanelWidth,
+  linkCitations,
   hootieAccentStyle,
   hootieGreeting,
   pushesContent,
@@ -689,9 +690,9 @@ function Welcome({
 }
 
 /**
- * An answer with its citations. `[[Title]]` in the text becomes a chip for a
- * cited node; a wiki link the server didn't resolve stays as plain text, so
- * nothing reads as clickable that isn't.
+ * An answer with its citations. `[[X]]` in the text becomes a chip for a
+ * cited node; a wiki link the server didn't resolve becomes plain text
+ * without its brackets, so nothing reads as clickable that isn't.
  */
 function AnswerBubble({
   name,
@@ -705,19 +706,12 @@ function AnswerBubble({
   onOpenNode: (nestId: string, nodeId: string) => void;
 }) {
   const cited = message.cited ?? [];
-  const byTitle = useMemo(
-    () => new Map(cited.map((n) => [n.title.toLowerCase(), n])),
-    [cited],
-  );
-  // Rewrite [[Title]] → [Title](#cite:<id>) for the cited ones; the link
-  // renderer below turns those hrefs into chips.
+  // [[X]] → a chip for a cited node (by title, id or slug — the server's
+  // rules), plain text for anything else; the link renderer below turns the
+  // #cite: hrefs into chips.
   const source = useMemo(
-    () =>
-      message.content.replace(/\[\[([^\]]+)\]\]/g, (whole, title: string) => {
-        const n = byTitle.get(title.trim().toLowerCase());
-        return n ? `[${title.trim()}](#cite:${encodeURIComponent(n.id)})` : whole;
-      }),
-    [message.content, byTitle],
+    () => linkCitations(message.content, message.cited),
+    [message.content, message.cited],
   );
 
   if (message.failed) {

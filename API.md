@@ -2399,7 +2399,7 @@ Request:
 ```
 
 - `message` (required) — the question. `@name` tokens loop a colleague in (below).
-- `node_id` (optional) — the document the person has open. It and its neighbours (one hop) lead the context, whatever the question matches follows.
+- `node_id` (optional) — the document the person has open. It and its neighbours (one hop) lead the context, whatever the question matches follows. The open document is always included: it has its own budget (~6,000 tokens), and a longer one is cut with a visible `[trimmed …]` marker rather than left out; its neighbours fill the rest of the anchor budget (never less than ~1,500 tokens). A `node_id` the caller can't read, or that doesn't exist, is the same `404 { error: "Node not found" }`.
 - `history` (optional) — prior turns, oldest first; the server keeps the most recent 20.
 
 Response: `text/event-stream`.
@@ -2408,12 +2408,12 @@ Response: `text/event-stream`.
 |---|---|
 | `meta` | `{ nodes: [{ id, title, url, tags, type }], anchor: node \| null }` — what the answer will be grounded in, before the model speaks. |
 | `delta` | `{ text }` — a chunk of the answer. |
-| `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (by `[[Title]]`, in order), and what happened to any `@mentions`. |
+| `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (in order of first mention, each once), and what happened to any `@mentions`. A `[[X]]` (or `[[X\|alias]]`) cites a retrieved document when X is its title, its full id, or its id's last segment (slug), compared ignoring case, dash variants (`-` `–` `—`), quote variants and surrounding whitespace; a shared title resolves to the first retrieved match. Only documents retrieved for this caller can be cited — a link to anything else is not, and the panel shows it as plain text. |
 | `error` | `{ error }` — the model call failed; the stream ends. |
 
 **Standing instructions.** The nest's always-include documents the caller can read (approved versions) sit in the system prompt in a "Standing instructions for this nest" block, ahead of the retrieved documents, on every question — see [Always-include documents](#always-include-documents-standing-instructions).
 
-**Grounding.** The retrieved documents are placed in the system prompt verbatim with the instruction to answer from them alone. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
+**Grounding.** The retrieved documents are placed in the system prompt with the instruction to answer from them alone — verbatim, except that an HTML page (a `type: artifact` document, or a body that starts with `<!doctype`/`<html>`) is reduced to its visible text first: script, style, template and noscript content, comments and tags are dropped, entities decoded and whitespace collapsed. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
 
 **Mentions.** A message naming people (`@alice@acme.com`) posts the exchange — question and answer, under the asker's name — as a comment on the anchor document (the open one, else the first document the answer cites) and notifies them through the comment-mention path: inbox row, and email / Slack / Teams where configured. `mention` is `{ status: "posted", node_id, node_title, thread_id, notified }` or `{ status: "undeliverable", reason: "no_anchor" | "post_failed" }`. Nothing is posted when nobody is named.
 
