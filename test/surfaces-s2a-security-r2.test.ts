@@ -587,6 +587,63 @@ describe("M2: withdrawal is a system action", () => {
   });
 });
 
+describe("Reviews decided in the web queue (not via the surface)", () => {
+  // Alice (owner) decides directly; reset so later suites see the default.
+  beforeAll(async () => {
+    expect((await jsonRequest(app, "PATCH", `/nests/${N}/settings`, { allow_self_approve: true }, alice.apiKey)).status).toBe(200);
+  });
+  afterAll(async () => {
+    await jsonRequest(app, "PATCH", `/nests/${N}/settings`, { allow_self_approve: false }, alice.apiKey);
+  });
+  /** Two new items in one proposal, so a decided item has a still-pending sibling. */
+  async function twoItems(tag: string) {
+    modelImpl = (req) => {
+      const t = propose(req, { title: `Web queue ${tag} first decision`, body: `Decision: ${tag} first.` });
+      const items = (t.content[0] as any).input.items;
+      items.push({ ...items[0], title: `Web queue ${tag} second decision`, body: `Decision: ${tag} second.` });
+      return t;
+    };
+    const ts = await say("C2", "U_BOB", `we agreed two things about ${tag} today, both final`);
+    await brain("C2", ts);
+    const rows = await S.db.getDb().all(
+      "SELECT * FROM surface_proposal_items WHERE title LIKE ? AND state = 'pending' ORDER BY title",
+      [`Web queue ${tag}%`],
+    );
+    expect(rows.length).toBe(2);
+    return rows as any[];
+  }
+
+  it("approve in the web queue → a reader sees it at once; the sweep settles only that item", async () => {
+    const [first, second] = await twoItems("approve");
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}`, undefined, bob.apiKey)).status).not.toBe(200);
+    const ok = await jsonRequest(app, "POST", `/nests/${N}/nodes/${first.node_id}/approve`, { note: "ok" }, alice.apiKey);
+    expect(ok.status, JSON.stringify(ok.data)).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}`, undefined, bob.apiKey)).status).toBe(200);
+    await S.purge.purgeSweep(Date.now());
+    expect((await one("SELECT state FROM surface_proposal_items WHERE id = ?", [first.id])).state).toBe("approved");
+    // The sibling's review is still live: untouched and still hidden.
+    expect((await one("SELECT state FROM surface_proposal_items WHERE id = ?", [second.id])).state).toBe("pending");
+    expect((await one("SELECT status FROM review_requests WHERE id = ?", [second.review_id])).status).toBe("pending");
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${second.node_id}`, undefined, bob.apiKey)).status).not.toBe(200);
+  });
+
+  it("reject in the web queue → stays hidden; the sweep discards the draft and closes the item", async () => {
+    const [first] = await twoItems("reject");
+    const no = await jsonRequest(app, "POST", `/nests/${N}/nodes/${first.node_id}/reject`, { note: "not a decision" }, alice.apiKey);
+    expect(no.status, JSON.stringify(no.data)).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}`, undefined, bob.apiKey)).status).not.toBe(200);
+    await S.purge.purgeSweep(Date.now());
+    expect((await one("SELECT state FROM surface_proposal_items WHERE id = ?", [first.id])).state).toBe("withdrawn");
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}`, undefined, alice.apiKey)).status).toBe(404);
+  });
+
+  it("a reader can't read a hidden draft's review history (it carries the model-written note)", async () => {
+    const [first] = await twoItems("history");
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}/reviews`, undefined, bob.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "GET", `/nests/${N}/nodes/${first.node_id}/reviews`, undefined, alice.apiKey)).status).toBe(200);
+  });
+});
+
 describe("L1: the judge's reading is budgeted", () => {
   it("L1: ≤ 3 reads per turn, ≤ 24k chars read per run", async () => {
     let turn = 0;

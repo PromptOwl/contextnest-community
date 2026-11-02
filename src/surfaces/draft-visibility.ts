@@ -37,8 +37,11 @@ async function load(nestId: string, op: "new" | "edit"): Promise<HiddenSet> {
   try {
     if (draftVisibilityTestHooks.fail) throw new Error("injected read failure");
     const col = op === "new" ? "node_id" : "COALESCE(target_node_id, node_id)";
+    // A review a person already approved (e.g. in the web queue) stops hiding at
+    // once; the purge sweep then settles the item's own state.
     const rows = (await getDb().all(
-      `SELECT ${col} AS id FROM surface_proposal_items WHERE nest_id = ? AND op = ? AND state IN ${HIDING_STATES} AND ${col} IS NOT NULL`,
+      `SELECT ${col} AS id FROM surface_proposal_items i WHERE nest_id = ? AND op = ? AND state IN ${HIDING_STATES} AND ${col} IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM review_requests r WHERE r.id = i.review_id AND r.status = 'approved')`,
       [nestId, op],
     )) as Array<{ id: string }>;
     return new Set(rows.map((r) => r.id));
