@@ -801,6 +801,11 @@ export const config = {
   get FEATURE_METACOGNITION(): boolean {
     return process.env.FEATURE_METACOGNITION === "true";
   },
+  /** Surfaces master switch (Slack/Teams/email → nest). Off by default; also
+   *  needs the workflow plane and metacognition (see src/surfaces/flags.ts). */
+  get FEATURE_SURFACES(): boolean {
+    return process.env.FEATURE_SURFACES === "true";
+  },
   /**
    * Experimental: the cross-nest document stream (CU-wdqcq02crv) — GET
    * /me/stream and the Stream page, one card per node version across every

@@ -2407,8 +2407,7 @@ export function runMigrations(db: Database.Database): void {
 
   // 079: Surfaces core (conversation ↔ nest bindings with the two-flag guard,
   //   identity links, one-time link tokens and reviews, opt-outs, notices).
-  //   The DDL is shared with Postgres (src/surfaces/schema-ddl.ts). Numbered
-  //   079: 078 is claimed by an open branch.
+  //   The DDL is shared with Postgres (src/surfaces/schema-ddl.ts).
   if (!hasMigration("079_surfaces_core")) {
     db.transaction(() => {
       db.exec(surfacesS1Ddl("(datetime('now'))"));
