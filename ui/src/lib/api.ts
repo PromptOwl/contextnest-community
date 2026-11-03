@@ -4254,6 +4254,13 @@ export type HootieMention =
     }
   | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
 
+/** What Hootie is doing mid-answer: `tool` is `search_nest` (a search the
+ *  model asked for) or `broaden` (the server's own broader search). */
+export interface HootieStatus {
+  tool: string;
+  text: string;
+}
+
 export interface HootieTurn {
   role: "user" | "assistant";
   content: string;
@@ -4273,6 +4280,9 @@ export async function chatWithHootie(
   on: {
     meta?: (m: { nodes: HootieNode[]; anchor: HootieNode | null }) => void;
     delta?: (text: string) => void;
+    /** Hootie is working (searching the nest again). Text received before
+     *  it is superseded: the answer starts over with the next delta. */
+    status?: (s: HootieStatus) => void;
     done?: (d: {
       answer: string;
       cited: HootieNode[];
@@ -4325,6 +4335,7 @@ export async function chatWithHootie(
     }
     if (event === "meta") on.meta?.(payload);
     else if (event === "delta") on.delta?.(payload.text ?? "");
+    else if (event === "status") on.status?.({ tool: String(payload.tool ?? ""), text: String(payload.text ?? "") });
     else if (event === "done") on.done?.(payload);
     else if (event === "error") on.error?.(payload.error ?? "Something went wrong.");
   };

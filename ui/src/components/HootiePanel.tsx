@@ -47,6 +47,9 @@ import hootieIcon from "../assets/hootie.svg";
 import {
   HOOTIE_PANEL_DEFAULT,
   clampPanelWidth,
+  pendingLabel,
+  withDelta,
+  withStatus,
   hootieAccentStyle,
   hootieGreeting,
   pushesContent,
@@ -72,6 +75,8 @@ interface Message {
   mention?: HootieMention | null;
   /** Assistant only: still streaming in. */
   pending?: boolean;
+  /** Assistant only: what Hootie is doing before the answer (a search). */
+  status?: string;
   /** Assistant only: the model call failed; content is the explanation. */
   failed?: boolean;
 }
@@ -273,12 +278,14 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
         {
           delta: (text) =>
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === answerId ? { ...m, content: m.content + text } : m,
-              ),
+              prev.map((m) => (m.id === answerId ? withDelta(m, text) : m)),
+            ),
+          status: (s) =>
+            setMessages((prev) =>
+              prev.map((m) => (m.id === answerId ? withStatus(m, s.text) : m)),
             ),
           done: (d) =>
-            patch({ content: d.answer, cited: d.cited, mention: d.mention, pending: false }),
+            patch({ content: d.answer, cited: d.cited, mention: d.mention, pending: false, status: undefined }),
           error: (text) => patch({ content: text, failed: true, pending: false }),
         },
         ctrl.signal,
@@ -718,7 +725,7 @@ function AnswerBubble({
     <div>
       <div className="rounded-2xl rounded-tl-md border bg-background px-3.5 py-2.5 text-sm shadow-sm">
         {message.pending && !message.content ? (
-          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label={`${name} is thinking`}>
+          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label={message.status ?? `${name} is thinking`}>
             <span className="flex gap-1">
               {[0, 150, 300].map((d) => (
                 <span
@@ -728,7 +735,9 @@ function AnswerBubble({
                 />
               ))}
             </span>
-            <span className="text-xs">Reading the nest…</span>
+            <span className="text-xs" aria-live="polite" data-testid="hootie-status">
+              {pendingLabel(message)}
+            </span>
           </span>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">

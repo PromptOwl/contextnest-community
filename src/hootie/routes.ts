@@ -34,8 +34,12 @@ import {
   type ContextNodeSummary,
   type ContextResult,
 } from "../nodes/context-service.js";
-import { artifactText, isHtmlBody, trimToTokens } from "./artifact-text.js";
 import { citedNodes } from "./citations.js";
+import { Gathered, modelBlock, defuseFence } from "./retrieval.js";
+import { runAgent, AccessLostError } from "./agent.js";
+import { canStillAsk } from "./access.js";
+import { searchNestTool, SEARCH_BUDGET, type HootieTool } from "./tools.js";
+import { isWeakRetrieval, relaxedQuery } from "./broaden.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
@@ -46,10 +50,10 @@ import { tryConsume } from "../shared/rate-limit.js";
 import { getNest } from "../nests/service.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
-  streamAnswer,
   describeModelError,
   type ModelTurn,
   ModelRefusedError,
+  ToolsRejectedError,
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
@@ -72,6 +76,8 @@ const ANCHOR_BUDGET = 6000;
 /** Room its neighbours always get, however much of the budget the open
  *  document took. */
 const NEIGHBOUR_FLOOR = 1500;
+/** Extra searches the model may run for one question before it must answer. */
+export const MAX_SEARCHES = 2;
 /** How Hootie's own retrievals are attributed in the activity log. */
 const HOOTIE_CLIENT: ClientMetadata = { agent: "hootie" };
 /**
@@ -171,20 +177,9 @@ hootieRoutes.post("/chat", async (c) => {
 
   // ── Retrieval, as the caller ──
   // The open document first (so it always leads the context), then whatever
-  // the question matches. De-duped by id; the anchor's own block is never
-  // repeated by the question path.
-  const nodes: ContextNodeSummary[] = [];
-  const blocks: string[] = [];
-  const seen = new Set<string>();
-  const take = (r: ContextResult) => {
-    for (let i = 0; i < r.nodes.length; i++) {
-      const n = r.nodes[i];
-      if (seen.has(n.id)) continue;
-      seen.add(n.id);
-      nodes.push(n);
-      blocks.push(modelBlock(r.blocks[i]).markdown);
-    }
-  };
+  // the question matches, then whatever the model searches for. De-duped by
+  // id; the anchor's own block is never repeated by the question path.
+  const gathered = new Gathered();
 
   let anchor: ContextNodeSummary | null = null;
   if (nodeId) {
@@ -221,10 +216,8 @@ hootieRoutes.post("/chat", async (c) => {
     // existence oracle. Checked before anything is retrieved for the model.
     if (at < 0) return c.json({ error: "Node not found" }, 404);
     anchor = own.nodes[at];
-    const anchorBlock = modelBlock(own.blocks[at], ANCHOR_BUDGET).markdown;
-    seen.add(anchor.id);
-    nodes.push(anchor);
-    blocks.push(anchorBlock);
+    const anchorBlock = modelBlock(own.blocks[at], ANCHOR_BUDGET);
+    gathered.add(anchor, anchorBlock);
 
     // In the neighbour pass the anchor is again first in line and always
     // fits (its raw size is added to the budget), so the neighbours get
@@ -242,13 +235,14 @@ hootieRoutes.post("/chat", async (c) => {
         include_drafts: true,
       },
     });
-    take(near);
+    gathered.take(near);
   }
   // The question itself. @names are colleagues, not search terms — strip
   // them so a mention doesn't drag in every document that quotes an email.
   const question = stripMentions(message);
+  let first: ContextResult | null = null;
   if (question) {
-    const r = await resolveContext({
+    first = await resolveContext({
       nestId,
       userId,
       baseUrl,
@@ -258,30 +252,47 @@ hootieRoutes.post("/chat", async (c) => {
       client: HOOTIE_CLIENT,
       body: { prompt: question, max_tokens: CONTEXT_BUDGET },
     });
-    take(r);
+    gathered.take(first);
   }
 
   const nest = await getNest(nestId);
   // The nest's always-include documents ride on every question, whatever it
   // retrieved (CU-wdqcq05rn0) — approved text the caller may read.
   const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
-  const system = buildSystemPrompt({
-    nestName: nest?.name ?? "this nest",
-    userEmail,
-    anchor,
-    blocks,
-    standing,
-  });
+  const promptFor = (canSearch: boolean) =>
+    buildSystemPrompt({
+      nestName: nest?.name ?? "this nest",
+      userEmail,
+      anchor,
+      blocks: gathered.blocks,
+      standing,
+      searches: canSearch ? MAX_SEARCHES : 0,
+    });
+  // The model may look further when what it was given doesn't answer: the
+  // same gated retrieval, as the caller, logged as Hootie's read.
+  const tools: HootieTool[] = [
+    searchNestTool({ nestId, userId, baseUrl, client: HOOTIE_CLIENT, gathered }),
+  ];
   const turns: ModelTurn[] = [...history, { role: "user", content: message }];
   const mentionNames = extractMentions(message);
 
   trackEvent("hootie.chat", {
     nestId,
     anchored: !!anchor,
-    context_nodes: nodes.length,
+    context_nodes: gathered.nodes.length,
     history_turns: history.length,
     mentions: mentionNames.length,
   });
+
+  // Asked again before every model round, tool run and broadening pass: the
+  // middleware's nest check ran once, at the start of the turn (access.ts).
+  // A failing check fails closed: no access, the same empty `done`, never
+  // reported as a model error.
+  const stillAllowed = () =>
+    canStillAsk(nestId, userId).catch((err) => {
+      console.error("[hootie] access re-check failed; ending the turn", nestId, err);
+      return false;
+    });
 
   return streamSSE(c, async (stream) => {
     // A client that hangs up mid-answer (panel closed, nest switched, a new
@@ -295,26 +306,65 @@ hootieRoutes.post("/chat", async (c) => {
 
     await stream.writeSSE({
       event: "meta",
-      data: JSON.stringify({ nodes, anchor }),
+      data: JSON.stringify({ nodes: [...gathered.nodes], anchor }),
     });
     let answer = "";
-    try {
-      for await (const chunk of streamAnswer({
+    const status = async (tool: string, text: string) => {
+      // Whatever was written before a search is superseded by what follows.
+      answer = "";
+      await stream.writeSSE({ event: "status", data: JSON.stringify({ tool, text }) });
+    };
+    const respond = async (canSearch: boolean) => {
+      for await (const ev of runAgent({
         apiKey: credential.apiKey,
         model: callModel,
         baseUrl: credential.baseUrl,
-        system,
+        system: promptFor(canSearch),
         turns,
+        tools: canSearch ? tools : [],
+        maxCalls: MAX_SEARCHES,
         signal: cancel.signal,
+        stillAllowed,
       })) {
         if (cancel.signal.aborted) return;
-        answer += chunk;
-        await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: chunk }) });
+        if (ev.type === "status") {
+          await status(ev.tool, ev.text);
+        } else {
+          answer += ev.text;
+          await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: ev.text }) });
+        }
+      }
+    };
+    try {
+      try {
+        await respond(true);
+      } catch (err) {
+        if (!(err instanceof ToolsRejectedError)) throw err;
+        // This model (or its gateway) won't take tools: look further
+        // ourselves when the first retrieval was weak, then answer without.
+        if (cancel.signal.aborted) return;
+        if (question && isWeakRetrieval(first)) {
+          if (!(await stillAllowed())) throw new AccessLostError();
+          await status("broaden", "Searching the nest more broadly");
+          await broaden({ nestId, userId, baseUrl, question, first, gathered, stillAllowed });
+        }
+        if (cancel.signal.aborted) return;
+        answer = "";
+        await respond(false);
       }
     } catch (err) {
       // Our own cancellation surfaces as an abort error from the SDK: nothing
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
+      if (err instanceof AccessLostError) {
+        // Removed from the nest mid-question: end the turn with the terminal
+        // event and nothing else — no answer, no citations, no mention post.
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({ answer: "", cited: [], mention: null }),
+        });
+        return;
+      }
       const text =
         err instanceof ModelRefusedError
           ? err.message
@@ -327,10 +377,15 @@ hootieRoutes.post("/chat", async (c) => {
     if (cancel.signal.aborted) return;
     // Only what was retrieved for this caller can be cited: a [[link]] to
     // anything else stays text (see citations.ts for how a link matches).
-    const cited = citedNodes(answer, nodes);
+    const cited = citedNodes(answer, gathered.nodes);
 
     let mention: MentionOutcome | null = null;
-    if (mentionNames.length > 0) {
+    if (mentionNames.length > 0 && !(await stillAllowed())) {
+      // Removed from the nest while the answer streamed: no comment is posted
+      // in their name and nobody is paged. The reason is the generic one —
+      // the outcome says nothing about why.
+      mention = { status: "undeliverable", reason: "post_failed" };
+    } else if (mentionNames.length > 0) {
       mention = await deliverMentions({
         nestId,
         userEmail,
@@ -347,6 +402,53 @@ hootieRoutes.post("/chat", async (c) => {
     });
   });
 });
+
+/**
+ * The deterministic broadening pass, for a model that won't take tools:
+ * the question's keywords relaxed to their stems, then the link-graph
+ * neighbours (one hop) of the best hits. Both are ordinary gated
+ * retrievals as the caller, logged as Hootie's reads.
+ */
+async function broaden(params: {
+  nestId: string;
+  userId: string;
+  baseUrl: string;
+  question: string;
+  first: ContextResult | null;
+  gathered: Gathered;
+  /** Re-checked before each retrieval; AccessLostError when it says no. */
+  stillAllowed: () => Promise<boolean>;
+}): Promise<void> {
+  const { nestId, userId, baseUrl, question, first, gathered, stillAllowed } = params;
+  const gate = async () => {
+    if (!(await stillAllowed())) throw new AccessLostError();
+  };
+  const hits: ContextNodeSummary[] = [...(first?.nodes ?? [])];
+  const relaxed = relaxedQuery(question);
+  if (relaxed) {
+    await gate();
+    const r = await resolveContext({
+      nestId,
+      userId,
+      baseUrl,
+      client: HOOTIE_CLIENT,
+      body: { prompt: relaxed, max_tokens: SEARCH_BUDGET },
+    });
+    gathered.take(r);
+    hits.push(...r.nodes);
+  }
+  const top = [...new Set(hits.filter((n) => n.via !== "hop").map((n) => n.id))].slice(0, 2);
+  if (top.length === 0) return;
+  await gate();
+  const r = await resolveContext({
+    nestId,
+    userId,
+    baseUrl,
+    client: HOOTIE_CLIENT,
+    body: { selector: top.map((id) => `[[${id}]]`).join(" | "), hops: 1, max_tokens: SEARCH_BUDGET },
+  });
+  gathered.take(r);
+}
 
 /**
  * A well-formed node id: `nodes/` then one or more slug segments. Every id
@@ -412,13 +514,15 @@ function buildSystemPrompt(params: {
   blocks: string[];
   /** The rendered standing-instructions block, or "" (always-include-service). */
   standing?: string;
+  /** How many times the model may call search_nest; 0 = no tools. */
+  searches?: number;
 }): string {
-  const { nestName, userEmail, anchor, blocks, standing } = params;
+  const { nestName, userEmail, anchor, blocks, standing, searches = 0 } = params;
   // A document that contains `</documents>` would close the block early and
   // everything after it would read as instructions — defuse the tag in the body.
   const context =
     blocks.length > 0
-      ? blocks.join("\n\n---\n\n").replace(/<\/documents>/gi, "</ documents>")
+      ? defuseFence(blocks.join("\n\n---\n\n"))
       : "(nothing in the nest matched this question)";
   return [
     // The admin's assistant name on an enterprise licence (one line, ≤40
@@ -428,7 +532,12 @@ function buildSystemPrompt(params: {
     "Answer from the documents below and nothing else. They are the governed context this person is allowed to read; do not invent facts that are not in them.",
     "When you use a document, cite it by its exact title as a wiki link, like [[Title]] — this is how the reader opens it. Cite every document you drew on, and only those.",
     "Documents shown as web pages have been reduced to their visible text. A document marked [trimmed] continues beyond what is shown here; say so if the answer may lie in the part you can't see.",
-    "If the documents do not answer the question, say so plainly and, if you can, point to which document comes closest or what to search for. Do not guess.",
+    ...(searches > 0
+      ? [
+          `If the documents below do not answer the question, search the nest with the search_nest tool before you answer — other words, synonyms, the likely title — up to ${searches} times. Search before writing anything. Documents a search returns count like the ones below and are cited the same way.`,
+          "If the documents still do not answer the question, say so plainly and, if you can, point to which document comes closest. Do not guess.",
+        ]
+      : ["If the documents do not answer the question, say so plainly and, if you can, point to which document comes closest or what to search for. Do not guess."]),
     "Be concise and direct. Use short paragraphs or a short list; no preamble.",
     "Names written as @someone in the message are colleagues the person is looping in — they are not questions for you, and you should not address them.",
     anchor
@@ -445,24 +554,6 @@ function buildSystemPrompt(params: {
     context,
     "</documents>",
   ].join("\n");
-}
-
-/**
- * A retrieved block as the model gets it. An HTML page (an artifact) is
- * reduced to its visible text — the model reads what the person sees, not
- * the scripts and styles around it. With `maxTokens`, the block is cut to
- * that size with a visible marker rather than left out.
- */
-function modelBlock(
-  block: ContextResult["blocks"][number],
-  maxTokens?: number,
-): { markdown: string } {
-  let body = block.body;
-  if (isHtmlBody(block.type, body)) body = artifactText(body);
-  if (maxTokens !== undefined) {
-    body = trimToTokens(body, Math.max(50, maxTokens - approxTokens(block.header))).text;
-  }
-  return { markdown: block.header + body };
 }
 
 /**

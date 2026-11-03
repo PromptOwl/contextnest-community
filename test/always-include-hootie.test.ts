@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   describeModelError as realDescribeModelError,
   ModelRefusedError as RealModelRefusedError,
+  ToolsRejectedError as RealToolsRejectedError,
 } from "../src/hootie/model.js";
 import {
   setupTestEnv,
@@ -29,8 +30,14 @@ beforeAll(() => {
       lastSystem = params.system;
       yield "Hoot.";
     },
+    streamRound: async function* (params: { system: string }) {
+      lastSystem = params.system;
+      yield "Hoot.";
+      return { toolCalls: [], assistant: [{ type: "text", text: "Hoot." }] };
+    },
     describeModelError: realDescribeModelError,
     ModelRefusedError: RealModelRefusedError,
+    ToolsRejectedError: RealToolsRejectedError,
   }));
 });
 afterAll(() => {

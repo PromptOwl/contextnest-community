@@ -95,3 +95,26 @@ export function linkCitations(content: string, cited: readonly CitableNode[] | u
     return `[${escapeLabel(label ?? n.title)}](#cite:${encodeURIComponent(n.id)})`;
   });
 }
+
+// ─── Searching ───────────────────────────────────────────────────────────
+// While Hootie searches the nest again the bubble shows what it's doing.
+// A status supersedes any text so far (the model thinking aloud before it
+// searched); the next text clears the status.
+
+interface Streaming {
+  content: string;
+  status?: string;
+}
+
+export function withStatus<M extends Streaming>(m: M, text: string): M {
+  return { ...m, content: "", status: text };
+}
+
+export function withDelta<M extends Streaming>(m: M, text: string): M {
+  return { ...m, content: m.content + text, status: undefined };
+}
+
+/** The pending bubble's line before any answer text arrives. */
+export function pendingLabel(m: Streaming): string {
+  return m.status || "Reading the nest…";
+}
