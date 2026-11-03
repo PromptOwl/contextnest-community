@@ -481,3 +481,18 @@ describe("GWT 15 — MCP admin tools at REST parity", () => {
     expect(JSON.stringify(r.body)).not.toContain("cnst_sys_");
   });
 });
+
+describe("revoke / rotate need every granted nest", () => {
+  it("an admin of only one of the system's nests is refused, and the key keeps working", async () => {
+    const partial = await registerUser(app, "partial-admin@test.com", "Partial");
+    await jsonRequest(app, "POST", `/nests/${nestB}/collaborators`, { email: partial.email, permission: "admin" }, owner.apiKey);
+    const made = await jsonRequest(app, "POST", "/systems", { name: "Shared Bot", capability: "read", nest_ids: [nestB, nestC] }, owner.apiKey);
+    expect(made.status).toBe(201);
+    const id = made.data.id;
+    const key = made.data.api_key;
+
+    expect((await jsonRequest(app, "DELETE", `/systems/${id}`, undefined, partial.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "POST", `/systems/${id}/rotate`, undefined, partial.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "GET", `/nests/${nestC}/nodes`, undefined, key)).status).toBe(200);
+  });
+});
