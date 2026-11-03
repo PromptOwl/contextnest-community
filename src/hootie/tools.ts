@@ -422,10 +422,10 @@ function reviewQueueTool(ctx: ToolContext): HootieTool {
     validate: (input) => (checkInput(input, {}) ? null : "review_queue takes no input."),
     status: () => STATUS.reviewQueue,
     run: async () => {
-      const d = dataOf<{ requests: Array<{ nodeId: string; title: string | null; version: number; priority: string; requestedBy: string }> }>(
-        await callOp(ctx, "context_review_queue", { status: "pending" }),
-      );
-      const requests = d?.requests ?? [];
+      const r = await callOp(ctx, "context_review_queue", { status: "pending" });
+      // Plain text is the op's "nothing pending"; an error is not "all clear".
+      if (typeof r !== "string" && r.isError) return UNAVAILABLE;
+      const requests = dataOf<{ requests: Array<{ nodeId: string; title: string | null; version: number; priority: string; requestedBy: string }> }>(r)?.requests ?? [];
       // The queue holds the whole nest's requests; Hootie tells this person
       // only about the ones they may review — the same check approve uses —
       // and counts after that filter.

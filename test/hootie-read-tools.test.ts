@@ -60,6 +60,8 @@ let rejectTools = false;
 
 // ── handleToolCall, observed ───────────────────────────────────────────────
 let mcpCalls: Array<{ tool: string; args: any; ctx: any }> = [];
+/** An op that answers with an error result, for one test. */
+let failOp: string | null = null;
 
 const TEST_GATEWAY = { baseUrl: "http://127.0.0.1:9", key: "sk-po-test", defaultModel: "default-claude/claude-sonnet-5" };
 
@@ -124,6 +126,7 @@ beforeAll(() => {
       ...actual,
       handleToolCall: async (tool: string, args: any, ctx: any) => {
         mcpCalls.push({ tool, args: JSON.parse(JSON.stringify(args)), ctx: { ...ctx, storage: undefined, queryEngine: undefined, versionManager: undefined } });
+        if (failOp === tool) return { text: "boom", isError: true };
         return actual.handleToolCall(tool, args, ctx);
       },
     };
@@ -637,6 +640,19 @@ describe("H1 review queue counts what the caller can review (AC-H1-10)", () => {
     const r = resultsAfter(0)[0];
     expect(r.content).toMatch(/\b0 items you can review\b/);
     expectNoHiddenTrace(r.content);
+  });
+
+  it("a failed queue op is an error result, never \"0 items\"", async () => {
+    failOp = "context_review_queue";
+    try {
+      scriptedRounds = [{ calls: [{ name: "review_queue", input: {} }] }, { text: "Can't tell." }];
+      await chat(owner, "what's waiting for me?", reviewNestId);
+    } finally {
+      failOp = null;
+    }
+    const r = resultsAfter(0)[0];
+    expect(r.is_error).toBe(true);
+    expect(r.content).not.toMatch(/items? you can review/);
   });
 });
 
