@@ -529,6 +529,16 @@ describe("H1 searched-before-saying-no (AC-H1-05)", () => {
     expect(statusTexts(events)).not.toContain("First pass was thin. Searched again more broadly");
     expect(done(events).trail).toEqual(expect.objectContaining({ searches: 1, broadened: false }));
   });
+
+  it("a question about an open document is answered from it: no broadening, one round", async () => {
+    scriptedRounds = [{ text: "It starts with real customers." }];
+    // Owner, not Priya: her questions in this file sit near the chat rate limit.
+    const { text } = await chatRaw(owner, { message: "when does testing begin?", node_id: pilotId });
+    const events = parseSse(text);
+    expect(modelRounds).toHaveLength(1);
+    expect(statusTexts(events)).not.toContain("First pass was thin. Searched again more broadly");
+    expect(done(events).trail).toEqual(expect.objectContaining({ broadened: false }));
+  });
 });
 
 describe("H1 budget (AC-H1-06)", () => {

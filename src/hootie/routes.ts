@@ -398,9 +398,11 @@ hootieRoutes.post("/chat", async (c) => {
         // Searched before saying no (§3.2, AC-H1-05): a thin first pass the
         // model answered without looking further, and without citing
         // anything, gets the deterministic broadening before the answer
-        // stands. Re-answered only when it found something new.
+        // stands. Re-answered only when it found something new. Not for a
+        // question about an open document: that document is the context.
         if (
           !work.aborted &&
+          !anchor &&
           question &&
           isWeakRetrieval(first) &&
           turn.used.search + turn.used.read === 0 &&
