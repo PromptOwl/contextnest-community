@@ -2397,7 +2397,7 @@ Change rows of a **table** node without rewriting its CSV. Write tier, exactly l
 - **Concurrency.** `base_version` is the table's **head** version (the `version` every response returns), not the approved version a view shows. `base_version` other than the current version → `409 { error: "Version conflict", base_version, current_version }`, nothing written. Without it, a write that lands between this call's read and its write is refused the same way, never overwritten.
 - Response `200 { table, version, state: "published" | "draft", applied: { appended, updated, deleted }, review_id?, review_error? }` (`review_error`: the draft was written but submitting it for review failed; submit it again with `POST …/submit-review`, don't repeat the write); a call that changes nothing answers `{ …, unchanged: true }` with no new version.
 - The review screen shows a table draft's changes by row (added / changed / removed, by key) above the line diff.
-- No MCP tool yet: the matching agent operation needs a new tool schema, which waits on the engine's shared schemas (see CLAUDE.md, "No new inline schemas").
+- Same operation over MCP (per-nest): `context_table_rows` — `table` (`"[[Title]]"` or a node id) plus the same `ops`, `base_version`, `submit_review`, `change_note`. Write is gated by the caller's per-node edit permission (a refusal is `UNAUTHORIZED_ACTION` with the access-request hint); bad input is `VALIDATION_FAILED`; a version conflict or someone else's draft is `VALIDATION_FAILED` with `conflict: true`, `current_version` (and `reason: "draft_in_progress"`). Success returns the REST body as `structuredContent`.
 
 #### Table `:ref` columns — rows linked into the graph
 

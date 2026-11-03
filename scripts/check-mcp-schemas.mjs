@@ -55,7 +55,9 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   94->97 Surfaces S3 (src/mcp/surfaces-tools.ts): context_surfaces_seed_apply, seed_list, seed_status — twins of
 //   POST /surfaces/seeds/apply, GET /surfaces/seeds, GET /surfaces/seeds/status; Community-only seed state
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
-const BASELINE = 97;
+//   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
+//   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
+const BASELINE = 98;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
