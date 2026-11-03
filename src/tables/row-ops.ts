@@ -231,6 +231,7 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
     } else if (op.op === "update") {
       resolveColumns(op.set, at);
       const hit = findOne(op.key, at);
+      let touched = false;
       for (const [name, v] of Object.entries(op.set)) {
         const idx = byName.get(name)!;
         if (idx === keyIdx && v !== hit.values[idx]) {
@@ -239,10 +240,11 @@ export function applyRowOps(body: string, ops: RowOp[]): RowOpsResult {
         if (hit.values[idx] !== v) {
           hit.values[idx] = v;
           if (hit.row) hit.row.dirty = true;
-          changed = true;
+          changed = touched = true;
         }
       }
-      nUpdate++;
+      // Count only rows a value actually changed in.
+      if (touched) nUpdate++;
     } else {
       const hit = findOne(op.key, at);
       if (hit.row) lines[hit.row.line] = null;

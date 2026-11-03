@@ -23,7 +23,7 @@
  * holds no privilege of its own here — the request carries the viewer's own
  * session, and the checks above are the viewer's.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { engineCache } from "../nodes/engine.js";
@@ -41,7 +41,7 @@ export const tableRowRoutes = new Hono<AuthEnv>();
 
 const MAX_CHANGE_NOTE = 500;
 
-function conflict(c: any, base: number, current: number) {
+function conflict(c: Context<AuthEnv>, base: number, current: number) {
   return c.json(
     {
       error: "Version conflict",
@@ -59,6 +59,8 @@ function conflict(c: any, base: number, current: number) {
  * would let a write land in between, and the ops would be applied to the
  * older body under the newer head — which expectHead then accepts, silently
  * reverting that write. Throws ConflictError if the node keeps moving.
+ * Known limit (ABA): a draft discarded and redrafted under the same unsealed
+ * number between this read and the write passes expectHead (see PR #482).
  */
 export async function readStable(
   getHead: () => Promise<number>,

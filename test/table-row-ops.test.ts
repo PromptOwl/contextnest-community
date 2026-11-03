@@ -106,6 +106,7 @@ describe("applyRowOps", () => {
     const out = applyRowOps(BODY, parseRowOps([{ op: "update", key: "r1", set: { stage: "lead" } }]));
     expect(out.changed).toBe(false);
     expect(out.body).toBe(BODY);
+    expect(out.updated).toBe(0);
   });
 
   describe("refusals (all-or-nothing: a refusal is a throw, so nothing is returned to write)", () => {
