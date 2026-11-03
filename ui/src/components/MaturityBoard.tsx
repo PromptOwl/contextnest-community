@@ -1518,8 +1518,8 @@ function MaturityBoardInner({
             ) : null
           )}
           {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
-          {effectiveConfig.dimension === "tag" && !isDone && stageDot(col.key) && (
-            <span className={`h-2 w-2 shrink-0 rounded-full ${stageDot(col.key)}`} />
+          {effectiveConfig.dimension === "tag" && !isDone && stageDot(col.key, namespaceKey(effectiveConfig.tagNamespace)) && (
+            <span className={`h-2 w-2 shrink-0 rounded-full ${stageDot(col.key, namespaceKey(effectiveConfig.tagNamespace))}`} />
           )}
           <span
             className={`min-w-0 text-[13px] font-semibold truncate ${
