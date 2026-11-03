@@ -598,7 +598,7 @@ describe("render", () => {
       title: "V",
       intro: "See [[project-november]], [[nodes/x|the X doc]] and [[secret-node]]. `[[in-code]]`",
       blocks: [
-        { index: 0, id: "m", kind: "md", ok: true, text: "Also [[project-november#Gates]]" },
+        { index: 0, id: "m", kind: "md", ok: true, text: "Also [[project-november#Gates]] and [[#Risks]]" },
         { index: 1, id: "l", kind: "list", ok: true, items: [{ id: "nodes/t1", title: "Task <one>" }] },
       ],
       frameUrl: (id) => `/frame/${id}`,
@@ -613,6 +613,9 @@ describe("render", () => {
     expect(html).toContain('<a href="/nest/n1?doc=nodes%2Fx" target="_top">the X doc</a>');
     expect(html).toContain('<a href="/nest/n1?doc=nodes%2Ft1" target="_top">Task &lt;one&gt;</a>');
     expect(html).toContain("secret-node");
+    // An anchor names the label, never the link target; an anchor alone keeps its text.
+    expect(html).toContain('target="_top">Gates</a>');
+    expect(html).toContain(" and Risks");
     expect(html).not.toContain("[[project-november");
     expect(html).not.toContain("[[secret-node]]");
     expect(html).toContain("<code>[[in-code]]</code>");

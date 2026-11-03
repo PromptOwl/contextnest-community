@@ -10,6 +10,7 @@
  */
 import MarkdownIt from "markdown-it";
 import type { ResolvedBlock } from "./core.js";
+import { wikiParts } from "../site/markdown.js";
 
 /** A `[[target]]` (or a node id) → the in-app address of a node the reader
  *  may see, or null. Built per request over the reader's own scope, so a
@@ -35,11 +36,11 @@ markdown.inline.ruler.before("link", "wikilink", (state, silent) => {
   const inner = src.slice(start + 2, end);
   if (!inner.trim() || inner.includes("\n") || inner.includes("[")) return false;
   if (!silent) {
-    const [rawTarget, ...rest] = inner.split(/\\?\|/);
-    const target = rawTarget.split("#")[0].trim();
-    const label = rest.join("|").trim() || target.split("/").pop() || target;
+    // The anchor only feeds the label: the app's `?doc=` address has no
+    // heading target, so the link opens the document itself.
+    const { path, label } = wikiParts(inner);
     const resolve = (state.env as { resolveLink?: LinkResolver } | undefined)?.resolveLink;
-    const href = target && resolve ? resolve(target) : null;
+    const href = path && resolve ? resolve(path) : null;
     if (href) {
       const open = state.push("link_open", "a", 1);
       open.attrs = [

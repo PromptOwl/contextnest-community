@@ -230,11 +230,15 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
   const deps = createViewDeps();
   const blocks = s.layout.meta ? await resolveBlocks(s.layout.meta, s.nestId, [s.viewer], deps) : [];
   const q = s.pinned !== undefined ? `?v=${s.pinned}` : "";
+  // The resolver scans the whole nest; build it only when something will link.
+  const links =
+    s.layout.body.includes("[[") ||
+    blocks.some((b) => b.ok && (b.kind === "list" || (b.kind === "md" && b.text.includes("[["))));
   const html = renderViewPage({
     title: s.layout.title,
     intro: s.layout.body,
     blocks,
-    resolveLink: await viewerLinkResolver(s.nestId, s.viewer),
+    resolveLink: links ? await viewerLinkResolver(s.nestId, s.viewer) : undefined,
     frameUrl: (blockId) =>
       `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}`,
     truncated: !!s.layout.meta && s.layout.meta.blocks.length > CAPS.MAX_BLOCKS,
