@@ -11,6 +11,13 @@
  * Text the model writes in a round that ends in a tool call is it thinking
  * aloud before searching, not the answer: the status event that follows
  * tells the client to drop it, and the route does the same.
+ *
+ * Access is re-checked inside the loop, not left to the request's start:
+ * `stillAllowed` runs before every model round and before every tool run,
+ * whatever the tool. When it says no — the person was removed from the nest
+ * mid-question — the loop throws AccessLostError at once: no tool runs, no
+ * tool result goes to the model, no further round is asked for, and nothing
+ * more is yielded.
  */
 import { streamRound, type ModelMessage, type ModelTurn, type ToolSpec } from "./model.js";
 import type { HootieTool } from "./tools.js";
@@ -19,6 +26,14 @@ export type AgentEvent =
   | { type: "text"; text: string }
   /** A tool is about to run. Supersedes any text sent since the last one. */
   | { type: "status"; tool: string; text: string; input: unknown };
+
+/** The caller lost access to the nest mid-turn; the turn must end now. */
+export class AccessLostError extends Error {
+  constructor() {
+    super("Access to this nest ended during the answer.");
+    this.name = "AccessLostError";
+  }
+}
 
 export interface AgentParams {
   apiKey: string;
@@ -30,6 +45,9 @@ export interface AgentParams {
   /** Tool calls this question may make in all. */
   maxCalls: number;
   signal: AbortSignal;
+  /** Whether the caller may still read the nest — a live check (see
+   *  access.ts), asked before every round and every tool run. */
+  stillAllowed: () => Promise<boolean>;
 }
 
 export async function* runAgent(params: AgentParams): AsyncGenerator<AgentEvent> {
@@ -38,7 +56,12 @@ export async function* runAgent(params: AgentParams): AsyncGenerator<AgentEvent>
   const specs: ToolSpec[] = tools.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   const messages: ModelMessage[] = params.turns.map((t) => ({ ...t }));
   let calls = 0;
+  const gate = async () => {
+    if (!(await params.stillAllowed())) throw new AccessLostError();
+  };
   for (;;) {
+    if (signal.aborted) return;
+    await gate();
     if (signal.aborted) return;
     const spent = calls >= params.maxCalls;
     const round = streamRound({
@@ -75,8 +98,15 @@ export async function* runAgent(params: AgentParams): AsyncGenerator<AgentEvent>
         content = "No more searches for this question. Answer with the documents you have.";
         isError = true;
       } else {
+        // Before the status line too: someone removed hears nothing more.
+        await gate();
+        if (signal.aborted) return;
         calls++;
         yield { type: "status", tool: tool.name, text: tool.status(call.input), input: call.input };
+        if (signal.aborted) return;
+        // And again right before the run: writing the status line awaits
+        // the client, which can stall — the first check is not "now".
+        await gate();
         if (signal.aborted) return;
         try {
           ({ content, isError = false } = await tool.run(call.input, signal));
