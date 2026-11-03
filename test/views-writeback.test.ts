@@ -1,12 +1,8 @@
 /**
  * View write-back wiring on the view page (`…/view/hosted`).
  *
- * `write_to` is a layout field on an html block. Engine 3.2.0's view schema
- * is strict and does not know it yet (proposed upstream), so these tests
- * simulate the engine accepting it: the deps module's layout readers are
- * wrapped to add `write_to` to named html blocks of the version they read —
- * exactly what an engine that passes the field through would return. Every
- * other part (gates, trust, rendering, headers) runs for real.
+ * `write_to` is a layout field on an html block, validated by the engine's
+ * view schema (3.5.0+). Everything here runs for real.
  *
  * AC covered here:
  *  - a block with write_to gets a bridge; a block without it, or a target not
@@ -15,32 +11,10 @@
  *    can write, gets a bridge; a draft layout (?v=draft) never does
  *  - the frame CSP stays `connect-src 'none'`; /p never has a write path
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, authed, resetAuthRateLimit } from "./helpers.js";
 import { ARTIFACT_SANDBOX_CSP_NO_POPUPS } from "../src/shared/artifact-sandbox.js";
 import { WRITE_BRIDGE_JS, writeBridgeCspHash } from "../src/views/write.js";
-
-// viewId → { htmlBlockId: write_to }
-const SIM: Record<string, Record<string, string[]>> = ((globalThis as any).__cnWriteToSim ??= {});
-
-vi.mock("../src/views/deps.js", async (importOriginal) => {
-  const real: any = await importOriginal();
-  const sim = () => ((globalThis as any).__cnWriteToSim ?? {}) as Record<string, Record<string, string[]>>;
-  const withWriteTo = (viewId: string, v: any) => {
-    const add = sim()[viewId];
-    if (!add || !v?.meta) return v;
-    const blocks = v.meta.blocks.map((b: any) =>
-      b.html && b.id && add[b.id] ? { ...b, html: { ...b.html, write_to: add[b.id] } } : b,
-    );
-    return { ...v, meta: { ...v.meta, blocks } };
-  };
-  return {
-    ...real,
-    readViewVersion: async (nestId: string, viewId: string, version: number) =>
-      withWriteTo(viewId, await real.readViewVersion(nestId, viewId, version)),
-    liveViewVersion: (viewId: string, doc: any) => withWriteTo(viewId, real.liveViewVersion(viewId, doc)),
-  };
-});
 
 type User = { apiKey: string; userId: string; email: string };
 
@@ -95,20 +69,15 @@ beforeAll(async () => {
     { id: "d", data: { binding: tId } },
     { id: "e", data: { binding: t2Id } },
     { id: "c", callout: { text: "hello" } },
-    { id: "h", html: { ref: aId, data_from: ["d"] } },
+    // Only h writes (to d).
+    { id: "h", html: { ref: aId, data_from: ["d"], write_to: ["d"] } },
     { id: "h2", html: { ref: aId, data_from: ["d"] } },
     { id: "h3", html: { ref: aId } },
   ];
   vId = await mk({ title: "Pipeline View", type: "view", content: "intro", view: { blocks } });
-  // h writes to d; h3 names a callout and an unknown id (neither is a table target).
-  SIM[vId] = { h: ["d"], h3: ["c", "zz"] };
-
   vDraftId = await mk({ title: "Draft View", type: "view", content: "intro", view: { blocks } });
-  SIM[vDraftId] = { h: ["d"] };
-
   // A view whose author later loses write access.
   vByAuthor = await mk({ title: "Author View", type: "view", content: "intro", view: { blocks } }, author);
-  SIM[vByAuthor] = { h: ["d"] };
 }, 90000);
 
 afterAll(() => env.cleanup());
@@ -136,9 +105,21 @@ describe("the page of a view with write_to", () => {
     expect(Object.keys(cfg.frames)).toEqual(["h"]);
     expect(cfg.frames.h.targets).toEqual({ d: `/nests/${encodeURIComponent(nestId)}/nodes/${tId}/rows` });
     expect(cfg.frames.h.token).toMatch(/^[A-Za-z0-9_-]{24}$/);
-    // h2 has no write_to; h3's targets are a callout and an unknown id.
+    // h2 and h3 have no write_to.
     expect(cfg.frames.h2).toBeUndefined();
     expect(cfg.frames.h3).toBeUndefined();
+  });
+
+  it("the engine refuses a write_to that names a non-data or unknown block", async () => {
+    for (const writeTo of [["c"], ["zz"]]) {
+      const blocks = [
+        { id: "d", data: { binding: tId } },
+        { id: "c", callout: { text: "hello" } },
+        { id: "h", html: { ref: aId, write_to: writeTo } },
+      ];
+      const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: `Bad ${writeTo[0]}`, type: "view", content: "x", view: { blocks } }, owner.apiKey);
+      expect(r.status, JSON.stringify(r.data)).toBe(400);
+    }
   });
 
   it("each frame is addressable by its block id from the page's own markup", async () => {

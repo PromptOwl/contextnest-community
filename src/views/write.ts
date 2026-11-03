@@ -25,7 +25,9 @@
  * itself are the viewer's, checked by the server on every request.
  */
 import { createHash, randomBytes } from "crypto";
-import type { ViewMeta } from "@promptowl/contextnest-engine";
+import type { ViewBlock, ViewMeta } from "@promptowl/contextnest-engine";
+
+type HtmlBlock = Extract<ViewBlock, { html: unknown }>;
 import { blockIdOf, blockKindOf, normalizeDataFrom, servedBlocks, type AuthorInfo, type ResolvedBlock } from "./core.js";
 import { ROW_OPS_CAPS } from "../tables/row-ops.js";
 import { config } from "../config.js";
@@ -51,7 +53,7 @@ export function declaredWriteTo(view: ViewMeta): Map<string, string[]> {
   const out = new Map<string, string[]>();
   servedBlocks(view).forEach((b, i) => {
     if (blockKindOf(b) !== "html") return;
-    const ids = normalizeDataFrom((b.html as { write_to?: unknown } | undefined)?.write_to);
+    const ids = normalizeDataFrom((b.html as HtmlBlock["html"] | undefined)?.write_to);
     if (ids.length) out.set(blockIdOf(b, i), ids);
   });
   return out;
