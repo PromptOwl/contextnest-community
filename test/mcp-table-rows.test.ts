@@ -8,8 +8,22 @@
  *  - bad value → VALIDATION_FAILED, nothing written
  *  - read-only key → refused, nothing written
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
+
+// Pass-through: records what each review submission was given (its baseUrl
+// builds the notification's "Open document" link).
+const submitted: any[] = ((globalThis as any).__cnSubmitted ??= []);
+vi.mock("../src/governance/review-service.js", async (importOriginal) => {
+  const real: any = await importOriginal();
+  return {
+    ...real,
+    submitForReview: (p: any) => {
+      (globalThis as any).__cnSubmitted.push(p);
+      return real.submitForReview(p);
+    },
+  };
+});
 
 type User = { apiKey: string; userId: string; email: string };
 
@@ -84,6 +98,8 @@ describe("context_table_rows", () => {
     expect(r.data).toMatchObject({ table: tId, state: "draft", applied: { appended: 0, updated: 1, deleted: 0 } });
     expect(r.data.version).toBeGreaterThan(before.version);
     expect(typeof r.data.review_id).toBe("string");
+    // The review notification links back to this server, like every MCP write.
+    expect(submitted.at(-1)?.baseUrl).toMatch(/^https?:\/\//);
     const after = await head();
     expect(after.content).toBe(before.content.replace("r1,lead,10", "r1,qualified,10"));
   });

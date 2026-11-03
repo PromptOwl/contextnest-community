@@ -688,6 +688,7 @@ export const TOOL_DEFINITIONS = [
           description:
             'Up to 100 ops, applied in order: {"op":"append","row":{col:value}} | {"op":"update","key":"<key>","set":{col:value}} | {"op":"delete","key":"<key>"}',
           items: { type: "object" },
+          maxItems: 100,
         },
         base_version: { type: "number", description: "The head version you read; a different head is refused as a conflict." },
         submit_review: { type: "boolean", description: "On a governed nest, submit the draft for review." },
@@ -3669,7 +3670,13 @@ async function runTool(
       }
       let out: Awaited<ReturnType<typeof writeTableRows>>;
       try {
-        out = await writeTableRows(nestId, node.id, args, { userId, client: ctx.client });
+        const { ops, base_version, submit_review, change_note } = args;
+        out = await writeTableRows(
+          nestId,
+          node.id,
+          { ops, base_version, submit_review, change_note },
+          { userId, client: ctx.client, baseUrl: ctx.baseUrl },
+        );
       } catch (err) {
         return contributorError(err);
       }
