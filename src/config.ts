@@ -227,6 +227,10 @@ export const config = {
   get CN_VIEW_DATA_OFF(): boolean {
     return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
   },
+  /** View write-back kill switch: `off` removes every view's write bridge. */
+  get CN_VIEW_WRITES_OFF(): boolean {
+    return String(process.env.CN_VIEW_WRITES ?? "").trim().toLowerCase() === "off";
+  },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
     return process.env.PROMPTOWL_BYPASS_SECRET || "";

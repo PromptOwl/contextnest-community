@@ -60,6 +60,7 @@ import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { viewRoutes } from "./views/routes.js";
+import { tableRowRoutes } from "./tables/row-routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
@@ -3589,7 +3590,9 @@ export function createApp(): Hono<AuthEnv> {
       c.req.method === "POST" &&
       parts.length >= 4 &&
       (parts[parts.length - 1] === "revert" ||
-        parts[parts.length - 1] === "move");
+        parts[parts.length - 1] === "move" ||
+        // Row ops on a table node are a body edit of that node (tables/row-routes.ts).
+        parts[parts.length - 1] === "rows");
     let stewardEditorBypass = false;
     // `!access.archived`: the cap leaves every caller at "read", which is
     // exactly the shape this bypass fires on — without it, archiving would
@@ -3890,6 +3893,10 @@ export function createApp(): Hono<AuthEnv> {
   //      /:nodeId{.+}/hosted would read "<viewId>/view" as the node id; it
   //      falls through (next()) when the id is not a view node.
   nestsApp.route("/:nestId/nodes", viewRoutes);
+  //   0c. tableRowRoutes — POST /:nodeId/rows (row ops on a table node). The
+  //      /rows suffix must beat nodeRoutes' greedy catch-all; no other router
+  //      has a POST …/rows.
+  nestsApp.route("/:nestId/nodes", tableRowRoutes);
   //   0c. officeNodeRoutes — POST /office (a .pptx/.docx/.xlsx upload), same reason.
   nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);

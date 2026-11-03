@@ -10,6 +10,7 @@
  */
 import MarkdownIt from "markdown-it";
 import type { ResolvedBlock } from "./core.js";
+import { WRITE_BRIDGE_JS } from "./write.js";
 import { wikiParts } from "../site/markdown.js";
 
 /** A `[[target]]` (or a node id) → the in-app address of a node the reader
@@ -97,12 +98,12 @@ const PAGE_CSS = `
   code{background:#f5f5f4;border-radius:4px;padding:.1em .3em}
 `;
 
-function shell(title: string, main: string, wide = false): string {
+function shell(title: string, main: string, wide = false, tail = ""): string {
   return (
     `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<title>${esc(title)}</title><style>${PAGE_CSS}</style></head>` +
-    `<body><main${wide ? ' class="cn-wide"' : ""}>${main}</main></body></html>`
+    `<body><main${wide ? ' class="cn-wide"' : ""}>${main}</main>${tail}</body></html>`
   );
 }
 
@@ -144,6 +145,7 @@ function blockHtml(
   b: ResolvedBlock,
   frameUrl: (blockId: string) => string,
   resolveLink?: LinkResolver,
+  addressable = false,
 ): string {
   if (!b.ok) {
     switch (b.kind) {
@@ -180,6 +182,9 @@ function blockHtml(
       // origin, and its response carries the matching CSP sandbox.
       return (
         `<div class="cn-block"><iframe sandbox="allow-scripts allow-modals" src="${esc(frameUrl(b.id))}"` +
+        // The write bridge finds a message's frame by this attribute (view
+        // write-back); present only on pages that carry the bridge.
+        (addressable ? ` data-cn-block="${esc(b.id)}"` : "") +
         ` class="cn-frame" title="Embedded page" loading="lazy" referrerpolicy="no-referrer"></iframe></div>`
       );
   }
@@ -213,14 +218,20 @@ export function renderViewPage(r: {
   truncated?: boolean;
   /** The stored layout failed the engine's view schema; no block is served. */
   invalidLayout?: boolean;
+  /** View write-back: the bridge's config JSON (already escaped for a
+   *  <script> element, see write.ts). When set, frames carry their block id
+   *  and the page ends with the config and the bridge; the route must serve
+   *  it under withWriteBridge(VIEW_PAGE_CSP). Unset, the page is unchanged. */
+  writeConfigJson?: string;
 }): string {
   const parts = [`<h1>${esc(r.title)}</h1>`];
   if (r.intro.trim()) parts.push(`<div class="cn-intro">${renderMd(r.intro, r.resolveLink)}</div>`);
   if (r.invalidLayout) parts.push(placeholder("This view's layout could not be read."));
+  const writes = r.writeConfigJson !== undefined;
   const feeds = feedBlockIds(r.blocks);
   const sources: string[] = [];
   for (const b of r.blocks) {
-    const html = blockHtml(b, r.frameUrl, r.resolveLink);
+    const html = blockHtml(b, r.frameUrl, r.resolveLink, writes);
     (feeds.has(b.id) ? sources : parts).push(html);
   }
   if (r.truncated) {
@@ -235,7 +246,10 @@ export function renderViewPage(r: {
   }
   // A page that embeds an html block (a dashboard) gets the full width.
   const wide = r.blocks.some((b) => b.kind === "html" && b.ok);
-  return shell(r.title, parts.join(""), wide);
+  const tail = writes
+    ? `<script type="application/json" id="cn-write-config">${r.writeConfigJson}</script><script>${WRITE_BRIDGE_JS}</script>`
+    : "";
+  return shell(r.title, parts.join(""), wide, tail);
 }
 
 /** The `/p` rendering of a published view: its own intro, and one neutral

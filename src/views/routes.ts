@@ -43,7 +43,21 @@ import {
   resolveBlocks,
   serializeNestData,
   type Principal,
+  type ResolvedBlock,
 } from "./core.js";
+import {
+  declaredWriteTo,
+  decideWriteTrust,
+  FRAME_TOKEN_RE,
+  frameTokenTag,
+  mintFrameToken,
+  rowsUrl,
+  viewWritesKillSwitch,
+  withWriteBridge,
+  writeConfigJson,
+  writeTargets,
+  type WriteFrames,
+} from "./write.js";
 import { renderViewPage, type LinkResolver } from "./render.js";
 import { callerRefResolver } from "../tables/refs.js";
 import {
@@ -216,6 +230,58 @@ async function loadServedView(c: any, tail: string): Promise<Gate> {
   return { served: { nestId, viewId, viewer, layout, served, viewApproved, pinned } };
 }
 
+/**
+ * View write-back: for each html block of the served layout that declares
+ * `write_to`, the targets the viewer's page may write through (write.ts).
+ * Empty — so the page carries no script — unless the served layout is an
+ * approved version, no kill switch is on, the viewer is a member (not a
+ * visibility-only reader), and the block passes decideWriteTrust. Whether
+ * the viewer may write a given table is the rows endpoint's call, per request.
+ */
+async function writeFramesFor(
+  s: Served,
+  blocks: ResolvedBlock[],
+): Promise<{ frames: WriteFrames; artifactVersions: Record<string, number> }> {
+  const none = { frames: {}, artifactVersions: {} };
+  if (!s.layout.meta || !s.viewApproved || s.served == null || s.viewer.approvedOnly) return none;
+  const killSwitch = viewDataKillSwitch() || viewWritesKillSwitch();
+  if (killSwitch) return none;
+  const declared = declaredWriteTo(s.layout.meta);
+  if (declared.size === 0) return none;
+  const frames: WriteFrames = {};
+  const artifactVersions: Record<string, number> = {};
+  let viewAuthors: string[] | null | undefined;
+  for (const b of blocks) {
+    if (!b.ok || b.kind !== "html") continue;
+    const writeTo = declared.get(b.id);
+    if (!writeTo) continue;
+    const targets = writeTargets(writeTo, blocks);
+    if (Object.keys(targets).length === 0) continue;
+    // The frame serves the artifact's approved version (readArtifact), so
+    // that version's chain is the code that would ask for the write.
+    const artVersion = await getApprovedVersion(s.nestId, b.artifactId);
+    if (viewAuthors === undefined) viewAuthors = await listVersionAuthors(s.nestId, s.viewId, s.served);
+    const artAuthors = artVersion != null ? await listVersionAuthors(s.nestId, b.artifactId, artVersion) : null;
+    const authorsIncomplete = viewAuthors === null || artAuthors === null;
+    const trust = decideWriteTrust({
+      killSwitch,
+      viewApproved: s.viewApproved,
+      artifactApproved: artVersion != null,
+      authors: authorsIncomplete ? [] : await authorInfos(s.nestId, [...viewAuthors!, ...artAuthors!]),
+      authorsIncomplete,
+    });
+    if (!trust.ok || artVersion == null) continue;
+    frames[b.id] = {
+      token: mintFrameToken(),
+      targets: Object.fromEntries(
+        Object.entries(targets).map(([dataBlock, tableId]) => [dataBlock, rowsUrl(s.nestId, tableId)]),
+      ),
+    };
+    artifactVersions[b.id] = artVersion;
+  }
+  return { frames, artifactVersions };
+}
+
 function viewerHeaders(c: any, served: number | null) {
   c.header("Cache-Control", "private, no-store");
   if (served != null) c.header("X-View-Snapshot", String(served));
@@ -230,6 +296,16 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
   const deps = createViewDeps();
   const blocks = s.layout.meta ? await resolveBlocks(s.layout.meta, s.nestId, [s.viewer], deps) : [];
   const q = s.pinned !== undefined ? `?v=${s.pinned}` : "";
+  const { frames: writeFrames, artifactVersions } = await writeFramesFor(s, blocks);
+  const writes = Object.keys(writeFrames).length > 0;
+  // A write frame's URL carries its token and the artifact version the trust
+  // check passed for; the frame echoes the token only when it serves exactly
+  // that approved version.
+  const writeQuery = (blockId: string) => {
+    const f = Object.prototype.hasOwnProperty.call(writeFrames, blockId) ? writeFrames[blockId] : null;
+    if (!f) return "";
+    return `${q ? "&" : "?"}wt=${f.token}&av=${artifactVersions[blockId]}`;
+  };
   // The resolver scans the whole nest; build it only when something will link.
   const links =
     s.layout.body.includes("[[") ||
@@ -240,11 +316,12 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
     blocks,
     resolveLink: links ? await viewerLinkResolver(s.nestId, s.viewer) : undefined,
     frameUrl: (blockId) =>
-      `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}`,
+      `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}${writeQuery(blockId)}`,
     truncated: !!s.layout.meta && s.layout.meta.blocks.length > CAPS.MAX_BLOCKS,
     invalidLayout: !s.layout.meta,
+    ...(writes ? { writeConfigJson: writeConfigJson(writeFrames) } : {}),
   });
-  c.header("Content-Security-Policy", VIEW_PAGE_CSP);
+  c.header("Content-Security-Policy", writes ? withWriteBridge(VIEW_PAGE_CSP) : VIEW_PAGE_CSP);
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
   viewerHeaders(c, s.served);
@@ -338,7 +415,26 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
       killSwitch,
     },
   });
-  const body = injectNestData(artifact.html, serializeNestData(data));
+  let body = injectNestData(artifact.html, serializeNestData(data));
+  // View write-back: echo the page's frame token (view/write.ts) only when
+  // this serve is exactly the approved artifact version the page's trust
+  // check passed for. Anything else — a malformed token, another version, a
+  // draft fallback — gets no token, so the bridge refuses its messages.
+  const wt = c.req.query("wt");
+  const av = Number(c.req.query("av"));
+  if (
+    typeof wt === "string" &&
+    FRAME_TOKEN_RE.test(wt) &&
+    Number.isInteger(av) &&
+    artifact.approved &&
+    artifact.version === av &&
+    !viewDataKillSwitch() &&
+    !viewWritesKillSwitch()
+  ) {
+    const marker = '<script type="application/json" id="nest-data">';
+    const at = body.indexOf(marker);
+    if (at >= 0) body = body.slice(0, at) + frameTokenTag(wt) + body.slice(at);
+  }
   applyArtifactSandboxHeaders(c, { popups: false });
   // Only this app's own view page may frame a data-carrying frame, whatever
   // FRAME_ANCESTORS allows the rest of the app (the global guard keeps a

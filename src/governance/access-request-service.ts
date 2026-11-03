@@ -781,7 +781,13 @@ export function writeTargetForPath(
     let tail = parts.slice(2);
     // A node id is at least "nodes/<slug>", so only a third segment can be an
     // action suffix (PATCH never carries one).
-    if (method !== "PATCH" && tail.length > 2 && NODE_ACTION_SUFFIXES.has(tail[tail.length - 1])) {
+    const last = tail[tail.length - 1];
+    if (
+      method !== "PATCH" &&
+      tail.length > 2 &&
+      // POST …/rows is a row write on the table node (tables/row-routes.ts).
+      (NODE_ACTION_SUFFIXES.has(last) || (method === "POST" && last === "rows"))
+    ) {
       tail = tail.slice(0, -1);
     }
     let id = tail.join("/");
