@@ -112,7 +112,7 @@ import {
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
 import { AppError, BillingConfirmError } from "../shared/errors.js";
-import { billingConfirmed } from "../auth/seats.js";
+import { billingConfirmed, confirmBillingToolField } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -128,6 +128,7 @@ import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
+  clientToolField,
   mergeClient,
   parseClientMetadata,
   type ClientMetadata,
@@ -488,12 +489,30 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edge_types_list",
 ]);
 
-/** The zod field for an `array` property in a tool's JSON schema, shared by
- *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
- *  (metacognition feeds, MCP servers): each item must be an object, its fields
- *  are the handler's parser's to check. Everything else is a list of strings. */
-export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+/** The zod field for an `array` property in a tool's JSON schema. A list of
+ *  objects (metacognition feeds, MCP servers): each item must be an object, its
+ *  fields are the handler's parser's to check. Everything else is strings. */
+function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
   return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
+/** A tool's JSON schema as its MCP zod shape, shared by the per-nest
+ *  (routes.ts) and server-level (server-routes.ts) surfaces. Caller attribution
+ *  (spec §9.4) and billing confirm ride on every tool, declared once here. */
+export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
+  const props = (inputSchema as any)?.properties || {};
+  const required: string[] = (inputSchema as any)?.required || [];
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
+    let field: z.ZodTypeAny;
+    if (def.type === "string") field = z.string();
+    else if (def.type === "number") field = z.number();
+    else if (def.type === "array") field = arrayToolField(def);
+    else field = z.any();
+    if (!required.includes(key)) field = field.optional();
+    shape[key] = field;
+  }
+  return Object.assign(shape, clientToolField, confirmBillingToolField);
 }
 
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at

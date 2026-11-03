@@ -10,7 +10,7 @@ import {
   TOOL_DEFINITIONS,
   MCP_READ_TOOLS,
   MCP_ADMIN_TOOLS,
-  arrayToolField,
+  toolShape,
   handleToolCall,
   toCallToolResult,
 } from "./tools.js";
@@ -23,12 +23,9 @@ import { surfacesEnabled } from "../surfaces/flags.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
 } from "../shared/client-metadata.js";
-import { confirmBillingToolField } from "../auth/seats.js";
 import { config } from "../config.js";
-import { z } from "zod";
 import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -103,27 +100,8 @@ function createMcpServerForNest(
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-
-    for (const [key, def] of Object.entries(props) as Array<
-      [string, any]
-    >) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = arrayToolField(def);
-      else field = z.any();
-
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Caller attribution rides on EVERY tool (spec §9.4) — declared here
-    // rather than in each tool's inputSchema, so no tool can be added without
-    // it and the divergence guard sees no new inline schema. Validated against
-    // the engine's own schema inside handleToolCall.
-    Object.assign(shape, clientToolField, confirmBillingToolField);
+    // `client` is validated against the engine's own schema in handleToolCall.
+    const shape = toolShape(tool.inputSchema);
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
