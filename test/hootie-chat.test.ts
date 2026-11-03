@@ -1644,12 +1644,15 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
   });
 
-  it("unknown tool calls count against the cap — a model inventing tools can't loop", async () => {
+  it("an unknown tool call is a rejected call — a model inventing tools can't loop", async () => {
     const bogus = { name: "delete_everything", input: {} };
-    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
+    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
     const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
-    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
-    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
+    // The first invented name makes the rest of the turn answer-only.
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "none"]);
+    const done = events.find((e) => e.event === "done")!.data;
+    expect(done.answer).toBe("Done.");
+    expect(done.answer_only).toBe("rejected_call");
   });
 
   it("a model or gateway that rejects tools still answers — broadening a weak first retrieval itself", async () => {
