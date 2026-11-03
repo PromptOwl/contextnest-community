@@ -2052,6 +2052,7 @@ export function DocumentsTab({
         folders={allFolders}
         canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
         canDelete={selectedNodes.every((n) => canManage || isMine(n))}
+        canSubmit={stewardshipEnabled && selectedNodes.some((n) => n.status === "draft" && canEditNode(n))}
         onClear={() => setSelected(new Map())}
         onDone={fetchData}
       />
