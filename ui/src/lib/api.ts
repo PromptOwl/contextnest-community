@@ -4254,12 +4254,19 @@ export type HootieMention =
     }
   | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
 
-/** What Hootie is doing mid-answer: `tool` is `search_nest` (a search the
- *  model asked for) or `broaden` (the server's own broader search). */
+/** What Hootie is doing mid-answer: `tool` is the tool that's running
+ *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's
+ *  own broader search). `text` is a server template; `node`, when present,
+ *  is the document the line names. */
 export interface HootieStatus {
   tool: string;
   text: string;
+  node?: { id: string; title: string };
 }
+
+/** Why a turn ran without tools: the model connection refused them, or the
+ *  model asked for something it may not have and the turn stopped looking. */
+export type HootieAnswerOnly = "tools_refused" | "rejected_call";
 
 export interface HootieTurn {
   role: "user" | "assistant";
@@ -4287,6 +4294,8 @@ export async function chatWithHootie(
       answer: string;
       cited: HootieNode[];
       mention: HootieMention | null;
+      answer_only?: HootieAnswerOnly | null;
+      trail?: { searches: number; reads: number; broadened: boolean };
     }) => void;
     error?: (message: string) => void;
   },

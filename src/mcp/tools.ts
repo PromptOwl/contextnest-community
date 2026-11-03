@@ -152,6 +152,9 @@ import {
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
 const MAX_HOPS = 10;
+/** context_review_queue: rows read-checked per call, and rows listed. */
+const REVIEW_QUEUE_SCAN = 200;
+const REVIEW_QUEUE_PAGE = 50;
 
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
@@ -4334,25 +4337,71 @@ async function runTool(
 
     case "context_review_queue": {
       const status = args.status || "pending";
+      // The same gate as REST /review-queue (CU-wdqcq05rz6): a visibility-only
+      // reader sees their OWN requests, not everyone's — a request names an
+      // unapproved draft. Everyone else sees only the rows whose document
+      // they can read (a share-only caller, for one). Enforced here, in the
+      // op, so every MCP caller and Hootie get the same answer.
+      const ownOnly = await isPublicReader(nestId, ctx.userId);
+      // Own-only is filtered in SQL, so its total is exact. Otherwise the
+      // readability filter runs over a bounded window BEFORE paging, and the
+      // total counts only readable rows in it — never a row this caller may
+      // not see (security r2 N2), never stuck at one page either.
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : { limit: REVIEW_QUEUE_SCAN }),
       });
+      let readableRows = result.requests;
+      let total = result.total;
+      if (!ownOnly) {
+        const readable = new Set(
+          (
+            await filterAccessible(
+              nestId,
+              ctx.userId,
+              userEmail,
+              readableRows.map((r) => ({ id: r.nodeId })),
+            )
+          ).map((n) => n.id),
+        );
+        // ponytail: past REVIEW_QUEUE_SCAN rows the count is a floor; page in SQL if queues get that big.
+        readableRows = readableRows.filter((r) => readable.has(r.nodeId));
+        total = readableRows.length;
+      }
+      const requests = readableRows.slice(0, REVIEW_QUEUE_PAGE);
 
-      if (result.requests.length === 0) {
+      if (requests.length === 0) {
         return status === "pending"
           ? "No documents pending review. All caught up!"
           : `No reviews with status "${status}".`;
       }
 
-      const list = result.requests
+      const list = requests
         .map(
           (r, i) =>
             `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
-      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+      const more = total > requests.length ? `\n\nShowing the first ${requests.length}.` : "";
+      return {
+        text: `# Review Queue (${status})\n**${total} item(s)**\n\n${list}${more}`,
+        // The rows the prose lists, by node id — only rows this caller may
+        // see (above), so a caller can act on them without parsing prose.
+        data: {
+          total,
+          requests: requests.map((r) => ({
+            nodeId: r.nodeId,
+            title: r.title ?? null,
+            version: r.version,
+            priority: r.priority,
+            requestedBy: r.requestedBy,
+            requestedAt: r.requestedAt,
+            ...(r.requestNote ? { requestNote: r.requestNote } : {}),
+          })),
+        },
+      };
     }
 
     case "context_my_drafts": {
