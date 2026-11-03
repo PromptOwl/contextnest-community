@@ -23,7 +23,7 @@
  * holds no privilege of its own here — the request carries the viewer's own
  * session, and the checks above are the viewer's.
  */
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { engineCache } from "../nodes/engine.js";
@@ -32,7 +32,7 @@ import { canReadNode, resolveCallerEmail } from "../governance/access-guard.js";
 import * as versions from "../governance/version-service.js";
 import * as reviews from "../governance/review-service.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, type ClientMetadata } from "../shared/client-metadata.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { applyRowOps, parseRowOps } from "./row-ops.js";
@@ -41,16 +41,19 @@ export const tableRowRoutes = new Hono<AuthEnv>();
 
 const MAX_CHANGE_NOTE = 500;
 
-function conflict(c: Context<AuthEnv>, base: number, current: number) {
-  return c.json(
-    {
+/** What a row write answers: 200 with the result, or 409 with the conflict. */
+export type TableRowsOutcome = { status: 200 | 409; body: Record<string, unknown> };
+
+function conflict(base: number, current: number): TableRowsOutcome {
+  return {
+    status: 409,
+    body: {
       error: "Version conflict",
       message: `The table changed (now v${current}, you sent v${base}). Reload it and try again.`,
       base_version: base,
       current_version: current,
     },
-    409,
-  );
+  };
 }
 
 /**
@@ -77,11 +80,6 @@ export async function readStable(
 }
 
 tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
-  const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
-  const userId = c.get("userId");
-  if (!config.TYPE_TABLE_ENABLED) throw new ValidationError("Table nodes are turned off on this server (TYPE_TABLE_ENABLED=false).");
-
   let body: Record<string, unknown>;
   try {
     body = await c.req.json();
@@ -89,6 +87,28 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     throw new ValidationError("Body must be JSON: { ops: [...] }");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("Body must be a JSON object");
+  const out = await writeTableRows(c.req.param("nestId")!, c.req.param("nodeId")!, body, {
+    userId: c.get("userId"),
+    client: attributeRequest(c, body.client),
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json(out.body, out.status);
+});
+
+/**
+ * Row ops on a table node as `caller`: the body of POST …/rows, shared with
+ * MCP `context_table_rows`. Bad input throws ValidationError; an unreadable or
+ * missing node throws NotFoundError. Write permission is the caller's surface
+ * gate (the nest guard for REST, the per-node edit check for MCP).
+ */
+export async function writeTableRows(
+  nestId: string,
+  nodeId: string,
+  body: Record<string, unknown>,
+  caller: { userId: string; client?: ClientMetadata; baseUrl?: string },
+): Promise<TableRowsOutcome> {
+  const { userId, client } = caller;
+  if (!config.TYPE_TABLE_ENABLED) throw new ValidationError("Table nodes are turned off on this server (TYPE_TABLE_ENABLED=false).");
   const ops = parseRowOps(body.ops);
   const base = body.base_version;
   if (base !== undefined && !(typeof base === "number" && Number.isInteger(base) && base >= 0)) {
@@ -98,7 +118,6 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
   if (note !== undefined && (typeof note !== "string" || note.length > MAX_CHANGE_NOTE)) {
     throw new ValidationError(`change_note must be a string of at most ${MAX_CHANGE_NOTE} characters`);
   }
-  const client = attributeRequest(c, body.client);
 
   const userEmail = await resolveCallerEmail(userId);
   // A node the caller cannot read is a 404, like a missing one.
@@ -121,7 +140,7 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     () => versions.getCurrentVersion(nestId, nodeId),
     async () => (await storage.readDocument(nodeId)).body || "",
   );
-  if (base !== undefined && base !== head) return conflict(c, base, head);
+  if (base !== undefined && base !== head) return conflict(base, head);
 
   // The working copy may be someone else's unreviewed draft. Building on it
   // would fold their unseen edits into this write (and, with submit_review,
@@ -133,14 +152,14 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     String(headRow.status) === "draft" &&
     String(headRow.editedBy ?? "").toLowerCase() !== userEmail.toLowerCase()
   ) {
-    return c.json(
-      {
+    return {
+      status: 409,
+      body: {
         error: "This table has an unreviewed draft by someone else. Ask them to submit or discard it, then try again.",
         code: "draft_in_progress",
         current_version: head,
       },
-      409,
-    );
+    };
   }
 
   const applied = applyRowOps(current, ops);
@@ -148,7 +167,7 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
   const stateOf = async (v: number) =>
     (await versions.getApprovedVersion(nestId, nodeId)) === v ? "published" : "draft";
   if (!applied.changed) {
-    return c.json({ table: nodeId, version: head, state: await stateOf(head), applied: counts, unchanged: true });
+    return { status: 200, body: { table: nodeId, version: head, state: await stateOf(head), applied: counts, unchanged: true } };
   }
 
   let version: number;
@@ -168,7 +187,7 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     // expectHead refused: someone wrote between our read and the lock.
     if (err instanceof ConflictError) {
       const now = await versions.getCurrentVersion(nestId, nodeId);
-      if (now !== head) return conflict(c, base ?? head, now);
+      if (now !== head) return conflict(base ?? head, now);
     }
     throw err;
   }
@@ -191,7 +210,7 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
           version,
           requestedBy: userEmail,
           note: (note as string | undefined) ?? describe(counts),
-          baseUrl: requestBaseUrl(c.req.url),
+          baseUrl: caller.baseUrl,
           client,
         });
         reviewId = request.id;
@@ -201,15 +220,18 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
     }
   }
 
-  return c.json({
-    table: nodeId,
-    version,
-    state,
-    applied: counts,
-    ...(reviewId ? { review_id: reviewId } : {}),
-    ...(reviewError ? { review_error: reviewError } : {}),
-  });
-});
+  return {
+    status: 200,
+    body: {
+      table: nodeId,
+      version,
+      state,
+      applied: counts,
+      ...(reviewId ? { review_id: reviewId } : {}),
+      ...(reviewError ? { review_error: reviewError } : {}),
+    },
+  };
+}
 
 function describe(n: { appended: number; updated: number; deleted: number }): string {
   const parts: string[] = [];

@@ -976,7 +976,7 @@ Streamable HTTP, stateless. Two endpoints:
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`

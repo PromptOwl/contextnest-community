@@ -68,6 +68,7 @@ import {
   type InstructionsRevision,
 } from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
+import { writeTableRows } from "../tables/row-routes.js";
 import { tableRefProse, tableRefReport } from "../tables/refs.js";
 import {
   addComment,
@@ -672,6 +673,27 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["table"],
+    },
+  },
+  {
+    name: "context_table_rows",
+    description:
+      "Change rows of a TABLE node by its :key column: append, update or delete. Typed against the header and all-or-nothing. Lands as a draft on a governed nest (submit_review to send it for review), published otherwise. Twin of REST POST …/rows.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        table: { type: "string", description: 'The table node — "[[Title]]" or a node id like nodes/pipeline' },
+        ops: {
+          type: "array",
+          description:
+            'Up to 100 ops, applied in order: {"op":"append","row":{col:value}} | {"op":"update","key":"<key>","set":{col:value}} | {"op":"delete","key":"<key>"}',
+          items: { type: "object" },
+        },
+        base_version: { type: "number", description: "The head version you read; a different head is refused as a conflict." },
+        submit_review: { type: "boolean", description: "On a governed nest, submit the draft for review." },
+        change_note: { type: "string", description: "Version note (max 500 chars)." },
+      },
+      required: ["table", "ops"],
     },
   },
   {
@@ -3627,6 +3649,40 @@ async function runTool(
           ...fields,
           ...(tableRefs ? { table_refs: tableRefs } : {}),
         },
+      };
+    }
+
+    case "context_table_rows": {
+      const ref = String(args.table ?? "").trim();
+      const title = /^\[\[(.+)\]\]$/.exec(ref)?.[1];
+      const node = await resolveTargetNode(storage, title ? { title } : { id: ref });
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // PRIMARY write gate, as context_update: the /mcp transport admits read-tier callers.
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to edit "${node.frontmatter.title}": ${editCheck.reason}`,
+          { type: "node", id: node.id },
+        );
+      }
+      let out: Awaited<ReturnType<typeof writeTableRows>>;
+      try {
+        out = await writeTableRows(nestId, node.id, args, { userId, client: ctx.client });
+      } catch (err) {
+        return contributorError(err);
+      }
+      const r = out.body as Record<string, any>;
+      if (out.status === 409) {
+        const text = String(r.message ?? r.error);
+        return toolError(text, "VALIDATION_FAILED", { conflict: true, current_version: r.current_version, ...(r.code ? { reason: r.code } : {}) });
+      }
+      const a = r.applied;
+      return {
+        text: r.unchanged
+          ? `No change: ${node.frontmatter.title} already has those values (v${r.version}).`
+          : `Rows updated in **${node.frontmatter.title}** — ${a.appended} added, ${a.updated} updated, ${a.deleted} deleted; v${r.version}, ${r.state}${r.review_id ? `, review ${r.review_id}` : ""}${r.review_error ? ` (review not submitted: ${r.review_error})` : ""}`,
+        data: r,
       };
     }
 
