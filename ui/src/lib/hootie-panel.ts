@@ -3,6 +3,7 @@
  * hootie-panel.test.ts). The panel component stays about the conversation.
  */
 import type { HootieBrand } from "./api";
+import { WIKI_LINK, citationResolver, splitWikiLink, type CitableNode } from "../../../src/hootie/citations";
 
 export const HOOTIE_PANEL_MIN = 340;
 export const HOOTIE_PANEL_MAX = 720;
@@ -66,4 +67,31 @@ export function hootieAccentStyle(accent: string | null): { backgroundColor: str
 /** The greeting line: the admin's, or "Hi, I'm <name>". */
 export function hootieGreeting(brand: HootieBrand): string {
   return brand.greeting?.trim() || `Hi, I'm ${brand.name}`;
+}
+
+// ─── Citations ───────────────────────────────────────────────────────────
+// The panel resolves `[[X]]` with the server's own module (pure, no imports),
+// so the chips can never disagree with the server's `cited`.
+export type { CitableNode };
+
+/** Escape text for a markdown link label. */
+function escapeLabel(s: string): string {
+  return s.replace(/[\\[\]]/g, (c) => `\\${c}`);
+}
+
+/**
+ * The answer as markdown for the bubble: each `[[X]]` that resolves against
+ * `cited` becomes a `[Title](#cite:<id>)` link (the bubble renders those as
+ * chips; an alias, `[[X|alias]]`, is shown instead of the title), and every
+ * other one becomes its plain text — no brackets, nothing that looks
+ * clickable but isn't. `cited` is undefined while the answer streams.
+ */
+export function linkCitations(content: string, cited: readonly CitableNode[] | undefined): string {
+  const resolve = citationResolver(cited ?? []);
+  return content.replace(WIKI_LINK, (_whole, inner: string) => {
+    const { target, label } = splitWikiLink(inner);
+    const n = resolve(target);
+    if (!n) return label ?? target;
+    return `[${escapeLabel(label ?? n.title)}](#cite:${encodeURIComponent(n.id)})`;
+  });
 }

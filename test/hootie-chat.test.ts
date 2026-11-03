@@ -1093,3 +1093,177 @@ describe("POST /nests/:id/chat — the model's provider picks the key (byok)", (
     }
   });
 });
+
+// ─── Ticket A: an HTML artifact open, and every [[link]] in the answer ───
+// Engineering Ops task: community-nest-hootie-works-with-an-html-artifact-open-
+// and-every-link-in-its-answers-renders.
+describe("POST /nests/:id/chat — artifact anchor and citation links", () => {
+  let app: any;
+  let owner: { apiKey: string; email: string; userId: string };
+  let stranger: { apiKey: string; email: string; userId: string };
+  let nestId: string;
+
+  /** A dashboard page whose raw HTML is far over the 6,000-token budget
+   *  (~40 KB), almost all of it script and style. */
+  function bigDashboardHtml(): string {
+    const script = `var SCRIPT_SENTINEL_${"x".repeat(10)} = 1;\n`.repeat(900);
+    const style = `.STYLE_SENTINEL { color: #123456; }\n`.repeat(200);
+    return [
+      "<!doctype html>",
+      "<html><head><title>Project Dashboard</title>",
+      `<style>${style}</style>`,
+      `<script>${script}</script>`,
+      "</head><body>",
+      "<h1>Project November</h1>",
+      "<p>Status: <b>Blocked</b> on vendor contract &amp; legal review &mdash; owner Dana.</p>",
+      "<ul><li>Gate G1: Nov&nbsp;6</li><li>Pilot users: 12</li></ul>",
+      "<template><p>TEMPLATE_SENTINEL</p></template>",
+      "<noscript>NOSCRIPT_SENTINEL</noscript>",
+      "<!-- COMMENT_SENTINEL -->",
+      "<p>See [[Dashboard Notes]] for context.</p>",
+      `<script type="module">import x from "./y.js"; MODULE_SENTINEL()</script>`,
+      "</body></html>",
+    ].join("\n");
+  }
+
+  beforeAll(async () => {
+    setupTestEnv();
+    process.env.HOOTIE_ENABLED = "true";
+    app = await createTestApp("key", { features: ["byok"], gateway: TEST_GATEWAY });
+    owner = await registerUser(app, "artifact-owner@acme.com", "Owner");
+    await resetAuthRateLimit();
+    stranger = await registerUser(app, "artifact-stranger@acme.com", "Stranger");
+    await resetAuthRateLimit();
+    nestId = (await jsonRequest(app, "POST", "/nests", { name: "Artifact Nest" }, owner.apiKey)).data.nest.id;
+  });
+
+  afterAll(() => {
+    delete process.env.HOOTIE_ENABLED;
+  });
+
+  async function create(nest: string, body: Record<string, unknown>): Promise<string> {
+    const r = await jsonRequest(app, "POST", `/nests/${nest}/nodes`, body, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data).slice(0, 200)).toBeLessThan(300);
+    return r.data.node.id;
+  }
+  async function prime(nest: string) {
+    await jsonRequest(app, "POST", `/nests/${nest}/context`, { selector: "#none" }, owner.apiKey);
+  }
+
+  it("answers with an oversized HTML artifact open: 200, its visible text reaches the model, its script/style never do", async () => {
+    const dashId = await create(nestId, { title: "Project Dashboard", type: "artifact", content: bigDashboardHtml() });
+    await create(nestId, {
+      title: "Dashboard Notes",
+      content: "# Notes\n\nThe [[Project Dashboard]] is refreshed every Monday by NOTES_SENTINEL.",
+    });
+    await prime(nestId);
+
+    scriptedAnswer = "The vendor contract is blocked.";
+    const { status, events } = await chat(app, nestId, { message: "what is blocked?", node_id: dashId }, owner.apiKey);
+    expect(status).toBe(200);
+    expect(events.map((e) => e.event)).toContain("done");
+    const meta = events.find((e) => e.event === "meta")!;
+    expect(meta.data.anchor).toEqual(expect.objectContaining({ id: dashId, title: "Project Dashboard" }));
+
+    const system = lastModelCall!.system;
+    // The page's visible text, entities decoded …
+    expect(system).toContain("Blocked on vendor contract & legal review — owner Dana.");
+    expect(system).toContain("Gate G1: Nov 6");
+    // … none of what the browser doesn't show, and no markup …
+    for (const hidden of [
+      "SCRIPT_SENTINEL",
+      "STYLE_SENTINEL",
+      "MODULE_SENTINEL",
+      "TEMPLATE_SENTINEL",
+      "NOSCRIPT_SENTINEL",
+      "COMMENT_SENTINEL",
+    ]) {
+      expect(system, hidden).not.toContain(hidden);
+    }
+    expect(system).not.toMatch(/<\/?(?:p|li|ul|h1|body|html|script|style)\b/i);
+    // … and the neighbour it links to still made it in.
+    expect(system).toContain("NOTES_SENTINEL");
+  });
+
+  it("an anchor larger than its own budget is trimmed with a visible marker — never dropped — and neighbours still fill the rest", async () => {
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Huge Anchor" }, owner.apiKey)).data.nest.id;
+    // ~60 KB of visible text: no amount of tag-stripping makes it fit.
+    const filler = "The quarterly plan covers every region in detail. ".repeat(1200);
+    const hugeId = await create(nest, {
+      title: "Huge Plan",
+      content: `# Huge Plan\n\nHEAD_SENTINEL opens the plan. See [[Plan Appendix]].\n\n${filler}\n\nTAIL_SENTINEL closes it.`,
+    });
+    await create(nest, { title: "Plan Appendix", content: "# Appendix\n\nAPPENDIX_SENTINEL: the budget table." });
+    await prime(nest);
+
+    scriptedAnswer = "It covers every region.";
+    const { status, events } = await chat(app, nest, { message: "summarise this", node_id: hugeId }, owner.apiKey);
+    expect(status).toBe(200);
+    expect(events.find((e) => e.event === "meta")!.data.anchor.id).toBe(hugeId);
+    const system = lastModelCall!.system;
+    expect(system).toContain("HEAD_SENTINEL");
+    expect(system).not.toContain("TAIL_SENTINEL");
+    expect(system).toContain("[trimmed");
+    expect(system).toContain("APPENDIX_SENTINEL");
+    // Bounded: the anchor was cut to its budget, not passed through whole.
+    expect(system.length).toBeLessThan(filler.length);
+  });
+
+  it("an unreadable or missing anchor is still the same 404 — an oversized artifact draft included", async () => {
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Artifact Oracle" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    const draftId = await create(nest, { title: "Secret Dashboard", type: "artifact", content: bigDashboardHtml() });
+
+    lastModelCall = null;
+    const hidden = await chatRaw(app, nest, { message: "what's this?", node_id: draftId }, stranger.apiKey);
+    const missing = await chatRaw(app, nest, { message: "what's this?", node_id: "nodes/no-such-node" }, stranger.apiKey);
+    expect(hidden.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(hidden.text).toBe(missing.text);
+    expect(JSON.parse(hidden.text)).toEqual({ error: "Node not found" });
+    expect(lastModelCall).toBeNull();
+  });
+
+  it("cites a retrieved node by its slug or its full id, and by its title through case, dash and quote variants", async () => {
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Link Forms" }, owner.apiKey)).data.nest.id;
+    const hubId = await create(nest, {
+      title: "Launch Hub",
+      content: "# Hub\n\nSee [[Live Dashboard Page]], [[Q3 Plan — Owner’s Review]] and [[Pricing “Draft” Notes]].",
+    });
+    const liveId = await create(nest, { title: "Live Dashboard Page", content: "# Live\n\nThe live one." });
+    const planId = await create(nest, { title: "Q3 Plan — Owner’s Review", content: "# Plan\n\nOwner review." });
+    const priceId = await create(nest, { title: "Pricing “Draft” Notes", content: "# Pricing\n\nDraft." });
+    await prime(nest);
+    const liveSlug = liveId.split("/").pop()!;
+
+    scriptedAnswer = [
+      `Open [[${liveSlug}]] (also [[${liveId}]]).`,
+      "Then [[q3 plan - owner's review]] and [[  PRICING \"draft\" NOTES ]].",
+      "The hub is [[Launch Hub|the hub]].",
+    ].join(" ");
+    const { status, events } = await chat(app, nest, { message: "where is everything?", node_id: hubId }, owner.apiKey);
+    expect(status).toBe(200);
+    const done = events.find((e) => e.event === "done")!;
+    // In order of first mention, each node once.
+    expect(done.data.cited.map((n: any) => n.id)).toEqual([liveId, planId, priceId, hubId]);
+  });
+
+  it("a [[link]] to nothing retrieved — or to a node the caller can't read — is never cited", async () => {
+    // Public nest: A is published before stewardship turns on; B is a draft
+    // a public reader can't see, linked from A so it is one hop away.
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Gated Links" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${nest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    const aId = await create(nest, { title: "Open Doc", content: "# Open\n\nRelated: [[Hidden Draft]]." });
+    await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    const bId = await create(nest, { title: "Hidden Draft", content: "# Hidden\n\nHIDDEN_SENTINEL" });
+    await prime(nest);
+
+    scriptedAnswer = `See [[Open Doc]], [[Hidden Draft]], [[${bId}]], [[${bId.split("/").pop()}]] and [[Something not retrieved]].`;
+    const { status, events } = await chat(app, nest, { message: "what is related?", node_id: aId }, stranger.apiKey);
+    expect(status).toBe(200);
+    expect(lastModelCall!.system).not.toContain("HIDDEN_SENTINEL");
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.cited.map((n: any) => n.id)).toEqual([aId]);
+  });
+});

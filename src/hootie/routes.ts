@@ -30,8 +30,12 @@ import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLab
 import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
+  approxTokens,
   type ContextNodeSummary,
+  type ContextResult,
 } from "../nodes/context-service.js";
+import { artifactText, isHtmlBody, trimToTokens } from "./artifact-text.js";
+import { citedNodes } from "./citations.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
@@ -62,6 +66,12 @@ const MAX_HISTORY_CHARS = 8000;
 const MAX_HISTORY_RAW = MAX_HISTORY_TURNS * 4;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
+/** The open document's own budget: over it, the document is cut (and says
+ *  so), never dropped. */
+const ANCHOR_BUDGET = 6000;
+/** Room its neighbours always get, however much of the budget the open
+ *  document took. */
+const NEIGHBOUR_FLOOR = 1500;
 /** How Hootie's own retrievals are attributed in the activity log. */
 const HOOTIE_CLIENT: ClientMetadata = { agent: "hootie" };
 /**
@@ -166,13 +176,13 @@ hootieRoutes.post("/chat", async (c) => {
   const nodes: ContextNodeSummary[] = [];
   const blocks: string[] = [];
   const seen = new Set<string>();
-  const take = (r: Awaited<ReturnType<typeof resolveContext>>) => {
+  const take = (r: ContextResult) => {
     for (let i = 0; i < r.nodes.length; i++) {
       const n = r.nodes[i];
       if (seen.has(n.id)) continue;
       seen.add(n.id);
       nodes.push(n);
-      blocks.push(r.blocks[i].markdown);
+      blocks.push(modelBlock(r.blocks[i]).markdown);
     }
   };
 
@@ -181,13 +191,20 @@ hootieRoutes.post("/chat", async (c) => {
     // Anchored by ID — `[[nodes/…]]` is the id-style wiki target — never by
     // title: titles aren't unique, and a same-titled sibling must not lead
     // the context for a document the person doesn't have open.
-    // hops: 1 — the document plus what it links to and what links to it.
     // include_drafts: the person has this document OPEN — very often the
     // draft they are writing — and "is this right?" has to be about the text
     // in front of them, not the last approved version. filterAccessible and
     // resolveReadableBody still decide what this caller may see of it (a
     // public reader gets the approved body, or nothing).
-    const r = await resolveContext({
+    //
+    // Two passes. The document alone first (hops: 0): a one-document result
+    // is never budgeted away — resolveContext lets its only match through
+    // oversized — so a large anchor (an HTML dashboard) can't be skipped in
+    // favour of its smaller neighbours. It is then reduced to text and cut
+    // to its own budget here. Then its neighbours (hops: 1) in the budget the
+    // anchor left, never less than NEIGHBOUR_FLOOR.
+    const anchorSelector = `[[${nodeId}]]`;
+    const own = await resolveContext({
       nestId,
       userId,
       baseUrl,
@@ -195,20 +212,37 @@ hootieRoutes.post("/chat", async (c) => {
       // read, so the activity log tells it apart from the person opening
       // the document themselves.
       client: HOOTIE_CLIENT,
-      body: {
-        selector: `[[${nodeId}]]`,
-        hops: 1,
-        max_tokens: CONTEXT_BUDGET,
-        include_drafts: true,
-      },
+      body: { selector: anchorSelector, hops: 0, max_tokens: ANCHOR_BUDGET, include_drafts: true },
     });
-    anchor = r.nodes.find((n) => n.id === nodeId) ?? null;
+    const at = own.nodes.findIndex((n) => n.id === nodeId);
     // Not in the gated result = not a document this caller can ask about.
     // One answer for "doesn't exist" and "exists, but not for you": the
     // node_id is caller-supplied, and the gate must not double as an
     // existence oracle. Checked before anything is retrieved for the model.
-    if (!anchor) return c.json({ error: "Node not found" }, 404);
-    take(r);
+    if (at < 0) return c.json({ error: "Node not found" }, 404);
+    anchor = own.nodes[at];
+    const anchorBlock = modelBlock(own.blocks[at], ANCHOR_BUDGET).markdown;
+    seen.add(anchor.id);
+    nodes.push(anchor);
+    blocks.push(anchorBlock);
+
+    // In the neighbour pass the anchor is again first in line and always
+    // fits (its raw size is added to the budget), so the neighbours get
+    // exactly the room left.
+    const room = Math.max(NEIGHBOUR_FLOOR, CONTEXT_BUDGET - approxTokens(anchorBlock));
+    const near = await resolveContext({
+      nestId,
+      userId,
+      baseUrl,
+      client: HOOTIE_CLIENT,
+      body: {
+        selector: anchorSelector,
+        hops: 1,
+        max_tokens: room + approxTokens(own.blocks[at].markdown),
+        include_drafts: true,
+      },
+    });
+    take(near);
   }
   // The question itself. @names are colleagues, not search terms — strip
   // them so a mention doesn't drag in every document that quotes an email.
@@ -291,6 +325,8 @@ hootieRoutes.post("/chat", async (c) => {
     }
 
     if (cancel.signal.aborted) return;
+    // Only what was retrieved for this caller can be cited: a [[link]] to
+    // anything else stays text (see citations.ts for how a link matches).
     const cited = citedNodes(answer, nodes);
 
     let mention: MentionOutcome | null = null;
@@ -391,6 +427,7 @@ function buildSystemPrompt(params: {
     "",
     "Answer from the documents below and nothing else. They are the governed context this person is allowed to read; do not invent facts that are not in them.",
     "When you use a document, cite it by its exact title as a wiki link, like [[Title]] — this is how the reader opens it. Cite every document you drew on, and only those.",
+    "Documents shown as web pages have been reduced to their visible text. A document marked [trimmed] continues beyond what is shown here; say so if the answer may lie in the part you can't see.",
     "If the documents do not answer the question, say so plainly and, if you can, point to which document comes closest or what to search for. Do not guess.",
     "Be concise and direct. Use short paragraphs or a short list; no preamble.",
     "Names written as @someone in the message are colleagues the person is looping in — they are not questions for you, and you should not address them.",
@@ -411,35 +448,21 @@ function buildSystemPrompt(params: {
 }
 
 /**
- * Which of the retrieved nodes the answer cites, in order of first mention.
- * A citation is the node's exact title as a [[wiki link]] (case-insensitive),
- * which is what the system prompt asks for and what the panel turns into a
- * chip.
- *
- * Titles aren't unique. When two retrieved nodes share the cited title, the
- * citation resolves to ONE of them — the first in `nodes` order, which is the
- * open document if it is one, else the higher-ranked match — never both: a
- * doubled citation would put two chips on one reference, and the mention
- * anchor below would land on a coin flip. The pick is deterministic and the
- * best-ranked candidate; the chip carries the id, so it is never a mystery
- * which one it was.
+ * A retrieved block as the model gets it. An HTML page (an artifact) is
+ * reduced to its visible text — the model reads what the person sees, not
+ * the scripts and styles around it. With `maxTokens`, the block is cut to
+ * that size with a visible marker rather than left out.
  */
-function citedNodes(
-  answer: string,
-  nodes: ContextNodeSummary[],
-): ContextNodeSummary[] {
-  const lower = answer.toLowerCase();
-  const seenTitles = new Set<string>();
-  const hits: Array<{ n: ContextNodeSummary; at: number }> = [];
-  for (const n of nodes) {
-    const key = n.title.toLowerCase();
-    if (seenTitles.has(key)) continue;
-    const at = lower.indexOf(`[[${key}]]`);
-    if (at < 0) continue;
-    seenTitles.add(key);
-    hits.push({ n, at });
+function modelBlock(
+  block: ContextResult["blocks"][number],
+  maxTokens?: number,
+): { markdown: string } {
+  let body = block.body;
+  if (isHtmlBody(block.type, body)) body = artifactText(body);
+  if (maxTokens !== undefined) {
+    body = trimToTokens(body, Math.max(50, maxTokens - approxTokens(block.header))).text;
   }
-  return hits.sort((a, b) => a.at - b.at).map((x) => x.n);
+  return { markdown: block.header + body };
 }
 
 /**
