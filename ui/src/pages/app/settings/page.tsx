@@ -621,7 +621,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
 
   // Same alphabet and length the server serves (OPENAI_APPS_CHALLENGE_RE in
   // src/config.ts); checked here so a bad paste is flagged before the 400.
-  const openaiToken = (draft.openai_apps_challenge ?? "").trim();
+  const openaiToken = (draft?.openai_apps_challenge ?? "").trim();
   const openaiTokenError =
     openaiToken && !/^[A-Za-z0-9._-]{1,512}$/.test(openaiToken)
       ? "Paste the token exactly as OpenAI shows it: letters, digits, dashes, underscores or dots, no spaces."
