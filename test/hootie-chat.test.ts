@@ -139,7 +139,18 @@ const TEST_GATEWAY = { baseUrl: "http://127.0.0.1:9", key: "sk-po-test", default
  * it writes, and the tool calls it ends on. When the list runs out, a round
  * answers with `scriptedAnswer` as before.
  */
-let scriptedRounds: Array<{ text?: string; calls?: Array<{ name: string; input: unknown }> }> = [];
+let scriptedRounds: Array<{
+  /** A function writes from what the round was sent — a model echoing what
+   *  its tools returned. */
+  text?: string | ((messages: any[]) => string);
+  calls?: Array<{ name: string; input: unknown }>;
+  /** Runs after the round's text, before it hands back its tool calls —
+   *  something that happens "between rounds" (a removal mid-turn). */
+  after?: () => Promise<void>;
+}> = [];
+/** Runs at the start of every round the route asks for (1-based), before
+ *  the round can be refused — e.g. a removal before a tools-refused round. */
+let beforeRound: ((n: number) => Promise<void>) | null = null;
 /** Every round the route asked for, in order — what the model was sent. */
 let modelRounds: Array<{ system: string; messages: any[]; tools: string[]; toolChoice?: string }> = [];
 /** When true, any round offered tools is refused as a gateway would. */
@@ -175,8 +186,31 @@ async function* scriptedText(signal?: AbortSignal): AsyncGenerator<string> {
   yield scriptedAnswer.slice(mid);
 }
 
+/** Calls to the in-turn access re-check (src/hootie/access.ts), 1-based. */
+let accessChecks = 0;
+/** Runs after re-check N has answered (and before the loop acts on it) —
+ *  a removal landing in the window right after a passed check. */
+let afterAccessCheck: ((n: number) => Promise<void>) | null = null;
+/** When set, re-check N throws this instead of answering (a DB failure). */
+let accessFault: { at: number; error: unknown } | null = null;
+
 // The model mock is file-wide: no describe in this file may reach the SDK.
 beforeAll(() => {
+  // The access re-check is the REAL one, wrapped so a test can count calls,
+  // act right after one, or make one fail.
+  // The real module is imported per call, not once: every suite's
+  // createTestApp resets the module graph, and a copy bound to an earlier
+  // suite's database would answer for the wrong one.
+  vi.doMock("../src/hootie/access.js", () => ({
+      canStillAsk: async (nestId: string, userId: string) => {
+        const n = ++accessChecks;
+        if (accessFault && accessFault.at === n) throw accessFault.error;
+        const real = await vi.importActual<typeof import("../src/hootie/access.js")>("../src/hootie/access.js");
+        const ok = await real.canStillAsk(nestId, userId);
+        if (afterAccessCheck) await afterAccessCheck(n);
+        return ok;
+      },
+  }));
   vi.doMock("../src/hootie/model.js", () => ({
     streamRound: async function* (params: {
       system: string;
@@ -194,6 +228,7 @@ beforeAll(() => {
         tools: (params.tools ?? []).map((t) => t.name),
         toolChoice: params.toolChoice,
       });
+      if (beforeRound) await beforeRound(n);
       lastModelCall = {
         system: params.system,
         turns: params.messages,
@@ -229,12 +264,14 @@ beforeAll(() => {
         }
         return { toolCalls: [], assistant: [{ type: "text", text }] };
       }
-      if (round.text) yield round.text;
+      const text = typeof round.text === "function" ? round.text(params.messages) : round.text;
+      if (text) yield text;
+      if (round.after) await round.after();
       const toolCalls = (round.calls ?? []).map((c, i) => ({ id: `call_${n}_${i}`, name: c.name, input: c.input }));
       return {
         toolCalls,
         assistant: [
-          ...(round.text ? [{ type: "text", text: round.text }] : []),
+          ...(text ? [{ type: "text", text }] : []),
           ...toolCalls.map((c) => ({ type: "tool_use", ...c })),
         ],
       };
@@ -266,6 +303,7 @@ beforeAll(() => {
 });
 afterAll(() => {
   vi.doUnmock("../src/hootie/model.js");
+  vi.doUnmock("../src/hootie/access.js");
 });
 
 describe("POST /nests/:id/chat — Hootie in the nest", () => {
@@ -1606,6 +1644,14 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
   });
 
+  it("unknown tool calls count against the cap — a model inventing tools can't loop", async () => {
+    const bogus = { name: "delete_everything", input: {} };
+    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
+    const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
+  });
+
   it("a model or gateway that rejects tools still answers — broadening a weak first retrieval itself", async () => {
     rejectTools = true;
     const nest = (await jsonRequest(app, "POST", "/nests", { name: "No Tools" }, owner.apiKey)).data.nest.id;
@@ -1643,6 +1689,22 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     expect(done.data.cited.map((n: any) => n.id)).toEqual([pilotId]);
   });
 
+  it("broadening pulls the neighbours of both top hits, not just the first", async () => {
+    rejectTools = true;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Two Hits" }, owner.apiKey)).data.nest.id;
+    const add = (title: string, content: string) =>
+      jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content }, owner.apiKey);
+    await add("Pilot Plan", "# Pilot\n\nWe start tests with real customers on Nov 6. See [[Pilot Logistics]].");
+    await add("Beta Plan", "# Beta\n\nBeta tests start in December. See [[Beta Rooms]].");
+    await add("Pilot Logistics", "# Logistics\n\nRooms booked in Atlanta. LOGISTICS_SENTINEL");
+    await add("Beta Rooms", "# Rooms\n\nRooms booked in Denver. ROOMS_SENTINEL");
+
+    scriptedAnswer = "Nov 6.";
+    await chat(app, nest, { message: "when does testing begin?" }, owner.apiKey);
+    expect(modelRounds.at(-1)!.system).toContain("LOGISTICS_SENTINEL");
+    expect(modelRounds.at(-1)!.system).toContain("ROOMS_SENTINEL");
+  });
+
   it("without tools and with a strong first retrieval, it just answers — no broadening", async () => {
     rejectTools = true;
     scriptedAnswer = "Nov 6.";
@@ -1676,6 +1738,15 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
       if (done) break;
       seen += decoder.decode(value, { stream: true });
     }
+    // Hang up once round 1 is in flight. (The loop re-checks nest access
+    // before every round — one query — so a hang-up that lands during that
+    // check stops the turn before round 1 is even asked for: on a slower
+    // database the round might never start, which is not this case.)
+    const inFlight = Date.now();
+    while (modelRounds.length === 0 && Date.now() - inFlight < 3000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(modelRounds).toHaveLength(1);
     await reader_.cancel();
     const started = Date.now();
     while (roundSawAbort === null && Date.now() - started < 3500) {
@@ -1685,5 +1756,344 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(modelRounds).toHaveLength(1);
     expect(scriptedRounds).toEqual([{ text: "never" }]); // round 2 never asked for
+  });
+});
+
+/**
+ * Removal mid-question (ticket: "someone removed from a nest mid-question
+ * keeps reading it through Hootie until the answer ends"; H2 security review
+ * S1/S3). The nest middleware checks access once, when the chat starts; on a
+ * nest without stewardship `canReadNode` admits any caller, assuming that
+ * check still holds. So the loop itself must re-check nest access before
+ * every tool run, every further model round and the no-tools broadening —
+ * and when it is gone, end the turn with `done` and nothing else.
+ */
+describe("POST /nests/:id/chat — removed mid-question", () => {
+  let app: any;
+  let olga: { apiKey: string; email: string; userId: string };
+  let priya: { apiKey: string; email: string; userId: string };
+  const MARKER = "REMOVED_MARKER_9c41e7";
+
+  beforeAll(async () => {
+    setupTestEnv();
+    process.env.HOOTIE_ENABLED = "true";
+    app = await createTestApp("key", { features: ["byok"], gateway: TEST_GATEWAY });
+    olga = await registerUser(app, "olga-recheck@acme.com", "Olga");
+    await resetAuthRateLimit();
+    priya = await registerUser(app, "priya-recheck@acme.com", "Priya");
+    await resetAuthRateLimit();
+  });
+
+  beforeEach(() => {
+    scriptedRounds = [];
+    modelRounds = [];
+    rejectTools = false;
+    holdAtRound = 0;
+    roundSawAbort = null;
+    scriptedError = null;
+    beforeRound = null;
+    scriptedAnswer = "Hoot.";
+    accessChecks = 0;
+    afterAccessCheck = null;
+    accessFault = null;
+    resetAccessThrottle();
+  });
+
+  afterAll(() => {
+    scriptedRounds = [];
+    rejectTools = false;
+    beforeRound = null;
+    afterAccessCheck = null;
+    accessFault = null;
+    delete process.env.HOOTIE_ENABLED;
+  });
+
+  /** A private nest without stewardship (the defaults), Priya a read
+   *  collaborator on it, and a document only a search would find whose body
+   *  carries MARKER. */
+  let scratches = 0;
+  async function scratch() {
+    const nestId = (await jsonRequest(app, "POST", "/nests", { name: `Scratch ${++scratches}` }, olga.apiKey)).data.nest.id;
+    const settings = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, olga.apiKey);
+    expect(settings.data.nest.visibility).toBe("private");
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: priya.email, permission: "read" }, olga.apiKey)).status).toBeLessThan(300);
+    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, olga.apiKey);
+    const collabId = (roster.data.collaborators ?? roster.data).find((r: any) => (r.email ?? r.user_email) === priya.email).id;
+    const launchId = (
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+        title: "Launch checklist",
+        content: `# Launch\n\nRunbook steps; we start tests with real customers. ${MARKER}`,
+      }, olga.apiKey)
+    ).data.node.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/context`, { selector: "#none" }, olga.apiKey);
+    const removePriya = async () => {
+      const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/collaborators/${collabId}`, undefined, olga.apiKey);
+      expect(del.status).toBe(200);
+    };
+    return { nestId, launchId, removePriya };
+  }
+
+  /** A round that answers with everything its tools returned, verbatim —
+   *  the worst case: whatever reached the model reaches the reader. */
+  const echoResults = (messages: any[]) => {
+    const last = messages.at(-1);
+    const results = Array.isArray(last?.content) ? last.content.filter((b: any) => b?.type === "tool_result") : [];
+    return `Found: ${results.map((r: any) => r.content).join(" | ")}`;
+  };
+
+  async function ask(nestId: string, message: string) {
+    const { status, text } = await chatRaw(app, nestId, { message }, priya.apiKey);
+    return { status, text, events: parseSse(text) };
+  }
+
+  /** Hootie's reads of `nodeId` as Priya, from the activity log. */
+  async function priyaRetrievals(nestId: string, nodeId: string) {
+    await flushAccessLog();
+    const log = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/activity-log?node=${encodeURIComponent(nodeId)}&type=retrieved`,
+      undefined,
+      olga.apiKey,
+    );
+    expect(log.status).toBe(200);
+    return log.data.items.filter((i: any) => i.actor === priya.email && i.agent === "hootie");
+  }
+
+  it("removed before the search runs: no search, no further round, the marker never reaches her, and the turn ends with done", async () => {
+    const { nestId, launchId, removePriya } = await scratch();
+    scriptedRounds = [
+      { text: "Let me look.", calls: [{ name: "search_nest", input: { query: "launch checklist runbook" } }], after: removePriya },
+      { text: echoResults },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    expect(text).not.toContain(MARKER);
+    // Nothing after round 1's own text but the terminal event: no status
+    // line for the search, no tool run, no tool result, no round 2.
+    expect(events.map((e) => e.event)).toEqual(["meta", "delta", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(modelRounds).toHaveLength(1);
+    expect(scriptedRounds).toEqual([{ text: echoResults }]); // round 2 never asked for
+    expect(await priyaRetrievals(nestId, launchId)).toEqual([]);
+  });
+
+  it("removed after one search already ran: the next search is not run either, and no further round", async () => {
+    // (The H2 proposal's get_node-after-list_nodes case, at the loop level:
+    // a read that succeeded while she was a member doesn't keep the door
+    // open for the next one.)
+    const { nestId, launchId, removePriya } = await scratch();
+    const LATER = "LATER_MARKER_51d0b2";
+    const roadmapId = (
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+        title: "Roadmap memo",
+        content: `# Roadmap\n\nQuarterly objectives for the platform. ${LATER}`,
+      }, olga.apiKey)
+    ).data.node.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/context`, { selector: "#none" }, olga.apiKey);
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "launch checklist runbook" } }] },
+      { calls: [{ name: "search_nest", input: { query: "roadmap memo quarterly objectives" } }], after: removePriya },
+      { text: echoResults },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    // The first search ran as a member (one status line, its result went to
+    // round 2); the second never did.
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[1].messages.at(-1).content[0].content).toContain(MARKER);
+    expect(events.map((e) => e.event)).toEqual(["meta", "status", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(text).not.toContain(LATER);
+    expect(text).not.toContain(MARKER);
+    expect(scriptedRounds).toEqual([{ text: echoResults }]);
+    expect(await priyaRetrievals(nestId, launchId)).not.toEqual([]);
+    expect(await priyaRetrievals(nestId, roadmapId)).toEqual([]);
+  });
+
+  it("removed while the search's status line is being written: the search still does not run (R2)", async () => {
+    const { nestId, launchId, removePriya } = await scratch();
+    // Check 1 is before round 1, check 2 passes just before the status
+    // line; the removal lands right after it — the window the awaited
+    // status write opens before the tool runs.
+    afterAccessCheck = async (n) => {
+      if (n === 2) await removePriya();
+    };
+    scriptedRounds = [
+      { calls: [{ name: "search_nest", input: { query: "launch checklist runbook" } }] },
+      { text: echoResults },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    expect(text).not.toContain(MARKER);
+    // She was a member when the line was written; nothing after it.
+    expect(events.map((e) => e.event)).toEqual(["meta", "status", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(modelRounds).toHaveLength(1);
+    expect(scriptedRounds).toEqual([{ text: echoResults }]);
+    expect(await priyaRetrievals(nestId, launchId)).toEqual([]);
+  });
+
+  it("the access re-check itself fails (a DB error): the turn ends closed with the same empty done, not a model error (R4)", async () => {
+    const { nestId, launchId } = await scratch();
+    const err = Object.assign(new Error("SQLITE_BUSY: database is locked"), { status: 529 });
+    accessFault = { at: 2, error: err };
+    scriptedRounds = [
+      { text: "Let me look.", calls: [{ name: "search_nest", input: { query: "launch checklist runbook" } }] },
+      { text: echoResults },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    expect(text).not.toContain(MARKER);
+    expect(text).not.toMatch(/SQLITE|database|overloaded|model/i);
+    expect(events.some((e) => e.event === "error")).toBe(false);
+    expect(events.map((e) => e.event)).toEqual(["meta", "delta", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(modelRounds).toHaveLength(1);
+    expect(await priyaRetrievals(nestId, launchId)).toEqual([]);
+  });
+
+  it("a DB error in the re-check at the @mention gate posts nothing and still ends with done (R4)", async () => {
+    const { nestId, launchId } = await scratch();
+    const before = await mentionTrail(nestId, launchId);
+    // Check 1 is before round 1 (it answers); check 2 is the mention gate.
+    accessFault = { at: 2, error: new Error("SQLITE_BUSY: database is locked") };
+    scriptedRounds = [{ text: "The checklist covers go-live." }];
+    const { status, text } = await chatRaw(
+      app,
+      nestId,
+      { message: `@${olga.email} can you confirm the go-live steps?`, node_id: launchId },
+      priya.apiKey,
+    );
+    expect(status).toBe(200);
+    const events = parseSse(text);
+    expect(events.some((e) => e.event === "error")).toBe(false);
+    const done = events.at(-1)!;
+    expect(done.event).toBe("done");
+    expect(done.data.mention).toEqual({ status: "undeliverable", reason: "post_failed" });
+    expect(await mentionTrail(nestId, launchId)).toEqual({ threads: 0, mentions: before.mentions });
+  });
+
+  it("removed after a round whose calls run no tool: no further model round", async () => {
+    const { nestId, removePriya } = await scratch();
+    // An unknown tool runs nothing, so only the before-round re-check can
+    // stop round 2 (which would carry her a fresh answer).
+    scriptedRounds = [
+      { calls: [{ name: "no_such_tool", input: {} }], after: removePriya },
+      { text: "never" },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    expect(text).not.toContain(MARKER);
+    expect(events.map((e) => e.event)).toEqual(["meta", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(modelRounds).toHaveLength(1);
+    expect(scriptedRounds).toEqual([{ text: "never" }]); // round 2 never asked for
+  });
+
+  it("removed when the gateway refuses tools: no broadening, no answer round", async () => {
+    const { nestId, launchId, removePriya } = await scratch();
+    rejectTools = true;
+    beforeRound = async (n) => {
+      if (n === 1) await removePriya();
+    };
+    // The answer round would be sent the broadened documents.
+    scriptedAnswer = "never";
+    // "testing" finds nothing as written (a weak first retrieval); its stem
+    // "test" would find the launch checklist's "tests".
+    const { status, text, events } = await ask(nestId, "when does testing begin?");
+    expect(status).toBe(200);
+    expect(text).not.toContain(MARKER);
+    expect(events.map((e) => e.event)).toEqual(["meta", "done"]);
+    expect(events.at(-1)!.data).toEqual({ answer: "", cited: [], mention: null });
+    expect(modelRounds).toHaveLength(1);
+    expect(text).not.toContain("never");
+    expect(await priyaRetrievals(nestId, launchId)).toEqual([]);
+  });
+
+  /** Comment threads on `nodeId` and Olga's mention notifications for it.
+   *  (Every scratch nest's checklist has the same node id, so tests compare
+   *  the mention count before and after.) */
+  async function mentionTrail(nestId: string, nodeId: string) {
+    const threads = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${nodeId}/annotations`, undefined, olga.apiKey);
+    expect(threads.status).toBe(200);
+    const inbox = await jsonRequest(app, "GET", "/me/notifications", undefined, olga.apiKey);
+    expect(inbox.status).toBe(200);
+    return {
+      threads: threads.data.threads.length as number,
+      mentions: inbox.data.notifications.filter((n: any) => n.kind === "mention" && n.node_id === nodeId).length as number,
+    };
+  }
+
+  it("removed after the answer streams, before the @mention is delivered: no comment, no notification, a generic undeliverable", async () => {
+    const { nestId, launchId, removePriya } = await scratch();
+    const before = await mentionTrail(nestId, launchId);
+    scriptedRounds = [{ text: "The checklist covers go-live.", after: removePriya }];
+    const { status, events } = await chatRaw(
+      app,
+      nestId,
+      { message: `@${olga.email} can you confirm the go-live steps?`, node_id: launchId },
+      priya.apiKey,
+    ).then((r) => ({ ...r, events: parseSse(r.text) }));
+    expect(status).toBe(200);
+    expect(modelRounds).toHaveLength(1);
+    const done = events.at(-1)!;
+    expect(done.event).toBe("done");
+    expect(done.data.answer).toBe("The checklist covers go-live.");
+    // Generic: says nothing about why (no "access", no "removed").
+    expect(done.data.mention).toEqual({ status: "undeliverable", reason: "post_failed" });
+    expect(before.threads).toBe(0);
+    expect(await mentionTrail(nestId, launchId)).toEqual({ threads: 0, mentions: before.mentions });
+  });
+
+  it("still a member: the same @mention is posted and Olga is notified — unchanged", async () => {
+    const { nestId, launchId } = await scratch();
+    const before = await mentionTrail(nestId, launchId);
+    scriptedRounds = [{ text: "The checklist covers go-live." }];
+    const { status, text } = await chatRaw(
+      app,
+      nestId,
+      { message: `@${olga.email} can you confirm the go-live steps?`, node_id: launchId },
+      priya.apiKey,
+    );
+    expect(status).toBe(200);
+    const done = parseSse(text).at(-1)!;
+    expect(done.data.mention).toEqual(expect.objectContaining({ status: "posted", node_id: launchId }));
+    expect(before.threads).toBe(0);
+    expect(await mentionTrail(nestId, launchId)).toEqual({ threads: 1, mentions: before.mentions + 1 });
+  });
+
+  it("still a member: the search runs, its documents reach the next round, and the answer streams — unchanged", async () => {
+    const { nestId, launchId } = await scratch();
+    scriptedRounds = [
+      { text: "Let me look.", calls: [{ name: "search_nest", input: { query: "launch checklist runbook" } }] },
+      { text: echoResults },
+    ];
+    const { status, text, events } = await ask(nestId, "where are we at?");
+    expect(status).toBe(200);
+    expect(events.map((e) => e.event)).toEqual(["meta", "delta", "status", "delta", "done"]);
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[1].messages.at(-1).content[0].content).toContain(MARKER);
+    // The same echo that stays silent after a removal carries the marker here.
+    expect(text).toContain(MARKER);
+    const done = events.at(-1)!;
+    expect(done.event).toBe("done");
+    expect(done.data.answer).toContain(MARKER);
+    expect(await priyaRetrievals(nestId, launchId)).not.toEqual([]);
+  });
+
+  it("still a member with tools refused: the broadening runs and the answer round gets its documents — unchanged", async () => {
+    const { nestId, launchId } = await scratch();
+    rejectTools = true;
+    scriptedAnswer = "Soon — [[Launch checklist]].";
+    const { status, events } = await ask(nestId, "when does testing begin?");
+    expect(status).toBe(200);
+    expect(events.find((e) => e.event === "status")!.data).toEqual({ tool: "broaden", text: "Searching the nest more broadly" });
+    expect(modelRounds).toHaveLength(2);
+    expect(modelRounds[1].system).toContain(MARKER);
+    const done = events.at(-1)!;
+    expect(done.event).toBe("done");
+    expect(done.data.answer).toBe("Soon — [[Launch checklist]].");
+    expect(await priyaRetrievals(nestId, launchId)).not.toEqual([]);
   });
 });

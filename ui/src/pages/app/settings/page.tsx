@@ -139,6 +139,7 @@ const TABS: {
       "shared_deployment",
       "oidc_enabled",
       "sso_token_exchange_enabled",
+      "openai_apps_challenge",
     ],
   },
   {
@@ -673,6 +674,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setDeletingSite(false);
     }
   };
+
+  // Same alphabet and length the server serves (OPENAI_APPS_CHALLENGE_RE in
+  // src/config.ts); checked here so a bad paste is flagged before the 400.
+  const openaiToken = (draft?.openai_apps_challenge ?? "").trim();
+  const openaiTokenError =
+    openaiToken && !/^[A-Za-z0-9._-]{1,512}$/.test(openaiToken)
+      ? "Paste the token exactly as OpenAI shows it: letters, digits, dashes, underscores or dots, no spaces."
+      : undefined;
 
   const set = (patch: Partial<AdminSettings>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -1580,6 +1589,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   flat refusal. Existing API keys keep working exactly as
                   before.
                 </p>
+
+                <div className="space-y-1 pt-2">
+                  <Label htmlFor="openai-apps-challenge">OpenAI domain token</Label>
+                  <TextField
+                    id="openai-apps-challenge"
+                    error={fieldErrors.openai_apps_challenge ?? openaiTokenError}
+                    value={draft.openai_apps_challenge ?? ""}
+                    placeholder="Paste the token from OpenAI's app setup"
+                    onChange={(v) => set({ openai_apps_challenge: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    To publish this server as a ChatGPT app, OpenAI checks that
+                    you own the domain by reading this token at{" "}
+                    <code>/.well-known/openai-apps-challenge</code>. It is
+                    public by design. Leave empty to turn the check off.
+                  </p>
+                </div>
               </CardContent>
             </Card>
 

@@ -127,8 +127,11 @@ test.describe('Server settings', () => {
     await expect(ss.tabDot('Features')).toBeVisible();
     await expect(ss.unsaved).toBeVisible();
 
-    // Discard drops every edit.
+    // Discard asks first, then drops every edit.
     await ss.discardButton.click();
+    await expect(ss.discardDialog).toBeVisible();
+    await ss.discardConfirm.click();
+    await expect(ss.discardDialog).toBeHidden();
     await expect(ss.unsaved).toHaveCount(0);
     await expect(ss.tabDot('Features')).toHaveCount(0);
     await expect(ss.saveButton).toBeDisabled();
@@ -733,7 +736,12 @@ test.describe('Server settings', () => {
     await asAdmin(primary_user);
     const { page, serverSettingsPage: ss } = primary_user;
     const { patches } = await stubServerSettings(page, {
-      overrides: { workflow_plane_enabled: false, subagent_runs_enabled: false, metacognition_enabled: false },
+      overrides: {
+        workflow_plane_enabled: false,
+        subagent_runs_enabled: false,
+        metacognition_enabled: false,
+        surfaces_enabled: false,
+      },
     });
     await ss.goto();
     await ss.openTab('Features');

@@ -155,6 +155,26 @@ describe("streamRound — tools (ticket B)", () => {
     expect(calls[0].params.tools).toEqual([searchTool]);
   });
 
+  it("a 400 on a later round (tool history present) still falls back, but isn't remembered as tool-less", async () => {
+    rejectsTools.add("claude-opus-5");
+    const { streamRound, ToolsRejectedError } = await load();
+    const later = [
+      ...base.turns,
+      { role: "assistant" as const, content: [{ type: "tool_use", id: "toolu_1", name: "search_nest", input: {} }] },
+      { role: "user" as const, content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "none" }] },
+    ];
+    await expect(
+      round(streamRound({ ...base, messages: later, model: "claude-opus-5", tools: [searchTool] })),
+    ).rejects.toBeInstanceOf(ToolsRejectedError);
+    // The tool-less answer works — and must not mark the model tool-less.
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5" }));
+    rejectsTools = new Set();
+    calls = [];
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params.tools).toEqual([searchTool]);
+  });
+
   it("a 400 that isn't about tools (it fails without them too) is not remembered as tool-less", async () => {
     alwaysFail = { status: 400, message: "Your credit balance is too low to access the Anthropic API." };
     const { streamRound, ToolsRejectedError } = await load();

@@ -46,10 +46,10 @@ import {
 } from "../nodes/context-service.js";
 import { citedNodes } from "./citations.js";
 import { Gathered, modelBlock, defuseFence } from "./retrieval.js";
-import { runAgent } from "./agent.js";
+import { runAgent, dataFenceTag, AccessLostError } from "./agent.js";
+import { canStillAsk } from "./access.js";
 import { hootieTools, SEARCH_BUDGET } from "./tools.js";
 import { TurnContext, stoppedLine, turnDeadline } from "./turn.js";
-import { dataFenceTag } from "./agent.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { STATUS } from "./status.js";
 import { inertAnswer } from "./inert.js";
@@ -328,6 +328,16 @@ hootieRoutes.post("/chat", async (c) => {
     mentions: mentionNames.length,
   });
 
+  // Asked again before every model round, tool run and broadening pass: the
+  // middleware's nest check ran once, at the start of the turn (access.ts).
+  // A failing check fails closed: no access, the same empty `done`, never
+  // reported as a model error.
+  const stillAllowed = () =>
+    canStillAsk(nestId, userId).catch((err) => {
+      console.error("[hootie] access re-check failed; ending the turn", nestId, err);
+      return false;
+    });
+
   return streamSSE(c, async (stream) => {
     // A client that hangs up mid-answer (panel closed, nest switched, a new
     // question fired) must stop the model too — every chat is a paid call,
@@ -370,6 +380,7 @@ hootieRoutes.post("/chat", async (c) => {
         turn,
         fenceTag,
         signal: work,
+        stillAllowed,
       })) {
         if (work.aborted) return;
         if (ev.type === "status") {
@@ -396,7 +407,7 @@ hootieRoutes.post("/chat", async (c) => {
           citedNodes(answer, citable()).length === 0
         ) {
           const before = gathered.nodes.length;
-          await broaden({ nestId, userId, baseUrl, question, first, gathered });
+          await broaden({ nestId, userId, baseUrl, question, first, gathered, stillAllowed });
           broadened = true;
           allowGathered();
           if (cancel.signal.aborted) return;
@@ -412,8 +423,9 @@ hootieRoutes.post("/chat", async (c) => {
         answerOnly = "tools_refused";
         if (cancel.signal.aborted) return;
         if (question && isWeakRetrieval(first) && !work.aborted) {
+          if (!(await stillAllowed())) throw new AccessLostError();
           await status("broaden", "Searching the nest more broadly");
-          await broaden({ nestId, userId, baseUrl, question, first, gathered });
+          await broaden({ nestId, userId, baseUrl, question, first, gathered, stillAllowed });
           broadened = true;
           allowGathered();
         }
@@ -434,6 +446,15 @@ hootieRoutes.post("/chat", async (c) => {
       // Our own cancellation surfaces as an abort error from the SDK: nothing
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
+      if (err instanceof AccessLostError) {
+        // Removed from the nest mid-question: end the turn with the terminal
+        // event and nothing else — no answer, no citations, no mention post.
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({ answer: "", cited: [], mention: null }),
+        });
+        return;
+      }
       if (timedOut()) {
         // The deadline cut a round short: end with what arrived.
         turn.exhausted = true;
@@ -458,7 +479,12 @@ hootieRoutes.post("/chat", async (c) => {
     const cited = citedNodes(answer, citable());
 
     let mention: MentionOutcome | null = null;
-    if (mentionNames.length > 0) {
+    if (mentionNames.length > 0 && !(await stillAllowed())) {
+      // Removed from the nest while the answer streamed: no comment is posted
+      // in their name and nobody is paged. The reason is the generic one —
+      // the outcome says nothing about why.
+      mention = { status: "undeliverable", reason: "post_failed" };
+    } else if (mentionNames.length > 0) {
       mention = await deliverMentions({
         nestId,
         userEmail,
@@ -501,11 +527,17 @@ async function broaden(params: {
   question: string;
   first: ContextResult | null;
   gathered: Gathered;
+  /** Re-checked before each retrieval; AccessLostError when it says no. */
+  stillAllowed: () => Promise<boolean>;
 }): Promise<void> {
-  const { nestId, userId, baseUrl, question, first, gathered } = params;
+  const { nestId, userId, baseUrl, question, first, gathered, stillAllowed } = params;
+  const gate = async () => {
+    if (!(await stillAllowed())) throw new AccessLostError();
+  };
   const hits: ContextNodeSummary[] = [...(first?.nodes ?? [])];
   const relaxed = relaxedQuery(question);
   if (relaxed) {
+    await gate();
     const r = await resolveContext({
       nestId,
       userId,
@@ -518,6 +550,7 @@ async function broaden(params: {
   }
   const top = [...new Set(hits.filter((n) => n.via !== "hop").map((n) => n.id))].slice(0, 2);
   if (top.length === 0) return;
+  await gate();
   const r = await resolveContext({
     nestId,
     userId,

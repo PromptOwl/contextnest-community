@@ -12,21 +12,23 @@
  */
 import { approxTokens } from "../nodes/context-service.js";
 
-/** What the publish/render path treats as an HTML page (same heuristic). */
-export function isHtmlBody(type: string | undefined, body: string): boolean {
-  return type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
-}
+export { isHtmlBody } from "../shared/artifact-sandbox.js";
 
-/** Elements whose content is never shown as text. An unclosed one runs to
- *  the end, as it does in the browser. */
-const HIDDEN = /<!--[\s\S]*?(?:-->|$)|<(script|style|template|noscript)\b[\s\S]*?(?:<\/\1\s*>|$)/gi;
+/** Attributes inside a tag; quoted values may contain `<` or `>`. */
+const ATTRS = String.raw`(?:\s|"[^"]*"|'[^']*'|[^\s"'<>])*`;
+/** One left-to-right pass, so a `<script` inside an attribute value is part of
+ *  its tag, never a hidden element. Alternatives: comment; hidden element
+ *  (script/style/template/noscript, content dropped, unclosed runs to the end);
+ *  start/end tag; doctype. */
+const MARKUP = new RegExp(
+  String.raw`<!--[\s\S]*?(?:-->|$)|<(script|style|template|noscript)\b${ATTRS}>[\s\S]*?(?:<\/\1\s*>|$)|<\/?([a-zA-Z][^\s/<>]*)${ATTRS}>|<![^>]*>`,
+  "gi",
+);
 /** Tags whose boundaries are line breaks in the rendered page. */
 const BLOCK =
   /^(?:address|article|aside|blockquote|br|dd|details|dialog|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|summary|table|tbody|thead|tfoot|tr|ul|title|head|body|html|caption|option|label|button|canvas|svg|text)$/i;
 /** Cells sit side by side. */
 const CELL = /^(?:td|th)$/i;
-/** A start/end tag or doctype; quoted attribute values may contain `>`. */
-const TAG = /<\/?([a-zA-Z][^\s/<>]*)(?:\s|"[^"]*"|'[^']*'|[^\s"'<>])*>|<![^>]*>/g;
 
 const NAMED: Record<string, string> = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
@@ -50,11 +52,9 @@ function decodeEntities(s: string): string {
 }
 
 export function artifactText(html: string): string {
-  const text = html
-    .replace(HIDDEN, " ")
-    .replace(TAG, (_tag, name: string | undefined) =>
-      !name ? " " : BLOCK.test(name) ? "\n" : CELL.test(name) ? " " : "",
-    );
+  const text = html.replace(MARKUP, (_m, _hidden, name: string | undefined) =>
+    !name ? " " : BLOCK.test(name) ? "\n" : CELL.test(name) ? " " : "",
+  );
   return decodeEntities(text)
     .split("\n")
     .map((line) => line.replace(/\s+/g, " ").trim())

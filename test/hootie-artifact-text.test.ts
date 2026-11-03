@@ -27,6 +27,10 @@ describe("artifactText — what the page shows, nothing it runs", () => {
     expect(text).not.toMatch(/[<>]/);
   });
 
+  it("treats a <script inside an attribute value as part of its tag", () => {
+    expect(artifactText('<div title="<script>x">visible</div><p data-x=\'<style>\'>after</p>')).toBe("visible\nafter");
+  });
+
   it("decodes entities once, and keeps text inside inline tags joined", () => {
     expect(artifactText("<p>Fish &amp; chips &mdash; &lt;b&gt; &#39;x&#x27; &nbsp;&hellip; &amp;lt;</p>")).toBe(
       "Fish & chips — <b> 'x' … &lt;",
