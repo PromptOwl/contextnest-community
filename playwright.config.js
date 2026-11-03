@@ -223,6 +223,14 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
+  {
+    // Nest page → Overview tab (CN-OVR-001 … CN-OVR-021). Serial: each case
+    // checks the Overview of a nest it arranges and then deletes.
+    file: 'nest-overview/nest_overview.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -306,7 +314,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -632,6 +640,17 @@ export default defineConfig({
           name: 'nest-import',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/nest-import/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-overview',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-overview/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

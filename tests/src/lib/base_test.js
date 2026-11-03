@@ -42,6 +42,7 @@ import NestArchivePage from '../page_factory/app/nest_archive_page.js';
 import NewDocumentPage from '../page_factory/app/new_document_page.js';
 import NewFolderPage from '../page_factory/app/new_folder_page.js';
 import NestImportPage from '../page_factory/app/nest_import_page.js';
+import NestOverviewPage from '../page_factory/app/nest_overview_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -75,6 +76,9 @@ import NewFolderApi from './new_folder_api.js';
 
 // REST helper used to arrange Nest Import preconditions (nests, documents, shares)
 import NestImportApi from './nest_import_api.js';
+
+// REST helper used to arrange Nest Overview preconditions (folders, typed documents, edits)
+import NestOverviewApi from './nest_overview_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -402,6 +406,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get nestImportApi() {
         if (!this._nestImportApi) this._nestImportApi = new NestImportApi(this.page);
         return this._nestImportApi;
+      },
+
+      // Nest page → Overview tab (facts, Contents tree, Recently edited, empty nest)
+      get nestOverviewPage() {
+        return new NestOverviewPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Overview suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestOverviewApi() {
+        if (!this._nestOverviewApi) this._nestOverviewApi = new NestOverviewApi(this.page);
+        return this._nestOverviewApi;
       },
 
       /**
