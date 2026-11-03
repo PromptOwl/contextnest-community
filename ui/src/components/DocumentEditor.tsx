@@ -1395,6 +1395,10 @@ export function DocumentEditor({
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
 
+  // Editing the title or body is the user fixing what the last error asked
+  // for, so the stale banner goes (CU-wdqcq06fjw).
+  useEffect(() => setError(null), [title, content]);
+
   // Set once the user has answered the leave dialog and the navigation is
   // going through — the browser-level guards below must not ask a second time.
   const leavingRef = useRef(false);
