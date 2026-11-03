@@ -130,15 +130,20 @@ export function SystemsPanel({ nestId }: { nestId: string }) {
         <ul className="divide-y rounded-md border text-sm">
           {systems.map((s) => {
             const addable = adminNests.filter((n) => !s.nests.some((x) => x.id === n.id));
+            // Rotate/revoke reach every nest it works in; the server refuses them
+            // unless the caller administers all of those nests.
+            const notWhole = s.other_nest_count > 0
+              ? "It also works in nests you don't administer. Remove this nest from it instead."
+              : undefined;
             return (
               <li key={s.id} className="space-y-1.5 px-3 py-2" data-testid={`system-row-${s.id}`}>
                 <div className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
                   <Badge variant="secondary" className="text-[10px] capitalize">{s.capability}</Badge>
-                  <Button size="sm" variant="ghost" aria-label={`Rotate ${s.name}'s key`} title="Rotate key" disabled={busy} onClick={() => void rotate(s)}>
+                  <Button size="sm" variant="ghost" aria-label={`Rotate ${s.name}'s key`} title={notWhole ?? "Rotate key"} disabled={busy || !!notWhole} onClick={() => void rotate(s)}>
                     <RefreshCw className="h-4 w-4" />
                   </Button>
-                  <Button size="sm" variant="ghost" aria-label={`Revoke ${s.name}`} title="Revoke" disabled={busy} onClick={() => setRevokeTarget(s)}>
+                  <Button size="sm" variant="ghost" aria-label={`Revoke ${s.name}`} title={notWhole ?? "Revoke"} disabled={busy || !!notWhole} onClick={() => setRevokeTarget(s)}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
