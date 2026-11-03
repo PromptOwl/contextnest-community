@@ -348,6 +348,8 @@ export interface AdminSettings {
    * user in instead of carrying a shared API key. Requires public_base_url.
    */
   mcp_oauth_enabled: boolean;
+  /** OpenAI's ChatGPT-app domain token, served at /.well-known/openai-apps-challenge. "" = off. */
+  openai_apps_challenge: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
