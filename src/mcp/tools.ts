@@ -152,6 +152,9 @@ import {
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
 const MAX_HOPS = 10;
+/** context_review_queue: rows read-checked per call, and rows listed. */
+const REVIEW_QUEUE_SCAN = 200;
+const REVIEW_QUEUE_PAGE = 50;
 
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
@@ -4340,29 +4343,33 @@ async function runTool(
       // they can read (a share-only caller, for one). Enforced here, in the
       // op, so every MCP caller and Hootie get the same answer.
       const ownOnly = await isPublicReader(nestId, ctx.userId);
+      // Own-only is filtered in SQL, so its total is exact. Otherwise the
+      // readability filter runs over a bounded window BEFORE paging, and the
+      // total counts only readable rows in it — never a row this caller may
+      // not see (security r2 N2), never stuck at one page either.
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
-        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : {}),
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : { limit: REVIEW_QUEUE_SCAN }),
       });
-      let requests = result.requests;
-      if (!ownOnly && requests.length > 0) {
+      let readableRows = result.requests;
+      let total = result.total;
+      if (!ownOnly) {
         const readable = new Set(
           (
             await filterAccessible(
               nestId,
               ctx.userId,
               userEmail,
-              requests.map((r) => ({ id: r.nodeId })),
+              readableRows.map((r) => ({ id: r.nodeId })),
             )
           ).map((n) => n.id),
         );
-        requests = requests.filter((r) => readable.has(r.nodeId));
+        // ponytail: past REVIEW_QUEUE_SCAN rows the count is a floor; page in SQL if queues get that big.
+        readableRows = readableRows.filter((r) => readable.has(r.nodeId));
+        total = readableRows.length;
       }
-      // A filtered page, or a page short of the queue (getReviewQueue pages
-      // at 50): count only the rows shown. The queue's total could include
-      // requests past this page the caller may not see (security r2 N2).
-      const filtered = requests.length !== result.requests.length || result.total > requests.length;
+      const requests = readableRows.slice(0, REVIEW_QUEUE_PAGE);
 
       if (requests.length === 0) {
         return status === "pending"
@@ -4377,14 +4384,13 @@ async function runTool(
         )
         .join("\n\n");
 
+      const more = total > requests.length ? `\n\nShowing the first ${requests.length}.` : "";
       return {
-        // A filtered page counts only what is shown: the queue's total would
-        // count rows this caller may not know about.
-        text: `# Review Queue (${status})\n**${filtered ? requests.length : result.total} item(s)**\n\n${list}`,
+        text: `# Review Queue (${status})\n**${total} item(s)**\n\n${list}${more}`,
         // The rows the prose lists, by node id — only rows this caller may
         // see (above), so a caller can act on them without parsing prose.
         data: {
-          total: filtered ? requests.length : result.total,
+          total,
           requests: requests.map((r) => ({
             nodeId: r.nodeId,
             title: r.title ?? null,

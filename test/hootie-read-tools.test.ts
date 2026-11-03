@@ -767,8 +767,8 @@ describe("security r1 F3 — context_review_queue is gated inside the op, for ev
   });
 });
 
-describe("security r2 N2 — the review-queue count never covers rows past the page", () => {
-  it("with more pending requests than one page, a reviewer who sees every row on it is told the page count, not the nest total", async () => {
+describe("security r2 N2 — the review-queue count covers only rows the caller can read", () => {
+  it("with more pending requests than one page, a reviewer who can read all of them gets the full count and the first page", async () => {
     const big = (await jsonRequest(app, "POST", "/nests", { name: "Big Queue" }, owner.apiKey)).data.nest.id;
     await jsonRequest(app, "POST", `/nests/${big}/collaborators`, { email: ed.email, permission: "write" }, owner.apiKey);
     await jsonRequest(app, "PATCH", `/nests/${big}/settings`, { stewardship_enabled: true }, owner.apiKey);
@@ -785,10 +785,11 @@ describe("security r2 N2 — the review-queue count never covers rows past the p
     const { result } = await mcpCall(owner.apiKey, big, "context_review_queue");
     const text = result!.content.map((c) => c.text).join("");
     expect(result!.structuredContent.requests.length).toBe(50);
-    expect(result!.structuredContent.total).toBe(50);
-    // The count line, exactly: the page's 50, never the nest's 52.
+    // Read-checked before paging: all 52 are readable, so all 52 count.
+    expect(result!.structuredContent.total).toBe(52);
     const countLine = /\*\*(\d+) item\(s\)\*\*/.exec(text);
-    expect(countLine?.[1]).toBe("50");
+    expect(countLine?.[1]).toBe("52");
+    expect(text).toContain("Showing the first 50.");
   }, 120_000);
 });
 
