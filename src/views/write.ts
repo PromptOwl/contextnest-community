@@ -28,6 +28,7 @@ import { createHash, randomBytes } from "crypto";
 import type { ViewMeta } from "@promptowl/contextnest-engine";
 import { blockIdOf, blockKindOf, normalizeDataFrom, servedBlocks, type AuthorInfo, type ResolvedBlock } from "./core.js";
 import { ROW_OPS_CAPS } from "../tables/row-ops.js";
+import { config } from "../config.js";
 
 /** Per-message and per-frame limits the bridge enforces before any request. */
 export const WRITE_CAPS = {
@@ -41,7 +42,7 @@ export const WRITE_CAPS = {
 
 /** `CN_VIEW_WRITES=off` removes every write bridge (`CN_VIEW_DATA=off` does too). */
 export function viewWritesKillSwitch(): boolean {
-  return String(process.env.CN_VIEW_WRITES ?? "").trim().toLowerCase() === "off";
+  return config.CN_VIEW_WRITES_OFF;
 }
 
 /** html block id → its `write_to` (ordered, de-duplicated), for the served

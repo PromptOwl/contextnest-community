@@ -184,12 +184,12 @@ tableRowRoutes.post("/:nodeId{.+}/rows", async (c) => {
       // write (a retry would then append twice). Report it alongside.
       try {
         const request = await reviews.submitForReview({
-        nestId,
-        nodeId,
-        version,
-        requestedBy: userEmail,
-        note: (note as string | undefined) ?? describe(counts),
-        baseUrl: requestBaseUrl(c.req.url),
+          nestId,
+          nodeId,
+          version,
+          requestedBy: userEmail,
+          note: (note as string | undefined) ?? describe(counts),
+          baseUrl: requestBaseUrl(c.req.url),
           client,
         });
         reviewId = request.id;
