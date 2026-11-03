@@ -12,9 +12,8 @@
  * retrieved for this caller, so a link to anything the caller can't read
  * (or that wasn't retrieved) never resolves.
  *
- * The panel has the same rules in ui/src/lib/hootie-panel.ts, tested with
- * the same cases (test/hootie-citations.test.ts and
- * ui/src/lib/hootie-panel.test.ts): keep the two in step.
+ * The panel (ui/src/lib/hootie-panel.ts) imports this module, so keep it
+ * pure and import-free: the UI bundle pulls it in as-is.
  */
 
 export interface CitableNode {

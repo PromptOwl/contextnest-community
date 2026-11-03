@@ -3,6 +3,7 @@
  * hootie-panel.test.ts). The panel component stays about the conversation.
  */
 import type { HootieBrand } from "./api";
+import { WIKI_LINK, citationResolver, splitWikiLink, type CitableNode } from "../../../src/hootie/citations";
 
 export const HOOTIE_PANEL_MIN = 340;
 export const HOOTIE_PANEL_MAX = 720;
@@ -69,72 +70,9 @@ export function hootieGreeting(brand: HootieBrand): string {
 }
 
 // ─── Citations ───────────────────────────────────────────────────────────
-// How a `[[X]]` in an answer resolves to a document. The SAME rules as the
-// server's src/hootie/citations.ts (which decides `cited`), tested with the
-// same cases — keep the two in step. A link matches a node by its title, its
-// full id or its id's last segment (slug), compared through citationKey.
-// Only the nodes passed in are candidates: the panel passes `cited`, which
-// the server resolved from what it retrieved for this caller.
-
-export interface CitableNode {
-  id: string;
-  title: string;
-}
-
-/** `[[…]]` with no brackets or line break inside. */
-const WIKI_LINK = /\[\[([^[\]\n]+)\]\]/g;
-
-/** The comparison form of a title, id or slug: case, dash and quote
- *  variants and whitespace don't matter. */
-export function citationKey(s: string): string {
-  return s
-    .normalize("NFKC")
-    .replace(/[‐-―−﹘﹣－]/g, "-")
-    .replace(/[‘’‚‛′`´]/g, "'")
-    .replace(/[“”„‟″«»]/g, '"')
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-/** `target|alias` → what to resolve, and what to show (null: the title). */
-export function splitWikiLink(inner: string): { target: string; label: string | null } {
-  const bar = inner.indexOf("|");
-  if (bar < 0) return { target: inner.trim(), label: null };
-  const label = inner.slice(bar + 1).trim();
-  return { target: inner.slice(0, bar).trim(), label: label || null };
-}
-
-/** Titles win over ids and ids over slugs; within each, the first node. */
-function citationResolver<T extends CitableNode>(nodes: readonly T[]): (target: string) => T | undefined {
-  const byKey = new Map<string, T>();
-  const add = (key: string, n: T) => {
-    if (key && !byKey.has(key)) byKey.set(key, n);
-  };
-  for (const n of nodes) add(citationKey(n.title), n);
-  for (const n of nodes) add(citationKey(n.id), n);
-  for (const n of nodes) add(citationKey(n.id.slice(n.id.lastIndexOf("/") + 1)), n);
-  return (target) => byKey.get(citationKey(target));
-}
-
-export function resolveCitation<T extends CitableNode>(target: string, nodes: readonly T[]): T | undefined {
-  return citationResolver(nodes)(target);
-}
-
-/** The nodes `answer` cites, in order of first mention, each once. */
-export function citedNodes<T extends CitableNode>(answer: string, nodes: readonly T[]): T[] {
-  const resolve = citationResolver(nodes);
-  const out: T[] = [];
-  const seen = new Set<string>();
-  for (const m of answer.matchAll(WIKI_LINK)) {
-    const n = resolve(splitWikiLink(m[1]).target);
-    if (n && !seen.has(n.id)) {
-      seen.add(n.id);
-      out.push(n);
-    }
-  }
-  return out;
-}
+// The panel resolves `[[X]]` with the server's own module (pure, no imports),
+// so the chips can never disagree with the server's `cited`.
+export type { CitableNode };
 
 /** Escape text for a markdown link label. */
 function escapeLabel(s: string): string {

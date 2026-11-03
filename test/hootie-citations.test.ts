@@ -1,8 +1,7 @@
 /**
  * How Hootie resolves a `[[X]]` in an answer to one of the retrieved nodes
- * (server side, src/hootie/citations.ts). The panel has the same rules in
- * ui/src/lib/hootie-panel.ts, tested with the same cases in
- * ui/src/lib/hootie-panel.test.ts — keep the two in step.
+ * (src/hootie/citations.ts). The panel imports the same module, so these
+ * cases cover both sides.
  */
 import { describe, it, expect } from "vitest";
 import {

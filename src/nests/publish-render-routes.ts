@@ -20,7 +20,7 @@ import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
 import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
-import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import { applyArtifactSandboxHeaders, isHtmlBody } from "../shared/artifact-sandbox.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { isSecureRequest } from "../auth/sessions.js";
 import { sendEmailToRecipient } from "../notify/email.js";
@@ -386,7 +386,7 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   if (artifact.version == null) return c.html(unavailablePage(), 404);
   const type = String(artifact.type ?? "document");
   const body = artifact.html ?? "";
-  const isHtml = type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
+  const isHtml = isHtmlBody(type, body);
 
   await publish.logView(row.id, viewerEmail);
   applyArtifactSandboxHeaders(c);
