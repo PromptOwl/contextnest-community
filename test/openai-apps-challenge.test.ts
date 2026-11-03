@@ -108,6 +108,51 @@ describe("Settings: openai_apps_challenge", () => {
     await expectJson404(await app.request(PATH));
   });
 
+  it("survives a restart: the saved token is reloaded from the database", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    await jsonRequest(app, "PATCH", "/admin/settings", { openai_apps_challenge: TOKEN }, admin.apiKey);
+
+    // A restart starts with a clean env and reloads the durable settings.
+    delete process.env.OPENAI_APPS_CHALLENGE;
+    await expectJson404(await app.request(PATH));
+    const { loadServerSettings } = await import("../src/db/settings.js");
+    await loadServerSettings();
+    expect(await (await app.request(PATH)).text()).toBe(TOKEN);
+  });
+
+  it("a saved token wins over the deploy env var after a restart", async () => {
+    process.env.OPENAI_APPS_CHALLENGE = "from-deploy-env";
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const { loadServerSettings } = await import("../src/db/settings.js");
+    await loadServerSettings(); // boot: baseline = deploy env
+    await jsonRequest(app, "PATCH", "/admin/settings", { openai_apps_challenge: TOKEN }, admin.apiKey);
+
+    process.env.OPENAI_APPS_CHALLENGE = "from-deploy-env"; // env unchanged on restart
+    await loadServerSettings();
+    expect(await (await app.request(PATH)).text()).toBe(TOKEN);
+  });
+
+  it("a cleared token stays cleared after a restart while the env var is unchanged", async () => {
+    process.env.OPENAI_APPS_CHALLENGE = "from-deploy-env";
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const { loadServerSettings } = await import("../src/db/settings.js");
+    await loadServerSettings();
+    await jsonRequest(app, "PATCH", "/admin/settings", { openai_apps_challenge: "" }, admin.apiKey);
+    await expectJson404(await app.request(PATH));
+
+    process.env.OPENAI_APPS_CHALLENGE = "from-deploy-env"; // restart, same env
+    await loadServerSettings();
+    await expectJson404(await app.request(PATH));
+
+    // A new value in the deploy env takes over again.
+    process.env.OPENAI_APPS_CHALLENGE = "new-deploy-value";
+    await loadServerSettings();
+    expect(await (await app.request(PATH)).text()).toBe("new-deploy-value");
+  });
+
   it("a non-admin cannot set it", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     await registerUser(app, OWNER_EMAIL);
