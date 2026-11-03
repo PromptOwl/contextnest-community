@@ -1485,6 +1485,10 @@ function MaturityBoardInner({
   const renderHeader = (col: { key: string; label: string; title: string }, count: number) => {
     const isDone =
       effectiveConfig.dimension === "tag" && doneTags.includes(col.key.toLowerCase());
+    const dot =
+      effectiveConfig.dimension === "tag" && !isDone
+        ? stageDot(col.key, namespaceKey(effectiveConfig.tagNamespace))
+        : undefined;
     return (
       <div
         className={`group/header flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${
@@ -1518,9 +1522,7 @@ function MaturityBoardInner({
             ) : null
           )}
           {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
-          {effectiveConfig.dimension === "tag" && !isDone && stageDot(col.key) && (
-            <span className={`h-2 w-2 shrink-0 rounded-full ${stageDot(col.key)}`} />
-          )}
+          {dot && <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />}
           <span
             className={`min-w-0 text-[13px] font-semibold truncate ${
               capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""

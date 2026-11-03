@@ -114,9 +114,11 @@ export function universalTags(
 }
 
 /** The dot for a stage column's key (`stage:in-review`); none for any other
- *  column, so only a stage board gets coloured headers. */
-export function stageDot(columnKey: string): string | undefined {
-  const k = columnKey.replace(/^#/, "").trim().toLowerCase();
+ *  column, so only a stage board gets coloured headers. Grouped by a tag
+ *  namespace, the key is the bare value, so pass that `namespace` too. */
+export function stageDot(columnKey: string, namespace = ""): string | undefined {
+  const full = namespace && !columnKey.includes(":") ? `${namespace}:${columnKey}` : columnKey;
+  const k = full.replace(/^#/, "").trim().toLowerCase();
   if (!k.startsWith("stage:")) return undefined;
   const v = slug(k.slice("stage:".length));
   return DOTS[STAGES[v] ?? HASHED[hashIndex(v)]!];

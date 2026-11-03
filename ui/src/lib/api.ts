@@ -1645,6 +1645,51 @@ export async function revokeNestHeadlessKey(nestId: string, keyId: string) {
   });
 }
 
+// Named systems (CU-wdqcq0538g) — machine identities a nest admin manages
+// (src/auth/system-routes.ts). The key comes back once, on create and rotate.
+export interface SystemInfo {
+  id: string;
+  name: string;
+  capability: "read" | "write";
+  key_prefix: string | null;
+  nests: Array<{ id: string; name: string; permission: string }>;
+  other_nest_count: number;
+  created_by_email: string | null;
+  last_used_at: string | null;
+}
+
+export async function listNestSystems(nestId: string) {
+  return request<{ systems: SystemInfo[] }>(`/nests/${nestId}/systems`);
+}
+
+export async function createSystem(name: string, capability: "read" | "write", nestIds: string[]) {
+  return request<SystemInfo & { api_key: string }>("/systems", {
+    method: "POST",
+    body: JSON.stringify({ name, capability, nest_ids: nestIds }),
+  });
+}
+
+export async function rotateSystem(systemId: string) {
+  return request<SystemInfo & { api_key: string }>(`/systems/${systemId}/rotate`, { method: "POST" });
+}
+
+export async function revokeSystem(systemId: string) {
+  return request<{ deleted: true }>(`/systems/${systemId}`, { method: "DELETE" });
+}
+
+export async function addSystemNest(systemId: string, nestId: string) {
+  return request<SystemInfo>(`/systems/${systemId}/nests`, {
+    method: "POST",
+    body: JSON.stringify({ nest_id: nestId }),
+  });
+}
+
+export async function removeSystemNest(systemId: string, nestId: string) {
+  return request<{ removed: true; system_deleted: boolean }>(`/systems/${systemId}/nests/${nestId}`, {
+    method: "DELETE",
+  });
+}
+
 // Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
 // on its own; home_node: null clears the designated landing node.
 export async function setNestReaderMode(

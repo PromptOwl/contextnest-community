@@ -13,7 +13,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
-import { saveOutcome } from "../lib/save-outcome";
+import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { documentLink } from "../lib/nest-url";
@@ -1395,6 +1395,10 @@ export function DocumentEditor({
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
 
+  // Editing the title or body is the user fixing what the last error asked
+  // for, so the stale banner goes (CU-wdqcq06fjw).
+  useEffect(() => setError(null), [title, content]);
+
   // Set once the user has answered the leave dialog and the navigation is
   // going through — the browser-level guards below must not ask a second time.
   const leavingRef = useRef(false);
@@ -1514,8 +1518,48 @@ export function DocumentEditor({
   const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
   const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
 
+  // Save just the tags where that publishes cleanly (CU-wdqcq02a1q). Saves run
+  // one at a time off the latest base version, so quick clicks don't conflict.
+  const baseVersionRef = useRef(baseVersion);
+  baseVersionRef.current = baseVersion;
+  const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+    const run = async () => {
+      const snap = initialSnapshotRef.current;
+      const otherFieldsDirty =
+        title.trim() !== snap.title.trim() ||
+        normalizeHtml(content) !== normalizeHtml(snap.content) ||
+        schedule.trim() !== snap.schedule.trim() ||
+        prime !== loadedPrimeRef.current ||
+        alwaysInclude !== loadedAlwaysIncludeRef.current;
+      if (!canSaveTagsAlone({ isNew, status, outcome, otherFieldsDirty })) return "deferred" as const;
+      try {
+        const res: any = await api.updateNode(nestId, nodeId, { tags: next }, baseVersionRef.current);
+        const v = res?.version ?? res?.node?.version;
+        if (typeof v === "number") {
+          baseVersionRef.current = v;
+          setBaseVersion(v);
+        }
+        setUpdatedAt(res?.node?.updated_at ?? new Date().toISOString());
+        initialSnapshotRef.current = { ...initialSnapshotRef.current, tags: [...next] };
+        setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
+        return "saved" as const;
+      } catch (err) {
+        console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
+        return "failed" as const;
+      }
+    };
+    const p = tagSaveChain.current.then(run);
+    tagSaveChain.current = p;
+    return p;
+  };
+
+  // A real failure says so; a deferred tag says it waits for Save.
+  const tagSaveFailed = () =>
+    toast.error("Couldn't save the tag", { id: "tag-added", description: "Save the document to keep it." });
+
   // `picked` is a suggestion chosen from the list — already a valid nest tag.
-  const addTag = useCallback((picked?: string) => {
+  const addTag = (picked?: string) => {
     const { tags: accepted, notes } =
       picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
     // A paste commits several tags at once, and one transient toast per
@@ -1531,20 +1575,30 @@ export function DocumentEditor({
       setTagInput("");
       return;
     }
-    setTags([...tags, ...accepted]);
+    const next = [...tags, ...accepted];
+    setTags(next);
     setTagInput("");
     setTouched(true);
-    // Local until Save — say so, or "added" reads as persisted.
-    toast.success(
-      accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
-      // One toast slot: adding tags one after another updates it instead of stacking.
-      { id: "tag-added", description: "Save the document to keep it." },
+    // Say whether it's kept, or "added" reads as persisted when it's local.
+    void saveTagsAlone(next).then((r) =>
+      r === "failed"
+        ? tagSaveFailed()
+        : toast.success(
+            accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+            // One toast slot: adding tags one after another updates it instead of stacking.
+            { id: "tag-added", description: r === "saved" ? "Saved." : "Save the document to keep it." },
+          ),
     );
-  }, [tagPreview, tags]);
+  };
 
   const removeTag = (t: string) => {
-    setTags(tags.filter((x) => x !== t));
+    const next = tags.filter((x) => x !== t);
+    setTags(next);
     setTouched(true);
+    void saveTagsAlone(next).then((r) => {
+      if (r === "saved") toast.success(`Tag "${t}" removed`, { id: "tag-added", description: "Saved." });
+      else if (r === "failed") tagSaveFailed();
+    });
   };
 
   const persistCurrent = async (): Promise<{
