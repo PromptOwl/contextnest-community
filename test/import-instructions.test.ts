@@ -50,6 +50,27 @@ describe("imported CONTEXT.md", () => {
     expect(data.content).toContain("Never guess.");
   });
 
+  it("takes a lowercase context.md as the instructions", async () => {
+    const files = [
+      { path: "context.md", content: "# Team rules\n\nLowercase still counts.\n" },
+      { path: "notes/alpha.md", content: "---\ntitle: Alpha\n---\n\n# Alpha\n" },
+    ];
+    const imp = await jsonRequest(app, "POST", "/nests/import", { name: "Lowercase Rules", files }, apiKey);
+    expect(imp.status).toBe(201);
+    const { data } = await jsonRequest(app, "GET", `/nests/${imp.data.nest.id}/instructions`, undefined, apiKey);
+    expect(data.content).toContain("Lowercase still counts.");
+  });
+
+  it("warns when the only CONTEXT.md sits in a subfolder", async () => {
+    const files = [
+      { path: "docs/CONTEXT.md", content: "# Nested rules\n" },
+      { path: "notes/alpha.md", content: "---\ntitle: Alpha\n---\n\n# Alpha\n" },
+    ];
+    const imp = await jsonRequest(app, "POST", "/nests/import", { name: "Nested Rules", files }, apiKey);
+    expect(imp.status).toBe(201);
+    expect(imp.data.warnings.join(" ")).toMatch(/docs\/CONTEXT\.md/);
+  });
+
   it("survives the browser's chunked upload", async () => {
     const first = await jsonRequest(app, "POST", "/nests/import", {
       name: "Chunked Rules",
