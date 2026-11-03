@@ -1568,6 +1568,14 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
   });
 
+  it("unknown tool calls count against the cap — a model inventing tools can't loop", async () => {
+    const bogus = { name: "delete_everything", input: {} };
+    scriptedRounds = [{ calls: [bogus] }, { calls: [bogus] }, { calls: [bogus], text: "Done." }, { text: "never" }];
+    const { events } = await chat(app, nestId, { message: question }, stranger.apiKey);
+    expect(modelRounds.map((r) => r.toolChoice)).toEqual(["auto", "auto", "none"]);
+    expect(events.find((e) => e.event === "done")!.data.answer).toBe("Done.");
+  });
+
   it("a model or gateway that rejects tools still answers — broadening a weak first retrieval itself", async () => {
     rejectTools = true;
     const nest = (await jsonRequest(app, "POST", "/nests", { name: "No Tools" }, owner.apiKey)).data.nest.id;
@@ -1603,6 +1611,22 @@ describe("POST /nests/:id/chat — searching again (search_nest)", () => {
     const done = events.find((e) => e.event === "done")!;
     expect(done.data.answer).toBe("Nov 6 — [[Pilot Plan]].");
     expect(done.data.cited.map((n: any) => n.id)).toEqual([pilotId]);
+  });
+
+  it("broadening pulls the neighbours of both top hits, not just the first", async () => {
+    rejectTools = true;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Two Hits" }, owner.apiKey)).data.nest.id;
+    const add = (title: string, content: string) =>
+      jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content }, owner.apiKey);
+    await add("Pilot Plan", "# Pilot\n\nWe start tests with real customers on Nov 6. See [[Pilot Logistics]].");
+    await add("Beta Plan", "# Beta\n\nBeta tests start in December. See [[Beta Rooms]].");
+    await add("Pilot Logistics", "# Logistics\n\nRooms booked in Atlanta. LOGISTICS_SENTINEL");
+    await add("Beta Rooms", "# Rooms\n\nRooms booked in Denver. ROOMS_SENTINEL");
+
+    scriptedAnswer = "Nov 6.";
+    await chat(app, nest, { message: "when does testing begin?" }, owner.apiKey);
+    expect(modelRounds.at(-1)!.system).toContain("LOGISTICS_SENTINEL");
+    expect(modelRounds.at(-1)!.system).toContain("ROOMS_SENTINEL");
   });
 
   it("without tools and with a strong first retrieval, it just answers — no broadening", async () => {

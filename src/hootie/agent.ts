@@ -92,6 +92,8 @@ export async function* runAgent(params: AgentParams): AsyncGenerator<AgentEvent>
       let content: string;
       let isError = false;
       if (!tool) {
+        // Counts against the cap too, or a model inventing names loops forever.
+        calls++;
         content = `There is no tool named ${call.name}.`;
         isError = true;
       } else if (calls >= params.maxCalls) {

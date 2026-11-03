@@ -125,7 +125,7 @@ export async function* streamRound(params: RoundParams): AsyncGenerator<string, 
     try {
       return confirm(yield* answer(client, params, false, state));
     } catch (err) {
-      throw toolRejection(err, withTools, key, state.started);
+      throw toolRejection(err, params, key, state.started);
     }
   }
   const state = { started: false };
@@ -139,7 +139,7 @@ export async function* streamRound(params: RoundParams): AsyncGenerator<string, 
     try {
       result = yield* answer(client, params, false, bareState);
     } catch (bare) {
-      throw toolRejection(bare, withTools, key, bareState.started);
+      throw toolRejection(bare, params, key, bareState.started);
     }
     plainModels.add(key);
     return confirm(result);
@@ -147,10 +147,12 @@ export async function* streamRound(params: RoundParams): AsyncGenerator<string, 
 }
 
 /** A bare request with tools refused before any output → ToolsRejectedError. */
-function toolRejection(err: unknown, withTools: boolean, key: string, started: boolean): unknown {
-  if (!withTools || started || (err as { status?: number })?.status !== 400) return err;
+function toolRejection(err: unknown, params: RoundParams, key: string, started: boolean): unknown {
+  if (!params.tools?.length || started || (err as { status?: number })?.status !== 400) return err;
   console.log(`[hootie] ${key} refused a request with tools (400); answering without`);
-  toolSuspects.add(key);
+  // Only a first round says the model refuses tools: a later one already took
+  // them, so its 400 is about the tool history, not tools.
+  if (params.messages.every((m) => typeof m.content === "string")) toolSuspects.add(key);
   return new ToolsRejectedError();
 }
 
