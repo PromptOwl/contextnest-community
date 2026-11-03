@@ -118,6 +118,36 @@ describe("context_table_rows", () => {
     expect((await head()).version).toBe(before.version);
   });
 
+  it("someone else's unreviewed draft is a conflict with reason draft_in_progress", async () => {
+    const t = (await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Drafted", type: "table", content: T_CSV }, owner.apiKey)).data.node.id;
+    const other = await registerUser(app, "other@mcprows.test", "Other");
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: other.email, permission: "write" }, owner.apiKey);
+    const d = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${t}`, { content: `${T_CSV}\nr7,secret,1` }, other.apiKey);
+    expect(d.data.node.status).toBe("draft");
+    const r = await call(editor.apiKey, { table: t, ops: [{ op: "update", key: "r1", set: { stage: "won" } }] });
+    expect(r.isError).toBe(true);
+    expect(r.data).toMatchObject({ code: "VALIDATION_FAILED", conflict: true, reason: "draft_in_progress", current_version: d.data.node.version });
+  });
+
+  it("a missing table is DOCUMENT_NOT_FOUND, by id or [[Title]]", async () => {
+    for (const table of ["nodes/no-such-table", "[[No Such Table]]"]) {
+      const r = await call(editor.apiKey, { table, ops: [{ op: "delete", key: "r1" }] });
+      expect(r.isError).toBe(true);
+      expect(r.data?.code).toBe("DOCUMENT_NOT_FOUND");
+    }
+  });
+
+  it("an empty table argument is VALIDATION_FAILED; a missing one fails the input schema", async () => {
+    for (const table of ["", "  "]) {
+      const r = await call(editor.apiKey, { table, ops: [{ op: "delete", key: "r1" }] });
+      expect(r.isError).toBe(true);
+      expect(r.data?.code).toBe("VALIDATION_FAILED");
+    }
+    const missing = await call(editor.apiKey, { ops: [{ op: "delete", key: "r1" }] });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toMatch(/table/);
+  });
+
   it("a read-only key is refused and nothing is written", async () => {
     const before = await head();
     const r = await call(readOnlyKey, { table: tId, ops: [{ op: "delete", key: "r2" }] });

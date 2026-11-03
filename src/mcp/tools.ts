@@ -3653,7 +3653,8 @@ async function runTool(
     }
 
     case "context_table_rows": {
-      const ref = String(args.table ?? "").trim();
+      const ref = typeof args.table === "string" ? args.table.trim() : "";
+      if (!ref) return toolError('table is required: "[[Title]]" or a node id', "VALIDATION_FAILED");
       const title = /^\[\[(.+)\]\]$/.exec(ref)?.[1];
       const node = await resolveTargetNode(storage, title ? { title } : { id: ref });
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
