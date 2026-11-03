@@ -290,6 +290,36 @@ describe("AC-1: the view page", () => {
   });
 });
 
+describe("the view page layout and links (CU-wdqcq06f73)", () => {
+  it("draws the html block first and collapses its data_from sources below it", async () => {
+    const body = await (await get(page(vId))).text();
+    const frameAt = body.indexOf("<iframe");
+    const sourcesAt = body.indexOf('<details class="cn-sources">');
+    expect(frameAt).toBeGreaterThan(-1);
+    expect(sourcesAt).toBeGreaterThan(frameAt);
+    expect(body.indexOf("Metric One")).toBeGreaterThan(sourcesAt);
+    expect(body.indexOf("Alpha")).toBeGreaterThan(sourcesAt);
+    expect(body).toContain('<main class="cn-wide">');
+  });
+
+  it("resolves [[wiki-links]] in the intro to the app's document URL, by slug and by title", async () => {
+    const id = await create({
+      title: "Linked View",
+      type: "view",
+      content: "See [[intro]], [[Revenue|the revenue table]] and [[no-such-node]].",
+      view: { blocks: [{ callout: { text: "hi" } }] },
+    });
+    const res = await get(page(id));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    const doc = (nodeId: string) => `/nest/${nestId}?doc=${encodeURIComponent(nodeId)}`;
+    expect(body).toContain(`<a href="${doc("nodes/intro")}" target="_top">intro</a>`);
+    expect(body).toContain(`<a href="${doc(tId)}" target="_top">the revenue table</a>`);
+    expect(body).toContain("no-such-node");
+    expect(body).not.toContain("[[");
+  });
+});
+
 describe("AC-2 / AC-3 / AC-4: the html-block frame", () => {
   it("injects exactly one nest-data, after the doctype and before the app script", async () => {
     const res = await get(frame(vId, "h"));

@@ -553,6 +553,79 @@ describe("render", () => {
     expect(html).toContain("not supported yet");
   });
 
+  it("puts an html block's data_from sources after it, collapsed, and goes full width", () => {
+    const html = renderViewPage({
+      title: "Board",
+      intro: "",
+      blocks: [
+        { index: 0, id: "tasks", kind: "list", ok: true, items: [{ id: "nodes/t1", title: "Task one" }] },
+        { index: 1, id: "progress", kind: "data", ok: true, columns: ["day"], rows: [{ day: "Mon" }] },
+        { index: 2, id: "note", kind: "callout", ok: true, text: "Heads up", tone: "info" },
+        { index: 3, id: "board", kind: "html", ok: true, artifactId: "nodes/a", dataFrom: ["tasks", "progress"] },
+      ],
+      frameUrl: (id) => `/frame/${id}`,
+    });
+    const frame = html.indexOf("<iframe");
+    const details = html.indexOf('<details class="cn-sources">');
+    expect(frame).toBeGreaterThan(-1);
+    expect(details).toBeGreaterThan(frame);
+    expect(html.indexOf("Task one")).toBeGreaterThan(details);
+    expect(html.indexOf("Mon")).toBeGreaterThan(details);
+    expect(html.indexOf("Heads up")).toBeLessThan(frame); // not a source: stays in place
+    expect(html).toContain("Data behind this view (2 sources)");
+    expect(html).not.toContain("<details open");
+    expect(html).toContain('<main class="cn-wide">');
+  });
+
+  it("keeps sources in place and the narrow column when the html block failed or there is none", () => {
+    const failed = renderViewPage({
+      title: "B",
+      intro: "",
+      blocks: [
+        { index: 0, id: "tasks", kind: "list", ok: true, items: [{ id: "x", title: "Task one" }] },
+        { index: 1, id: "board", kind: "html", ok: false, error: "not_found" },
+      ],
+      frameUrl: (id) => `/frame/${id}`,
+    });
+    expect(failed).not.toContain("<details");
+    expect(failed).toContain("<main>");
+    expect(failed.indexOf("Task one")).toBeLessThan(failed.indexOf("unavailable"));
+  });
+
+  it("resolves [[wiki-links]] through the reader's resolver and leaves unknown ones as plain labels", () => {
+    const seen: string[] = [];
+    const html = renderViewPage({
+      title: "V",
+      intro: "See [[project-november]], [[nodes/x|the X doc]] and [[secret-node]]. `[[in-code]]`",
+      blocks: [
+        { index: 0, id: "m", kind: "md", ok: true, text: "Also [[project-november#Gates]]" },
+        { index: 1, id: "l", kind: "list", ok: true, items: [{ id: "nodes/t1", title: "Task <one>" }] },
+      ],
+      frameUrl: (id) => `/frame/${id}`,
+      resolveLink: (t) => {
+        seen.push(t);
+        if (t === "project-november") return "/nest/n1?doc=nodes%2Fprojects%2Fproject-november";
+        if (t === "nodes/x" || t === "nodes/t1") return `/nest/n1?doc=${encodeURIComponent(t)}`;
+        return null;
+      },
+    });
+    expect(html).toContain('<a href="/nest/n1?doc=nodes%2Fprojects%2Fproject-november" target="_top">project-november</a>');
+    expect(html).toContain('<a href="/nest/n1?doc=nodes%2Fx" target="_top">the X doc</a>');
+    expect(html).toContain('<a href="/nest/n1?doc=nodes%2Ft1" target="_top">Task &lt;one&gt;</a>');
+    expect(html).toContain("secret-node");
+    expect(html).not.toContain("[[project-november");
+    expect(html).not.toContain("[[secret-node]]");
+    expect(html).toContain("<code>[[in-code]]</code>");
+    expect(seen).not.toContain("in-code");
+  });
+
+  it("without a resolver, wiki-links render as labels (the public page names nothing)", () => {
+    const html = renderPublicViewPage({ title: "Pub", intro: "See [[nodes/private/plan|the plan]]", blockCount: 0 });
+    expect(html).toContain("the plan");
+    expect(html).not.toContain("nodes/private/plan");
+    expect(html).not.toContain("<a ");
+  });
+
   it("the public page shows the intro and one placeholder per block, nothing else", () => {
     const html = renderPublicViewPage({ title: "Pub", intro: "Hello **there**", blockCount: 3 });
     expect((html.match(/Available to nest members/g) || []).length).toBe(3);
