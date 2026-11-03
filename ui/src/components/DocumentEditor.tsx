@@ -1518,32 +1518,47 @@ export function DocumentEditor({
   const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
   const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
 
-  // `picked` is a suggestion chosen from the list — already a valid nest tag.
-  // Save just the tags where that publishes cleanly (CU-wdqcq02a1q). The base
-  // version turns a concurrent edit into a conflict; the change then waits for Save.
-  const saveTagsAlone = async (next: string[]): Promise<boolean> => {
-    const snap = initialSnapshotRef.current;
-    const otherFieldsDirty =
-      title.trim() !== snap.title.trim() ||
-      normalizeHtml(content) !== normalizeHtml(snap.content) ||
-      schedule.trim() !== snap.schedule.trim() ||
-      prime !== loadedPrimeRef.current ||
-      alwaysInclude !== loadedAlwaysIncludeRef.current;
-    if (!canSaveTagsAlone({ isNew, status, outcome, otherFieldsDirty })) return false;
-    try {
-      const res: any = await api.updateNode(nestId, nodeId, { tags: next }, baseVersion);
-      const v = res?.version ?? res?.node?.version;
-      if (typeof v === "number") setBaseVersion(v);
-      setUpdatedAt(res?.node?.updated_at ?? new Date().toISOString());
-      initialSnapshotRef.current = { ...snap, tags: [...next] };
-      setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
-      return true;
-    } catch (err) {
-      console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
-      return false;
-    }
+  // Save just the tags where that publishes cleanly (CU-wdqcq02a1q). Saves run
+  // one at a time off the latest base version, so quick clicks don't conflict.
+  const baseVersionRef = useRef(baseVersion);
+  baseVersionRef.current = baseVersion;
+  const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+    const run = async () => {
+      const snap = initialSnapshotRef.current;
+      const otherFieldsDirty =
+        title.trim() !== snap.title.trim() ||
+        normalizeHtml(content) !== normalizeHtml(snap.content) ||
+        schedule.trim() !== snap.schedule.trim() ||
+        prime !== loadedPrimeRef.current ||
+        alwaysInclude !== loadedAlwaysIncludeRef.current;
+      if (!canSaveTagsAlone({ isNew, status, outcome, otherFieldsDirty })) return "deferred" as const;
+      try {
+        const res: any = await api.updateNode(nestId, nodeId, { tags: next }, baseVersionRef.current);
+        const v = res?.version ?? res?.node?.version;
+        if (typeof v === "number") {
+          baseVersionRef.current = v;
+          setBaseVersion(v);
+        }
+        setUpdatedAt(res?.node?.updated_at ?? new Date().toISOString());
+        initialSnapshotRef.current = { ...initialSnapshotRef.current, tags: [...next] };
+        setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
+        return "saved" as const;
+      } catch (err) {
+        console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
+        return "failed" as const;
+      }
+    };
+    const p = tagSaveChain.current.then(run);
+    tagSaveChain.current = p;
+    return p;
   };
 
+  // A real failure says so; a deferred tag says it waits for Save.
+  const tagSaveFailed = () =>
+    toast.error("Couldn't save the tag", { id: "tag-added", description: "Save the document to keep it." });
+
+  // `picked` is a suggestion chosen from the list — already a valid nest tag.
   const addTag = (picked?: string) => {
     const { tags: accepted, notes } =
       picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
@@ -1565,12 +1580,14 @@ export function DocumentEditor({
     setTagInput("");
     setTouched(true);
     // Say whether it's kept, or "added" reads as persisted when it's local.
-    void saveTagsAlone(next).then((saved) =>
-      toast.success(
-        accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
-        // One toast slot: adding tags one after another updates it instead of stacking.
-        { id: "tag-added", description: saved ? "Saved." : "Save the document to keep it." },
-      ),
+    void saveTagsAlone(next).then((r) =>
+      r === "failed"
+        ? tagSaveFailed()
+        : toast.success(
+            accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+            // One toast slot: adding tags one after another updates it instead of stacking.
+            { id: "tag-added", description: r === "saved" ? "Saved." : "Save the document to keep it." },
+          ),
     );
   };
 
@@ -1578,8 +1595,9 @@ export function DocumentEditor({
     const next = tags.filter((x) => x !== t);
     setTags(next);
     setTouched(true);
-    void saveTagsAlone(next).then((saved) => {
-      if (saved) toast.success(`Tag "${t}" removed`, { id: "tag-added", description: "Saved." });
+    void saveTagsAlone(next).then((r) => {
+      if (r === "saved") toast.success(`Tag "${t}" removed`, { id: "tag-added", description: "Saved." });
+      else if (r === "failed") tagSaveFailed();
     });
   };
 
