@@ -427,6 +427,7 @@ export function DocumentsTab({
     const node = deleteNodeTarget;
     try {
       await api.deleteNode(nestId, node.id);
+      toast.success(`Deleted "${node.title || node.id}"`);
       fetchData();
     } catch (err: any) {
       console.error("[NestView] deleteNode failed", nestId, node?.id, err);
