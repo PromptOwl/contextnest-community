@@ -35,7 +35,7 @@ export function BulkSelectionBar({
   onDone,
 }: {
   nestId: string;
-  nodes: { id: string; title?: string }[];
+  nodes: { id: string; title?: string; status?: string }[];
   /** Every folder path in the nest. */
   folders: string[];
   /** Whether the caller may edit every selected document (move, tag). */
@@ -74,16 +74,25 @@ export function BulkSelectionBar({
         res = r;
         done = r.done;
       } else if (action === "submit") {
-        // One submit per document, the same call the row's button makes; the
-        // server's refusal (not a draft, no permission) becomes that row's reason.
-        const settled = await Promise.allSettled(ids.map((id) => api.submitForReview(nestId, id)));
-        const results: Row[] = settled.map((s, i) =>
-          s.status === "fulfilled"
-            ? { id: ids[i], outcome: "updated" }
-            : { id: ids[i], outcome: "failed", reason: (s.reason as any)?.message || "Submit failed" },
-        );
+        // Drafts only, five at a time, through the row button's own call; the
+        // server's refusal (e.g. no permission) becomes that row's reason.
+        const drafts = nodes.filter((x) => x.status === "draft").map((x) => x.id);
+        const results: Row[] = nodes
+          .filter((x) => x.status !== "draft")
+          .map((x) => ({ id: x.id, outcome: "skipped", reason: "Not a draft" }));
+        for (let i = 0; i < drafts.length; i += 5) {
+          const batch = drafts.slice(i, i + 5);
+          const settled = await Promise.allSettled(batch.map((id) => api.submitForReview(nestId, id)));
+          settled.forEach((s, j) =>
+            results.push(
+              s.status === "fulfilled"
+                ? { id: batch[j], outcome: "updated" }
+                : { id: batch[j], outcome: "failed", reason: (s.reason as any)?.message || "Submit failed" },
+            ),
+          );
+        }
         done = results.filter((r) => r.outcome === "updated").length;
-        res = { requested: ids.length, skipped: 0, failed: ids.length - done, results };
+        res = { requested: ids.length, skipped: ids.length - drafts.length, failed: drafts.length - done, results };
       } else {
         const r = await api.bulkUpdateNodes(
           nestId,
