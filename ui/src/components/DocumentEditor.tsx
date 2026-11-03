@@ -16,7 +16,7 @@ import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { nestPath } from "../lib/nest-url";
+import { documentLink } from "../lib/nest-url";
 import { useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
@@ -100,6 +100,8 @@ import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
 import { TaskAssignee } from "./board/TaskAssignee";
+import { TaskDetails } from "./board/TaskDetails";
+import { AssigneeMenu } from "./board/CardParts";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -328,8 +330,6 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");
@@ -377,6 +377,8 @@ export function DocumentEditor({
   const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
   const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
   const [assignee, setAssignee] = useState<string | undefined>(undefined);
+  const [taskPriority, setTaskPriority] = useState<string | undefined>(undefined);
+  const [taskDue, setTaskDue] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -486,12 +488,12 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill" | "tool" | "table"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task"
   >("document");
   // Type switch that would reinterpret existing content — confirmed before
   // it's applied (see requestTypeChange below).
   const [pendingType, setPendingType] = useState<{
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table";
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task";
     label: string;
   } | null>(null);
   const isArtifactDraft = isNew && newType === "artifact";
@@ -499,7 +501,7 @@ export function DocumentEditor({
   // (e.g. Document → Agent, both markdown prose) doesn't change how
   // existing content reads, so only a cross-class switch needs a warning.
   const typeBodyKind = (
-    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
   ): "markdown" | "html" | "csv" | "code" =>
     t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
   // New-doc Type switch: warn before applying when there's existing content
@@ -507,7 +509,7 @@ export function DocumentEditor({
   // code) — nothing to reinterpret on an empty draft, and same-class
   // switches (e.g. Document ↔ Agent) don't change how the body is read.
   const requestTypeChange = (
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
     label: string,
   ) => {
     if (
@@ -560,13 +562,16 @@ export function DocumentEditor({
   // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
   // opened from the page count as inside, or opening one would hide the toolbar.
   const pageRef = useRef<HTMLDivElement | null>(null);
+  // The top bar counts as inside too: putting the controls away on a press
+  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
+  const topBarRef = useRef<HTMLDivElement | null>(null);
   const [pageActive, setPageActive] = useState(isNew);
   useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pageActive) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t)) return;
+      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
       if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
       setPageActive(false);
     };
@@ -941,6 +946,11 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
+  useBreadcrumb([
+    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
+  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
@@ -1166,6 +1176,8 @@ export function DocumentEditor({
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
       setAssignee((node as any)?.assignee ?? undefined);
+      setTaskPriority((node as any)?.priority ?? undefined);
+      setTaskDue((node as any)?.due ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -1569,6 +1581,15 @@ export function DocumentEditor({
         // sends `prime` at all, so an inherited (null) flag stays off the wire.
         ...(prime === null ? {} : { prime }),
         ...(alwaysInclude === null ? {} : { always_include: alwaysInclude }),
+        // A new task carries what was picked above the editor, so it need not
+        // be saved and reopened to be assigned.
+        ...(newType === "task"
+          ? {
+              ...(assignee ? { assignee } : {}),
+              ...(taskPriority ? { priority: taskPriority } : {}),
+              ...(taskDue ? { due: taskDue } : {}),
+            }
+          : {}),
       });
       savedId = (res as any)?.node?.id;
       createdStatus = (res as any)?.node?.status;
@@ -2048,7 +2069,7 @@ export function DocumentEditor({
             ...base,
             icon: LinkIcon,
             onSelect: () => {
-              const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
+              const url = documentLink(window.location.origin, nestId, nodeId);
               void copyTextWithToast(
                 url,
                 "Link copied — recipient needs access to this nest",
@@ -2259,6 +2280,7 @@ export function DocumentEditor({
           nestId={nestId}
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
+          documentUrl={documentLink(window.location.origin, nestId, nodeId)}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
@@ -2353,6 +2375,7 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
+        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
@@ -2943,7 +2966,7 @@ export function DocumentEditor({
                                 ?.focus();
                           }
                         }}
-                        placeholder="Untitled"
+                        placeholder={loading ? "Loading…" : "Untitled"}
                         // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
@@ -3202,7 +3225,7 @@ export function DocumentEditor({
                                 {/* Long tags truncate rather than eat the row; the
                             full value stays in the chip's title. */}
                                 <span className="truncate max-w-[16rem]">{t}</span>
-                                {!fieldsDisabled && (
+                                {!fieldsDisabled && !/^#?ticket:/i.test(t) && (
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -3238,18 +3261,28 @@ export function DocumentEditor({
 
                 {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-                {stewardshipEnabled && canFlagPrime && pageActive && (
-                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                {/* Always in the layout (not only while editing): a row that
+              appears on the first click shoves the whole page down under
+              the cursor. One compact line, the full wording on hover. */}
+                {stewardshipEnabled && canFlagPrime && (
+                  <div className="flex items-start justify-between gap-4 py-1">
                     <div className="space-y-0.5">
-                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                      <span
+                        className="flex items-center gap-1.5 text-sm font-medium"
+                        title={
+                          primeByTag && prime === null
+                            ? "Inherited from a prime tag on this document — it always needs steward approval."
+                            : "Always require steward approval for this document, even from an owner or admin with auto-publish on."
+                        }
+                      >
                         <Star className="h-4 w-4" />
                         Prime document
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {primeByTag && prime === null
+                            ? "Inherited from a prime tag"
+                            : "Every change needs steward approval"}
+                        </span>
                       </span>
-                      <p className="text-xs text-muted-foreground">
-                        {primeByTag && prime === null
-                          ? "Inherited from a prime tag on this document — it always needs steward approval."
-                          : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
-                      </p>
                       {primeByTag && prime === false && !effectiveAlwaysInclude && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its prime tag.
@@ -3287,20 +3320,28 @@ export function DocumentEditor({
                 {/* Always include — any nest, owner/admin only. It reaches every
               agent and model, governed or not; in a governed nest it also
               makes the document prime. */}
-                {canFlagPrime && pageActive && (
-                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                {canFlagPrime && (
+                  <div className="flex items-start justify-between gap-4 py-1">
                     <div className="space-y-0.5">
-                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                      <span
+                        className="flex items-center gap-1.5 text-sm font-medium"
+                        title={
+                          (alwaysIncludeByTag && alwaysInclude === null
+                            ? "Inherited from an always-include tag on this document."
+                            : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs.") +
+                          (stewardshipEnabled
+                            ? " It is also prime: every change to it needs steward approval."
+                            : "")
+                        }
+                      >
                         <Megaphone className="h-4 w-4" />
                         Always include
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {alwaysIncludeByTag && alwaysInclude === null
+                            ? "Inherited from a tag"
+                            : "Sent to every agent in this nest"}
+                        </span>
                       </span>
-                      <p className="text-xs text-muted-foreground">
-                        {alwaysIncludeByTag && alwaysInclude === null
-                          ? "Inherited from an always-include tag on this document."
-                          : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs."}
-                        {stewardshipEnabled &&
-                          " It is also prime: every change to it needs steward approval."}
-                      </p>
                       {alwaysIncludeByTag && alwaysInclude === false && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its always-include tag.
@@ -3366,6 +3407,60 @@ export function DocumentEditor({
                   />
                 )}
 
+                {/* A task being written: the same pickers, held until the first save. */}
+                {isNew && newType === "task" && (
+                  <div className="space-y-2" data-testid="new-task-details">
+                    <section className="flex items-center gap-2" aria-label="Assignee">
+                      <h3 className="text-xs font-medium text-muted-foreground">Assignee</h3>
+                      <AssigneeMenu
+                        assignee={assignee}
+                        people={(roster?.people ?? []).filter((p: any) => p.member !== false)}
+                        me={currentEmail}
+                        editable
+                        onChange={(email) => {
+                          setAssignee(email ?? undefined);
+                          setTouched(true);
+                        }}
+                        showName
+                      />
+                    </section>
+                    <TaskDetails
+                      nestId={nestId}
+                      tags={tags}
+                      priority={taskPriority}
+                      due={taskDue}
+                      canEdit
+                      onChange={(patch) => {
+                        if (patch.tags) setTags(newTags([], patch.tags.map((t) => tagKey(String(t)))));
+                        if ("priority" in patch) setTaskPriority(patch.priority ?? undefined);
+                        if ("due" in patch) setTaskDue(patch.due ?? undefined);
+                        setTouched(true);
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Stage, priority and due — tasks only, saved on pick like the assignee. */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskDetails
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    tags={tags}
+                    priority={taskPriority}
+                    due={taskDue}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setTaskPriority(n?.priority ?? undefined);
+                      setTaskDue(n?.due ?? undefined);
+                      if (Array.isArray(n?.tags)) {
+                        setTags(newTags([], n.tags.map((t: unknown) => tagKey(String(t)))));
+                      }
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
+                )}
+
                 {/* Relations — tasks only: blocks / blocked by / related /
               duplicates. Not content, so editable in view mode too; the
               caller's edit access to the task gates it. */}
@@ -3412,8 +3507,15 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {canEditContent && pageActive && (isNew || isRunnable || canTurnIntoHere) && (
-                  <div className="flex flex-col sm:flex-row gap-4 w-full">
+                {/* Held in place (invisible, unfocusable) while idle — like the
+              editor toolbar below — so activating the page doesn't push the
+              body down. */}
+                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                  <div
+                    className={`flex flex-col sm:flex-row gap-4 w-full ${pageActive ? "" : "invisible"}`}
+                    aria-hidden={!pageActive || undefined}
+                    {...(pageActive ? {} : ({ inert: "" } as object))}
+                  >
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
                         <label className="block text-sm font-medium mb-1">Type</label>
@@ -3502,7 +3604,7 @@ export function DocumentEditor({
                                 onClick={() => {
                                   if (isNew) {
                                     requestTypeChange(
-                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
                                       label,
                                     );
                                     return;

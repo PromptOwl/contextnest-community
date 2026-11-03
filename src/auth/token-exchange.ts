@@ -22,6 +22,7 @@
  * rests on signature + issuer + audience + expiry + email_verified. This is the
  * standard token-exchange trust model and is documented in CONFIGURATION.md.
  */
+import { signInAlertSoon } from "../surfaces/signin-alerts.js";
 import type { Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { jwtVerify } from "jose";
@@ -296,6 +297,8 @@ export async function handleTokenExchange(c: Context<AuthEnv>) {
     // Only a token that vouches for the address may later stand for its
     // domain (org contributions, CU-wdqcq05rz6).
     if (vouched) await markEmailVerified(user.id, "token-exchange");
+    // Round 9 (R5-M1): a sealed-nest owner hears about an agent sign-in.
+    signInAlertSoon(user.id, "token_exchange", { client: provider });
     const token = signMcpTicket(
       {
         sub: email,

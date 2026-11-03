@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { getAdminLicense, type AdminLicense, type LicenseStatus } from "../lib/api";
 import {
   adminLicenseNotice,
+  DISMISS_DAYS,
   isDismissed,
   neutralReadOnlyNotice,
   type LicenseNotice,
@@ -24,13 +25,46 @@ export function LicenseNoticeCard({
   onDismiss,
   onInstallKey,
   className = "",
+  compact = false,
 }: {
   notice: LicenseNotice;
   onDismiss?: () => void;
   onInstallKey?: () => void;
   className?: string;
+  /** One line — title, CTA link, dismiss — for content-heavy pages. */
+  compact?: boolean;
 }) {
   const Icon = notice.cta ? CalendarClock : Info;
+  const dismiss = onDismiss && (
+    <button
+      type="button"
+      onClick={onDismiss}
+      aria-label={`Dismiss for ${DISMISS_DAYS} days`}
+      title={`Hide for ${DISMISS_DAYS} days`}
+      className="opacity-60 hover:opacity-100"
+    >
+      <X className="h-4 w-4" />
+    </button>
+  );
+  if (compact) {
+    return (
+      <div
+        role="status"
+        data-testid="license-notice"
+        className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs ${LEVEL_STYLES[notice.level]} ${className}`}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate font-medium">{notice.title}</span>
+        {notice.cta && (
+          <a href={notice.contact.url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 underline">
+            {notice.cta}
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+        {dismiss}
+      </div>
+    );
+  }
   return (
     <div
       role="status"
@@ -70,17 +104,7 @@ export function LicenseNoticeCard({
             </div>
           )}
         </div>
-        {onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            aria-label="Dismiss for a week"
-            title="Hide for a week"
-            className="opacity-60 hover:opacity-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
+        {dismiss}
       </div>
     </div>
   );
@@ -124,20 +148,23 @@ function readDismissal(): { id: string; at: number } | null {
  * Server admins and the key's owner see the specifics (trial days left, end of
  * a grace period, seats, a lapsed key) with a way to talk to PromptOwl. Anyone
  * else sees nothing at all — until the workspace actually becomes read-only,
- * and then only the neutral line. Admin notices can be hidden for a week,
- * except in the last few days before something changes.
+ * and then only the neutral line. Admin notices can be hidden for
+ * DISMISS_DAYS, except in the last few days before something changes.
  */
 export function LicenseBanner({
   isAdmin,
   status,
   onInstallKey,
   className = "mb-4",
+  compact = false,
 }: {
   isAdmin: boolean;
   status: LicenseStatus | null;
   onInstallKey?: () => void;
   /** Spacing around the card; the shell passes its own where <main> has no padding. */
   className?: string;
+  /** Nest and document pages: a dismissible (not yet urgent) notice shrinks to one line. */
+  compact?: boolean;
 }) {
   const readOnly = !!status && (!status.valid || status.suspended);
   // Probe the admin endpoint for admins, and — since a lapsed license stops
@@ -165,6 +192,7 @@ export function LicenseBanner({
     <LicenseNoticeCard
       className={className}
       notice={notice}
+      compact={compact && notice.dismissible}
       onInstallKey={lic ? onInstallKey : undefined}
       onDismiss={
         notice.dismissible

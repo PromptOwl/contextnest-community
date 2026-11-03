@@ -11,6 +11,7 @@
  * too, not the live working copy. Without both, a caller who cannot open a
  * table could still read it one query at a time, pending rows included.
  */
+import { approvedOnlyForSurfaceEdit } from "../surfaces/draft-visibility.js";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { bodyOnly } from "../nodes/service.js";
@@ -103,7 +104,9 @@ export async function queryTableNode(
 
   let body = doc.body || "";
   let version = (doc.frontmatter.version as number) ?? null;
-  if (caller.approvedOnly) {
+  // A pending Surfaces edit is a chat-derived draft: below write, the
+  // approved rows only (round 3, N4). Views read tables through here too.
+  if (caller.approvedOnly || (await approvedOnlyForSurfaceEdit(nestId, doc.id, caller.userId))) {
     const approved = await getApprovedVersion(nestId, doc.id);
     if (approved == null) throw new NotFoundError(`Table not found: ${ref}`);
     const rebuilt = await reconstructApproved(versionManager, nestId, doc.id, approved);

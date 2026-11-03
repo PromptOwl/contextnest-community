@@ -3,7 +3,7 @@
  *
  *   POST /nests/:id/assets          images + video  → the asset store
  *   POST /nests/:id/nodes/pdf       a PDF           → a governed `pdf` node
- *   POST /nests/:id/nodes/office    .pptx / .docx   → a governed document
+ *   POST /nests/:id/nodes/office    .pptx / .docx / .xlsx → a governed document
  *   MCP  context_upload             any of the above, routed by file type
  *
  * Each REST route takes multipart (`file`) or a JSON body naming the bytes —
@@ -42,7 +42,7 @@ import { isPushAllowlisted } from "../nests/push-confirmation-service.js";
 import { nestRequiresPushConfirmation } from "../nests/service.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import { createNode, updateNode, PDF_NODE_TYPE, type OriginalFile } from "./service.js";
-import { createOfficeDocument } from "./office-service.js";
+import { createOfficeDocument, replaceOfficeDocument } from "./office-service.js";
 
 // ─── Types and caps ────────────────────────────────────────────────────────
 
@@ -71,6 +71,7 @@ const EXT_KIND: Record<string, UploadKind> = {
   pdf: "pdf",
   pptx: "office",
   docx: "office",
+  xlsx: "office",
 };
 
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -108,7 +109,7 @@ export function supportedTypes(kinds: UploadKind[] = ["image", "video", "pdf", "
   if (kinds.includes("image")) parts.push(`png, jpg, jpeg, gif, webp (images, max ${mb(uploadCap("image"))})`);
   if (kinds.includes("video")) parts.push(`mp4, webm (video, max ${mb(uploadCap("video"))})`);
   if (kinds.includes("pdf")) parts.push(`pdf (a PDF document, max ${mb(uploadCap("pdf"))})`);
-  if (kinds.includes("office")) parts.push(`pptx, docx (a document from PowerPoint/Word, max ${mb(uploadCap("office"))})`);
+  if (kinds.includes("office")) parts.push(`pptx, docx, xlsx (a document from PowerPoint/Word/Excel, max ${mb(uploadCap("office"))})`);
   return parts.join("; ");
 }
 
@@ -352,7 +353,7 @@ function fieldsOf(body: Record<string, unknown>): UploadFields {
 const MISSING_FILE: Record<Exclude<UploadRoute, "any">, string> = {
   asset: 'multipart field "file" (an image or video) is required',
   pdf: 'multipart field "file" (a PDF) is required',
-  office: 'multipart field "file" (a .pptx or .docx) is required',
+  office: 'multipart field "file" (a .pptx, .docx or .xlsx) is required',
 };
 
 /**
@@ -424,7 +425,7 @@ export async function storeAsset(nestId: string, upload: ResolvedUpload): Promis
 /** A readable title from an uploaded file name ("Q3 report.pdf" → "Q3 report"). */
 export function titleFromUploadFilename(name: string): string {
   return (name.split(/[/\\]/).pop() || "")
-    .replace(/\.(pdf|pptx|docx)$/i, "")
+    .replace(/\.(pdf|pptx|docx|xlsx)$/i, "")
     .replace(/[_]+/g, " ")
     .trim()
     .slice(0, 200);
@@ -433,9 +434,11 @@ export function titleFromUploadFilename(name: string): string {
 export interface SavedDocument {
   node: ContextNode;
   version: number;
-  /** False when a pdf upload replaced an existing pdf node. */
+  /** False when an upload replaced an existing node's file. */
   created: boolean;
   original?: OriginalFile;
+  /** Things the caller should know, e.g. hand edits a re-upload replaced. */
+  warnings?: string[];
 }
 
 /**
@@ -491,7 +494,7 @@ export async function savePdfUpload(
   return { node, version, created: true };
 }
 
-/** A .pptx/.docx upload: always a new document. */
+/** A .pptx/.docx/.xlsx upload: a new document, or (`nodeId`) a new version of the one it came from. */
 export async function saveOfficeUpload(
   nestId: string,
   upload: ResolvedUpload,
@@ -499,10 +502,25 @@ export async function saveOfficeUpload(
   userEmail: string,
   client?: ClientMetadata,
 ): Promise<SavedDocument> {
-  if (fields.nodeId) {
-    throw new ValidationError("An Office upload always creates a new document; nodeId is not supported.");
-  }
   if (upload.bytes.length > config.OFFICE_MAX_BYTES) throw tooLargeError("office", upload.bytes.length);
+  if (fields.nodeId) {
+    // Body field, not a path param: checked here before it becomes a path.
+    assertSafeNodeId(fields.nodeId);
+    const replaced = await replaceOfficeDocument(
+      nestId,
+      fields.nodeId,
+      {
+        bytes: upload.bytes,
+        filename: upload.filename,
+        ...(fields.title ? { title: fields.title } : {}),
+        ...(fields.tags ? { tags: fields.tags } : {}),
+        ...(fields.changeNote ? { changeNote: fields.changeNote } : {}),
+        ...(client ? { client } : {}),
+      },
+      userEmail,
+    );
+    return { node: replaced.node, version: replaced.version, created: false, original: replaced.original, warnings: replaced.warnings };
+  }
   const made = await createOfficeDocument(
     nestId,
     {

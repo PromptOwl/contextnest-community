@@ -4,6 +4,8 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { approvedOnlyForSurfaceEdit, surfaceEditsHiddenFor, isHidden as isSurfaceHidden } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
@@ -132,6 +134,7 @@ import {
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
+import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -149,6 +152,9 @@ import {
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
 const MAX_HOPS = 10;
+/** context_review_queue: rows read-checked per call, and rows listed. */
+const REVIEW_QUEUE_SCAN = 200;
+const REVIEW_QUEUE_PAGE = 50;
 
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
@@ -446,6 +452,8 @@ export interface McpToolContext {
  * read-tier workflow-plane tools.
  */
 export const MCP_READ_TOOLS = new Set<string>([
+  // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
+  ...SURFACES_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -505,6 +513,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // Surfaces (bindings, identity links): only advertised while
+  // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
+  ...SURFACES_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -527,7 +538,7 @@ const TASK_FIELD_PROPERTIES = {
   },
   priority: {
     type: ["string", "null"],
-    description: 'One of "urgent", "high", "medium", "low". null or "" clears it.',
+    description: 'One of the nest\'s priority keys (default: "urgent", "high", "medium", "low"; a nest can define its own). null or "" clears it.',
   },
   parent: {
     type: ["string", "null"],
@@ -703,7 +714,7 @@ export const TOOL_DEFINITIONS = [
         },
         priority: {
           type: "string",
-          description: 'Only nodes with this priority: urgent | high | medium | low | none.',
+          description: "Only nodes with this priority key (default levels: urgent | high | medium | low), or 'none'.",
         },
         due_before: {
           type: "string",
@@ -905,7 +916,7 @@ export const TOOL_DEFINITIONS = [
     // POST /nodes/office) so an agent can attach a file without multipart.
     // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
     description:
-      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx or .docx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, or the Word document's headings, lists and tables) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx, .docx or .xlsx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, the Word document's headings, lists and tables, or a table per spreadsheet sheet) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -938,7 +949,12 @@ export const TOOL_DEFINITIONS = [
         as: {
           type: "string",
           description:
-            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx). A file of the other kind is refused rather than rerouted.',
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx, xlsx). A file of the other kind is refused rather than rerouted.',
+        },
+        node_id: {
+          type: "string",
+          description:
+            "Office files only: the id of the document an earlier .pptx/.docx/.xlsx upload created. The file becomes that document's new version (same kind of file required) instead of a new document; the earlier file stays downloadable from its version. In a governed nest it lands as a draft for review.",
         },
       },
     },
@@ -1130,7 +1146,7 @@ export const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description:
-            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: one of the nest\'s priority keys (default urgent|high|medium|low), or null. assignee: email|null. due: YYYY-MM-DD|null. fields: custom field values by key (null clears). change_note: recorded in each version.",
           properties: {
             board_id: { type: "string" },
             column: { type: "string" },
@@ -1139,6 +1155,7 @@ export const TOOL_DEFINITIONS = [
             priority: { type: ["string", "null"] },
             assignee: { type: ["string", "null"] },
             due: { type: ["string", "null"] },
+            fields: { type: "object" },
             change_note: { type: "string" },
           },
         },
@@ -1726,6 +1743,19 @@ async function resolveLlmBody(
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
   if (!stewardship) {
+    // A pending Surfaces edit is a chat-derived draft: below write, the
+    // approved body only (security round 2, M1d).
+    if (await approvedOnlyForSurfaceEdit(ctx.nestId, node.id, ctx.userId)) {
+      const approvedV = await versions.getApprovedVersion(ctx.nestId, node.id);
+      if (approvedV == null) return null;
+      try {
+        const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approvedV)).raw;
+        ctx.servedVersions?.set(node.id, approvedV);
+        return raw;
+      } catch {
+        return null;
+      }
+    }
     // Ungoverned: the live body, which is the document's current version.
     const live = Number(node.frontmatter?.version);
     if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
@@ -1979,6 +2009,10 @@ export async function handleToolCall(
     status = 500;
     throw err;
   } finally {
+    if (config.METRICS_ENABLED) {
+      const ms = Date.now() - started;
+      void import("../ops/metrics.js").then((m) => m.recordToolCall(toolName, status, ms));
+    }
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,
@@ -2099,11 +2133,40 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
         "VALIDATION_FAILED",
       );
     }
+    if (args.node_id && upload.kind !== "office") {
+      return toolError("node_id replaces an Office document's file; it only works with a .pptx, .docx or .xlsx.", "VALIDATION_FAILED");
+    }
     if (!isDocument) {
       const asset = await uploads.storeAsset(nestId, upload);
       return {
         text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
         data: { kind: upload.kind, ...asset },
+      };
+    }
+    if (args.node_id) {
+      const saved = await uploads.saveOfficeUpload(
+        nestId,
+        upload,
+        { nodeId: String(args.node_id), ...(args.title?.trim() ? { title: args.title.trim() } : {}), ...(args.tags ? { tags: args.tags as string[] } : {}) },
+        userEmail,
+        ctx.client,
+      );
+      const { node, version } = saved;
+      const url = `/nests/${nestId}/originals/${saved.original!.file}`;
+      return {
+        text:
+          `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: String(node.frontmatter.title ?? ""),
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          original: { ...saved.original, url },
+          ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
+        },
       };
     }
     const fields = {
@@ -2662,12 +2725,23 @@ async function runTool(
       // timeout on a 444-node governed nest while REST answered at once.
       const matches = matchDocuments(await discoverForSearch(storage), query)
         .filter((n) => !isDerivedAnnotationsNode(n.id));
-      const accessible = await filterAccessible(
+      let accessible = await filterAccessible(
         nestId,
         userId,
         userEmail,
         matches,
       );
+      // A hit on a pending Surfaces edit must not reveal it matched only the
+      // chat-derived draft: re-match those on the approved body (round 2, M1d).
+      const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+      if (accessible.some((n) => isSurfaceHidden(surfaceEdits, n.id))) {
+        const rebodied = await Promise.all(
+          accessible.map(async (n) =>
+            isSurfaceHidden(surfaceEdits, n.id) ? { ...n, body: await approvedReadableBody(nestId, n.id) } : n,
+          ),
+        );
+        accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
+      }
       const count = accessible.length;
       if (count === 0)
         return {
@@ -4263,25 +4337,71 @@ async function runTool(
 
     case "context_review_queue": {
       const status = args.status || "pending";
+      // The same gate as REST /review-queue (CU-wdqcq05rz6): a visibility-only
+      // reader sees their OWN requests, not everyone's — a request names an
+      // unapproved draft. Everyone else sees only the rows whose document
+      // they can read (a share-only caller, for one). Enforced here, in the
+      // op, so every MCP caller and Hootie get the same answer.
+      const ownOnly = await isPublicReader(nestId, ctx.userId);
+      // Own-only is filtered in SQL, so its total is exact. Otherwise the
+      // readability filter runs over a bounded window BEFORE paging, and the
+      // total counts only readable rows in it — never a row this caller may
+      // not see (security r2 N2), never stuck at one page either.
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : { limit: REVIEW_QUEUE_SCAN }),
       });
+      let readableRows = result.requests;
+      let total = result.total;
+      if (!ownOnly) {
+        const readable = new Set(
+          (
+            await filterAccessible(
+              nestId,
+              ctx.userId,
+              userEmail,
+              readableRows.map((r) => ({ id: r.nodeId })),
+            )
+          ).map((n) => n.id),
+        );
+        // ponytail: past REVIEW_QUEUE_SCAN rows the count is a floor; page in SQL if queues get that big.
+        readableRows = readableRows.filter((r) => readable.has(r.nodeId));
+        total = readableRows.length;
+      }
+      const requests = readableRows.slice(0, REVIEW_QUEUE_PAGE);
 
-      if (result.requests.length === 0) {
+      if (requests.length === 0) {
         return status === "pending"
           ? "No documents pending review. All caught up!"
           : `No reviews with status "${status}".`;
       }
 
-      const list = result.requests
+      const list = requests
         .map(
           (r, i) =>
             `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
-      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+      const more = total > requests.length ? `\n\nShowing the first ${requests.length}.` : "";
+      return {
+        text: `# Review Queue (${status})\n**${total} item(s)**\n\n${list}${more}`,
+        // The rows the prose lists, by node id — only rows this caller may
+        // see (above), so a caller can act on them without parsing prose.
+        data: {
+          total,
+          requests: requests.map((r) => ({
+            nodeId: r.nodeId,
+            title: r.title ?? null,
+            version: r.version,
+            priority: r.priority,
+            requestedBy: r.requestedBy,
+            requestedAt: r.requestedAt,
+            ...(r.requestNote ? { requestNote: r.requestNote } : {}),
+          })),
+        },
+      };
     }
 
     case "context_my_drafts": {
@@ -4694,6 +4814,9 @@ async function runTool(
       // owner/admin and refuses system keys in metacognition/manage.ts.
       if (isMetacognitionTool(toolName)) {
         return runMetacognitionTool(toolName, args, ctx);
+      }
+      if (isSurfacesTool(toolName)) {
+        return runSurfacesTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

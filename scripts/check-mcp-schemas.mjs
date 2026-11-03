@@ -39,7 +39,23 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   68->69 context_upload (community-nest-upload-files-over-mcp-without-handling-binaries).
 //   69->70 context_set_visibility (twin of PATCH /nests/:id/visibility; Community-only: nest visibility is
 //   server state the engine does not model, so there is no engine op to consume).
-const BASELINE = 70;
+//   70->83 Surfaces S1 (src/mcp/surfaces-tools.ts): context_surfaces_status, bindings_list, binding_preview/create/update/
+//   delete/recheck/resume, links_list, link_revoke/unblock, link_reviews_list, link_review_decide — REST twins of /surfaces/*;
+//   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists
+//   (ContextNest#238: promote upstream or confirm Community-only; covers the S2a, S2b and S3 tools below too).
+//   83->87 Surfaces S2a (src/mcp/surfaces-tools.ts): context_surfaces_slack_install_create, settings_get, settings_update,
+//   windows_list — REST twins of POST /surfaces/slack/installs, GET/PATCH /surfaces/settings, GET /surfaces/windows; Community-only
+//   tables (surface_installs, surface_settings, surface_windows) the engine does not model, so no engine op exists.
+//   87->93 Surfaces S2b (src/mcp/surfaces-tools.ts): context_surfaces_proposals_list, my_pending, commits_list, budget_get,
+//   budget_update, disconnect — REST twins of GET /surfaces/proposals, /pending, /commits, GET/PATCH /surfaces/nests/:id/budget,
+//   DELETE /surfaces/installs/:id; Community-only tables (surface_proposals, surface_commits, surface_nest_budgets) the engine
+//   does not model, so no engine op exists.
+//   93->94 Surfaces S2b round 4: context_surfaces_binding_invite — twin of POST /surfaces/bindings/:id/invite (/nest invite);
+//   Community-only binding state the engine does not model.
+//   94->97 Surfaces S3 (src/mcp/surfaces-tools.ts): context_surfaces_seed_apply, seed_list, seed_status — twins of
+//   POST /surfaces/seeds/apply, GET /surfaces/seeds, GET /surfaces/seeds/status; Community-only seed state
+//   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
+const BASELINE = 97;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

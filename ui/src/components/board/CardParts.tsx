@@ -11,8 +11,12 @@
  * portals along the component tree — so each one stops its clicks, or picking
  * a menu item would also open the document.
  */
+import { levelGlyph, levelLabel, usePriorityLevels } from "../../lib/priorities";
+import { priorityTone, tagPillTone } from "../../lib/tones";
 import { useState, type ReactNode } from "react";
+import { copyTextWithToast } from "../../lib/clipboard";
 import {
+  AlertTriangle,
   Ban,
   CalendarDays,
   ListTree,
@@ -51,12 +55,9 @@ import {
 import { initialsOf, personTint } from "../AuthorshipChips";
 import { COLLAB_PERMISSIONS } from "../CollaboratorManager";
 import {
-  PRIORITIES,
-  PRIORITY_LABELS,
   dueState,
   formatDue,
   isPickedDue,
-  type Priority,
 } from "../../lib/board-tasks";
 
 const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -71,30 +72,71 @@ function Isolate({ children }: { children: ReactNode }) {
 }
 
 /** A node's type, as a small coloured glyph (cards and list rows). */
+/** The task's permanent number (`PO-12`) — the team's spoken shorthand, so it is
+ *  the most legible thing on a card. Click copies it. Renders nothing for an
+ *  unnumbered task. */
+export function TicketChip({ ticket, className = "" }: { ticket?: string; className?: string }) {
+  if (!ticket) return null;
+  return (
+    <button
+      type="button"
+      className={`shrink-0 cursor-copy rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] font-semibold leading-none text-primary tabular-nums hover:bg-primary/20 ${className}`}
+      title={`${ticket} — click to copy`}
+      aria-label={`Copy ticket number ${ticket}`}
+      data-testid="ticket-chip"
+      onClick={(e) => {
+        // Copying never also opens or drags the card it sits on.
+        e.stopPropagation();
+        void copyTextWithToast(ticket, `${ticket} copied`);
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      {ticket}
+    </button>
+  );
+}
+
+/** A tag on a card. A namespaced tag (`surface:community`) is a coloured pill
+ *  showing only its value, so it reads as an attribute; a flat tag stays a quiet
+ *  grey chip. `label` swaps in a display name (a surface's own name). */
+export function TagPill({ tag, label }: { tag: string; label?: string }) {
+  const bare = tag.replace(/^#/, "");
+  const i = bare.indexOf(":");
+  const tone = i > 0 ? tagPillTone(bare) : undefined;
+  if (!tone) {
+    return <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">{tag}</span>;
+  }
+  return (
+    <span title={`#${bare}`} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${tone}`}>
+      {label ?? bare.slice(i + 1)}
+    </span>
+  );
+}
+
 export function TypeIcon({ type }: { type: string }) {
   return <NodeTypeGlyph type={type} className="h-3.5 w-3.5" />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
 
-/** Linear's glyphs: urgent is a filled "!" square, the rest are 1–3 bars. */
-export function PriorityIcon({ priority }: { priority?: string }) {
-  if (priority === "urgent") {
+/** Linear's glyphs, drawn for however many levels the nest defines (see
+ *  levelGlyph): the top level is a filled "!" square, the rest are 1–3 bars. */
+export function PriorityIcon({ priority, tone }: { priority?: string; tone?: string }) {
+  const levels = usePriorityLevels();
+  const glyph = levelGlyph(levels, priority);
+  const name = priority ? levelLabel(levels, priority) : "No priority";
+  if (glyph.kind === "alert") {
     return (
-      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 text-orange-500" aria-label="Urgent">
+      <svg viewBox="0 0 16 16" className={`h-3.5 w-3.5 ${tone ?? "text-orange-500"}`} aria-label={name}>
         <rect x="1" y="1" width="14" height="14" rx="3" fill="currentColor" />
         <rect x="7.1" y="4" width="1.8" height="5" rx="0.9" fill="white" />
         <rect x="7.1" y="10.5" width="1.8" height="1.8" rx="0.9" fill="white" />
       </svg>
     );
   }
-  const filled = priority === "high" ? 3 : priority === "medium" ? 2 : priority === "low" ? 1 : 0;
+  const filled = glyph.kind === "bars" ? glyph.filled : 0;
   return (
-    <svg
-      viewBox="0 0 16 16"
-      className="h-3.5 w-3.5 text-foreground/70"
-      aria-label={priority ? PRIORITY_LABELS[priority as Priority] : "No priority"}
-    >
+    <svg viewBox="0 0 16 16" className={`h-3.5 w-3.5 ${tone ?? "text-foreground/70"}`} aria-label={name}>
       {[0, 1, 2].map((i) => (
         <rect
           key={i}
@@ -111,21 +153,14 @@ export function PriorityIcon({ priority }: { priority?: string }) {
   );
 }
 
-const PRIORITY_TONES: Record<string, string> = {
-  urgent: "bg-orange-500/15 text-orange-700 dark:text-orange-300",
-  high: "bg-red-500/10 text-red-700 dark:text-red-300",
-  medium: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
-  low: "bg-muted text-muted-foreground",
-};
-
-/** A set priority as a tinted pill: its bars plus the label. */
+/** A set priority as a tinted pill (red → grey by urgency): its bars plus the label. */
 export function PriorityBadge({ priority }: { priority: string }) {
+  const levels = usePriorityLevels();
+  const tone = priorityTone(levels.map((l) => l.key), priority) ?? "bg-muted text-muted-foreground";
   return (
-    <span
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium ${PRIORITY_TONES[priority] ?? PRIORITY_TONES.low}`}
-    >
-      <PriorityIcon priority={priority} />
-      {PRIORITY_LABELS[priority as Priority] ?? priority}
+    <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium ${tone}`}>
+      <PriorityIcon priority={priority} tone="text-current" />
+      {levelLabel(levels, priority)}
     </span>
   );
 }
@@ -137,23 +172,24 @@ export function PriorityMenu({
 }: {
   value?: string;
   editable: boolean;
-  onChange: (p: Priority | null) => void;
+  onChange: (p: string | null) => void;
 }) {
+  const levels = usePriorityLevels();
   const icon = value ? <PriorityBadge priority={value} /> : <PriorityIcon />;
-  if (!editable) return value ? <span title={PRIORITY_LABELS[value as Priority]}>{icon}</span> : null;
+  if (!editable) return value ? <span title={levelLabel(levels, value)}>{icon}</span> : null;
   return (
     <Isolate>
       <DropdownMenu>
         <DropdownMenuTrigger
           className={`rounded hover:bg-muted ${value ? "" : "p-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"}`}
-          title={value ? `Priority: ${PRIORITY_LABELS[value as Priority]}` : "Set priority"}
+          title={value ? `Priority: ${levelLabel(levels, value)}` : "Set priority"}
         >
           {icon}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" onClick={stop} className="w-40">
-          {PRIORITIES.map((p) => (
-            <DropdownMenuItem key={p} onSelect={() => onChange(p)} className="gap-2">
-              <PriorityIcon priority={p} /> {PRIORITY_LABELS[p]}
+          {levels.map((p) => (
+            <DropdownMenuItem key={p.key} onSelect={() => onChange(p.key)} className="gap-2">
+              <PriorityIcon priority={p.key} /> {p.label}
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
@@ -187,12 +223,15 @@ export function DueChip({
   onChange: (d: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Overdue carries a warning icon and label, not only red (CU-wdqcq06a1x).
+  const overdue = !!due && dueState(due, today) === "overdue";
   const chip = due ? (
     <span
       className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${DUE_TONES[dueState(due, today)]}`}
-      title={`Due ${due}${dueState(due, today) === "overdue" ? " — overdue" : ""}`}
+      title={`Due ${due}${overdue ? " — overdue" : ""}`}
     >
-      <CalendarDays className="h-3 w-3" />
+      {overdue ? <AlertTriangle className="h-3 w-3" aria-hidden /> : <CalendarDays className="h-3 w-3" />}
+      {overdue && <span className="sr-only">Overdue:</span>}
       {formatDue(due, today)}
     </span>
   ) : (

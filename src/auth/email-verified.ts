@@ -1,5 +1,7 @@
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { invalidateAllGuards } from "../surfaces/invalidate.js";
+import { surfacesEnabled } from "../surfaces/flags.js";
 
 /**
  * Record that an identity provider just vouched for this account's email
@@ -20,12 +22,15 @@ import { config } from "../config.js";
  */
 export async function markEmailVerified(userId: string, source: string): Promise<void> {
   try {
-    await getDb().run(
+    const res = await getDb().run(
       // First verification only: keeps the original timestamp, and a sign-in
       // of an already-verified account costs no write.
       "UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL",
       [new Date().toISOString(), userId],
     );
+    // A newly verified email can change who auto-matches into a bound
+    // conversation (Surfaces guard, PRD §4.17).
+    if (res.changes && surfacesEnabled()) await invalidateAllGuards();
   } catch (err) {
     console.error(
       `[auth] recording a verified email failed (user ${userId}, ${source}; sign-in continues):`,

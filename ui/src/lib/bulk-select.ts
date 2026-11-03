@@ -1,5 +1,6 @@
-/** Bulk-select helpers for the Documents list (CU-wdqcq05rbt). `selected` is
- *  the list's id → node map; `nodes` is the group a select-all box covers. */
+/** Bulk-select helpers for the Documents list (CU-wdqcq05rbt) and the Nests
+ *  grid (CU-wdqcq06a1u). `selected` is the id → item map; `nodes` is the group
+ *  a select-all box covers. */
 type Node = { id: string };
 
 /** Checkbox state for a group: all, some or none of it selected. */

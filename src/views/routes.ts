@@ -58,7 +58,8 @@ import {
   writeTargets,
   type WriteFrames,
 } from "./write.js";
-import { renderViewPage } from "./render.js";
+import { renderViewPage, type LinkResolver } from "./render.js";
+import { callerRefResolver } from "../tables/refs.js";
 import {
   authorInfos,
   createViewDeps,
@@ -106,6 +107,29 @@ function versionParam(c: any): number | undefined {
 }
 
 const pathOf = (id: string) => id.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * `[[target]]` → `/nest/<nestId>?doc=<id>` (the app's document address, same
+ * origin as this page) for a node the viewer may read, by the wikilink rule
+ * the graph and tables use: id, then title, then slug. Built over the viewer's
+ * own scope, so a node they cannot read is never named; an approved-only
+ * reader resolves without working-copy titles. A failure to build it costs
+ * the links, never the page.
+ */
+async function viewerLinkResolver(nestId: string, viewer: Principal): Promise<LinkResolver | undefined> {
+  try {
+    const resolve = await callerRefResolver(nestId, viewer.userId, viewer.email, {
+      approvedOnly: viewer.approvedOnly,
+      publishedOnly: viewer.approvedOnly,
+    });
+    return (target) => {
+      const id = resolve(target, false);
+      return id ? `/nest/${encodeURIComponent(nestId)}?doc=${encodeURIComponent(id)}` : null;
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 interface Served {
   nestId: string;
@@ -282,10 +306,15 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
     if (!f) return "";
     return `${q ? "&" : "?"}wt=${f.token}&av=${artifactVersions[blockId]}`;
   };
+  // The resolver scans the whole nest; build it only when something will link.
+  const links =
+    s.layout.body.includes("[[") ||
+    blocks.some((b) => b.ok && (b.kind === "list" || (b.kind === "md" && b.text.includes("[["))));
   const html = renderViewPage({
     title: s.layout.title,
     intro: s.layout.body,
     blocks,
+    resolveLink: links ? await viewerLinkResolver(s.nestId, s.viewer) : undefined,
     frameUrl: (blockId) =>
       `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}${writeQuery(blockId)}`,
     truncated: !!s.layout.meta && s.layout.meta.blocks.length > CAPS.MAX_BLOCKS,

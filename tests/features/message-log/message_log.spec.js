@@ -661,7 +661,13 @@ test.describe('Message log', () => {
     await ml.waitIdle();
     await expect(ml.rows.first()).toBeVisible();
     await expect(ml.table).toContainText('cnst_[REDACTED]');
-    await expect(ml.table).not.toContainText(fakeKey);
+    // The Subject cell shows the stored subject (also its tooltip), then " · <nest>":
+    // the nest's live name, which this test chose to carry the keys — not stored message text.
+    const subject = ml.cell(0, 'Subject');
+    await expect(subject).toContainText('cnst_[REDACTED]');
+    expect(await subject.getAttribute('title')).not.toContain(fakeKey);
+    const shown = (await ml.table.innerText()).split(nest.name).join('');
+    expect(shown).not.toContain(fakeKey);
   });
 
   test('CN-MSG-023: requesting a non-existent message returns "Message not found." and is recorded in the Access log', async ({ primary_user }) => {

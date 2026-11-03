@@ -1,3 +1,4 @@
+import { signInAlertSoon } from "./surfaces/signin-alerts.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { getSessionIdFromRequest } from "./auth/sessions.js";
@@ -84,6 +85,12 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
+import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
+import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
+import { registerConnector, getConnector } from "./surfaces/registry.js";
+import { parseKey } from "./surfaces/services/buffer-crypto.js";
+import { registerSurfacesLifecycle } from "./surfaces/services/lifecycle-service.js";
 import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
@@ -161,7 +168,7 @@ import {
   BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
-import { config, isEmailish, isEmailListish } from "./config.js";
+import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
 import {
   verifyEmailTransport,
   isEmailConfigured,
@@ -532,6 +539,13 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
       c.set("apiKeyLabel", `${act} via ${sub}'s agent`);
     }
+    // Round 9 (R5-M1): an agent acting as a sealed-nest owner is a sign-in they
+    // hear about (once per 24 h, at once for a new agent identity).
+    {
+      const cl = claims as unknown as Record<string, unknown>;
+      const client = [act, cl.azp, cl.client_id, cl.iss].filter((v) => typeof v === "string" && v).join("|");
+      signInAlertSoon(resolved.userId, "agent", { client });
+    }
     return next();
   },
 );
@@ -578,6 +592,14 @@ export function createApp(): Hono<AuthEnv> {
   // order with per-route backtracking, so mount order = specificity order and
   // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
+
+  // Prometheus metrics (METRICS_ENABLED). First, so every request is timed;
+  // loaded only when on, so a default server never imports prom-client.
+  if (config.METRICS_ENABLED) {
+    const metrics = import("./ops/metrics.js");
+    app.use("*", async (c, next) => (await metrics).httpMetrics(c, next));
+    app.get("/metrics", async (c) => (await metrics).metricsHandler(c));
+  }
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
@@ -795,6 +817,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // Kubernetes-style probes (public). Liveness is "the process answers";
+  // readiness also needs the database and nest storage, so an outage takes the
+  // pod out of rotation without restarting it.
+  app.get("/livez", (c) => c.json({ status: "ok" }));
+  app.get("/readyz", async (c) => {
+    const { readiness } = await import("./ops/status.js");
+    const { ready, checks } = await readiness();
+    return c.json({ status: ready ? "ok" : "unavailable", checks }, ready ? 200 : 503);
+  });
+
   // Admin-features gate: teammate management is blocked until a valid
   // license is installed, unless the server is within the Free tier.
   // Login/register/device/promptowl/admin-status stay public so users can
@@ -1008,6 +1040,17 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    // Surfaces (Slack → nest). The buffer key is write-only: presence only.
+    surfaces_enabled: config.FEATURE_SURFACES,
+    surfaces_buffer_key_set: !!config.SURFACES_BUFFER_KEY,
+    surfaces_judge_model: config.SURFACES_JUDGE_MODEL ?? "",
+    surfaces_default_cap_usd: config.SURFACES_DEFAULT_CAP_MICROS ? config.SURFACES_DEFAULT_CAP_MICROS / 1_000_000 : null,
+    surfaces_org_name: config.SURFACES_ORG_NAME ?? "",
+    // Hosted one-click Slack app (PromptOwl's own); secrets are presence only.
+    surfaces_slack_hosted_enabled: config.FEATURE_SURFACES_SLACK_HOSTED,
+    surfaces_slack_hosted_client_id: config.SURFACES_SLACK_HOSTED_CLIENT_ID ?? "",
+    surfaces_slack_hosted_client_secret_set: !!config.SURFACES_SLACK_HOSTED_CLIENT_SECRET,
+    surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
     experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -1035,6 +1078,8 @@ export function createApp(): Hono<AuthEnv> {
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
+    // Public by design: OpenAI reads it from /.well-known/openai-apps-challenge.
+    openai_apps_challenge: config.OPENAI_APPS_CHALLENGE ?? "",
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -1066,6 +1111,15 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Newer release on npm, and the command that updates this install.
+  app.use("/admin/update-status", flexAuthMiddleware);
+  app.get("/admin/update-status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { updateStatus } = await import("./ops/update-check.js");
+    return c.json(updateStatus());
   });
 
   // Models the current credential can reach — the Hootie model picker. On the
@@ -1442,6 +1496,61 @@ export function createApp(): Hono<AuthEnv> {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
+    // Surfaces (Slack → nest) reuses the plane and metacognition, so it needs both on.
+    if ("surfaces_enabled" in body) {
+      const planeOn = "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      const metaOn = "metacognition_enabled" in body ? !!body.metacognition_enabled : config.FEATURE_METACOGNITION;
+      if (body.surfaces_enabled && !(planeOn && metaOn)) {
+        addError("surfaces_enabled", "Surfaces requires the Workflow plane and Metacognition agents to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_SURFACES", value: body.surfaces_enabled ? "true" : null });
+      }
+    }
+    // Write-only secret (encrypted at rest); empty or null clears it.
+    if ("surfaces_buffer_key" in body) {
+      const v = typeof body.surfaces_buffer_key === "string" ? body.surfaces_buffer_key.trim() : "";
+      if (!v) pending.push({ name: "SURFACES_BUFFER_KEY", value: null });
+      else {
+        try {
+          parseKey(v);
+          pending.push({ name: "SURFACES_BUFFER_KEY", value: v });
+        } catch {
+          addError("surfaces_buffer_key", "Buffer key must be 32 bytes, base64 or hex — e.g. the output of: openssl rand -base64 32");
+        }
+      }
+    }
+    if ("surfaces_judge_model" in body) {
+      const v = String(body.surfaces_judge_model ?? "").trim();
+      if (/\s/.test(v)) addError("surfaces_judge_model", "Model must be a single identifier with no spaces (or empty for the default).");
+      else pending.push({ name: "SURFACES_JUDGE_MODEL", value: v || null });
+    }
+    if ("surfaces_default_cap_usd" in body) {
+      const raw = body.surfaces_default_cap_usd;
+      const n = raw === null || raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > 10_000) addError("surfaces_default_cap_usd", "Monthly cap must be between $0 and $10,000 (empty or 0 uses the default).");
+      else pending.push({ name: "SURFACES_DEFAULT_CAP_MICROS", value: n > 0 ? String(Math.round(n * 1_000_000)) : null });
+    }
+    if ("surfaces_org_name" in body) {
+      const v = String(body.surfaces_org_name ?? "").trim();
+      if (v.length > 100) addError("surfaces_org_name", "Organization name must be 100 characters or fewer.");
+      else pending.push({ name: "SURFACES_ORG_NAME", value: v || null });
+    }
+    if ("surfaces_slack_hosted_enabled" in body) {
+      const surfacesOn = "surfaces_enabled" in body ? !!body.surfaces_enabled : config.FEATURE_SURFACES;
+      if (body.surfaces_slack_hosted_enabled && !surfacesOn) addError("surfaces_slack_hosted_enabled", "Turn Surfaces on first.");
+      else pending.push({ name: "FEATURE_SURFACES_SLACK_HOSTED", value: body.surfaces_slack_hosted_enabled ? "true" : null });
+    }
+    // Hosted Slack app id and secrets: single tokens; the secrets are write-only.
+    for (const [key, name] of [
+      ["surfaces_slack_hosted_client_id", "SURFACES_SLACK_HOSTED_CLIENT_ID"],
+      ["surfaces_slack_hosted_client_secret", "SURFACES_SLACK_HOSTED_CLIENT_SECRET"],
+      ["surfaces_slack_hosted_signing_secret", "SURFACES_SLACK_HOSTED_SIGNING_SECRET"],
+    ] as const) {
+      if (!(key in body)) continue;
+      const v = typeof body[key] === "string" ? body[key].trim() : "";
+      if (/\s/.test(v) || v.length > 256) addError(key, "Must be a single value with no spaces, up to 256 characters (or empty to clear it).");
+      else pending.push({ name, value: v || null });
+    }
     // Experimental: the cross-nest document stream. Its own switch, no
     // dependencies. Off writes a tombstone (null): the switch is off now and
     // stays off across a restart with the same deploy env, even if that env
@@ -1669,6 +1778,15 @@ export function createApp(): Hono<AuthEnv> {
           value: turningOn ? "true" : null,
         });
       }
+    }
+    // OpenAI's ChatGPT-app domain token. Empty clears it.
+    if ("openai_apps_challenge" in body) {
+      const v = typeof body.openai_apps_challenge === "string" ? body.openai_apps_challenge.trim() : null;
+      if (v === null) addError("openai_apps_challenge", "The OpenAI domain token must be text (or empty to clear it).");
+      else if (v === "") pending.push({ name: "OPENAI_APPS_CHALLENGE", value: null });
+      else if (!OPENAI_APPS_CHALLENGE_RE.test(v))
+        addError("openai_apps_challenge", "Paste the token exactly as OpenAI shows it: letters, digits, dashes, underscores or dots, no spaces.");
+      else pending.push({ name: "OPENAI_APPS_CHALLENGE", value: v });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
@@ -1957,6 +2075,16 @@ export function createApp(): Hono<AuthEnv> {
     // 500 never leaves a live setting that was never durably stored. The store
     // is the database (durable + shared across instances) rather than a .env
     // file, which Cloud Run wipes on rebuild — see db/settings.ts.
+    // Round 8 (Misha's R4-M1 ruling): sign-in or email configuration that
+    // actually changes is announced to every sealed-nest owner.
+    const { authOrEmailSetting, alertSealedOwnersConfigChanged } = await import("./surfaces/signin-alerts.js");
+    const authChanges = [
+      ...new Set(
+        pending
+          .filter((p) => (process.env[p.name] ?? null) !== p.value && authOrEmailSetting(p.name))
+          .map((p) => authOrEmailSetting(p.name)!),
+      ),
+    ];
     for (const { name, value } of pending) {
       try {
         await persistSetting(name, value);
@@ -1972,6 +2100,9 @@ export function createApp(): Hono<AuthEnv> {
       if (value === null) delete process.env[name];
       else process.env[name] = value;
     }
+    // Round 9: queued once the save has committed (the outbox delivers and
+    // retries in the background; the Slack DM doesn't depend on mail settings).
+    if (authChanges.length) await alertSealedOwnersConfigChanged(authChanges.join(", "));
 
     // Own-provider keys go to PromptOwl, which tests each with the provider —
     // after the settings above are saved, so a refused key never strands them.
@@ -2239,6 +2370,21 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/people/*", flexAuthMiddleware);
   app.route("/people", peopleRoutes);
 
+  // Surfaces (Slack / Teams / email → governed nest). Org-level router like
+  // /teams; every route 404s while FEATURE_SURFACES is off. /link/:token is
+  // the one-time identity link page (signed-in user; CSRF in the form).
+  // Slack's own requests (events, interactions) carry no session: the
+  // request signature is the credential, so this router is mounted BEFORE
+  // the auth middleware. Its first middleware 404s everything under
+  // /surfaces/slack while FEATURE_SURFACES is off.
+  if (!getConnector("slack")) registerConnector(createSlackConnector());
+  registerSurfacesLifecycle();
+  app.route("/surfaces/slack", slackPublicRoutes);
+  app.use("/surfaces/*", flexAuthMiddleware);
+  app.route("/surfaces", surfacesRoutes);
+  app.use("/link/*", flexAuthMiddleware);
+  app.route("/link", linkPageRoutes);
+
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
     const userId = c.get("userId");
@@ -2423,16 +2569,25 @@ export function createApp(): Hono<AuthEnv> {
     const restNestIds = [...nestName.keys()].filter(
       (id) => !nestApprove.get(id),
     );
-    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
-      await Promise.all([
-        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
-        getReviewQueue({
-          status: "pending",
-          nestIds: restNestIds,
-          requestedByEmail: me,
-          limit: 1,
-        }),
-      ]);
+    const [
+      { total: approvableReviewTotal },
+      { total: myReviewsElsewhereTotal },
+      { total: myReviewsTotal },
+    ] = await Promise.all([
+      getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: restNestIds,
+        requestedByEmail: me,
+        limit: 1,
+      }),
+      getReviewQueue({
+        status: "pending",
+        nestIds: [...nestName.keys()],
+        requestedByEmail: me,
+        limit: 1,
+      }),
+    ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
     // Deletion flags and access requests ride the same two buckets (above)
     // but aren't paginated (both lists fetch every pending one), so folding in
@@ -2447,11 +2602,17 @@ export function createApp(): Hono<AuthEnv> {
       console.error("[me/work] assigned list failed", err);
       return [];
     });
+    // The badge's share (CU-wdqcq0658p): the same total minus what waits on
+    // others — the caller's own pending reviews and the requests they filed.
+    const waitingOnMeTotal =
+      reviewTotal + requestsShown - myReviewsTotal -
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
     return c.json({
       items,
       waiting,
       notifications,
       assigned,
+      waiting_on_me_total: waitingOnMeTotal,
       pagination: {
         total: reviewTotal + requestsShown,
         limit,
@@ -3736,7 +3897,7 @@ export function createApp(): Hono<AuthEnv> {
   //      /rows suffix must beat nodeRoutes' greedy catch-all; no other router
   //      has a POST …/rows.
   nestsApp.route("/:nestId/nodes", tableRowRoutes);
-  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx upload), same reason.
+  //   0c. officeNodeRoutes — POST /office (a .pptx/.docx/.xlsx upload), same reason.
   nestsApp.route("/:nestId/nodes", officeNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
@@ -3816,6 +3977,16 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   app.route("/oauth", oauthRoutes);
+
+  // OpenAI domain verification for publishing a ChatGPT app: OpenAI fetches
+  // this path and expects the token it issued, as plain text. Independent of
+  // MCP OAuth. Unset or malformed → the same JSON 404 as any unknown path.
+  app.get("/.well-known/openai-apps-challenge", (c) => {
+    const token = config.OPENAI_APPS_CHALLENGE;
+    if (!token) return c.json({ error: "Not found" }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.text(token);
+  });
 
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 

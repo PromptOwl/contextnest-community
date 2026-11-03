@@ -348,6 +348,8 @@ export interface AdminSettings {
    * user in instead of carrying a shared API key. Requires public_base_url.
    */
   mcp_oauth_enabled: boolean;
+  /** OpenAI's ChatGPT-app domain token, served at /.well-known/openai-apps-challenge. "" = off. */
+  openai_apps_challenge: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
@@ -375,6 +377,24 @@ export interface AdminSettings {
   hootie_model: string;
   subagent_runs_enabled: boolean;
   metacognition_enabled: boolean;
+  /** Surfaces (Slack → nest), FEATURE_SURFACES. Needs the plane and metacognition. */
+  surfaces_enabled?: boolean;
+  /** Whether SURFACES_BUFFER_KEY is set; the key itself is never returned. */
+  surfaces_buffer_key_set?: boolean;
+  /** Write-only: the buffer key to set, or null to clear. */
+  surfaces_buffer_key?: string | null;
+  surfaces_judge_model?: string;
+  /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
+  surfaces_default_cap_usd?: number | string | null;
+  surfaces_org_name?: string;
+  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
+  surfaces_slack_hosted_enabled?: boolean;
+  surfaces_slack_hosted_client_id?: string;
+  surfaces_slack_hosted_client_secret_set?: boolean;
+  surfaces_slack_hosted_signing_secret_set?: boolean;
+  /** Write-only: set, or null to clear. */
+  surfaces_slack_hosted_client_secret?: string | null;
+  surfaces_slack_hosted_signing_secret?: string | null;
   /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
@@ -457,6 +477,21 @@ export interface AdminSettings {
 
 export async function getAdminSettings() {
   return request<AdminSettings>("/admin/settings");
+}
+
+/** Admin: is a newer release on npm, and the command that updates this install. */
+export interface UpdateStatus {
+  enabled: boolean;
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+  install: "container" | "npm";
+  command: string;
+}
+
+export async function getUpdateStatus() {
+  return request<UpdateStatus>("/admin/update-status");
 }
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
@@ -946,6 +981,8 @@ export async function resetUserPassword(userId: string, password?: string) {
     email: string;
     keys_revoked?: boolean;
     temporary_password?: string;
+    reset_link_sent?: boolean;
+    message?: string;
   }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify(password ? { password } : {}),
@@ -1039,8 +1076,34 @@ export async function disconnectApp(clientId: string) {
 
 // ─── Nest settings ─────────────────────────────────────────────────────
 
+/** A product area. Sorts and filters tasks; never part of the ticket number. */
+export interface TaskSurface {
+  name: string;
+  tags: string[];
+}
+
+export interface TaskRules {
+  /** Tag namespaces a task holds only one tag from (e.g. "stage"). */
+  exclusive_namespaces: string[];
+  /** Tag a new task gets when it arrives with none from an exclusive namespace. */
+  default_stage_tag: string | null;
+  surfaces: TaskSurface[];
+  /** Name of the surface the create dialog preselects; null = none. */
+  default_surface: string | null;
+  ticket_numbering: boolean;
+  /** The nest's single ticket prefix ("PO"); required for numbering. */
+  ticket_prefix?: string | null;
+  /** First number issued; null = 1. */
+  ticket_start_at?: number | null;
+  /** Stage columns in workflow order (bare values). Empty: alphabetical. */
+  stage_order?: string[];
+  /** Priority levels, most urgent first. Empty: the built-in four. */
+  priorities?: { key: string; label: string }[];
+}
+
 export interface NestSettings {
   stewardship_enabled: boolean;
+  task_rules?: TaskRules;
   allow_self_approve: boolean;
   /** Review only prime documents; everything else self-publishes. */
   prime_only_review: boolean;
@@ -1134,6 +1197,8 @@ export async function updateNestSettings(
     prime_only_review?: boolean;
     prime_tags?: string[];
     always_include_tags?: string[];
+    /** Replaces the whole object. */
+    task_rules?: TaskRules;
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
@@ -2050,7 +2115,7 @@ export async function createPdfNode(
 }
 
 /**
- * Upload a .pptx or .docx as a governed markdown document (multipart). The
+ * Upload a .pptx, .docx or .xlsx as a governed markdown document (multipart). The
  * server extracts the slides/text into the body and keeps the original file
  * as a download linked from it.
  */
@@ -3608,6 +3673,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
+    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    waiting_on_me_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -4187,6 +4254,20 @@ export type HootieMention =
     }
   | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
 
+/** What Hootie is doing mid-answer: `tool` is the tool that's running
+ *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's
+ *  own broader search). `text` is a server template; `node`, when present,
+ *  is the document the line names. */
+export interface HootieStatus {
+  tool: string;
+  text: string;
+  node?: { id: string; title: string };
+}
+
+/** Why a turn ran without tools: the model connection refused them, or the
+ *  model asked for something it may not have and the turn stopped looking. */
+export type HootieAnswerOnly = "tools_refused" | "rejected_call";
+
 export interface HootieTurn {
   role: "user" | "assistant";
   content: string;
@@ -4206,10 +4287,15 @@ export async function chatWithHootie(
   on: {
     meta?: (m: { nodes: HootieNode[]; anchor: HootieNode | null }) => void;
     delta?: (text: string) => void;
+    /** Hootie is working (searching the nest again). Text received before
+     *  it is superseded: the answer starts over with the next delta. */
+    status?: (s: HootieStatus) => void;
     done?: (d: {
       answer: string;
       cited: HootieNode[];
       mention: HootieMention | null;
+      answer_only?: HootieAnswerOnly | null;
+      trail?: { searches: number; reads: number; broadened: boolean };
     }) => void;
     error?: (message: string) => void;
   },
@@ -4258,6 +4344,7 @@ export async function chatWithHootie(
     }
     if (event === "meta") on.meta?.(payload);
     else if (event === "delta") on.delta?.(payload.text ?? "");
+    else if (event === "status") on.status?.({ tool: String(payload.tool ?? ""), text: String(payload.text ?? "") });
     else if (event === "done") on.done?.(payload);
     else if (event === "error") on.error?.(payload.error ?? "Something went wrong.");
   };
@@ -4625,4 +4712,13 @@ export async function runMetacognitionAgent(nestId: string, nodeId: string) {
     method: "POST",
     body: "{}",
   });
+}
+
+export async function backfillTickets(nestId: string, body: { limit?: number; dry_run?: boolean } = {}) {
+  return request<{
+    numbered: number;
+    failed: number;
+    remaining: number;
+    results: { id: string; ticket?: string; outcome: string; reason?: string }[];
+  }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }

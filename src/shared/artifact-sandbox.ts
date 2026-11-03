@@ -74,3 +74,9 @@ export function applyArtifactSandboxHeaders(
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
 }
+
+/** Whether a node body is an HTML page (artifact type, or opens on doctype/html).
+ *  One heuristic for publish, site build and Hootie. */
+export function isHtmlBody(type: string | undefined, body: string): boolean {
+  return type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
+}

@@ -7,7 +7,9 @@
  * scan / list / approve / reject.
  */
 
-import { readFile, readdir } from "fs/promises";
+import { ForbiddenError } from "../shared/errors.js";
+import { adminFolderRefusal } from "../surfaces/admin-folders.js";
+import { readFile, readdir, stat } from "fs/promises";
 import { join, relative, sep } from "path";
 import {
   detectDrift,
@@ -326,6 +328,7 @@ const warnedViewCollisions = new Set<string>();
  */
 export async function documentsWithSuggestions(
   nestId: string,
+  retries = 3,
 ): Promise<Set<string>> {
   const root = resolveNestPath(nestId);
   const ids = new Set<string>();
@@ -333,6 +336,11 @@ export async function documentsWithSuggestions(
   try {
     entries = await readdir(root, { recursive: true, withFileTypes: true });
   } catch (err: any) {
+    // ENOENT while the nest is still there: an entry vanished mid-walk (a
+    // write's lock folder, a temp file — seals run beside reads now). Walk again.
+    if (err?.code === "ENOENT" && retries > 0 && (await stat(root).catch(() => null))) {
+      return documentsWithSuggestions(nestId, retries - 1);
+    }
     // A missing folder genuinely means nothing is staged. Anything else
     // (permissions, descriptor exhaustion) is NOT that, and this one walk
     // covers every document — so a swallowed failure drops pending-edit
@@ -587,6 +595,9 @@ export async function approveExternalEdit(input: {
   actor: string;
   comment?: string;
 }) {
+  // A seed's admin-only folders: nest admins only (S7-R3 R2-L3; the route checks first).
+  const adminOnly = await adminFolderRefusal(input.nestId, input.documentId, input.actor);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const { storage } = await engineCache.get(input.nestId);
   let result;
   try {

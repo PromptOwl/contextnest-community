@@ -1,4 +1,5 @@
 import { recordNodeAccess } from "../governance/access-log.js";
+import { approvedOnlyForSurfaceEdit } from "../surfaces/draft-visibility.js";
 import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
@@ -665,7 +666,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // the same body on purpose — an owner previewing the public reader — and
   // mirrors the listing's flag; it narrows what is served, never widens it.
   const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
-  if (publicReader || approvedOnly) {
+  // A pending Surfaces edit is a chat-derived draft: below write, serve the
+  // approved body as a public reader gets it (security round 2, M1d).
+  const surfaceEdit = await approvedOnlyForSurfaceEdit(nestId, nodeId, userId);
+  if (publicReader || approvedOnly || surfaceEdit) {
     let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED

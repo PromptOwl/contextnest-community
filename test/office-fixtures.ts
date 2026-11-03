@@ -184,3 +184,68 @@ export async function manyEntriesDocx(count: number): Promise<Uint8Array> {
   for (let i = 0; i < count; i++) zip.file(`junk/${i}.txt`, "");
   return zip.generateAsync({ type: "uint8array", compression: "STORE" });
 }
+
+const S = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+
+/** A cell: a shared string, a number, a boolean, a date serial (built-in
+ *  format 14, or 164 = a custom "yyyy-mm-dd hh:mm"), a formula with its cached
+ *  value, an inline string, or empty. */
+export type XlsxCell =
+  | string
+  | number
+  | boolean
+  | null
+  | { date: number; custom?: boolean }
+  | { formula: string; value: number }
+  | { inline: string };
+
+export interface XlsxSheet {
+  name: string;
+  rows: XlsxCell[][];
+}
+
+/** A workbook with one worksheet per entry, plus a chart sheet when `chartSheet`. */
+export async function buildXlsx(sheets: XlsxSheet[], opts: { date1904?: boolean; chartSheet?: string } = {}): Promise<Uint8Array> {
+  const shared: string[] = [];
+  const sst = (s: string) => {
+    const i = shared.indexOf(s);
+    return i === -1 ? shared.push(s) - 1 : i;
+  };
+  const col = (k: number) => String.fromCharCode(65 + k);
+  const cellXml = (v: XlsxCell, ref: string): string => {
+    if (v === null) return "";
+    if (typeof v === "string") return `<c r="${ref}" t="s"><v>${sst(v)}</v></c>`;
+    if (typeof v === "number") return `<c r="${ref}"><v>${v}</v></c>`;
+    if (typeof v === "boolean") return `<c r="${ref}" t="b"><v>${v ? 1 : 0}</v></c>`;
+    if ("date" in v) return `<c r="${ref}" s="${v.custom ? 2 : 1}"><v>${v.date}</v></c>`;
+    if ("formula" in v) return `<c r="${ref}"><f>${esc(v.formula)}</f><v>${v.value}</v></c>`;
+    return `<c r="${ref}" t="inlineStr"><is><t>${esc(v.inline)}</t></is></c>`;
+  };
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", CONTENT_TYPES);
+  const entries = sheets.map((s, i) => `<sheet name="${esc(s.name)}" sheetId="${i + 1}" ${R} r:id="rId${i + 1}"/>`);
+  const rels = sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="${REL_TYPE}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`);
+  if (opts.chartSheet) {
+    entries.push(`<sheet name="${esc(opts.chartSheet)}" sheetId="99" ${R} r:id="rId99"/>`);
+    rels.push(`<Relationship Id="rId99" Type="${REL_TYPE}/chartsheet" Target="chartsheets/sheet1.xml"/>`);
+    zip.file("xl/chartsheets/sheet1.xml", `<chartsheet ${S}/>`);
+  }
+  sheets.forEach((s, i) => {
+    const rows = s.rows
+      .map((r, n) => `<row r="${n + 1}">${r.map((v, k) => cellXml(v, `${col(k)}${n + 1}`)).join("")}</row>`)
+      .join("");
+    zip.file(`xl/worksheets/sheet${i + 1}.xml`, `<worksheet ${S}><sheetData>${rows}</sheetData></worksheet>`);
+  });
+  zip.file(
+    "xl/workbook.xml",
+    `<workbook ${S}>${opts.date1904 ? '<workbookPr date1904="1"/>' : ""}<sheets>${entries.join("")}</sheets></workbook>`,
+  );
+  zip.file("xl/_rels/workbook.xml.rels", `<Relationships ${REL_NS}>${rels.join("")}</Relationships>`);
+  zip.file(
+    "xl/styles.xml",
+    `<styleSheet ${S}><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy\-mm\-dd hh:mm"/></numFmts>` +
+      `<cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/></cellXfs></styleSheet>`,
+  );
+  zip.file("xl/sharedStrings.xml", `<sst ${S}>${shared.map((s) => `<si><t>${esc(s)}</t></si>`).join("")}</sst>`);
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+}
