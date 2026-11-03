@@ -61,6 +61,18 @@ describe("imported CONTEXT.md", () => {
     expect(data.content).toContain("Lowercase still counts.");
   });
 
+  it("prefers an exact-case CONTEXT.md over a lowercase twin", async () => {
+    const files = [
+      // Lowercase first: without the preference, the renamed twin is the first CONTEXT.md and wins.
+      { path: "context.md", content: "# Lower\n\nThe lowercase copy.\n" },
+      { path: "CONTEXT.md", content: "# Upper\n\nThe exact-case copy.\n" },
+    ];
+    const imp = await jsonRequest(app, "POST", "/nests/import", { name: "Twin Rules", files }, apiKey);
+    expect(imp.status).toBe(201);
+    const { data } = await jsonRequest(app, "GET", `/nests/${imp.data.nest.id}/instructions`, undefined, apiKey);
+    expect(data.content).toContain("The exact-case copy.");
+  });
+
   it("warns when the only CONTEXT.md sits in a subfolder", async () => {
     const files = [
       { path: "docs/CONTEXT.md", content: "# Nested rules\n" },

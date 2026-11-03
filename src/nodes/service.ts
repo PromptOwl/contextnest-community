@@ -2481,13 +2481,15 @@ async function stageImportedFilesInner(
   // `.context/` is the source vault's own settings, which the engine refuses
   // to import; dropped too, so an exported nest doesn't report it as a failure.
   // Everything else travels verbatim, `.versions/` history included.
+  // The engine reads exactly CONTEXT.md; on a case-sensitive disk a root
+  // `context.md` would be skipped as meta. An exact-case file, if sent, wins.
+  const hasExact = files.some((f) => String(f?.path) === "CONTEXT.md");
   const carried = files
     .filter((f) => {
       const segs = String(f?.path || "").split(/[\\/]/);
+      if (hasExact && /^context\.md$/i.test(String(f?.path)) && f.path !== "CONTEXT.md") return false;
       return !segs.includes("_suggestions") && !segs.includes(".context");
     })
-    // The engine reads exactly CONTEXT.md; on a case-sensitive disk a root
-    // `context.md` would be skipped as meta and never become instructions.
     .map((f) => (/^context\.md$/i.test(String(f.path)) ? { ...f, path: "CONTEXT.md" } : f));
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
   // View addresses (see views/collision.ts): a document arriving at a view's
