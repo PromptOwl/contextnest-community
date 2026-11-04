@@ -510,6 +510,8 @@ export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
     else if (def.type === "array") field = arrayToolField(def);
     else field = z.any();
     if (!required.includes(key)) field = field.optional();
+    // Carried into tools/list: without it a client sees the bare parameter name.
+    if (typeof def.description === "string") field = field.describe(def.description);
     shape[key] = field;
   }
   return Object.assign(shape, clientToolField, confirmBillingToolField);
@@ -530,6 +532,7 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   // action; only advertised while both feature flags are on (mcp/routes.ts).
   "context_metacognition_list",
   "context_metacognition_suggest",
+  "context_metacognition_preview",
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",

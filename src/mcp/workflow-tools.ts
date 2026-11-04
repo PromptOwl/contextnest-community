@@ -123,7 +123,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "With agent_stats: true and agent set to a metacognition agent, returns that agent's track record instead — run outcomes " +
       "(succeeded/failed/timeout/skipped), tokens and estimated cost, how its proposals were judged (approval rate), comments, " +
       "the last error, and its `limit` most recent runs — over the last `days` (default 30). Owner/admin only, like the agent's page. " +
-      "To list, set up, run or remove metacognition agents, use context_metacognition_list, context_metacognition_suggest, context_metacognition_configure, context_metacognition_run and context_metacognition_remove.",
+      "To list, set up, run or remove metacognition agents, use context_metacognition_list, context_metacognition_suggest, context_metacognition_preview, context_metacognition_configure, context_metacognition_run and context_metacognition_remove.",
     inputSchema: {
       type: "object",
       properties: {

@@ -1,7 +1,8 @@
 /**
- * Metacognition over MCP (CU-wdqcq05rqq): list, suggest, configure (with a dry
- * run), run and remove metacognition agents from a harness like Claude, without
- * hand-written REST calls.
+ * Metacognition over MCP (CU-wdqcq05rqq): list, suggest, preview, configure, run
+ * and remove metacognition agents from a harness like Claude, without
+ * hand-written REST calls. One operation per tool: preview is the read-only
+ * check, configure saves. configure's old dry_run stays for existing callers.
  *
  * Each tool calls the same operation in metacognition/manage.ts that the REST
  * route calls — the agent-document check, parseConfig, the owner pinning, the
@@ -12,7 +13,7 @@
  *  - advertised only when FEATURE_WORKFLOW_PLANE and FEATURE_METACOGNITION are
  *    on (mcp/routes.ts, mcp/server-routes.ts); a call that gets here anyway
  *    with either off is refused as not enabled;
- *  - all five are in MCP_ADMIN_TOOLS: offered only to a person holding a full
+ *  - all six are in MCP_ADMIN_TOOLS: offered only to a person holding a full
  *    credential who owns or administers the nest, never to read-only or
  *    headless keys;
  *  - every call re-checks: no system key, then owner/admin on the nest.
@@ -63,8 +64,16 @@ const EXAMPLE_BODY = JSON.stringify({
   persona: { name: "Archivist", avatar: "🦉" },
   scope: { read: ["gtm", "ops"], propose: ["gtm"] },
   caps: { max_proposals: 5, max_comments: 5 },
-  dry_run: true,
 });
+
+/** The config fields, spelled out once for preview and configure. */
+const CONFIG_FIELDS_HELP =
+  "Fields (the same body as PUT /nests/:id/metacognition/:node): persona {name, avatar: an emoji or up to 4 letters, never a URL}; " +
+  "scope {read: folders it may read, [] = the whole nest; propose: folders it may suggest edits in, inside read — " +
+  '[] = no edits, comments only; ["*"] = anywhere it reads}; caps {max_steps, max_tokens, max_seconds, max_proposals, max_comments} ' +
+  "(clamped to server limits); feeds [{name, url: public https}]; mcp_servers [{name, url, allowed_tools: [...], auth_env?: MCP_*}]; " +
+  "model (default: the nest's); notify {recipients: owner | reviewers | a member's email, channels: email | connectors, max_per_run} " +
+  "(default: nobody); enabled (default true). Unknown fields are ignored.";
 
 export const METACOGNITION_TOOL_DEFINITIONS = [
   {
@@ -80,31 +89,44 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
     name: "context_metacognition_suggest",
     description:
       "Suggest a starting config for an agent document, read off its approved instructions (persona from the title, folders it " +
-      "names, whether it should edit or only comment, feed links). Saves nothing. Returns { config, why, mcp_candidates, instructions }: " +
-      "config passes context_metacognition_configure as is; why explains each filled field; mcp_candidates are MCP links that need " +
-      "allowed_tools named by a person before they go in mcp_servers. Use it before configure when setting a new agent up. Owner/admin only.",
+      "names, whether it should edit or only comment, feed links). One read-only operation: it saves nothing, and fetches nothing, feed links included. " +
+      "Returns { config, why, mcp_candidates, instructions }: config passes context_metacognition_preview and context_metacognition_configure as is; " +
+      "why explains each filled field; mcp_candidates are MCP links that need allowed_tools named by a person before they go in mcp_servers. " +
+      "Use it before preview when setting a new agent up. Owner/admin only.",
     inputSchema: { type: "object", properties: { agent: AGENT_REF }, required: ["agent"] },
+  },
+  {
+    name: "context_metacognition_preview",
+    description:
+      "Check a metacognition agent config without saving it. One read-only operation: it validates the config against the agent document " +
+      "and returns the normalized config plus a plain-language summary. It saves nothing, starts nothing and fetches nothing. " +
+      "Show the user the summary, and call context_metacognition_configure only once they confirm. " +
+      `${CONFIG_FIELDS_HELP} Owner/admin only. Example: ${EXAMPLE_BODY}`,
+    inputSchema: {
+      type: "object",
+      properties: { agent: AGENT_REF, ...CONFIG_PROPERTIES },
+      required: ["agent"],
+    },
   },
   {
     name: "context_metacognition_configure",
     description:
-      "Turn an agent document into a metacognition agent, or change one's settings. The document must be type agent, " +
-      "and the server runs its APPROVED text as the agent's instructions (an unapproved agent document is skipped at run time). " +
-      "ALWAYS call with dry_run: true first: it validates and returns the normalized config plus a plain-language summary " +
-      "without saving. Show the user that summary, and save (dry_run omitted) only once they confirm. " +
-      "Fields (the same body as PUT /nests/:id/metacognition/:node): persona {name, avatar: an emoji or up to 4 letters, never a URL}; " +
-      "scope {read: folders it may read, [] = the whole nest; propose: folders it may suggest edits in, inside read — " +
-      '[] = no edits, comments only; ["*"] = anywhere it reads}; caps {max_steps, max_tokens, max_seconds, max_proposals, max_comments} ' +
-      "(clamped to server limits); feeds [{name, url: public https}]; mcp_servers [{name, url, allowed_tools: [...], auth_env?: MCP_*}]; " +
-      "model (default: the nest's); notify {recipients: owner | reviewers | a member's email, channels: email | connectors, max_per_run} " +
-      "(default: nobody); enabled (default true). Unknown fields are ignored. The agent never publishes: every change it " +
-      `makes goes to a reviewer. Owner/admin only. Example: ${EXAMPLE_BODY}`,
+      "Save a metacognition agent's settings. One write: it turns an agent document into a metacognition agent, or replaces the stored settings of one " +
+      "that already is. Saving calls nothing outside the server, but the feeds and MCP servers saved here are what the agent's runs, schedules and hooks then reach. " +
+      "The document must be type agent, and the server runs its APPROVED text as the agent's instructions (an unapproved agent document is skipped at run time). " +
+      "ALWAYS call context_metacognition_preview first and show the user its summary; save only once they confirm. " +
+      `${CONFIG_FIELDS_HELP} The agent never publishes: every change it ` +
+      `makes goes to a reviewer. Owner/admin only. dry_run is deprecated, use context_metacognition_preview. Example: ${EXAMPLE_BODY}`,
     inputSchema: {
       type: "object",
       properties: {
         agent: AGENT_REF,
         ...CONFIG_PROPERTIES,
-        dry_run: { type: "boolean", description: "true = validate and summarize, save nothing. Do this first. Must be a JSON boolean." },
+        dry_run: {
+          type: "boolean",
+          description:
+            "Deprecated: use context_metacognition_preview. Kept for existing callers: true saves nothing and answers as preview does. Must be a JSON boolean.",
+        },
       },
       required: ["agent"],
     },
@@ -112,8 +134,10 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
   {
     name: "context_metacognition_run",
     description:
-      "Start a metacognition agent now. The server runs it in the background and returns its run_id at once; follow it with " +
+      "Start one run of a metacognition agent now. One operation: the server runs it in the background and returns its run_id at once; follow it with " +
       "workflow_run_get { run_id }, and see its track record with workflow_runs_list { agent, agent_stats: true }. " +
+      "Side effects: the run calls the model (spending the nest's budget), may fetch the agent's configured feeds, may call its configured MCP servers' allowed tools, " +
+      "and may notify the people its owner listed. In the nest it can only leave comments and draft proposals for a reviewer: it never publishes or deletes. " +
       "Refused while the same agent is already running, and after too many starts in an hour. Owner/admin only.",
     inputSchema: {
       type: "object",
@@ -177,6 +201,20 @@ function agentArg(args: Record<string, any>): string {
   return typeof args.agent === "string" ? args.agent.trim() : "";
 }
 
+function configBody(args: Record<string, any>): Record<string, unknown> {
+  return Object.fromEntries(Object.keys(CONFIG_PROPERTIES).filter((k) => k in args).map((k) => [k, args[k]]));
+}
+
+/** Validate and summarize; never saves. `next` tells the harness how to save. */
+async function previewConfig(args: Record<string, any>, ctx: McpToolContext, next: string): Promise<ToolResult> {
+  const v = await validateAgentConfig(ctx.nestId, agentArg(args), configBody(args));
+  const summary = summarizeConfig(v.config, { enabled: v.enabled });
+  return {
+    text: `Dry run — nothing saved.\n\n${summary}\n\nShow the user this summary; ${next}.`,
+    data: { dry_run: true, saved: false, node_id: v.nodeId, enabled: v.enabled, config: v.config, summary },
+  };
+}
+
 export async function runMetacognitionTool(
   toolName: string,
   args: Record<string, any>,
@@ -213,7 +251,7 @@ export async function runMetacognitionTool(
             title: d.frontmatter.title,
             instructions_approved: approved.get(d.id) ?? false,
             summary: approved.get(d.id)
-              ? "Not a metacognition agent yet. Set it up with context_metacognition_configure (dry_run first)."
+              ? "Not a metacognition agent yet. Set it up with context_metacognition_preview, then context_metacognition_configure."
               : "Not a metacognition agent yet, and its instructions have no approved version: runs would be skipped until a reviewer approves the document.",
           }))
           .sort((a, b) => a.node_id.localeCompare(b.node_id));
@@ -234,23 +272,18 @@ export async function runMetacognitionTool(
         }
         return { text: lines.join("\n"), data: { agents, unconfigured } };
       }
+      case "context_metacognition_preview":
+        return previewConfig(args, ctx, "call context_metacognition_configure to save it");
       case "context_metacognition_configure": {
         // The PUT body is exactly its own fields: nothing a wrapper adds to the
         // call (nest, client, confirm_billing, …) reaches parseConfig.
         const { dry_run } = args;
-        const body = Object.fromEntries(Object.keys(CONFIG_PROPERTIES).filter((k) => k in args).map((k) => [k, args[k]]));
+        const body = configBody(args);
         // Fail closed: a dry_run of "true" or 1 must never read as "save it".
         if (dry_run !== undefined && typeof dry_run !== "boolean") {
           throw new ValidationError("dry_run must be true or false");
         }
-        if (dry_run === true) {
-          const v = await validateAgentConfig(ctx.nestId, agentArg(args), body);
-          const summary = summarizeConfig(v.config, { enabled: v.enabled });
-          return {
-            text: `Dry run — nothing saved.\n\n${summary}\n\nShow the user this summary; call again without dry_run to save it.`,
-            data: { dry_run: true, saved: false, node_id: v.nodeId, enabled: v.enabled, config: v.config, summary },
-          };
-        }
+        if (dry_run === true) return previewConfig(args, ctx, "call again without dry_run to save it");
         const agent = await configureAgent({
           nestId: ctx.nestId,
           nodeId: agentArg(args),
