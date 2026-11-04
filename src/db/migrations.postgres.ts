@@ -1,5 +1,9 @@
 import type { DatabaseAdapter } from "./adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
+import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
+import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -102,6 +106,11 @@ export const HISTORICAL_MIGRATIONS = [
   "075_node_index_manifest",
   "076_nest_write_jobs",
   "077_nest_seal_leases",
+  "078_task_rules_ticket_counters",
+  "079_surfaces_core",
+  "080_surfaces_ingest",
+  "081_surfaces_cards",
+  "082_surfaces_seeds",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1303,6 +1312,30 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       expires_at BIGINT NOT NULL
     );
   `);
+
+  // Migration 078 parity: task rules + ticket counters (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS task_rules TEXT;
+    CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      prefix TEXT NOT NULL,
+      last_value INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (nest_id, prefix)
+    );
+  `);
+
+  // Migration 079 parity: Surfaces core tables (shared DDL, see migrations.ts).
+  await db.exec(surfacesS1Ddl(NOW));
+  // Migration 080 parity: Surfaces ingestion tables (S2a).
+  await db.exec(surfacesS2aDdl(NOW, "BIGINT"));
+  // Migration 081 parity: Surfaces cards, commit audit, usage, DM (S2b).
+  await db.exec(surfacesS2bDdl(NOW));
+  await db.exec(surfacesS2bAlterPostgres());
+  // Re-review R3-L2: an earlier 081 created surface_personal_nests without `sealed`.
+  await db.exec("ALTER TABLE surface_personal_nests ADD COLUMN IF NOT EXISTS sealed INTEGER NOT NULL DEFAULT 1");
+  // Migration 082 parity: Surfaces seeds (S3).
+  await db.exec(surfacesS3Ddl(NOW));
+  await db.exec(surfacesS3AlterPostgres());
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

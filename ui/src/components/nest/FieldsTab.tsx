@@ -29,6 +29,7 @@ import {
   UserRound,
 } from "lucide-react";
 import * as api from "../../lib/api";
+import { TaskNumberingCard } from "./TaskNumberingCard";
 import { reads } from "../../lib/queries";
 import {
   FIELD_TYPE_HINTS,
@@ -245,6 +246,7 @@ export function FieldsTab({ nestId }: { nestId: string }) {
 
   return (
     <>
+      <TaskNumberingCard nestId={nestId} canManage={canManage} />
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-3">

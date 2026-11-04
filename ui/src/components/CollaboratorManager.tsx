@@ -58,6 +58,8 @@ export interface Collaborator {
   email?: string;
   /** Steward roles the same user holds on this nest (read-only, from API). */
   stewardRoles?: string[];
+  /** "system" for a named system key (CU-wdqcq06djb): never a nest admin. */
+  principal_kind?: "human" | "system";
 }
 
 interface SharedTeam {
@@ -522,6 +524,16 @@ export function CollaboratorManager({
                 <span className="flex-1 min-w-0 truncate text-sm">
                   {c.email || c.user_id}
                 </span>
+                {c.principal_kind === "system" && (
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] px-1.5 py-0"
+                    title="A named system key, managed in Nest settings → Systems"
+                    data-testid={`collaborator-system-${c.id}`}
+                  >
+                    System
+                  </Badge>
+                )}
                 {/* Steward roles held by the same user — read-only context.
                     The switch below already says "reviewer" for the nest row. */}
                 {(c.stewardRoles ?? [])
@@ -575,7 +587,9 @@ export function CollaboratorManager({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {COLLAB_PERMISSIONS.map((p) => (
+                        {COLLAB_PERMISSIONS.filter(
+                          (p) => !(c.principal_kind === "system" && p.value === "admin"),
+                        ).map((p) => (
                           <SelectItem key={p.value} value={p.value}>
                             {p.label}
                           </SelectItem>

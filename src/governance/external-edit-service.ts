@@ -7,6 +7,8 @@
  * scan / list / approve / reject.
  */
 
+import { ForbiddenError } from "../shared/errors.js";
+import { adminFolderRefusal } from "../surfaces/admin-folders.js";
 import { readFile, readdir, stat } from "fs/promises";
 import { join, relative, sep } from "path";
 import {
@@ -593,6 +595,9 @@ export async function approveExternalEdit(input: {
   actor: string;
   comment?: string;
 }) {
+  // A seed's admin-only folders: nest admins only (S7-R3 R2-L3; the route checks first).
+  const adminOnly = await adminFolderRefusal(input.nestId, input.documentId, input.actor);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const { storage } = await engineCache.get(input.nestId);
   let result;
   try {

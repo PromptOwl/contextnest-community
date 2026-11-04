@@ -31,3 +31,15 @@ export function saveOutcome(s: {
   if (s.primeOnlyReview) return "publish";
   return s.allowSelfApprove && s.ownerOrAdmin ? "publish" : "draft";
 }
+
+/** A tag change saves on its own (CU-wdqcq02a1q) only on a live doc whose
+ *  save publishes, with nothing else unsaved — a tag click never mints a
+ *  draft or review, or publishes one. Otherwise it waits for Save. */
+export function canSaveTagsAlone(s: {
+  isNew: boolean;
+  status: string | null;
+  outcome: SaveOutcome;
+  otherFieldsDirty: boolean;
+}): boolean {
+  return !s.isNew && (s.status === "published" || s.status === "approved") && s.outcome === "publish" && !s.otherFieldsDirty;
+}

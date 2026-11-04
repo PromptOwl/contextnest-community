@@ -32,7 +32,6 @@ import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { z } from "zod";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
@@ -40,11 +39,9 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
-import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -66,7 +63,7 @@ import {
   TOOL_DEFINITIONS,
   headlessToolError,
   MCP_READ_TOOLS,
-  arrayToolField,
+  toolShape,
   type ToolResult,
 } from "./tools.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
@@ -661,20 +658,7 @@ function createServerMcp(
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     if (isMetacognitionTool(tool.name) && !offerMetacognition) continue;
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = arrayToolField(def);
-      else field = z.any();
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Same §9.4 and billing-confirm fields the per-nest surface advertises.
-    Object.assign(shape, clientToolField, confirmBillingToolField);
+    const shape = toolShape(tool.inputSchema);
     server.tool(tool.name, tool.description, shape, async (args) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
@@ -976,7 +960,7 @@ Streamable HTTP, stateless. Two endpoints:
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`

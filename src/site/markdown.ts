@@ -88,7 +88,7 @@ export function stripHtmlComments(body: string): string {
 }
 
 /** `target#fragment|label` inside `[[ ]]`, with the label the page shows. */
-function wikiParts(inner: string): { path: string; fragment: string | undefined; label: string } {
+export function wikiParts(inner: string): { path: string; fragment: string | undefined; label: string } {
   // `\|` is the table-safe form of the alias pipe (see renderMarkdown).
   const [rawTarget, ...rest] = inner.split(/\\?\|/);
   const [path, fragment] = rawTarget.split("#");

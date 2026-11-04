@@ -206,7 +206,7 @@ async function emailGrantee(p: {
       permission: p.role,
       by: p.grantedBy || undefined,
       link: docLink(p.nestId, isDoc ? p.target : undefined, p.baseUrl),
-    });
+    }, { nestId: p.nestId });
   } catch (err) {
     // A lost email must never fail the share, but it must be debuggable.
     console.error("[grants] share email failed", p.nestId, p.target, err);

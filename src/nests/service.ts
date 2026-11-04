@@ -17,6 +17,7 @@ import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
+import { defaultTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
 
 /**
  * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
@@ -536,6 +537,41 @@ export async function nestDoneTags(nestId: string): Promise<string[]> {
 export async function setDoneTags(nestId: string, tags: string[]): Promise<void> {
   await getDb().run("UPDATE nests SET done_tags = ? WHERE id = ?", [
     parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
+ * The nest's task rules (exclusive tag namespaces, default stage, ticket
+ * numbering — src/nodes/task-rules.ts). Nests that never set any read as
+ * "no rules", so task writes behave exactly as before.
+ */
+export async function nestTaskRules(nestId: string): Promise<TaskRules> {
+  const row = (await getDb().get("SELECT name, task_rules FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { name: string; task_rules: string | null } | undefined;
+  // A nest that has never saved rules numbers its tasks: every task gets a
+  // permanent ID, as in any tracker. Saving rules (even with numbering off)
+  // replaces this.
+  if (row && (row.task_rules === null || row.task_rules === undefined || row.task_rules === "")) {
+    return defaultTaskRules(row.name);
+  }
+  return parseTaskRules(row?.task_rules);
+}
+
+/** Write the default rules into a nest that has none, so its prefix stays put
+ *  if the nest is renamed. A no-op once rules are stored; safe to race. */
+export async function storeDefaultTaskRules(nestId: string): Promise<void> {
+  const rules = await nestTaskRules(nestId);
+  await getDb().run(
+    "UPDATE nests SET task_rules = ? WHERE id = ? AND (task_rules IS NULL OR task_rules = '')",
+    [serializeTaskRules(rules), nestId],
+  );
+}
+
+export async function setTaskRules(nestId: string, rules: TaskRules): Promise<void> {
+  await getDb().run("UPDATE nests SET task_rules = ? WHERE id = ?", [
+    serializeTaskRules(rules),
     nestId,
   ]);
 }
@@ -1183,6 +1219,9 @@ export async function deleteNest(nestId: string): Promise<void> {
     // reason as the rows above. No try/catch: the migration always creates the
     // table, and on Postgres a failed statement aborts the transaction anyway.
     await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
+    // Surfaces private (sealed) nest marker (migration 081, no FK): left behind
+    // it would keep the owner "sealed" forever (no admin reset, alerts on).
+    await tx.run("DELETE FROM surface_personal_nests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

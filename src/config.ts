@@ -91,6 +91,9 @@ function ownHost(): string {
   }
 }
 
+/** OpenAI's challenge token alphabet: URL-safe, 1–512 characters. */
+export const OPENAI_APPS_CHALLENGE_RE = /^[A-Za-z0-9._-]{1,512}$/;
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -223,6 +226,10 @@ export const config = {
   /** View-data kill switch (§1.12): `off` withholds every view frame's data. */
   get CN_VIEW_DATA_OFF(): boolean {
     return String(process.env.CN_VIEW_DATA ?? "").trim().toLowerCase() === "off";
+  },
+  /** View write-back kill switch: `off` removes every view's write bridge. */
+  get CN_VIEW_WRITES_OFF(): boolean {
+    return String(process.env.CN_VIEW_WRITES ?? "").trim().toLowerCase() === "off";
   },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
@@ -596,6 +603,17 @@ export const config = {
     return process.env.MCP_OAUTH_ENABLED === "true";
   },
   /**
+   * OpenAI's domain-verification token for publishing a ChatGPT app, served
+   * as plain text at /.well-known/openai-apps-challenge. Set in the deploy
+   * env or Settings → Agent OAuth. Only 1–512 URL-safe characters are ever
+   * served; anything else (or unset) leaves the path 404ing, so a bad value
+   * can't be echoed back as content from this domain.
+   */
+  get OPENAI_APPS_CHALLENGE(): string | null {
+    const v = process.env.OPENAI_APPS_CHALLENGE?.trim() ?? "";
+    return OPENAI_APPS_CHALLENGE_RE.test(v) ? v : null;
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -800,6 +818,40 @@ export const config = {
    */
   get FEATURE_METACOGNITION(): boolean {
     return process.env.FEATURE_METACOGNITION === "true";
+  },
+  /** Surfaces master switch (Slack/Teams/email → nest). Off by default; also
+   *  needs the workflow plane and metacognition (see src/surfaces/flags.ts). */
+  get FEATURE_SURFACES(): boolean {
+    return process.env.FEATURE_SURFACES === "true";
+  },
+  /** AES-256 key (base64 or hex, 32 bytes) for the Surfaces chat buffer. Unset → nothing is buffered. */
+  get SURFACES_BUFFER_KEY(): string | undefined {
+    return process.env.SURFACES_BUFFER_KEY;
+  },
+  /** Overrides the Surfaces judge model (else the listener's, else the default). */
+  get SURFACES_JUDGE_MODEL(): string | undefined {
+    return process.env.SURFACES_JUDGE_MODEL || undefined;
+  },
+  /** Default per-nest monthly Surfaces spend cap, in micro-dollars (0/unset → built-in default). */
+  get SURFACES_DEFAULT_CAP_MICROS(): number {
+    return Number(process.env.SURFACES_DEFAULT_CAP_MICROS) || 0;
+  },
+  /** Organization name Surfaces uses in chat copy (callers pick their own fallback wording). */
+  get SURFACES_ORG_NAME(): string | undefined {
+    return process.env.SURFACES_ORG_NAME || undefined;
+  },
+  /** Hosted one-click Slack install (behind Slack Marketplace approval) and its app credentials. */
+  get FEATURE_SURFACES_SLACK_HOSTED(): boolean {
+    return process.env.FEATURE_SURFACES_SLACK_HOSTED === "true";
+  },
+  get SURFACES_SLACK_HOSTED_CLIENT_ID(): string | null {
+    return process.env.SURFACES_SLACK_HOSTED_CLIENT_ID || null;
+  },
+  get SURFACES_SLACK_HOSTED_CLIENT_SECRET(): string | null {
+    return process.env.SURFACES_SLACK_HOSTED_CLIENT_SECRET || null;
+  },
+  get SURFACES_SLACK_HOSTED_SIGNING_SECRET(): string | null {
+    return process.env.SURFACES_SLACK_HOSTED_SIGNING_SECRET || null;
   },
   /**
    * Experimental: the cross-nest document stream (CU-wdqcq02crv) — GET
