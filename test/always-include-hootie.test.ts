@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   describeModelError as realDescribeModelError,
   ModelRefusedError as RealModelRefusedError,
+  ToolsRejectedError as RealToolsRejectedError,
 } from "../src/hootie/model.js";
 import {
   setupTestEnv,
@@ -29,8 +30,14 @@ beforeAll(() => {
       lastSystem = params.system;
       yield "Hoot.";
     },
+    streamRound: async function* (params: { system: string }) {
+      lastSystem = params.system;
+      yield "Hoot.";
+      return { toolCalls: [], assistant: [{ type: "text", text: "Hoot." }] };
+    },
     describeModelError: realDescribeModelError,
     ModelRefusedError: RealModelRefusedError,
+    ToolsRejectedError: RealToolsRejectedError,
   }));
 });
 afterAll(() => {
@@ -40,9 +47,9 @@ afterAll(() => {
 describe("Hootie gets the standing instructions", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
-  let owner: { apiKey: string; email: string; userId: string };
-  let reader: { apiKey: string; email: string; userId: string };
-  let guest: { apiKey: string; email: string; userId: string };
+  let owner: { apiKey: string; email: string; userId: string; cookie: string };
+  let reader: { apiKey: string; email: string; userId: string; cookie: string };
+  let guest: { apiKey: string; email: string; userId: string; cookie: string };
   let nestId: string;
 
   beforeAll(async () => {
@@ -88,11 +95,12 @@ describe("Hootie gets the standing instructions", () => {
     expect(grant.status).toBe(201);
   });
 
-  async function systemFor(apiKey: string): Promise<string> {
+  // Hootie runs only as a signed-in person (AC-H1-07): chat with the session.
+  async function systemFor(user: { cookie: string }): Promise<string> {
     lastSystem = null;
     const res = await app.request(`/nests/${nestId}/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers: { "Content-Type": "application/json", Cookie: user.cookie },
       body: JSON.stringify({ message: "does it rain in spring?" }),
     });
     expect(res.status).toBe(200);
@@ -107,7 +115,7 @@ describe("Hootie gets the standing instructions", () => {
   });
 
   it("puts a standing-instructions block before the retrieved documents", async () => {
-    const system = await systemFor(reader.apiKey);
+    const system = await systemFor(reader);
     expect(system).toContain("Standing instructions for this nest");
     expect(system).toContain("TONE-RULE-TEXT");
     expect(system).toContain('<standing_document id="nodes/tone-rules"');
@@ -116,7 +124,7 @@ describe("Hootie gets the standing instructions", () => {
   });
 
   it("gives a reader with a document share only the rules they can read", async () => {
-    const system = await systemFor(guest.apiKey);
+    const system = await systemFor(guest);
     expect(system).toContain("TONE-RULE-TEXT");
     expect(system).not.toContain("BOARD-RULE-TEXT");
     expect(system).not.toContain("nodes/board-rules");

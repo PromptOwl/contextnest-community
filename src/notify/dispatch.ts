@@ -257,6 +257,12 @@ export async function hasAnyConnector(nestId: string, kind: string): Promise<boo
  * backgrounded and failure-proof by construction.
  */
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
+  // A sealed personal nest: no server-wide or per-nest connector delivery
+  // (re-review R3-H1b).
+  {
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    if (await sealedNest(ev.nestId)) return;
+  }
   const db = getDb();
   const nestName = await resolveNestName(ev.nestId);
   // Message-log context: who caused it, and the run when a run is the subject.

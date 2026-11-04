@@ -32,6 +32,7 @@ import {
   Megaphone,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { SystemsPanel } from "./nest/SystemsPanel";
 
 interface NestSettingsModalProps {
   nestId: string;
@@ -709,6 +710,9 @@ export function NestSettingsModal({
             </div>
           </div>
           )}
+
+          {/* Acts on its own (each change saves immediately), not via Save. */}
+          {canManageStewardship && <SystemsPanel nestId={nestId} />}
         </div>
 
         <DialogFooter>

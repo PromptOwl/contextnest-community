@@ -1,0 +1,380 @@
+{
+ "format": "surfaces-eval/v1",
+ "split": "dev",
+ "note": "Synthetic. Never customer messages (PRD \u00a78.1).",
+ "streams": [
+  {
+   "id": "s1",
+   "channel": "general-eng",
+   "messages": [
+    {
+     "id": "a1",
+     "ts": "1793350800.000100",
+     "author": "Dana",
+     "text": "Should we move the Acme renewal to annual billing?"
+    },
+    {
+     "id": "a2",
+     "ts": "1793350920.000100",
+     "author": "Sam",
+     "text": "Yes, agreed. Annual billing for Acme from next quarter, Dana owns it."
+    },
+    {
+     "id": "b1",
+     "ts": "1793354400.000100",
+     "author": "Sam",
+     "text": "anyone up for lunch at noon?"
+    },
+    {
+     "id": "b2",
+     "ts": "1793354460.000100",
+     "author": "Dana",
+     "text": "sure, the usual place"
+    },
+    {
+     "id": "c1",
+     "ts": "1793358000.000100",
+     "author": "Priya",
+     "text": "what's the status of the onboarding doc?"
+    },
+    {
+     "id": "d1",
+     "ts": "1793361600.000100",
+     "author": "Dana",
+     "text": "Going forward all customer escalations go through the #support-escalations channel first."
+    },
+    {
+     "id": "d2",
+     "ts": "1793361720.000100",
+     "author": "Sam",
+     "text": "Agreed, I'll update the runbook."
+    },
+    {
+     "id": "e1",
+     "ts": "1793365200.000100",
+     "author": "Priya",
+     "text": "Sam's salary review is next week, keep it quiet"
+    },
+    {
+     "id": "f1",
+     "ts": "1793368800.000100",
+     "author": "Dana",
+     "text": "nice weather today"
+    }
+   ],
+   "labels": [
+    {
+     "first_message_id": "a1",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "b1",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "c1",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "d1",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "e1",
+     "label": "not_keep",
+     "must_never": true
+    },
+    {
+     "first_message_id": "f1",
+     "label": "not_keep"
+    }
+   ]
+  },
+  {
+   "id": "s2",
+   "channel": "ops",
+   "messages": [
+    {
+     "id": "t0",
+     "ts": "1793351400.000100",
+     "author": "Dana",
+     "text": "Thread: which vendor for error tracking?"
+    },
+    {
+     "id": "t1",
+     "ts": "1793351460.000100",
+     "author": "Sam",
+     "text": "Sentry is cheaper for our volume",
+     "thread_ts": "1793351400.000100"
+    },
+    {
+     "id": "t2",
+     "ts": "1793351520.000100",
+     "author": "Dana",
+     "text": "Agreed, we go with Sentry; Sam sets it up by Friday",
+     "thread_ts": "1793351400.000100"
+    },
+    {
+     "id": "g1",
+     "ts": "1793356200.000100",
+     "author": "Priya",
+     "text": "the docs site says Acme is on monthly billing but that's wrong, it's annual now"
+    },
+    {
+     "id": "h1",
+     "ts": "1793362800.000100",
+     "author": "Sam",
+     "text": "\ud83e\udde0 keep: our on-call rotation is weekly, starting Monday"
+    }
+   ],
+   "labels": [
+    {
+     "first_message_id": "t0",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "t1",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "g1",
+     "label": "keep",
+     "clear_keep": true,
+     "conflict": "true"
+    },
+    {
+     "first_message_id": "h1",
+     "label": "keep",
+     "forced": true
+    }
+   ]
+  },
+  {
+   "id": "s3",
+   "channel": "leads",
+   "messages": [
+    {
+     "id": "k0",
+     "ts": "1793400000.000100",
+     "author": "Dana",
+     "text": "We decided to sunset the legacy API on March 1; Priya agreed."
+    },
+    {
+     "id": "k0b",
+     "ts": "1793400120.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x0",
+     "ts": "1793403600.000100",
+     "author": "Priya",
+     "text": "anyone seen my charger?"
+    },
+    {
+     "id": "k1",
+     "ts": "1793407200.000100",
+     "author": "Dana",
+     "text": "Going forward, design reviews happen every Tuesday at 10."
+    },
+    {
+     "id": "k1b",
+     "ts": "1793407320.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x1",
+     "ts": "1793410800.000100",
+     "author": "Priya",
+     "text": "haha that meme"
+    },
+    {
+     "id": "k2",
+     "ts": "1793414400.000100",
+     "author": "Dana",
+     "text": "Acme's main contact is now Jordan Lee (VP Ops)."
+    },
+    {
+     "id": "k2b",
+     "ts": "1793414520.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x2",
+     "ts": "1793418000.000100",
+     "author": "Priya",
+     "text": "brb coffee"
+    },
+    {
+     "id": "k3",
+     "ts": "1793421600.000100",
+     "author": "Dana",
+     "text": "Agreed: Q1 pricing stays flat for existing customers."
+    },
+    {
+     "id": "k3b",
+     "ts": "1793421720.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x3",
+     "ts": "1793425200.000100",
+     "author": "Priya",
+     "text": "happy friday all"
+    },
+    {
+     "id": "k4",
+     "ts": "1793428800.000100",
+     "author": "Dana",
+     "text": "Sam owns the SOC 2 evidence collection, due end of month."
+    },
+    {
+     "id": "k4b",
+     "ts": "1793428920.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x4",
+     "ts": "1793432400.000100",
+     "author": "Priya",
+     "text": "is the wifi slow for anyone else?"
+    },
+    {
+     "id": "k5",
+     "ts": "1793436000.000100",
+     "author": "Dana",
+     "text": "We are moving staging to the eu-west region, confirmed by Dana."
+    },
+    {
+     "id": "k5b",
+     "ts": "1793436120.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x5",
+     "ts": "1793439600.000100",
+     "author": "Priya",
+     "text": "good morning"
+    },
+    {
+     "id": "k6",
+     "ts": "1793443200.000100",
+     "author": "Dana",
+     "text": "Correction: the support SLA is 4 business hours, not 8."
+    },
+    {
+     "id": "k6b",
+     "ts": "1793443320.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x6",
+     "ts": "1793446800.000100",
+     "author": "Priya",
+     "text": "thanks!"
+    },
+    {
+     "id": "k7",
+     "ts": "1793450400.000100",
+     "author": "Dana",
+     "text": "Decision: all new services use Postgres 16."
+    },
+    {
+     "id": "k7b",
+     "ts": "1793450520.000100",
+     "author": "Sam",
+     "text": "Agreed."
+    },
+    {
+     "id": "x7",
+     "ts": "1793454000.000100",
+     "author": "Priya",
+     "text": "see you tomorrow"
+    }
+   ],
+   "labels": [
+    {
+     "first_message_id": "k0",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x0",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k1",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x1",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k2",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x2",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k3",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x3",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k4",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x4",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k5",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x5",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k6",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x6",
+     "label": "not_keep"
+    },
+    {
+     "first_message_id": "k7",
+     "label": "keep",
+     "clear_keep": true
+    },
+    {
+     "first_message_id": "x7",
+     "label": "not_keep"
+    }
+   ]
+  }
+ ]
+}

@@ -1,3 +1,6 @@
+import { cleanTaskRules } from "../nodes/task-rules.js";
+import { backfillTicketNumbers } from "../nodes/ticket-backfill.js";
+import { syncTicketCounters } from "../nodes/ticket-numbers.js";
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import {
@@ -42,6 +45,8 @@ import {
   setAlwaysIncludeTags,
   setPrimeTags,
   nestDoneTags,
+  nestTaskRules,
+  setTaskRules,
   setDoneTags,
   nestRequiresPushConfirmation,
   setRequirePushConfirmation,
@@ -740,7 +745,10 @@ async function requireNestCaretaker(nestId: string, userId: string, verb: string
     config.AUTH_MODE !== "open" &&
     nest.user_id === ANON_USER_ID &&
     (await isLicenseAdminUserId(userId));
-  if (access.rawPermission !== "owner" && !adminCaretaker) {
+  // A sealed personal nest (Surfaces): a server admin keeps DELETE — and only
+  // delete — though they can't open it (Misha, 2026-11-01).
+  const sealedDelete = verb === "delete" && access.sealedAdmin === true && (await isServerAdminUserId(userId));
+  if (access.rawPermission !== "owner" && !adminCaretaker && !sealedDelete) {
     throw new ForbiddenError(
       `You don't have permission to ${verb} this nest. Only the nest owner can ${verb} it.`,
     );
@@ -788,6 +796,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     prime_tags: await nestPrimeTags(nestId),
     always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
+    task_rules: await nestTaskRules(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
@@ -826,6 +835,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     prime_tags?: string[] | string;
     always_include_tags?: string[] | string;
     done_tags?: string[] | string;
+    task_rules?: unknown;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
     review_sla_hours?: number | null;
@@ -848,6 +858,11 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
     );
   }
+
+  // Task rules (exclusive tag namespaces, default stage, ticket numbering) are
+  // shape-checked up front for the same reason.
+  const taskRulesPatch =
+    body.task_rules === undefined ? undefined : cleanTaskRules(body.task_rules);
 
   // Org contributions (CU-wdqcq05rz6), validated against the state they'd
   // leave behind — before anything in the body is written.
@@ -950,6 +965,15 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.done_tags) ? body.done_tags : [body.done_tags],
     );
   }
+  // Task rules only change how FUTURE task writes are shaped; tasks already on
+  // the board are left exactly as they are (numbering existing ones is the
+  // explicit backfill).
+  if (taskRulesPatch) {
+    await setTaskRules(nestId, taskRulesPatch);
+    // Turning numbering on (or editing surfaces) must not let a counter sit
+    // below a number the nest already holds or ticket_start_at.
+    if (taskRulesPatch.ticket_numbering) await syncTicketCounters(nestId, taskRulesPatch);
+  }
   // Creator-reviews is likewise future-only: it stewards nobody retroactively
   // and turning it off leaves every steward row it created in place.
   if (typeof body.creator_is_reviewer === "boolean") {
@@ -973,6 +997,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     prime_tags: await nestPrimeTags(nestId),
     always_include_tags: await nestAlwaysIncludeTags(nestId),
     done_tags: await nestDoneTags(nestId),
+    task_rules: await nestTaskRules(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     review_sla_hours: await nestReviewSlaHours(nestId),
@@ -980,4 +1005,29 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     ...(await nestOrgContributions(nestId)),
     wiped,
   });
+});
+
+// POST /nests/:nestId/tickets/backfill — number the tasks the nest already has
+// (oldest first), up to `limit` per call; run again until `remaining` is 0.
+// Owner/admin only: it writes a tag onto every task it numbers.
+nestRoutes.post("/:nestId/tickets/backfill", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const permission = await effectivePermission(nestId, c.get("userId"));
+  if (permission === "none") throw new NotFoundError("Nest not found");
+  if (permission !== "admin" && permission !== "owner") {
+    throw new ForbiddenError("Only a nest admin or the owner can number existing tasks.");
+  }
+  const body = await c.req
+    .json<{ limit?: number; dry_run?: boolean }>()
+    .catch(() => ({} as { limit?: number; dry_run?: boolean }));
+  const limit = body.limit === undefined ? undefined : Number(body.limit);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+    throw new ValidationError("limit must be a whole number of tasks, 1 or more");
+  }
+  return c.json(
+    await backfillTicketNumbers(nestId, await resolveCallerEmail(c.get("userId")), {
+      limit,
+      dryRun: body.dry_run === true,
+    }),
+  );
 });

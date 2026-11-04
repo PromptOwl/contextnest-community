@@ -37,7 +37,8 @@ import {
   updateNode,
   derivedNodeId,
 } from "../nodes/service.js";
-import { resolveExportBody } from "../nodes/readable-body.js";
+import { resolveExportBody, approvedReadableBody } from "../nodes/readable-body.js";
+import { hiddenSurfaceDrafts, hiddenSurfaceEdits, isHidden, type HiddenSet } from "../surfaces/draft-visibility.js";
 import { engineCache } from "../nodes/engine.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { resolveNodeGrant } from "../governance/grants-service.js";
@@ -88,6 +89,9 @@ export interface ToolContext {
   read: Set<string>;
   mcp: McpPool;
   signal: AbortSignal;
+  /** Surfaces judge: record no run steps (their details can carry text the
+   *  model derived from chat, which must never be persisted — PRD §4.4). */
+  quiet?: boolean;
 }
 
 const MAX_BODY_CHARS = 30_000;
@@ -274,6 +278,7 @@ export function toolsFor(agent: MetacognitionAgent): Anthropic.Tool[] {
 type Step = { action: "read" | "write" | "branch" | "notify" | "external"; node_id?: string; detail: Record<string, unknown> };
 
 async function step(ctx: ToolContext, s: Step): Promise<void> {
+  if (ctx.quiet) return;
   await appendRunStep(ctx.runId, s);
   // The proposal / comment / access request this step made links back here.
   await linkRunArtifacts(ctx.runId, s.detail);
@@ -370,7 +375,18 @@ async function inReadScope(ctx: ToolContext, nodeId: string): Promise<boolean> {
   return inFolders(nodeId, ctx.agent.config.scope.read) || (await personaGrant(ctx, nodeId)) !== null;
 }
 
+/**
+ * A pending Surfaces draft (a new document a listener proposed from chat) is
+ * never in ANY agent's context until a person approves it — whatever the
+ * agent's owner may see (judge round 1, AC-JDG-13). A pending Surfaces edit
+ * is read at its approved body (readNode).
+ */
+async function surfaceHidden(ctx: ToolContext): Promise<HiddenSet> {
+  return hiddenSurfaceDrafts(ctx.nestId);
+}
+
 async function mayRead(ctx: ToolContext, nodeId: string): Promise<string | null> {
+  if (isHidden(await surfaceHidden(ctx), nodeId)) return "not found";
   if (!(await inReadScope(ctx, nodeId))) return "outside your read scope";
   if (!(await canReadNode(ctx.nestId, nodeId, ctx.owner.userId, ctx.owner.email))) {
     return "outside what your owner may read";
@@ -405,10 +421,35 @@ async function alreadyProposed(ctx: ToolContext, nodeId: string): Promise<string
       ORDER BY requested_at DESC LIMIT 1`,
     [ctx.nestId, nodeId, ctx.agent.persona.email, since],
   )) as { status: string; resolution_note: string | null } | undefined;
-  if (!row) return null;
+  if (!row) return fingerprintHold(ctx.nestId, nodeId);
   if (row.status === "pending") return `You already proposed a change to ${nodeId}; it is still waiting for review.`;
   return `A reviewer rejected your proposal for ${nodeId} recently${row.resolution_note ? ` ("${row.resolution_note.slice(0, 200)}")` : ""}. Don't propose it again this week; if you have new information, comment instead.`;
 }
+
+/**
+ * The 7-day hold after a Surfaces draft was rejected or expired survives the
+ * draft's purge: the fingerprint row (no body) is what remains (PRD §4.9,
+ * V7). Tolerates a database without the Surfaces tables.
+ */
+async function fingerprintHold(nestId: string, nodeId: string): Promise<string | null> {
+  try {
+    const hit = (await getDb().get(
+      "SELECT source FROM surface_fingerprints WHERE nest_id = ? AND node_id = ? AND hold_until > ? LIMIT 1",
+      [nestId, nodeId, new Date().toISOString()],
+    )) as { source: string } | undefined;
+    if (!hit) return null;
+  } catch {
+    return null;
+  }
+  return `A reviewer rejected a proposal for ${nodeId} recently. Don't propose it again this week; if you have new information, comment instead.`;
+}
+
+/** The metacognition 7-day hold check, for callers outside the loop (Surfaces dedup). */
+export async function metacognitionHoldFor(p: { nestId: string; personaEmail: string; nodeId: string }): Promise<string | null> {
+  return alreadyProposed({ nestId: p.nestId, agent: { persona: { email: p.personaEmail } } } as unknown as ToolContext, p.nodeId);
+}
+
+export type DraftOutcome = { ok: true; nodeId: string; reviewId: string; version: number } | { ok: false; message: string };
 
 export async function runTool(ctx: ToolContext, name: string, input: Record<string, unknown>): Promise<ToolOutcome> {
   // One nest, the persona's own. Every tool reads ctx.nestId; this keeps a
@@ -454,8 +495,10 @@ async function searchNest(ctx: ToolContext, input: Record<string, unknown>): Pro
     body: { prompt: query, max_tokens: 4000, hops: 0 },
   });
   const hits: typeof result.nodes = [];
+  const hidden = await surfaceHidden(ctx);
   for (const n of result.nodes) {
     if (hits.length >= 25) break;
+    if (isHidden(hidden, n.id)) continue;
     if (await inReadScope(ctx, n.id)) hits.push(n);
   }
   await step(ctx, { action: "read", detail: { tool: "search_nest", query, hits: hits.map((h) => h.id) } });
@@ -472,7 +515,8 @@ async function listFolder(ctx: ToolContext, input: Record<string, unknown>): Pro
   if (!(await inReadScope(ctx, probe))) {
     return accessNeeded(ctx, "list_nodes", raw ? `nodes/${raw}` : "nodes", "read", "outside your read scope");
   }
-  const rows = (await listNodesForCaller(ctx.nestId, ctx.owner.userId, { folder: raw })).slice(0, 100);
+  const hidden = await surfaceHidden(ctx);
+  const rows = (await listNodesForCaller(ctx.nestId, ctx.owner.userId, { folder: raw })).filter((r) => !isHidden(hidden, r.id)).slice(0, 100);
   await step(ctx, { action: "read", detail: { tool: "list_nodes", folder: raw, count: rows.length } });
   if (!rows.length) return { content: "That folder has no documents." };
   return {
@@ -494,7 +538,9 @@ async function readNode(ctx: ToolContext, input: Record<string, unknown>): Promi
   } catch {
     return { isError: true, content: `No document ${id}.` };
   }
-  const body = await resolveExportBody(ctx.nestId, id, doc.body || "");
+  const body = isHidden(await hiddenSurfaceEdits(ctx.nestId), id)
+    ? await approvedReadableBody(ctx.nestId, id)
+    : await resolveExportBody(ctx.nestId, id, doc.body || "");
   await step(ctx, { action: "read", node_id: id, detail: { tool: "read_node" } });
   ctx.read.add(id);
   if (body === null) return { content: `${id} has no approved version yet, so there is nothing to read.` };
@@ -521,30 +567,53 @@ function noteFor(ctx: ToolContext, note: string): string {
   return `[${ctx.agent.persona.name} · metacognition] ${note}`.slice(0, 2000);
 }
 
+const asTool = (r: DraftOutcome, ok: (d: Extract<DraftOutcome, { ok: true }>) => string): ToolOutcome =>
+  r.ok ? { content: ok(r) } : { isError: true, content: r.message };
+
 async function proposeEdit(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  return asTool(await proposeEditDraft(ctx, input), (d) => `Proposed. ${d.nodeId} v${d.version} is waiting for a reviewer (review ${d.reviewId}).`);
+}
+
+/**
+ * propose_edit's work, callable outside the ReAct loop (Surfaces, V1): every
+ * scope, hold and draft-in-the-way check, then a draft authored by the
+ * persona and submitForReview with the persona as proposer.
+ */
+/**
+ * Server-only options for the propose helpers — never read from a model's
+ * tool input (the tool wrappers don't pass them).
+ *  - id: an exact id the caller already reserved (Surfaces hides it first);
+ *  - bypassHold: skip the 7-day hold (a person explicitly asked, PRD §4.9).
+ */
+export interface DraftOptions {
+  id?: string;
+  bypassHold?: boolean;
+}
+
+export async function proposeEditDraft(ctx: ToolContext, input: Record<string, unknown>, opts: DraftOptions = {}): Promise<DraftOutcome> {
   const id = nodeIdOf(input.id);
   const content = str(input.content, 500_000);
   const note = str(input.note, 2000);
-  if (!id || content === null || !note) return { isError: true, content: "id, content and note are required" };
+  if (!id || content === null || !note) return { ok: false, message: "id, content and note are required" };
   const spent = proposalBudget(ctx);
-  if (spent) return spent;
+  if (spent) return { ok: false, message: spent.content };
   const denied = (await mayRead(ctx, id)) ?? (await mayPropose(ctx, id));
-  if (denied) return accessNeeded(ctx, "propose_edit", id, "propose", denied);
-  const repeat = await alreadyProposed(ctx, id);
-  if (repeat) return { isError: true, content: repeat };
+  if (denied) return { ok: false, message: (await accessNeeded(ctx, "propose_edit", id, "propose", denied)).content };
+  const repeat = opts.bypassHold ? null : await alreadyProposed(ctx, id);
+  if (repeat) return { ok: false, message: repeat };
 
   // Only a document whose working copy IS its approved text: a pending review
   // or someone's unsaved draft is a person's work in progress, and a proposal
   // written over it would replace what they're doing.
   if (await getPendingReview(ctx.nestId, id)) {
-    return { isError: true, content: `${id} already has a change waiting for review. Leave it until that is decided.` };
+    return { ok: false, message: `${id} already has a change waiting for review. Leave it until that is decided.` };
   }
   // Read the head BEFORE the checks and hand it to the write: updateNode
   // re-checks it inside the node's write lock, so a person's save landing
   // between these checks and the write is refused (409), never overwritten.
   const head = await getCurrentVersion(ctx.nestId, id);
   if (await hasUnsealedDraft(ctx.nestId, id)) {
-    return { isError: true, content: `${id} has a draft someone is working on. Leave it, or comment instead.` };
+    return { ok: false, message: `${id} has a draft someone is working on. Leave it, or comment instead.` };
   }
 
   const persona = ctx.agent.persona.email;
@@ -559,7 +628,7 @@ async function proposeEdit(ctx: ToolContext, input: Record<string, unknown>): Pr
     );
   } catch (err) {
     if (err instanceof ConflictError || err instanceof LockedError) {
-      return { isError: true, content: `${id} changed while you were working on it. Leave it for this run.` };
+      return { ok: false, message: `${id} changed while you were working on it. Leave it for this run.` };
     }
     throw err;
   }
@@ -577,27 +646,38 @@ async function proposeEdit(ctx: ToolContext, input: Record<string, unknown>): Pr
     node_id: id,
     detail: { tool: "propose_edit", kind: "proposal", review_id: review.id, version: res.version, note },
   });
-  return { content: `Proposed. ${id} v${res.version} is waiting for a reviewer (review ${review.id}).` };
+  return { ok: true, nodeId: id, reviewId: review.id, version: res.version };
 }
 
 async function proposeNew(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  return asTool(await proposeNewDraft(ctx, input), (d) => `Proposed new document ${d.nodeId}; it is waiting for a reviewer (review ${d.reviewId}).`);
+}
+
+/** propose_new's work, callable outside the ReAct loop (Surfaces, V1). */
+export async function proposeNewDraft(ctx: ToolContext, input: Record<string, unknown>, opts: DraftOptions = {}): Promise<DraftOutcome> {
   const folder = typeof input.folder === "string" ? input.folder.trim().replace(/^nodes\/?/, "").replace(/^\/+|\/+$/g, "") : "";
   const title = str(input.title, 200)?.trim();
   const content = str(input.content, 500_000);
   const note = str(input.note, 2000);
-  if (!title || content === null || !note) return { isError: true, content: "folder, title, content and note are required" };
+  if (!title || content === null || !note) return { ok: false, message: "folder, title, content and note are required" };
   const spent = proposalBudget(ctx);
-  if (spent) return spent;
+  if (spent) return { ok: false, message: spent.content };
   const probe = folder ? `nodes/${folder}/new` : "nodes/new";
   const denied = await mayPropose(ctx, probe);
-  if (denied) return accessNeeded(ctx, "propose_new", folder ? `nodes/${folder}` : "nodes", "propose", denied);
+  if (denied) return { ok: false, message: (await accessNeeded(ctx, "propose_new", folder ? `nodes/${folder}` : "nodes", "propose", denied)).content };
   // The id createNode will give it: a new document it proposed before (and
   // got rejected, or is still waiting on) is the same proposal again.
-  const derived = derivedNodeId(title);
+  // A caller may reserve the exact id (Surfaces hides it before the draft
+  // exists): it must sit in the folder being proposed into.
+  const reserved = opts.id === undefined ? null : nodeIdOf(opts.id);
+  if (opts.id !== undefined && (!reserved || !reserved.startsWith(folder ? `nodes/${folder}/` : "nodes/") || reserved.slice((folder ? `nodes/${folder}/` : "nodes/").length).includes("/"))) {
+    return { ok: false, message: "the reserved id must be a document directly in the folder" };
+  }
+  const derived = reserved ?? derivedNodeId(title);
   if (derived) {
-    const candidate = folder ? derived.replace(/^nodes\//, `nodes/${folder}/`) : derived;
-    const repeat = await alreadyProposed(ctx, candidate);
-    if (repeat) return { isError: true, content: repeat };
+    const candidate = reserved ?? (folder ? derived.replace(/^nodes\//, `nodes/${folder}/`) : derived);
+    const repeat = opts.bypassHold ? null : await alreadyProposed(ctx, candidate);
+    if (repeat) return { ok: false, message: repeat };
   }
   const tags = Array.isArray(input.tags)
     ? input.tags.filter((t): t is string => typeof t === "string" && t.length <= 60).slice(0, 10)
@@ -607,7 +687,7 @@ async function proposeNew(ctx: ToolContext, input: Record<string, unknown>): Pro
   try {
     created = await createNode(
       ctx.nestId,
-      { title, content, folder: folder || undefined, ...(tags?.length ? { tags } : {}) },
+      { title, content, ...(reserved ? { id: reserved } : { folder: folder || undefined }), ...(tags?.length ? { tags } : {}) },
       persona,
       { alwaysDraft: true, creatorReviews: false, notifyMentions: false },
     );
@@ -615,10 +695,10 @@ async function proposeNew(ctx: ToolContext, input: Record<string, unknown>): Pro
     // Only our own validation wording goes back to the model; anything else
     // is a server fault whose message isn't the model's business.
     if (err instanceof ValidationError || err instanceof ConflictError) {
-      return { isError: true, content: `Could not create it: ${err.message}` };
+      return { ok: false, message: `Could not create it: ${err.message}` };
     }
-    console.error("[metacognition] propose_new failed", ctx.nestId, err);
-    return { isError: true, content: "Could not create it (server error). Skip it for this run." };
+    console.error("[metacognition] propose_new failed", ctx.nestId, err instanceof Error ? err.name : "error");
+    return { ok: false, message: "Could not create it (server error). Skip it for this run." };
   }
   const review = await submitForReview({
     nestId: ctx.nestId,
@@ -634,7 +714,7 @@ async function proposeNew(ctx: ToolContext, input: Record<string, unknown>): Pro
     node_id: created.node.id,
     detail: { tool: "propose_new", kind: "proposal", review_id: review.id, note },
   });
-  return { content: `Proposed new document ${created.node.id}; it is waiting for a reviewer (review ${review.id}).` };
+  return { ok: true, nodeId: created.node.id, reviewId: review.id, version: created.version };
 }
 
 async function comment(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
@@ -1016,3 +1096,4 @@ function mcpWhy(err: unknown): string {
 export function mcpTokenFrom(env: Record<string, string>) {
   return (server: McpServerConfig): string | null => (server.auth_env ? env[server.auth_env] ?? null : null);
 }
+

@@ -30,6 +30,13 @@ export async function resetAuthRateLimit() {
  * initDb after vi.resetModules so the post-reset module graph the app uses is
  * the one that gets initialised). Here we just point env at a fresh dir and
  * best-effort close any connection left over on this module graph. */
+/** The Postgres schema of the current suite when TEST_SUITE_PG_URL is set. */
+let pgSuiteSchema: string | null = null;
+/** Which database the current suite runs on (for tests that read the catalogue). */
+export function testDbDriver(): "sqlite" | "postgres" {
+  return pgSuiteSchema ? "postgres" : "sqlite";
+}
+
 export function setupTestEnv() {
   // Reset the cached DB connection so each suite gets its own (best-effort —
   // adapter.close() is async; we don't block the sync setup on it).
@@ -52,11 +59,28 @@ export function setupTestEnv() {
   process.env.DB_DRIVER = "sqlite";
   delete process.env.DATABASE_URL;
   delete process.env.CLOUD_SQL_CONNECTION_NAME;
+  // Opt-in: run a suite against real Postgres (TEST_SUITE_PG_URL), each suite
+  // in its own schema, created in createTestApp and dropped on cleanup. Off by
+  // default, so `npm test` stays SQLite-only.
+  pgSuiteSchema = null;
+  const pgUrl = process.env.TEST_SUITE_PG_URL;
+  if (pgUrl) {
+    pgSuiteSchema = `suite_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    process.env.DB_DRIVER = "postgres";
+    process.env.DATABASE_URL = `${pgUrl}${pgUrl.includes("?") ? "&" : "?"}options=${encodeURIComponent(`-c search_path=${pgSuiteSchema}`)}`;
+  }
+  const schema = pgSuiteSchema;
 
   return {
     dataDir: testDir,
     async cleanup() {
       await resetDb();
+      if (schema && pgUrl) {
+        const { Pool } = await import("pg");
+        const admin = new Pool({ connectionString: pgUrl });
+        await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {});
+        await admin.end();
+      }
       try {
         rmSync(testDir, { recursive: true, force: true });
       } catch {}
@@ -162,6 +186,12 @@ export async function createTestApp(
     };
   });
   // Open the DB on the freshly-reset module graph the app will use.
+  if (pgSuiteSchema && process.env.TEST_SUITE_PG_URL) {
+    const { Pool } = await import("pg");
+    const admin = new Pool({ connectionString: process.env.TEST_SUITE_PG_URL });
+    await admin.query(`CREATE SCHEMA IF NOT EXISTS ${pgSuiteSchema}`);
+    await admin.end();
+  }
   {
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
@@ -255,6 +285,9 @@ export async function registerUser(
     apiKey: keyData.api_key as string,
     userId: registerData.user.id as string,
     email,
+    /** The browser session registration set — for routes only a signed-in
+     *  person may call (Hootie's chat refuses every API key). */
+    cookie: sessionCookie.split(";")[0],
   };
 }
 

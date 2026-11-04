@@ -4,6 +4,8 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { approvedOnlyForSurfaceEdit, surfaceEditsHiddenFor, isHidden as isSurfaceHidden } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
@@ -66,6 +68,7 @@ import {
   type InstructionsRevision,
 } from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
+import { writeTableRows } from "../tables/row-routes.js";
 import { tableRefProse, tableRefReport } from "../tables/refs.js";
 import {
   addComment,
@@ -109,7 +112,7 @@ import {
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
 import { AppError, BillingConfirmError } from "../shared/errors.js";
-import { billingConfirmed } from "../auth/seats.js";
+import { billingConfirmed, confirmBillingToolField } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -125,6 +128,7 @@ import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
+  clientToolField,
   mergeClient,
   parseClientMetadata,
   type ClientMetadata,
@@ -132,6 +136,7 @@ import {
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
+import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -149,6 +154,9 @@ import {
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
 const MAX_HOPS = 10;
+/** context_review_queue: rows read-checked per call, and rows listed. */
+const REVIEW_QUEUE_SCAN = 200;
+const REVIEW_QUEUE_PAGE = 50;
 
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
@@ -446,6 +454,8 @@ export interface McpToolContext {
  * read-tier workflow-plane tools.
  */
 export const MCP_READ_TOOLS = new Set<string>([
+  // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
+  ...SURFACES_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -479,12 +489,30 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edge_types_list",
 ]);
 
-/** The zod field for an `array` property in a tool's JSON schema, shared by
- *  both MCP shape builders (routes.ts, server-routes.ts). A list of objects
- *  (metacognition feeds, MCP servers): each item must be an object, its fields
- *  are the handler's parser's to check. Everything else is a list of strings. */
-export function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+/** The zod field for an `array` property in a tool's JSON schema. A list of
+ *  objects (metacognition feeds, MCP servers): each item must be an object, its
+ *  fields are the handler's parser's to check. Everything else is strings. */
+function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
   return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
+/** A tool's JSON schema as its MCP zod shape, shared by the per-nest
+ *  (routes.ts) and server-level (server-routes.ts) surfaces. Caller attribution
+ *  (spec §9.4) and billing confirm ride on every tool, declared once here. */
+export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
+  const props = (inputSchema as any)?.properties || {};
+  const required: string[] = (inputSchema as any)?.required || [];
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
+    let field: z.ZodTypeAny;
+    if (def.type === "string") field = z.string();
+    else if (def.type === "number") field = z.number();
+    else if (def.type === "array") field = arrayToolField(def);
+    else field = z.any();
+    if (!required.includes(key)) field = field.optional();
+    shape[key] = field;
+  }
+  return Object.assign(shape, clientToolField, confirmBillingToolField);
 }
 
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
@@ -505,6 +533,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // Surfaces (bindings, identity links): only advertised while
+  // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
+  ...SURFACES_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -527,7 +558,7 @@ const TASK_FIELD_PROPERTIES = {
   },
   priority: {
     type: ["string", "null"],
-    description: 'One of "urgent", "high", "medium", "low". null or "" clears it.',
+    description: 'One of the nest\'s priority keys (default: "urgent", "high", "medium", "low"; a nest can define its own). null or "" clears it.',
   },
   parent: {
     type: ["string", "null"],
@@ -664,6 +695,28 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_table_rows",
+    description:
+      "Change rows of a TABLE node by its :key column: append, update or delete. Typed against the header and all-or-nothing. Lands as a draft on a governed nest (submit_review to send it for review), published otherwise. Twin of REST POST …/rows.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        table: { type: "string", description: 'The table node — "[[Title]]" or a node id like nodes/pipeline' },
+        ops: {
+          type: "array",
+          description:
+            'Up to 100 ops, applied in order: {"op":"append","row":{col:value}} | {"op":"update","key":"<key>","set":{col:value}} | {"op":"delete","key":"<key>"}',
+          items: { type: "object" },
+          maxItems: 100,
+        },
+        base_version: { type: "number", description: "The head version you read; a different head is refused as a conflict." },
+        submit_review: { type: "boolean", description: "On a governed nest, submit the draft for review." },
+        change_note: { type: "string", description: "Version note (max 500 chars)." },
+      },
+      required: ["table", "ops"],
+    },
+  },
+  {
     name: "context_get",
     description: "Get the FULL content of a specific node by title or ID.",
     inputSchema: {
@@ -703,7 +756,7 @@ export const TOOL_DEFINITIONS = [
         },
         priority: {
           type: "string",
-          description: 'Only nodes with this priority: urgent | high | medium | low | none.',
+          description: "Only nodes with this priority key (default levels: urgent | high | medium | low), or 'none'.",
         },
         due_before: {
           type: "string",
@@ -1135,7 +1188,7 @@ export const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description:
-            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: one of the nest\'s priority keys (default urgent|high|medium|low), or null. assignee: email|null. due: YYYY-MM-DD|null. fields: custom field values by key (null clears). change_note: recorded in each version.",
           properties: {
             board_id: { type: "string" },
             column: { type: "string" },
@@ -1144,6 +1197,7 @@ export const TOOL_DEFINITIONS = [
             priority: { type: ["string", "null"] },
             assignee: { type: ["string", "null"] },
             due: { type: ["string", "null"] },
+            fields: { type: "object" },
             change_note: { type: "string" },
           },
         },
@@ -1731,6 +1785,19 @@ async function resolveLlmBody(
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
   if (!stewardship) {
+    // A pending Surfaces edit is a chat-derived draft: below write, the
+    // approved body only (security round 2, M1d).
+    if (await approvedOnlyForSurfaceEdit(ctx.nestId, node.id, ctx.userId)) {
+      const approvedV = await versions.getApprovedVersion(ctx.nestId, node.id);
+      if (approvedV == null) return null;
+      try {
+        const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approvedV)).raw;
+        ctx.servedVersions?.set(node.id, approvedV);
+        return raw;
+      } catch {
+        return null;
+      }
+    }
     // Ungoverned: the live body, which is the document's current version.
     const live = Number(node.frontmatter?.version);
     if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
@@ -2700,12 +2767,23 @@ async function runTool(
       // timeout on a 444-node governed nest while REST answered at once.
       const matches = matchDocuments(await discoverForSearch(storage), query)
         .filter((n) => !isDerivedAnnotationsNode(n.id));
-      const accessible = await filterAccessible(
+      let accessible = await filterAccessible(
         nestId,
         userId,
         userEmail,
         matches,
       );
+      // A hit on a pending Surfaces edit must not reveal it matched only the
+      // chat-derived draft: re-match those on the approved body (round 2, M1d).
+      const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+      if (accessible.some((n) => isSurfaceHidden(surfaceEdits, n.id))) {
+        const rebodied = await Promise.all(
+          accessible.map(async (n) =>
+            isSurfaceHidden(surfaceEdits, n.id) ? { ...n, body: await approvedReadableBody(nestId, n.id) } : n,
+          ),
+        );
+        accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
+      }
       const count = accessible.length;
       if (count === 0)
         return {
@@ -3594,6 +3672,47 @@ async function runTool(
       };
     }
 
+    case "context_table_rows": {
+      const ref = typeof args.table === "string" ? args.table.trim() : "";
+      if (!ref) return toolError('table is required: "[[Title]]" or a node id', "VALIDATION_FAILED");
+      const title = /^\[\[(.+)\]\]$/.exec(ref)?.[1];
+      const node = await resolveTargetNode(storage, title ? { title } : { id: ref });
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // PRIMARY write gate, as context_update: the /mcp transport admits read-tier callers.
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to edit "${node.frontmatter.title}": ${editCheck.reason}`,
+          { type: "node", id: node.id },
+        );
+      }
+      let out: Awaited<ReturnType<typeof writeTableRows>>;
+      try {
+        const { ops, base_version, submit_review, change_note } = args;
+        out = await writeTableRows(
+          nestId,
+          node.id,
+          { ops, base_version, submit_review, change_note },
+          { userId, client: ctx.client, baseUrl: ctx.baseUrl },
+        );
+      } catch (err) {
+        return contributorError(err);
+      }
+      const r = out.body as Record<string, any>;
+      if (out.status === 409) {
+        const text = String(r.message ?? r.error);
+        return toolError(text, "VALIDATION_FAILED", { conflict: true, current_version: r.current_version, ...(r.code ? { reason: r.code } : {}) });
+      }
+      const a = r.applied;
+      return {
+        text: r.unchanged
+          ? `No change: ${node.frontmatter.title} already has those values (v${r.version}).`
+          : `Rows updated in **${node.frontmatter.title}** — ${a.appended} added, ${a.updated} updated, ${a.deleted} deleted; v${r.version}, ${r.state}${r.review_id ? `, review ${r.review_id}` : ""}${r.review_error ? ` (review not submitted: ${r.review_error})` : ""}`,
+        data: r,
+      };
+    }
+
     case "context_task_log": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
@@ -4301,25 +4420,71 @@ async function runTool(
 
     case "context_review_queue": {
       const status = args.status || "pending";
+      // The same gate as REST /review-queue (CU-wdqcq05rz6): a visibility-only
+      // reader sees their OWN requests, not everyone's — a request names an
+      // unapproved draft. Everyone else sees only the rows whose document
+      // they can read (a share-only caller, for one). Enforced here, in the
+      // op, so every MCP caller and Hootie get the same answer.
+      const ownOnly = await isPublicReader(nestId, ctx.userId);
+      // Own-only is filtered in SQL, so its total is exact. Otherwise the
+      // readability filter runs over a bounded window BEFORE paging, and the
+      // total counts only readable rows in it — never a row this caller may
+      // not see (security r2 N2), never stuck at one page either.
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : { limit: REVIEW_QUEUE_SCAN }),
       });
+      let readableRows = result.requests;
+      let total = result.total;
+      if (!ownOnly) {
+        const readable = new Set(
+          (
+            await filterAccessible(
+              nestId,
+              ctx.userId,
+              userEmail,
+              readableRows.map((r) => ({ id: r.nodeId })),
+            )
+          ).map((n) => n.id),
+        );
+        // ponytail: past REVIEW_QUEUE_SCAN rows the count is a floor; page in SQL if queues get that big.
+        readableRows = readableRows.filter((r) => readable.has(r.nodeId));
+        total = readableRows.length;
+      }
+      const requests = readableRows.slice(0, REVIEW_QUEUE_PAGE);
 
-      if (result.requests.length === 0) {
+      if (requests.length === 0) {
         return status === "pending"
           ? "No documents pending review. All caught up!"
           : `No reviews with status "${status}".`;
       }
 
-      const list = result.requests
+      const list = requests
         .map(
           (r, i) =>
             `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
-      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+      const more = total > requests.length ? `\n\nShowing the first ${requests.length}.` : "";
+      return {
+        text: `# Review Queue (${status})\n**${total} item(s)**\n\n${list}${more}`,
+        // The rows the prose lists, by node id — only rows this caller may
+        // see (above), so a caller can act on them without parsing prose.
+        data: {
+          total,
+          requests: requests.map((r) => ({
+            nodeId: r.nodeId,
+            title: r.title ?? null,
+            version: r.version,
+            priority: r.priority,
+            requestedBy: r.requestedBy,
+            requestedAt: r.requestedAt,
+            ...(r.requestNote ? { requestNote: r.requestNote } : {}),
+          })),
+        },
+      };
     }
 
     case "context_my_drafts": {
@@ -4732,6 +4897,9 @@ async function runTool(
       // owner/admin and refuses system keys in metacognition/manage.ts.
       if (isMetacognitionTool(toolName)) {
         return runMetacognitionTool(toolName, args, ctx);
+      }
+      if (isSurfacesTool(toolName)) {
+        return runSurfacesTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

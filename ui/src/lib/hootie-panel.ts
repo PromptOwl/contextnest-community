@@ -3,6 +3,7 @@
  * hootie-panel.test.ts). The panel component stays about the conversation.
  */
 import type { HootieBrand } from "./api";
+import { WIKI_LINK, citationResolver, splitWikiLink, type CitableNode } from "../../../src/hootie/citations";
 
 export const HOOTIE_PANEL_MIN = 340;
 export const HOOTIE_PANEL_MAX = 720;
@@ -66,4 +67,72 @@ export function hootieAccentStyle(accent: string | null): { backgroundColor: str
 /** The greeting line: the admin's, or "Hi, I'm <name>". */
 export function hootieGreeting(brand: HootieBrand): string {
   return brand.greeting?.trim() || `Hi, I'm ${brand.name}`;
+}
+
+// ─── Citations ───────────────────────────────────────────────────────────
+// The panel resolves `[[X]]` with the server's own module (pure, no imports),
+// so the chips can never disagree with the server's `cited`.
+export type { CitableNode };
+
+/** Escape text for a markdown link label. */
+function escapeLabel(s: string): string {
+  return s.replace(/[\\[\]]/g, (c) => `\\${c}`);
+}
+
+/**
+ * The answer as markdown for the bubble: each `[[X]]` that resolves against
+ * `cited` becomes a `[Title](#cite:<id>)` link (the bubble renders those as
+ * chips; an alias, `[[X|alias]]`, is shown instead of the title), and every
+ * other one becomes its plain text — no brackets, nothing that looks
+ * clickable but isn't. `cited` is undefined while the answer streams.
+ */
+export function linkCitations(content: string, cited: readonly CitableNode[] | undefined): string {
+  const resolve = citationResolver(cited ?? []);
+  return content.replace(WIKI_LINK, (_whole, inner: string) => {
+    const { target, label } = splitWikiLink(inner);
+    const n = resolve(target);
+    if (!n) return label ?? target;
+    return `[${escapeLabel(label ?? n.title)}](#cite:${encodeURIComponent(n.id)})`;
+  });
+}
+
+// ─── Searching ───────────────────────────────────────────────────────────
+// While Hootie searches the nest again the bubble shows what it's doing.
+// A status supersedes any text so far (the model thinking aloud before it
+// searched); the next text clears the status.
+
+interface Streaming {
+  content: string;
+  status?: string;
+}
+
+export function withStatus<M extends Streaming>(m: M, text: string): M {
+  return { ...m, content: "", status: text };
+}
+
+export function withDelta<M extends Streaming>(m: M, text: string): M {
+  return { ...m, content: m.content + text, status: undefined };
+}
+
+/** The pending bubble's line before any answer text arrives. */
+export function pendingLabel(m: Streaming): string {
+  return m.status || "Reading the nest…";
+}
+
+/**
+ * The one line the panel's live region announces when an answer finishes
+ * (AC-H1-09). The feed itself is never a live region: streamed tokens are
+ * not read out one by one.
+ */
+export function answerReadyLine(d: { actions: number; proposals: number; answerOnly: boolean }): string {
+  if (d.answerOnly) return "Answer ready, answer-only mode.";
+  if (d.actions === 0 && d.proposals === 0) return "Answer ready.";
+  const n = (k: number, one: string) => `${k} ${one}${k === 1 ? "" : "s"}`;
+  return `Answer ready, ${n(d.actions, "action")} and ${n(d.proposals, "proposal")}.`;
+}
+
+/** Fixed copy over an answer given without tools because the model
+ *  connection refused them (AC-H1-11). */
+export function answerOnlyBanner(name: string): string {
+  return `Answer-only mode. This model connection can't use tools right now, so ${name} answered from what it found without opening anything or looking again. An admin can switch models in Settings.`;
 }

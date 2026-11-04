@@ -33,7 +33,7 @@ function css(site: Site): string {
   const tint = b?.page_tint_color && HEX.test(b.page_tint_color) ? b.page_tint_color : null;
   return `
 :root{--bg:${tint ?? "#fff"};--fg:#1c1917;--muted:#6b6560;--line:#e7e5e4;--soft:#f5f5f4;--accent:${accent ?? "#142a80"};--head:${headerBg ?? "transparent"};color-scheme:light}
-@media (prefers-color-scheme:dark){:root{--bg:#121214;--fg:#e9e7e4;--muted:#a19d98;--line:#2a2a2e;--soft:#1c1c20;--accent:${accent ? accent : "#9db1ff"};--head:transparent;color-scheme:dark}}
+@media (prefers-color-scheme:dark){:root{--bg:#121214;--fg:#e9e7e4;--muted:#a19d98;--line:#2a2a2e;--soft:#1c1c20;--accent:${accent ? `color-mix(in srgb,${accent} 45%,#fff)` : "#9db1ff"};--head:transparent;color-scheme:dark}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
@@ -94,6 +94,7 @@ aside.toc li{margin:4px 0}aside.toc li.h3{padding-left:12px}
 aside.toc a{color:var(--muted);text-decoration:none}aside.toc a:hover{color:var(--accent)}
 footer.foot{border-top:1px solid var(--line);padding:20px 24px;font-size:13px;color:var(--muted);text-align:center}
 footer.foot a{color:var(--muted)}
+footer.foot button{font:inherit;color:var(--muted);background:none;border:0;padding:0;text-decoration:underline;cursor:pointer}
 @media (max-width:1100px){.layout{grid-template-columns:256px minmax(0,1fr)}aside.toc{display:none}}
 @media (max-width:760px){
   .layout{display:block;padding:0 16px}
@@ -114,7 +115,7 @@ footer.foot a{color:var(--muted)}
  * opened at once with a ClipboardItem that waits on the fetch; writing after
  * the fetch resolves is the fallback for browsers without ClipboardItem.
  */
-const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){var c=navigator.clipboard,u=b.getAttribute('data-copy');function md(){return fetch(u).then(function(r){if(!r.ok)throw r.status;return r.text()})}function late(){return md().then(function(t){return c.writeText(t)})}var p;try{p=c.write([new ClipboardItem({'text/plain':md().then(function(t){return new Blob([t],{type:'text/plain'})})})]).catch(late)}catch(e){p=late()}p.then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
+const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){var c=navigator.clipboard,u=b.getAttribute('data-copy');function md(){return fetch(u).then(function(r){if(!r.ok)throw r.status;return r.text()})}function late(){return md().then(function(t){return c.writeText(t)})}var p;try{p=c.write([new ClipboardItem({'text/plain':md().then(function(t){return new Blob([t],{type:'text/plain'})})})]).catch(late)}catch(e){p=late()}p.then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})});document.querySelectorAll('[data-copy-text]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy-text')).then(function(){b.textContent='MCP URL copied'},function(){b.textContent='Copy failed'})})})`;
 
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s).digest("base64")}'`;
 
@@ -236,7 +237,8 @@ function shell(site: Site, opts: ShellOpts): string {
     b?.footer_text ? esc(b.footer_text) : esc(site.name),
     b?.footer_link_url ? `<a href="${esc(b.footer_link_url)}" rel="noopener">${esc(b.footer_link_label || b.footer_link_url)}</a>` : "",
     `<a href="${esc(href(site, "llms.txt"))}">llms.txt</a>`,
-    `<a href="${esc(`${site.serverOrigin}/nests/${site.nest.id}/mcp`)}" rel="nofollow">MCP</a>`,
+    // An agent endpoint, not a page — a browser GET only gets the auth error, so copy it instead.
+    `<button type="button" data-copy-text="${esc(`${site.serverOrigin}/nests/${site.nest.id}/mcp`)}" title="Copy this nest's MCP URL for your agent">Copy MCP URL</button>`,
     b?.hide_powered_by ? "" : `Published with <a href="https://contextnest.ai" rel="noopener">ContextNest</a>`,
   ].filter(Boolean);
   return `<!doctype html>

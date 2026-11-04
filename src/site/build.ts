@@ -57,6 +57,7 @@ import {
 import { pingIndexNow } from "./indexnow.js";
 import { siteNestsGeneration } from "./invalidate.js";
 import { config } from "../config.js";
+import { isHtmlBody } from "../shared/artifact-sandbox.js";
 
 export interface SiteNest {
   id: string;
@@ -366,7 +367,7 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
       continue;
     }
     // HTML artifacts render under the artifact sandbox (/p), not as a docs page.
-    if (fm.type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body)) continue;
+    if (isHtmlBody(fm.type, body)) continue;
     // A §1.12 view is intro-only on the open web, as on /p: its blocks resolve
     // other nodes and feed data to frames, which only a nest member may see.
     // The `view:` frontmatter is never emitted; a note stands in for the blocks.
