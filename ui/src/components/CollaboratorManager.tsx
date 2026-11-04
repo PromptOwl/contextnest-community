@@ -56,11 +56,16 @@ export interface Collaborator {
   user_id: string;
   permission: "read" | "write" | "admin";
   email?: string;
+  name?: string | null;
   /** Steward roles the same user holds on this nest (read-only, from API). */
   stewardRoles?: string[];
   /** "system" for a named system key (CU-wdqcq06djb): never a nest admin. */
   principal_kind?: "human" | "system";
 }
+
+/** A system goes by its configured name; its email is a generated address. */
+const collabLabel = (c: Collaborator) =>
+  (c.principal_kind === "system" && c.name) || c.email;
 
 interface SharedTeam {
   teamId: string;
@@ -317,7 +322,7 @@ export function CollaboratorManager({
     try {
       await api.removeCollaborator(nestId, collab.id);
       setCollaborators((prev) => prev.filter((c) => c.id !== collab.id));
-      toast.success(removeCollaboratorSuccessMessage(collab.email));
+      toast.success(removeCollaboratorSuccessMessage(collabLabel(collab)));
       onChanged();
     } catch (err: any) {
       setError(err?.message || "Failed to remove collaborator");
@@ -521,8 +526,8 @@ export function CollaboratorManager({
                 className="flex items-center gap-2 py-1.5"
                 data-testid={`collaborator-row-${c.id}`}
               >
-                <span className="flex-1 min-w-0 truncate text-sm">
-                  {c.email || c.user_id}
+                <span className="flex-1 min-w-0 truncate text-sm" title={c.email}>
+                  {collabLabel(c) || c.user_id}
                 </span>
                 {c.principal_kind === "system" && (
                   <Badge
@@ -631,7 +636,7 @@ export function CollaboratorManager({
       >
         <AlertDialogContent>
           {(() => {
-            const copy = removeCollaboratorConfirmCopy(removeTarget?.email, nestName);
+            const copy = removeCollaboratorConfirmCopy(removeTarget ? collabLabel(removeTarget) : undefined, nestName);
             return (
               <>
                 <AlertDialogHeader>

@@ -34,7 +34,7 @@ sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
   const nestId = c.req.param("nestId")!;
   const collabs = (await db.all(
-    `SELECT nc.*, u.email,
+    `SELECT nc.*, u.email, u.name,
             CASE WHEN EXISTS (SELECT 1 FROM system_accounts sa WHERE sa.user_id = nc.user_id)
                  THEN 'system' ELSE 'human' END AS principal_kind
        FROM nest_collaborators nc

@@ -2765,7 +2765,7 @@ export function DocumentEditor({
                           className="ml-auto text-xs text-muted-foreground"
                           title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
                         >
-                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
