@@ -284,6 +284,8 @@ export function DocumentSidebar({
                   workflowPlaneEnabled={workflowPlaneEnabled}
                   activeView={activeView}
                   onOpen={(view) => onOpenView(nestTarget(n), view)}
+                  currentNodeId={current ? nodeId : null}
+                  onOpenNode={(id) => onOpenDocument({ ...nestTarget(n), nodeId: id })}
                   onConnect={onConnect}
                 />
               )}
@@ -438,6 +440,8 @@ function NestViews({
   workflowPlaneEnabled,
   activeView,
   onOpen,
+  currentNodeId,
+  onOpenNode,
   onConnect,
 }: {
   nestId: string;
@@ -446,9 +450,13 @@ function NestViews({
   workflowPlaneEnabled: boolean;
   activeView: NestSidebarView["id"] | null;
   onOpen: (view: NestSidebarView) => void;
+  /** The node on screen, so its View row highlights. */
+  currentNodeId: string | null;
+  onOpenNode: (nodeId: string) => void;
   onConnect?: () => void;
 }) {
   const meta = useNestMeta(nestId);
+  const { typeViewEnabled } = useAuth();
   const caps = useMemo(() => {
     const m: any = meta.data;
     if (!m) return null;
@@ -469,6 +477,19 @@ function NestViews({
     enabled: !!caps && !caps.isReadOnly && !caps.isReaderView,
   });
   const pending = queue.data?.total ?? queue.data?.requests?.length ?? 0;
+  // Reader mode shows no user Views, same as it shows no built-in ones beyond
+  // its own set (nestSidebarViews returns early for it).
+  const viewNodes = useQuery({
+    ...reads.viewNodes(nestId),
+    enabled: !!caps && !caps.isReaderView && typeViewEnabled,
+  });
+  const userViews: Array<{ id: string; title: string }> = useMemo(
+    () =>
+      (viewNodes.data?.nodes ?? [])
+        .filter((n: any) => n?.type === "view")
+        .map((n: any) => ({ id: String(n.id), title: String(n.title || n.id) })),
+    [viewNodes.data],
+  );
   const stewardshipEnabled = !!(meta.data as any)?.nest?.stewardship_enabled;
   const views = useMemo(
     () =>
@@ -497,6 +518,7 @@ function NestViews({
   const grouped = views.filter((v) => v.group === "views");
 
   if (views.length === 0) return null;
+  const showUserViews = userViews.length > 0;
 
   const row = (v: NestSidebarView, indent = false) => {
     const Icon = v.icon ?? TAB_ICONS[v.id] ?? Home;
@@ -535,7 +557,7 @@ function NestViews({
   return (
     <div className="mb-1 ml-2 pl-1" data-testid="document-sidebar-views">
       {top.map((v) => row(v))}
-      {grouped.length > 0 && (
+      {(grouped.length > 0 || showUserViews) && (
         <>
           <button
             type="button"
@@ -552,6 +574,20 @@ function NestViews({
             <span className="truncate">Views</span>
           </button>
           {groupShown && grouped.map((v) => row(v, true))}
+          {groupShown &&
+            userViews.map((v) => (
+              <button
+                key={v.id}
+                type="button"
+                onClick={() => onOpenNode(v.id)}
+                aria-current={v.id === currentNodeId ? "page" : undefined}
+                className={cn(ROW, "pl-7", v.id === currentNodeId ? ROW_ACTIVE : ROW_IDLE)}
+                data-testid={`document-sidebar-userview-${v.id}`}
+              >
+                <LayoutGrid className={ROW_ICON} />
+                <span className="truncate">{v.title}</span>
+              </button>
+            ))}
         </>
       )}
       {onConnect && (

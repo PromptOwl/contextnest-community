@@ -149,10 +149,10 @@ function blockHtml(
 ): string {
   if (!b.ok) {
     switch (b.kind) {
-      // An md block that cannot be served renders nothing: missing, denied,
-      // unpublished all look the same.
+      // Missing, denied and unpublished share one neutral line, so a reader
+      // cannot tell a hidden node from an absent one.
       case "md":
-        return "";
+        return placeholder("This content is unavailable.");
       case "html":
         return placeholder("This embedded page is unavailable.");
       case "list":

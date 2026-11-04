@@ -457,9 +457,10 @@ describe("AC-15: pinned and retracted md blocks", () => {
     expect(json.frag).toEqual({ ok: false, kind: "md", error: "history_error" });
   });
 
-  it("the page renders nothing for the unpublished pin", async () => {
+  it("the page shows a neutral placeholder for the unpublished pin, not its content", async () => {
     const body = await (await get(page(pinnedMdView))).text();
     expect(body).toContain("pinned v1");
+    expect(body).toContain("This content is unavailable.");
     expect(body).not.toContain("pinned v2 draft");
     expect(body).not.toContain("soon retracted");
   });
