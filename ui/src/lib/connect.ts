@@ -50,6 +50,7 @@ export function serverMcpUrl(serverBaseUrl: string): string {
 export function allNestsChatPrompt(
   serverBaseUrl: string,
   openMode = false,
+  signIn = false,
 ): string {
   const mcp = serverMcpUrl(serverBaseUrl);
   return [
@@ -58,7 +59,10 @@ export function allNestsChatPrompt(
     `Add one MCP server "contextnest" at: ${mcp}`,
     openMode
       ? "This server needs no credential — connect directly."
-      : "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
+      : signIn
+        ? // People sign in as themselves (OAuth); API keys are for headless agents and CI.
+          "Add it with no Authorization header. Your client opens my browser so I sign in as myself — there is no key, so never ask me for one."
+        : "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
     "",
     "Call nest_index first to see every nest (name, description, size).",
     "",

@@ -58,6 +58,7 @@ import { keyCapability, nestOnlyKeyLabel } from "../lib/api-key-scope";
 import {
   nestChatPrompt,
   nestSetupPrompt,
+  allNestsChatPrompt,
   envFileContents,
   ctxCliConnectSnippet,
   claudeDesktopConfig,
@@ -105,6 +106,8 @@ export function ConnectModal({
   // Export / portability / nest-id are utilities, not part of connecting —
   // collapsed by default too.
   const [showMore, setShowMore] = useState(false);
+  // With sign-in on, the key panel is for automation only — collapsed.
+  const [showKeys, setShowKeys] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -195,11 +198,19 @@ export function ConnectModal({
   };
 
   const isOpenMode = authMode === "open";
+  // People sign in as themselves over OAuth; API keys are for headless agents
+  // and CI. OAuth is served on the server-level /mcp only, so the client
+  // snippets point there (it reads every nest the person can see, this one
+  // included) and carry no Authorization header.
+  const signIn = mcpOauthEnabled && !isOpenMode;
+  const noKey = isOpenMode || signIn;
+  const clientUrl = signIn ? serverMcpUrl(serverUrl) : mcpUrl;
+  const clientName = signIn ? "contextnest" : nestName;
   // Config-building logic lives in lib/connect.ts (pure, unit-tested there) —
   // see claudeDesktopConfig / claudeCodeCommand / mcpHttpConfig.
-  const claudeConfig = claudeDesktopConfig(nestName, mcpUrl, isOpenMode);
-  const claudeCodeCmd = claudeCodeCommand(nestName, mcpUrl, isOpenMode);
-  const mcpConfig = mcpHttpConfig(nestName, mcpUrl, isOpenMode);
+  const claudeConfig = claudeDesktopConfig(clientName, clientUrl, noKey);
+  const claudeCodeCmd = claudeCodeCommand(clientName, clientUrl, noKey);
+  const mcpConfig = mcpHttpConfig(clientName, clientUrl, noKey);
 
   const showOpenModeBanner = isOpenMode;
   const showLoginBanner = !authenticated && authMode === "key";
@@ -233,8 +244,9 @@ export function ConnectModal({
           <DialogHeader>
             <DialogTitle>Connect to {nestName}</DialogTitle>
             <DialogDescription>
-              Use this nest in the app you already have. New to this? Start on
-              the Hootie tab — it's the quickest way in.
+              {signIn
+                ? "Use this nest in the app you already have — it signs you in as yourself, no key needed."
+                : "Use this nest in the app you already have. New to this? Start on the Hootie tab — it's the quickest way in."}
             </DialogDescription>
           </DialogHeader>
 
@@ -252,9 +264,20 @@ export function ConnectModal({
               Now paste into your AI agent or harness
             </p>
             <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
-              Drop one of these into Claude, Cursor, Hootie, or any agent. It
-              self-installs, connects, and asks you for your API key — one
-              paste, all-purpose.
+              {signIn ? (
+                <>
+                  Drop one of these into Claude, Cursor, Codex or any agent. It
+                  adds <code className="text-[11px]">{serverMcpUrl(serverUrl)}</code>{" "}
+                  and your app opens a browser so you sign in as yourself — no
+                  key to copy. API keys are for headless agents and CI.
+                </>
+              ) : (
+                <>
+                  Drop one of these into Claude, Cursor, Hootie, or any agent. It
+                  self-installs, connects, and asks you for your API key — one
+                  paste, all-purpose.
+                </>
+              )}
             </p>
             <div className="flex flex-wrap gap-2">
               <CopyButton
@@ -265,7 +288,11 @@ export function ConnectModal({
                 toastMessage="Chat prompt copied"
               />
               <CopyButton
-                text={nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner)}
+                text={
+                  signIn
+                    ? `${allNestsChatPrompt(serverUrl, false, true)}\n\nStart with the "${nestName}" nest (id ${nestId}).`
+                    : nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner)
+                }
                 variant="default"
                 icon={Sparkles}
                 label="Set up an agent"
@@ -277,8 +304,8 @@ export function ConnectModal({
             <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
               <span>
-                You're not logged in. Login from the header to generate an API
-                key for external clients.
+                You're not logged in. Log in from the header to connect your
+                apps or create an API key for agents and CI.
               </span>
             </div>
           )}
@@ -305,13 +332,29 @@ export function ConnectModal({
               there rather than minting or rotating inline — a rotate started
               from whichever nest happened to be open is how people silently
               disconnected every other client they'd wired up. */}
-          {authenticated && !showOpenModeBanner && (
+          {authenticated && signIn && (
+            <button
+              type="button"
+              onClick={() => setShowKeys((v) => !v)}
+              aria-expanded={showKeys}
+              className="flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-sm hover:bg-muted/40"
+            >
+              <span className="font-medium">API key for headless agents &amp; CI</span>
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                Not needed for apps you use yourself
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${showKeys ? "rotate-180" : ""}`}
+                />
+              </span>
+            </button>
+          )}
+          {authenticated && !showOpenModeBanner && (!signIn || showKeys) && (
             <div className="rounded-md border bg-card p-3 space-y-2">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2 text-sm min-w-0">
                   <Key className="h-3.5 w-3.5 shrink-0" />
                   <span className="font-medium truncate">
-                    External-client API key
+                    API key for headless agents &amp; CI
                   </span>
                 </div>
                 {onManageKeys && (
@@ -326,6 +369,14 @@ export function ConnectModal({
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
+                {signIn && (
+                  <>
+                    <strong>Not needed for apps you use yourself</strong> —
+                    Claude, Cursor, Codex and Gemini sign you in (see{" "}
+                    <em>Configure a specific client</em>). A key is for an agent,
+                    pipeline or script that runs without you.{" "}
+                  </>
+                )}
                 Use the key you already have — an all-nests key works here too.
                 Handing this nest to an agent or integration that shouldn't see
                 anything else? Create a key for this nest only: it works with
@@ -569,7 +620,15 @@ export function ConnectModal({
                     <strong>Claude Code</strong> (the CLI) registers a server with
                     one command — it persists the config itself, no file to find
                     or edit.
-                    {!showOpenModeBanner && (
+                    {signIn && (
+                      <>
+                        {" "}
+                        Then run <code className="text-[11px] bg-muted px-1 rounded">/mcp</code>{" "}
+                        in Claude Code and choose <strong>Authenticate</strong> to
+                        sign in.
+                      </>
+                    )}
+                    {!noKey && (
                       <>
                         {" "}
                         Replace{" "}
@@ -597,7 +656,8 @@ export function ConnectModal({
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       claude_desktop_config.json
                     </code>
-                    {!showOpenModeBanner && (
+                    {signIn && " — or use the connector above, which needs no file. A browser opens to sign you in on first use."}
+                    {!noKey && (
                       <>
                         {" "}
                         (replace{" "}
@@ -649,12 +709,13 @@ export function ConnectModal({
               <TabsContent value="mcp" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Streamable HTTP MCP endpoint with 21 tools (11 content + 7
+                    Streamable HTTP MCP endpoint with 25 tools (11 content + 11
                     governance + 3 admin/sync). Works with native HTTP MCP
                     clients (Cursor, VS Code) as a JSON config; Claude Code has
                     its own one-command setup and Claude Desktop needs a
                     bridge — see the Claude tab for both.
-                    {!showOpenModeBanner && (
+                    {signIn && " The client opens a browser to sign you in on first use — no key."}
+                    {!noKey && (
                       <>
                         {" "}
                         Replace{" "}
@@ -671,7 +732,7 @@ export function ConnectModal({
                     multiline
                   />
                   <Snippet
-                    label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
+                    label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — headless agents & CI: export CONTEXTNEST_API_KEY first (people: ctx login, CLI tab)"}`}
                     value={ctxAliasSnippet}
                     multiline
                   />
@@ -788,29 +849,39 @@ export function ConnectModal({
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       ctx
                     </code>{" "}
-                    CLI
-                    {!showOpenModeBanner && (
-                      <>
-                        {" "}
-                        (export{" "}
-                        <code className="text-[11px] bg-muted px-1 rounded">
-                          CONTEXTNEST_API_KEY
-                        </code>{" "}
-                        first — the key never goes on the command line)
-                      </>
-                    )}
-                    :
+                    CLI:
                   </p>
                   <Snippet
                     label="Install"
                     value="npm i -g @promptowl/contextnest-cli"
                   />
+                  {!showOpenModeBanner && (
+                    <>
+                      <Snippet
+                        label="Sign in once (opens your browser) — registers every nest you can see"
+                        value={`ctx login ${serverUrl}`}
+                      />
+                      <p className="mb-3 text-xs text-muted-foreground">
+                        If this server has no browser sign-in, ctx says so and
+                        takes a key on stdin instead (
+                        <code className="text-[10px]">--key-stdin</code>).
+                      </p>
+                    </>
+                  )}
                   <Snippet
-                    label="Register this nest as a vault alias, then query it"
+                    label={
+                      showOpenModeBanner
+                        ? "Register this nest as a vault alias, then query it"
+                        : "Headless agents & CI — register this nest with the key in CONTEXTNEST_API_KEY"
+                    }
                     value={ctxAliasSnippet}
                     multiline
                   />
-                  <Snippet label="Push a local vault into this nest" value={ctxPush} multiline />
+                  <Snippet
+                    label={`Push a local vault into this nest${showOpenModeBanner ? "" : " (after ctx login, drop the key; in CI it comes from the environment)"}`}
+                    value={ctxPush}
+                    multiline
+                  />
                 </div>
                 <p className="text-xs text-muted-foreground">
                   <code className="text-[10px]">query</code>,{" "}

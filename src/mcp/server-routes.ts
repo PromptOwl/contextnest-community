@@ -871,8 +871,11 @@ governance. This file is the complete interaction manual for agents.
 ## Authentication
 
 Every request (except this file and /health): \`Authorization: Bearer cnst_<api-key>\`.
-Keys are minted in the web UI (Connect dialog → Generate Key). A key is
-either user-level (sees every nest the user can read) or scoped to one nest.
+API keys are for headless agents, CI and scripts; they are minted in the web UI
+(Workspace → API keys). A key is either user-level (sees every nest the user
+can read) or scoped to one nest. When the server has Agent OAuth on, a person
+using an interactive client (Claude, Cursor, Codex, Gemini) adds ${B}/mcp with
+no header and signs in through the browser instead — never ask them for a key.
 Servers in "open" auth mode need no key.
 
 ## Start here

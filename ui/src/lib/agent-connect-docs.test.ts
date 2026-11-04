@@ -9,6 +9,7 @@ import {
 
 const KEYED: ConnectDocsContext = { serverUrl: "https://nest.example.com" };
 const OPEN: ConnectDocsContext = { serverUrl: "https://nest.example.com", openMode: true };
+const SIGN_IN: ConnectDocsContext = { serverUrl: "https://nest.example.com", signIn: true };
 
 describe("harness registry", () => {
   it("has a unique id and a non-empty name for every harness", () => {
@@ -298,5 +299,41 @@ describe("the whole panel", () => {
     expect(doc.indexOf("# Chat")).toBeGreaterThanOrEqual(0);
     expect(doc.indexOf("# Command line")).toBeGreaterThan(doc.indexOf("# Chat"));
     expect(doc.indexOf("# Editors")).toBeGreaterThan(doc.indexOf("# Command line"));
+  });
+});
+
+describe("sign-in mode (Agent OAuth on): people sign in, keys are for agents and CI", () => {
+  // Hermes runs unattended, which is exactly what an API key is for.
+  const interactive = HARNESSES.filter((h) => h.id !== "hermes");
+
+  it("hands no interactive harness a key", () => {
+    for (const h of interactive) {
+      const out = renderHarnessDoc(h, SIGN_IN);
+      expect(out, h.id).not.toMatch(/Bearer/);
+      expect(out, h.id).not.toMatch(/CONTEXTNEST_API_KEY|API key>/);
+    }
+  });
+
+  it("never says the server lacks an authorization server", () => {
+    for (const h of HARNESSES) {
+      const out = renderHarnessDoc(h, SIGN_IN);
+      expect(out, h.id).not.toMatch(/Not connectable yet|does(n't| not) run (an )?OAuth|has no OAuth|none to offer yet/i);
+    }
+  });
+
+  it("tells the CLIs how to start the sign-in", () => {
+    expect(renderHarnessDoc(harnessById("claude-code")!, SIGN_IN)).toMatch(/Authenticate/);
+    expect(renderHarnessDoc(harnessById("codex")!, SIGN_IN)).toContain("codex mcp login contextnest");
+    expect(renderHarnessDoc(harnessById("gemini-cli")!, SIGN_IN)).toContain("/mcp auth contextnest");
+  });
+
+  it("keeps Hermes on a key and says why", () => {
+    expect(renderHarnessDoc(harnessById("hermes")!, SIGN_IN)).toMatch(/unattended/);
+  });
+
+  it("drops the per-person key advice from the panel and frames keys as automation", () => {
+    const all = renderAllHarnessDocs(SIGN_IN);
+    expect(all).not.toMatch(/user-level key/i);
+    expect(all).toMatch(/headless agents and CI/);
   });
 });

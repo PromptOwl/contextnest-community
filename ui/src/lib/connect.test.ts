@@ -71,6 +71,15 @@ describe("allNestsChatPrompt", () => {
   });
 });
 
+describe("allNestsChatPrompt sign-in mode", () => {
+  it("tells the agent to connect with no key and never ask for one", () => {
+    const p = allNestsChatPrompt("https://x.ai", false, true);
+    expect(p).toContain("https://x.ai/mcp");
+    expect(p).toMatch(/sign in/i);
+    expect(p).not.toMatch(/Authenticate with my ContextNest API key/);
+  });
+});
+
 describe("nestChatPrompt", () => {
   it("names the nest and forbids inventing answers", () => {
     const p = nestChatPrompt("GTM Strategy", "Go-to-market strategy");

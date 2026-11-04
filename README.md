@@ -93,7 +93,7 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 1. **Create a nest** on the Nests page — or **Import folder** to bring in Markdown you already have.
 2. **Write a document.** `[[Title]]` links another document, `@name` mentions a person, tags go under the title. Every save is a version.
 3. **Turn on stewardship** (nest Settings) if you want review. Saves become drafts; **Submit for review**; a steward approves or rejects. Alone? Allow self-approve and you get the history without the ceremony.
-4. **Connect an agent.** Inside a nest, **Connect** (bottom of the sidebar) gives you the MCP URL and a REST snippet; **Add with AI** (nest overview) is a prompt that has an agent write context in. Mint a key under Workspace → API keys.
+4. **Connect an agent.** Inside a nest, **Connect** (bottom of the sidebar) gives you the MCP URL and a REST snippet; **Add with AI** (nest overview) is a prompt that has an agent write context in. Your app signs you in; API keys (Workspace → API keys) are for headless agents and CI.
 5. **Share.** The whole nest with a person or team, one document or folder, or make it public with a read-only Reader mode.
 
 The in-app **How it works** page (sidebar → Help) is the full tour; **Docs** (header) is the agent manual.
@@ -117,11 +117,11 @@ Inside a nest: the document tree, plus **Board** (documents as cards by folder, 
 Point any agent at `<server>/llms.txt` — it is the complete manual (endpoints, MCP tools, selector grammar). The short version:
 
 - **Claude Code plugin** — `/plugin marketplace add promptowl/contextnest`, `/plugin install contextnest`, then `/contextnest:setup` walks you through connecting (browser sign-in, no key to paste).
-- **MCP** — `<server>/mcp` for everything the key can read, `<server>/nests/<id>/mcp` for one nest with the full toolset. Claude Code, Cursor and VS Code connect over HTTP with `Authorization: Bearer cnst_…`; Claude Desktop goes through `npx -y mcp-remote`.
+- **MCP** — people add `<server>/mcp` to Claude, Cursor, Codex or Gemini with no key and sign in through the browser (needs `MCP_OAUTH_ENABLED` — Server settings → Features → Agent OAuth); that one connection reads every nest they can see. Headless agents and CI use an API key instead: `Authorization: Bearer cnst_…` on `<server>/mcp`, or on `<server>/nests/<id>/mcp` for one nest. Claude Desktop config files go through `npx -y mcp-remote`.
 - **REST** — `POST /nests/<id>/context` with a selector (`#tag`, `[[Title]]`, `type:document`, combined with `+ | -`) returns assembled context plus a trace. Full reference: [API.md](./API.md).
-- **ctx CLI** — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
+- **ctx CLI** — `ctx login <server> --as <alias>` signs in through the browser; in CI, `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
 
-Keys are minted in the app (Workspace → API keys, or the Connect dialog) — one per client, user-wide or scoped to a nest. Servers in `AUTH_MODE=open` need none.
+**API keys are for headless agents, CI and scripts**, not for people in an interactive tool. Mint them in the app (Workspace → API keys) — one per job, user-wide or scoped to a nest. Servers in `AUTH_MODE=open` need none.
 
 ## System requirements
 

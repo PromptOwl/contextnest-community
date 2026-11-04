@@ -15,12 +15,13 @@
  * 1. NO KEY MATERIAL. These are instructions, not a credential hand-off. The
  *    key is named (a placeholder, or the env var that carries it) and never
  *    rendered — same rule connect.ts holds.
- * 2. HONESTY ABOUT OAUTH. Some surfaces only drive an OAuth client and will
- *    not accept a static bearer header. This server has no OAuth
- *    authorization server today (`/.well-known/*` 404s — see app.ts), so those
+ * 2. PEOPLE SIGN IN; KEYS ARE FOR AUTOMATION. With MCP_OAUTH_ENABLED on
+ *    (`ctx.signIn`), every interactive harness signs its person in over OAuth
+ *    and the steps carry no key at all — API keys are for headless agents and
+ *    CI. With it off there is no authorization server (`/.well-known/*` 404s),
+ *    so header harnesses fall back to a key and `support: "oauth-only"`
  *    harnesses get a plain "not yet" instead of steps that end in a failed
- *    connection. `support: "oauth-only"` marks them; flip to "header" and
- *    rewrite the body if/when an AS ships.
+ *    connection.
  *
  * Adding a harness: append one entry to HARNESSES. Add its id to the coverage
  * test so removal is deliberate rather than accidental.
@@ -31,6 +32,13 @@ export interface ConnectDocsContext {
   serverUrl: string;
   /** AUTH_MODE=open — no credential exists, so none may be mentioned. */
   openMode?: boolean;
+  /** MCP_OAUTH_ENABLED (and not open mode) — people sign in, no key. */
+  signIn?: boolean;
+}
+
+/** Whether these steps must hand over an API key: neither open mode nor sign-in. */
+function needsKey(ctx: ConnectDocsContext): boolean {
+  return !ctx.openMode && !ctx.signIn;
 }
 
 /**
@@ -156,10 +164,15 @@ export const HARNESSES: Harness[] = [
         `2. Set the MCP server URL to \`${mcp}\`.`,
         ctx.openMode
           ? "3. For **Authentication**, choose **No sign-in** — this server needs no credential."
-          : `3. For **Authentication**, choose **No sign-in**, then open **Request headers**, pick the \`authorization\` header and enter \`Bearer ${KEY_PLACEHOLDER}\` as its value. Enter the value only — Claude adds the header name itself and sends the value exactly as typed, so the \`Bearer \` prefix and its trailing space have to be there.`,
+          : ctx.signIn
+            ? "3. For **Authentication**, choose **OAuth** and leave the client ID and secret empty — this server lets Claude register itself."
+            : `3. For **Authentication**, choose **No sign-in**, then open **Request headers**, pick the \`authorization\` header and enter \`Bearer ${KEY_PLACEHOLDER}\` as its value. Enter the value only — Claude adds the header name itself and sends the value exactly as typed, so the \`Bearer \` prefix and its trailing space have to be there.`,
         "4. Click **Add**. Authentication settings can't be changed afterwards; changing them means removing the connector and adding it again.",
-        ctx.openMode ? null : "",
-        ctx.openMode
+        ctx.signIn
+          ? "5. Click **Connect**. Claude sends each person to this server to sign in, so everyone sees their own nests — nothing is shared."
+          : null,
+        needsKey(ctx) ? "" : null,
+        !needsKey(ctx)
           ? null
           : "> **Request headers are in beta, and the credential is organization-wide.** If the dialog has no **Request headers** section, your organization doesn't have access yet. Everyone on the connector shares the one credential, so on this surface they all reach this server as the key's owner and see that person's nests. Per-user visibility here needs OAuth, which this server doesn't run yet — for per-user nests today, use one of the command-line harnesses.",
         "",
@@ -183,7 +196,10 @@ export const HARNESSES: Harness[] = [
         "",
         "Developer mode is available on Plus, Pro, Business, Enterprise and Edu — not on the free tier. Public HTTPS is required.",
         ctx.openMode ? null : "",
-        ctx.openMode
+        ctx.signIn
+          ? "> ChatGPT discovers this server's sign-in from the URL and sends you here to authorize — choose **OAuth** if it asks. There is no key to paste."
+          : null,
+        !needsKey(ctx)
           ? null
           : "> **This surface may not connect yet.** The connection step takes a URL and discovers the server's own authentication; OpenAI documents no field for a fixed API key or `Authorization` header. If the connection fails asking you to sign in, this server has no OAuth authorization server to offer it — use one of the command-line harnesses instead.",
         "",
@@ -204,14 +220,18 @@ export const HARNESSES: Harness[] = [
         `2. Enter the MCP server URL \`${mcp}\`.`,
         ctx.openMode
           ? "3. Leave authentication empty."
-          : `3. Complete any authentication the form asks for, supplying \`Bearer ${KEY_PLACEHOLDER}\` where it wants a credential.`,
+          : ctx.signIn
+            ? "3. For authentication choose OAuth; Grok sends you to this server to sign in."
+            : `3. Complete any authentication the form asks for, supplying \`Bearer ${KEY_PLACEHOLDER}\` where it wants a credential.`,
         "4. Grok discovers the exposed tools and offers them alongside its built-in connectors.",
         "",
         "The server must be reachable over the public internet; Grok has no tunnel of its own.",
         ctx.openMode ? null : "",
         ctx.openMode
           ? null
-          : "> xAI documents the connector form but not which credentials it accepts, so the authentication step isn't verified here. If it only offers OAuth, this server has none to offer yet — use a command-line harness instead.",
+          : ctx.signIn
+            ? "> xAI documents the connector form but not which credentials it accepts, so the authentication step isn't verified here."
+            : "> xAI documents the connector form but not which credentials it accepts, so the authentication step isn't verified here. If it only offers OAuth, this server has none to offer yet — use a command-line harness instead.",
       ),
   },
   {
@@ -223,7 +243,15 @@ export const HARNESSES: Harness[] = [
     docs: "https://www.perplexity.ai/help-center/en/articles/13915507-adding-custom-remote-connectors",
     support: "oauth-only",
     body: (ctx, mcp) =>
-      oauthBlocked(
+      ctx.signIn
+        ? renderBody(
+            "1. Open **All settings → Connectors** and add a custom connector (Pro, Max or Enterprise).",
+            `2. Enter the MCP server URL \`${mcp}\` over Streamable HTTP.`,
+            "3. Under **Advanced**, leave the OAuth client ID empty if the form allows it — this server lets clients register themselves. Perplexity then sends you here to sign in.",
+            "",
+            "> Perplexity documents a client-ID field but not whether it may be left empty, so step 3 isn't verified here.",
+          )
+        : oauthBlocked(
         ctx,
         "Perplexity",
         "Under **All settings → Connectors**, Perplexity's custom-connector form asks for an OAuth client ID under **Advanced**, over Streamable HTTP, on a Pro, Max or Enterprise plan.",
@@ -242,12 +270,16 @@ export const HARNESSES: Harness[] = [
     body: (ctx, mcp) =>
       renderBody(
         "```bash",
-        ctx.openMode
-          ? `claude mcp add --transport http contextnest ${mcp}`
-          : `claude mcp add --transport http contextnest ${mcp} \\\n  --header "Authorization: Bearer $${KEY_ENV}"`,
+        needsKey(ctx)
+          ? `claude mcp add --transport http contextnest ${mcp} \\\n  --header "Authorization: Bearer $${KEY_ENV}"`
+          : `claude mcp add --transport http contextnest ${mcp}`,
         "```",
         "",
-        ctx.openMode
+        ctx.signIn
+          ? "Then run `/mcp` in Claude Code, pick `contextnest` and choose **Authenticate** — a browser opens and you sign in as yourself."
+          : null,
+        ctx.signIn ? "" : null,
+        !needsKey(ctx)
           ? "By default this registers at `local` scope — only you, only this project. Add `--scope user` for every project, or `--scope project` to write `.mcp.json` in the repo; that file is safe to commit."
           : `By default this registers at \`local\` scope — only you, only this project. Add \`--scope user\` for every project, or \`--scope project\` to write \`.mcp.json\` in the repo — that file is safe to commit because it can reference \`\${${KEY_ENV}}\` rather than the value.`,
         "",
@@ -264,20 +296,25 @@ export const HARNESSES: Harness[] = [
     body: (ctx, mcp) =>
       renderBody(
         "```bash",
-        ctx.openMode
-          ? `codex mcp add contextnest --url ${mcp}`
-          : `codex mcp add contextnest --url ${mcp} --bearer-token-env-var ${KEY_ENV}`,
+        needsKey(ctx)
+          ? `codex mcp add contextnest --url ${mcp} --bearer-token-env-var ${KEY_ENV}`
+          : `codex mcp add contextnest --url ${mcp}`,
+        ctx.signIn ? "codex mcp login contextnest" : null,
         "```",
         "",
+        ctx.signIn
+          ? "`codex mcp login` opens a browser so you sign in as yourself; Codex keeps the token, not you."
+          : null,
+        ctx.signIn ? "" : null,
         "Or write it into `~/.codex/config.toml` directly:",
         "",
         "```toml",
         "[mcp_servers.contextnest]",
         `url = "${mcp}"`,
-        ctx.openMode ? null : `bearer_token_env_var = "${KEY_ENV}"`,
+        needsKey(ctx) ? `bearer_token_env_var = "${KEY_ENV}"` : null,
         "```",
         "",
-        ctx.openMode
+        !needsKey(ctx)
           ? null
           : "Codex reads the token from the environment and sends it as an `Authorization: Bearer` header, so the value never lands in the config file.",
       ),
@@ -305,6 +342,10 @@ export const HARNESSES: Harness[] = [
           : `Values support \`\${env:VAR}\` interpolation against \`~/.hermes/.env\`, so put the key in that file as \`${KEY_ENV}\` and keep it out of the YAML.`,
         ctx.openMode ? null : "",
         "A `url` entry speaks Streamable HTTP — set `transport: \"sse\"` only if you need the older one.",
+        ctx.signIn ? "" : null,
+        ctx.signIn
+          ? "Hermes runs unattended, so it uses an API key rather than a sign-in — that is what API keys are for. Create one on the **API keys** page."
+          : null,
       ),
   },
   {
@@ -320,16 +361,20 @@ export const HARNESSES: Harness[] = [
         "{",
         '  "mcpServers": {',
         '    "contextnest": {',
-        `      "httpUrl": "${mcp}"${ctx.openMode ? "" : ","}`,
-        ctx.openMode
-          ? null
-          : `      "headers": { "Authorization": "Bearer ${KEY_PLACEHOLDER}" }`,
+        `      "httpUrl": "${mcp}"${needsKey(ctx) ? "," : ""}`,
+        needsKey(ctx)
+          ? `      "headers": { "Authorization": "Bearer ${KEY_PLACEHOLDER}" }`
+          : null,
         "    }",
         "  }",
         "}",
         "```",
         "",
         "Gemini CLI picks the transport from the property name: `httpUrl` is Streamable HTTP, `url` would be SSE, `command` would be stdio. Use `httpUrl` here.",
+        ctx.signIn ? "" : null,
+        ctx.signIn
+          ? "Start `gemini` and run `/mcp auth contextnest` — a browser opens and you sign in as yourself."
+          : null,
       ),
   },
 
@@ -347,16 +392,20 @@ export const HARNESSES: Harness[] = [
         "{",
         '  "mcpServers": {',
         '    "contextnest": {',
-        `      "url": "${mcp}"${ctx.openMode ? "" : ","}`,
-        ctx.openMode
-          ? null
-          : `      "headers": { "Authorization": "Bearer ${KEY_PLACEHOLDER}" }`,
+        `      "url": "${mcp}"${needsKey(ctx) ? "," : ""}`,
+        needsKey(ctx)
+          ? `      "headers": { "Authorization": "Bearer ${KEY_PLACEHOLDER}" }`
+          : null,
         "    }",
         "  }",
         "}",
         "```",
         "",
-        "Cursor expands variables inside `url` and `headers`, so the key can come from the environment rather than the file.",
+        ctx.signIn
+          ? "Open **Cursor Settings → MCP**: `contextnest` shows **Needs login** — click it and sign in in the browser."
+          : needsKey(ctx)
+            ? "Cursor expands variables inside `url` and `headers`, so the key can come from the environment rather than the file."
+            : null,
       ),
   },
 ];
@@ -405,11 +454,15 @@ export function renderAllHarnessDocs(ctx: ConnectDocsContext): string {
     "",
     ctx.openMode
       ? "This deployment runs in open mode, so no credential is involved and every caller is the same anonymous user."
-      : [
+      : ctx.signIn
+        ? "**Each person signs in as themselves — no API key.** The first connection opens a browser on this server's sign-in page, and from then on the person sees exactly their own nests. API keys are for headless agents and CI only; people create those on the **API keys** page."
+        : [
           "Two things to get right about the credential:",
           "",
-          "- **Use a user-level key, not a nest-scoped one.** A key scoped to a single nest narrows this endpoint back down to that nest, which looks exactly like the connect-once promise being broken. Mint a user-level key in the Connect dialog.",
+          "- **Use a user-level key, not a nest-scoped one.** A key scoped to a single nest narrows this endpoint back down to that nest, which looks exactly like the connect-once promise being broken. Mint a user-level key on the API keys page.",
           "- **Each person uses their own key.** A key shared across a team makes all of them the same user to this server, so they would all see the key owner's nests instead of their own.",
+          "",
+          "Better: turn on **Server settings → Features → Agent OAuth**. People then sign in as themselves and API keys are left to headless agents and CI.",
         ].join("\n"),
     "",
   ];

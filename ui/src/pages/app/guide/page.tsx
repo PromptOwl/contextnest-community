@@ -192,7 +192,7 @@ export default function GuidePage() {
           <Bullets
             items={[
               ["Teams", <>Group people once, then share nests with the team. Signed in with PromptOwl? Its teams can be synced in.</>],
-              ["API keys", <>What agents, the CLI and MCP clients use to sign in. A key sees every nest you can, or just one.{" "}
+              ["API keys", <>For headless agents, CI and scripts. Apps you use yourself — Claude, Cursor, Codex — sign you in over MCP instead. A key sees every nest you can, or just one.{" "}
                 <button type="button" onClick={manageKeys} className="underline underline-offset-2 text-foreground">Manage keys</button>.</>],
               ["Connect", <>Bottom of the nest sidebar: the MCP URL and REST snippets for that nest. <b>Add with AI</b> on the nest overview is a prompt that has an agent write context in.</>],
             ]}

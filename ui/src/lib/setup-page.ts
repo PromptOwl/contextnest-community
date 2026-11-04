@@ -235,16 +235,18 @@ export const CHOICES_KEY = "cn_setup_choices";
 /**
  * Steps to connect a cloud server to each agent. Claude Code can ride the
  * `ctx login` alias through the plugin; every other harness is the same
- * per-harness doc the server's own Settings panel shows (agent-connect-docs).
+ * per-harness doc the server's own Settings panel shows (agent-connect-docs),
+ * in its sign-in form: people sign in, API keys are for agents and CI.
  */
 export function cloudGuides(server: string, vaultAlias: string): ConnectGuide[] {
   const origin = cloudServer(server) ?? "https://<your server>";
   const v = ALIAS_PATTERN.test(vaultAlias) ? vaultAlias : "<alias>";
-  const key = [
-    `1. Sign in at [${origin}](${origin}) and open **Connect**. Create a user-level API key.`,
-    `2. Put it in your shell profile: \`export CONTEXTNEST_API_KEY=cnst_…\`. Do not paste the key into a config file you commit.`,
-    "3. Then:",
+  // People sign in over OAuth; API keys are for headless agents and CI. This
+  // page can't see whether that server has Agent OAuth on, so say what happens if not.
+  const noSignIn = [
     "",
+    "",
+    "> **No sign-in offered?** The server's admin has not turned on Agent OAuth yet — ask them to. Until then, create a key on the server's **API keys** page and send it as an `Authorization: Bearer` header.",
   ].join("\n");
   return [
     {
@@ -263,7 +265,7 @@ export function cloudGuides(server: string, vaultAlias: string): ConnectGuide[] 
     ...HARNESSES.map((h) => ({
       id: h.id,
       name: h.name,
-      steps: (h.support === "header" ? key : "") + renderHarnessDoc(h, { serverUrl: origin }),
+      steps: renderHarnessDoc(h, { serverUrl: origin, signIn: true }) + noSignIn,
     })),
   ];
 }

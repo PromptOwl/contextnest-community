@@ -43,6 +43,9 @@ describe("setup page", () => {
     expect(loginCommand({ ...c, server: "x; rm -rf ~" })).not.toContain("rm -rf");
     const steps = cloudGuides(c.server, c.alias).map((g) => g.steps).join("\n");
     expect(steps).toContain("https://nest.example.com/mcp");
+    // People sign in; no "go mint a key" preamble, only the fallback for a server without Agent OAuth.
+    expect(steps).not.toMatch(/Create a user-level API key|export CONTEXTNEST_API_KEY/);
+    expect(steps).toMatch(/No sign-in offered/);
   });
 
   it("reads detected tools from the fragment, dropping unknown ids", () => {

@@ -473,7 +473,7 @@ export default function NestsPage() {
             <ClientHint
               icon={<Monitor className="h-4 w-4" />}
               title="Claude Desktop"
-              desc="Open a nest and click Connect in its sidebar to get that nest's MCP endpoint."
+              desc={`Add ${serverUrl}/mcp as a custom connector (Settings → Connectors). One connection reads every nest you can see.`}
             />
           </div>
         </CardContent>

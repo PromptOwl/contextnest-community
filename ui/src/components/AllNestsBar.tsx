@@ -39,15 +39,17 @@ export function AllNestsBar({
   onManageKeys?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const { authenticated, authMode } = useAuth();
+  const { authenticated, authMode, mcpOauthEnabled } = useAuth();
   // AUTH_MODE=open servers need no credential at all — mirror ConnectModal
   // and drop key talk from both the panel and the prompt.
   const openMode = authMode === "open";
+  // People sign in over OAuth; a key is only for headless agents and CI.
+  const signIn = mcpOauthEnabled && !openMode;
   const showKeySection = authenticated && !openMode;
 
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
-  const prompt = allNestsChatPrompt(serverUrl, openMode);
+  const prompt = allNestsChatPrompt(serverUrl, openMode, signIn);
 
   return (
     <>
@@ -101,14 +103,15 @@ export function AllNestsBar({
             {showKeySection && (
               <div>
                 <p className="mb-1.5 text-xs font-medium text-muted-foreground">
-                  Your API key
+                  {signIn ? "Sign-in" : "Your API key"}
                 </p>
                 <div className="flex flex-col gap-2 rounded-md border bg-muted/40 p-2.5 sm:flex-row sm:items-center sm:justify-between">
                   <p className="flex items-start gap-2 text-xs text-muted-foreground">
                     <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span>
-                      Paste in the key you already use — any of your keys works
-                      here and on every nest. Need a new one?
+                      {signIn
+                        ? "Add the endpoint with no key — Claude, Cursor, Codex and Gemini open a browser so you sign in as yourself. API keys are only for headless agents and CI."
+                        : "Paste in the key you already use — any of your keys works here and on every nest. Need a new one?"}
                     </span>
                   </p>
                   {onManageKeys && (

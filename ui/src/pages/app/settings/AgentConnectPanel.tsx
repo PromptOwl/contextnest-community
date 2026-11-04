@@ -30,6 +30,7 @@ import {
   renderAllHarnessDocs,
   type HarnessKind,
 } from "../../../lib/agent-connect-docs";
+import { useAuth } from "../../../auth/AuthContext";
 
 const KIND_LABEL: Record<HarnessKind, string> = {
   chat: "Chat",
@@ -57,7 +58,9 @@ export function AgentConnectPanel({
   const configured = publicBaseUrl.trim();
   const serverUrl = configured || window.location.origin;
 
-  const ctx = useMemo(() => ({ serverUrl, openMode }), [serverUrl, openMode]);
+  const { mcpOauthEnabled } = useAuth();
+  const signIn = mcpOauthEnabled && !openMode;
+  const ctx = useMemo(() => ({ serverUrl, openMode, signIn }), [serverUrl, openMode, signIn]);
   const selected = harnessById(selectedId) ?? DEFAULT_HARNESS;
   const body = useMemo(() => renderHarnessDoc(selected, ctx), [selected, ctx]);
 
@@ -102,7 +105,15 @@ export function AgentConnectPanel({
           </div>
         )}
 
-        {!openMode && (
+        {signIn && (
+          <p className="text-xs text-muted-foreground">
+            <strong>Each person signs in as themselves — no API key.</strong>{" "}
+            Agent OAuth is on, so every tool below opens a browser on this
+            server's sign-in page and then sees exactly that person's nests.
+            API keys are for headless agents and CI only.
+          </p>
+        )}
+        {!openMode && !signIn && (
           <div className="space-y-1 text-xs text-muted-foreground">
             <p>
               <strong>Use a user-level key, not a nest-scoped one.</strong> A
@@ -114,6 +125,11 @@ export function AgentConnectPanel({
               <strong>Each person uses their own key.</strong> A key shared
               across a team makes all of them the same user to this server, so
               they would all see the key owner's nests instead of their own.
+            </p>
+            <p>
+              <strong>Better: turn on Agent OAuth</strong> (Features tab). People
+              then sign in as themselves, and API keys are left to headless
+              agents and CI.
             </p>
           </div>
         )}

@@ -150,7 +150,7 @@ export default function ApiKeysPage() {
       <PageTitle
         icon={KeyRound}
         title="API keys"
-        description="Make one key per place you connect from — then rotating the key for one client leaves the others alone."
+        description="Keys are for headless agents, CI and scripts — anything that runs without you. Apps you use yourself (Claude, Cursor, Codex, Gemini) connect to the server's /mcp and sign you in instead. Make one key per job, so rotating one leaves the others alone."
         className="mb-0"
       />
       <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
@@ -159,7 +159,7 @@ export default function ApiKeysPage() {
             <Layers className="h-3.5 w-3.5" /> All your nests
           </span>
           Works on every nest you can see, the server-level MCP endpoint, and
-          your account (including managing keys). Use it for your own tools.
+          your account (including managing keys). Use it for automation that works across your nests.
         </p>
         <p className="rounded-md border p-2.5">
           <span className="flex items-center gap-1.5 font-medium text-foreground">
@@ -188,7 +188,7 @@ export default function ApiKeysPage() {
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             maxLength={60}
-            placeholder="What's this key for? e.g. Claude Desktop, laptop CLI"
+            placeholder="What's this key for? e.g. GitHub Actions, nightly sync"
             aria-label="Key name"
             aria-invalid={duplicateName || undefined}
           />
