@@ -56,6 +56,9 @@ export type AuthEnv = {
   };
 };
 
+/** The server-level and per-nest MCP endpoints. */
+const MCP_PATH = /^\/(nests\/[^/]+\/)?mcp(\/|$)/;
+
 /**
  * Two transports accepted:
  *
@@ -145,9 +148,11 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     );
   }
   if (key) {
+    // 403 on MCP routes: mcp-remote answers any 401 with an OAuth sign-in, which
+    // can't help because it keeps sending the configured key over the new token.
     return c.json(
       { error: "This API key is invalid or has been revoked — generate a new one.", code: "invalid_key" },
-      401,
+      MCP_PATH.test(c.req.path) ? 403 : 401,
     );
   }
   return c.json(
