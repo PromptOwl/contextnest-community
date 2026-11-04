@@ -171,6 +171,12 @@ describe("one operation per tool (OpenAI review)", () => {
     expect(rest.data.agents.map((a: any) => a.node_id)).not.toContain("nodes/scout");
   });
 
+  it("preview is refused for a writer who doesn't administer the nest", async () => {
+    const out = await direct("context_metacognition_preview", { agent: "nodes/scout", ...CONFIG }, editor);
+    expect(out.isError).toBe(true);
+    expect(outText(out)).toMatch(/owner or an admin/);
+  });
+
   it("preview has no dry_run field, because it never saves", async () => {
     const preview = await described("context_metacognition_preview");
     expect(Object.keys(preview.inputSchema.properties)).not.toContain("dry_run");

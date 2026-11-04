@@ -87,7 +87,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_request_deletion: add("Files a request; nothing is deleted."),
   context_resolve_deletion: overwrite("Honouring a request deletes a document or folder, or deletes or archives the nest."),
   context_request_access: add("Files a request; the nest's admins are notified."),
-  context_resolve_access_request: add("Grants what was asked for, only ever raising access; never lowers or removes it."),
+  context_resolve_access_request: add("Adds access or raises a role; nobody loses anything, unlike context_grant, which can lower one."),
   context_submit_review: add("Opens a review request on an existing version; content is unchanged."),
   context_approve: overwrite("Publishes the version, replacing the text served to AI."),
   context_reject: add("Marks the version rejected; the published text and the draft stay."),

@@ -66,6 +66,13 @@ const EXAMPLE_BODY = JSON.stringify({
   caps: { max_proposals: 5, max_comments: 5 },
 });
 
+/** Preview's arguments. configure takes these plus the deprecated dry_run. */
+const CONFIG_INPUT = {
+  type: "object",
+  properties: { agent: AGENT_REF, ...CONFIG_PROPERTIES },
+  required: ["agent"],
+};
+
 /** The config fields, spelled out once for preview and configure. */
 const CONFIG_FIELDS_HELP =
   "Fields (the same body as PUT /nests/:id/metacognition/:node): persona {name, avatar: an emoji or up to 4 letters, never a URL}; " +
@@ -102,11 +109,7 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "and returns the normalized config plus a plain-language summary. It saves nothing, starts nothing and fetches nothing. " +
       "Show the user the summary, and call context_metacognition_configure only once they confirm. " +
       `${CONFIG_FIELDS_HELP} Owner/admin only. Example: ${EXAMPLE_BODY}`,
-    inputSchema: {
-      type: "object",
-      properties: { agent: AGENT_REF, ...CONFIG_PROPERTIES },
-      required: ["agent"],
-    },
+    inputSchema: CONFIG_INPUT,
   },
   {
     name: "context_metacognition_configure",
@@ -118,17 +121,15 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       `${CONFIG_FIELDS_HELP} The agent never publishes: every change it ` +
       `makes goes to a reviewer. Owner/admin only. dry_run is deprecated, use context_metacognition_preview. Example: ${EXAMPLE_BODY}`,
     inputSchema: {
-      type: "object",
+      ...CONFIG_INPUT,
       properties: {
-        agent: AGENT_REF,
-        ...CONFIG_PROPERTIES,
+        ...CONFIG_INPUT.properties,
         dry_run: {
           type: "boolean",
           description:
             "Deprecated: use context_metacognition_preview. Kept for existing callers: true saves nothing and answers as preview does. Must be a JSON boolean.",
         },
       },
-      required: ["agent"],
     },
   },
   {
