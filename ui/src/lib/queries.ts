@@ -42,7 +42,8 @@ export const keys = {
   instructionsRevisions: (nestId: string) =>
     [...keys.instructions(nestId), "revisions"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
-  viewNodes: (nestId: string) => [...keys.nest(nestId), "viewNodes"] as const,
+  // Under keys.nodes so a create, rename or delete refreshes the sidebar's list.
+  viewNodes: (nestId: string) => [...keys.nodes(nestId), "views"] as const,
   // Under keys.nodes so every write that drops the listing drops the lazily
   // loaded folder levels with it — see the invalidation table below.
   folderNodes: (nestId: string, folder: string) =>

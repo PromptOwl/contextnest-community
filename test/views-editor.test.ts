@@ -98,8 +98,36 @@ describe("re-typing away from view", () => {
       { type: "document" },
       owner.apiKey,
     );
-    expect(r.status, JSON.stringify(r.data)).toBeLessThan(500);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
     const g = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey);
     expect(g.status).toBe(200);
+    expect(g.data.node.type).toBe("document");
+    expect(g.data.node.view).toBeUndefined();
+  });
+});
+
+describe("view field for a steward editor", () => {
+  it("reaches a read collaborator who is a nest-scope editor", async () => {
+    const editor = await registerUser(app, "editor@view-editor.test", "Editor");
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: editor.email, permission: "read" },
+      owner.apiKey,
+    );
+    const steward = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "nest", users: [{ email: editor.email, role: "editor" }] },
+      owner.apiKey,
+    );
+    expect(steward.status, JSON.stringify(steward.data)).toBe(201);
+    const id = await createView("Steward view", LAYOUT);
+    const r = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, editor.apiKey);
+    expect(r.status).toBe(200);
+    expect(r.data.node.view).toEqual(LAYOUT);
   });
 });

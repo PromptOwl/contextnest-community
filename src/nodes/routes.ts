@@ -731,7 +731,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     response.type === "view" &&
     viewBlock &&
     (permissionLevel(c.get("nestPermission")) >= permissionLevel("write") ||
-      (response as any).myGrant === "write")
+      (await stewardship.canUserEdit(nestId, nodeId, await getUserEmail(c))).allowed)
   ) {
     (response as any).view = viewBlock;
   }

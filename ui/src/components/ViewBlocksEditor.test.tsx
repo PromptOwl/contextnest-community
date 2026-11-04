@@ -69,4 +69,10 @@ describe("DocumentEditor wiring", () => {
   it("sends the whole block list back on save, only when it changed", () => {
     expect(src).toMatch(/viewJson\(viewMeta\) !== loadedViewRef\.current/);
   });
+
+  it("puts the saved blocks back on discard and parks unsaved ones", () => {
+    expect(src).toMatch(/revertToSaved = \(\) => \{[\s\S]{0,300}setViewMeta\(loadedViewRef\.current/);
+    expect(src).toMatch(/writeDraft\(nestId, nodeId, \{[\s\S]{0,200}view: viewMeta/);
+    expect(src).toMatch(/draft\.view\) setViewMeta/);
+  });
 });

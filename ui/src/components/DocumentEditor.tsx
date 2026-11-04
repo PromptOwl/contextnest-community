@@ -1238,6 +1238,7 @@ export function DocumentEditor({
           setContent(draft.content);
           setTags(draft.tags);
           setSchedule(draft.schedule);
+          if (draft.view) setViewMeta(draft.view as ViewMeta);
           setTouched(true);
           setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
@@ -1816,6 +1817,7 @@ export function DocumentEditor({
       content,
       tags: [...tags],
       schedule: schedule.trim(),
+      ...(viewMeta ? { view: viewMeta } : {}),
       baseVersion,
     });
     // Couldn't back the edits up locally — the leave dialog still guards
@@ -1855,6 +1857,7 @@ export function DocumentEditor({
     setContent(snap.content);
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
+    if (!isNew) setViewMeta(loadedViewRef.current ? JSON.parse(loadedViewRef.current) : null);
     setTouched(false);
     setRestoredDraftAt(null);
   };

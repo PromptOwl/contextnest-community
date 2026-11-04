@@ -79,8 +79,8 @@ describe("governed edit of an approved View", () => {
       owner.apiKey,
     );
     expect(patched.status, JSON.stringify(patched.data)).toBe(200);
-    // Decision 1: the save lands as a draft (or pending_review), never published.
-    expect(["draft", "pending_review"]).toContain(patched.data.node?.status);
+    // The save lands as a draft; the author then submits it for review.
+    expect(patched.data.node?.status).toBe("draft");
 
     const readerBody = await (await get(page(id), reader)).text();
     expect(readerBody).toContain("APPROVED-LAYOUT");
@@ -111,28 +111,28 @@ describe("md placeholder", () => {
 
   it("shows the same line, not the content, for a node the viewer cannot read", async () => {
     const secretId = await create({ title: "Secret Plan", content: "TOP-SECRET-BODY" });
-    const steward = await jsonRequest(
-      app,
-      "POST",
-      `/nests/${nestId}/stewards`,
-      {
-        scope: "document",
-        target: secretId,
-        users: [{ email: owner.email, role: "reviewer" }],
-      },
-      owner.apiKey,
-    );
-    // Environment-dependent: if this steward shape is refused, the denial
-    // fixture is wrong, not the renderer.
-    expect(steward.status, JSON.stringify(steward.data)).toBeLessThan(300);
-
     const id = await create({
       title: "Denied ref",
       type: "view",
       content: "Intro.",
       view: { blocks: [{ md: { ref: secretId } }] },
     });
-    const body = await (await get(page(id), reader)).text();
+    // A read collaborator can read every node, so denial needs an outsider
+    // whose grant covers the View and not the node it references.
+    const outsider = await registerUser(app, "outsider@view-gov.test", "Outsider");
+    const grant = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: id, email: outsider.email, role: "read" },
+      owner.apiKey,
+    );
+    expect(grant.status, JSON.stringify(grant.data)).toBe(201);
+    expect((await get(`/nests/${nestId}/nodes/${secretId}`, outsider)).status).toBe(404);
+
+    const res = await get(page(id), outsider);
+    expect(res.status).toBe(200);
+    const body = await res.text();
     expect(body).not.toContain("TOP-SECRET-BODY");
     expect(body).toContain("This content is unavailable.");
   });
@@ -164,7 +164,7 @@ describe("regression: existing types", () => {
       { type: "document" },
       owner.apiKey,
     );
-    expect(back.status, JSON.stringify(back.data)).toBeLessThan(500);
+    expect(back.status, JSON.stringify(back.data)).toBe(200);
 
     const art = await create({ title: "Convert art", content: "Body." });
     const toArt = await jsonRequest(

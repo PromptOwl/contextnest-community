@@ -520,7 +520,7 @@ function NestViews({
   if (views.length === 0) return null;
   const showUserViews = userViews.length > 0;
 
-  const row =(v: NestSidebarView, indent = false) => {
+  const row = (v: NestSidebarView, indent = false) => {
     const Icon = v.icon ?? TAB_ICONS[v.id] ?? Home;
     const active = v.id === activeView;
     return (
