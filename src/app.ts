@@ -774,6 +774,7 @@ export function createApp(): Hono<AuthEnv> {
       // Project-board tasks — on once the engine knows the type (see
       // ACCEPTED_NODE_TYPES). Off → the board's "+ Add task" makes documents.
       type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
+      type_view_enabled: ACCEPTED_NODE_TYPES.has("view"),
       // Hootie in the nest (default OFF — admins opt in). Off → POST
       // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
       // actually answer is runner_key_configured above — the UI shows the
@@ -1017,6 +1018,7 @@ export function createApp(): Hono<AuthEnv> {
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
+    type_view_enabled: ACCEPTED_NODE_TYPES.has("view"),
     hootie_enabled: config.HOOTIE_ENABLED,
     // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),

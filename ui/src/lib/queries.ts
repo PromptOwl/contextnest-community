@@ -42,6 +42,7 @@ export const keys = {
   instructionsRevisions: (nestId: string) =>
     [...keys.instructions(nestId), "revisions"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
+  viewNodes: (nestId: string) => [...keys.nest(nestId), "viewNodes"] as const,
   // Under keys.nodes so every write that drops the listing drops the lazily
   // loaded folder levels with it — see the invalidation table below.
   folderNodes: (nestId: string, folder: string) =>
@@ -547,6 +548,14 @@ export const reads = {
     queryOptions({
       queryKey: keys.nodesMeta(nestId, approvedOnly),
       queryFn: () => api.listNodesMeta(nestId, approvedOnly),
+      staleTime: STALE.listing,
+    }),
+  // Just the View nodes, for the sidebar. Not reads.nodes: that is a whole-nest
+  // fetch and the tree loads lazily per folder.
+  viewNodes: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.viewNodes(nestId),
+      queryFn: () => api.listViewNodes(nestId),
       staleTime: STALE.listing,
     }),
   census: (nestId: string) =>

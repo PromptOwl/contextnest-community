@@ -25,7 +25,7 @@ import {
   resolveCallerEmail,
   canReadNode,
 } from "../governance/access-guard.js";
-import { isPublicReader } from "../shared/access.js";
+import { isPublicReader, permissionLevel } from "../shared/access.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   assertContributorCreate,
@@ -722,6 +722,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     if (approvedOnly) {
       throw new NotFoundError("This document has no approved version yet.");
     }
+  }
+
+  // The block list (refs, selectors) goes to writers only: views/core.ts treats
+  // denied and missing refs alike, and handing a reader the refs would undo that.
+  const viewBlock = node.frontmatter?.view;
+  if (
+    response.type === "view" &&
+    viewBlock &&
+    (permissionLevel(c.get("nestPermission")) >= permissionLevel("write") ||
+      (response as any).myGrant === "write")
+  ) {
+    (response as any).view = viewBlock;
   }
 
   // Resolved-from-DB workflow status; on-disk frontmatter status is
