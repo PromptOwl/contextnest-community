@@ -623,7 +623,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_instructions_update",
     description:
-      "Nest owners/admins: replace this nest's operating instructions (CONTEXT.md — what every agent reads first via context_init). Send the WHOLE file as `content`: read it with context_init, edit, send it back. Recorded in context_instructions_history. On a nest that holds agent writes, the change waits for a reviewer to confirm it.",
+      "Replace this nest's operating instructions (CONTEXT.md — what every agent reads first via context_init). Nest owners/admins only. Send the WHOLE file as `content`: read it with context_init, edit, send it back. Recorded in context_instructions_history. On a nest that holds agent writes, the change waits for a reviewer to confirm it.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -647,7 +647,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_search",
     description:
-      "Full-text keyword search across all node content, titles, tags, and metadata — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits, title matches first.",
+      "Search all documents by keyword, across content, titles, tags and metadata — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits, title matches first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -663,7 +663,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_query",
     description:
-      "Run a structured selector query. Supports: #tag, type:X, [[Title]], scope:X. Combine with +AND, |OR, -NOT.",
+      "Find documents with a selector, a small query language over tags, types, titles and scopes. Supports: #tag, type:X, [[Title]], scope:X. Combine with +AND, |OR, -NOT.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -680,7 +680,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_table_query",
     description:
-      "Deterministic lookup against a TABLE node (CSV fact store). Fetch exact rows instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
+      "Look up exact rows in a table node (a CSV fact store) instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -721,7 +721,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_get",
-    description: "Get the FULL content of a specific node by title or ID.",
+    description: "Read the full content of one document, by title or ID.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -777,7 +777,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve",
     description:
-      "Full context resolution — run a selector and return complete node content, respecting a token budget.",
+      "Fetch the full text of every document a selector matches, up to a token budget. Use context_query when you only need the matches.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1153,7 +1153,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_board_items",
     description:
-      "A saved board as a list — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
+      "List a saved board's items — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1667,7 +1667,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_headless",
     description:
-      "Nest owners/admins: manage HEADLESS publishing — the nest handed out API-only through read-only access keys that read its approved content (never drafts, history or people) over ctx / MCP / the read API. Only a private nest can be headless. action: status | enable | disable (pauses every key) | create_key (label) | revoke_key (key_id). The access key's token is returned once, on create_key.",
+      "Manage headless publishing for this nest. Nest owners/admins only. Headless means the nest is handed out API-only through read-only access keys that read its approved content (never drafts, history or people) over ctx / MCP / the read API. Only a private nest can be headless. action: status | enable | disable (pauses every key) | create_key (label) | revoke_key (key_id). The access key's token is returned once, on create_key.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1685,7 +1685,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_set_visibility",
     description:
-      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+      "Set who can read this whole nest. Nest owners/admins only. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1705,7 +1705,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_systems",
     description:
-      'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
+      'Manage named systems (machine identities such as "GitHub sync"). Nest owners/admins only. Systems are non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
     inputSchema: {
       type: "object" as const,
       properties: {

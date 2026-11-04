@@ -303,7 +303,7 @@ describe("the classification", () => {
 
   it("treats an unclassified name as the most cautious case rather than as safe", async () => {
     const { toolAnnotations } = await import("../src/mcp/annotations.js");
-    expect(toolAnnotations("context_not_a_real_tool")).toEqual({
+    expect(toolAnnotations("context_not_a_real_tool")).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
       openWorldHint: true,

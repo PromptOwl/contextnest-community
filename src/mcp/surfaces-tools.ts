@@ -71,7 +71,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
   {
     name: "context_surfaces_status",
     description:
-      "Surfaces status: connected workspace installs, how many conversation bindings are active / paused by the guard / paused by a member / removed, " +
+      "Show how many of this nest's conversation bindings are active / paused by the guard / paused by a member / removed, " +
       "and the server-admin disclosure every binding carries. Admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
@@ -98,7 +98,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_binding_update",
-    description: "Change a binding's explicit_public_bind / ext_capture_enabled / listener agent; the guard re-runs and may pause it. Admin only.",
+    description: "Change a binding's explicit_public_bind or ext_capture_enabled setting. The guard re-runs and may pause it. Admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -190,16 +190,16 @@ export const SURFACES_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        quiet_minutes: { type: "number" },
-        window_max_age_hours: { type: "number" },
-        buffer_ttl_hours: { type: "number" },
-        min_meaningful_chars: { type: "number" },
-        propose_threshold: { type: "number" },
-        reviewer_daily_cards: { type: "number" },
+        quiet_minutes: { type: "number", description: "Minutes of quiet that close a conversation window, 5–240 (default 20)." },
+        window_max_age_hours: { type: "number", description: "Longest a window stays open in hours, 1–12 and below buffer_ttl_hours (default 6)." },
+        buffer_ttl_hours: { type: "number", description: "Hours captured messages are kept, 1–24 (default 24)." },
+        min_meaningful_chars: { type: "number", description: "Shortest message that counts as meaningful, in characters, 1–50 (default 6)." },
+        propose_threshold: { type: "number", description: "Confidence a proposal needs, 0.5–0.95 (default 0.7)." },
+        reviewer_daily_cards: { type: "number", description: "Most proposal cards a reviewer gets a day, 1–10 (default 2)." },
         dm_capture: { type: "boolean", description: "DM capture on (true) or off (false, the default)." },
         signin_alerts: { type: "boolean", description: "Sign-in alerts for sealed-nest owners on (true, the default) or off; turning off notifies every owner." },
-        conversation_daily_cards: { type: "number" },
-        timezone: { type: "string" },
+        conversation_daily_cards: { type: "number", description: "Most proposal cards a conversation gets a day, 1–20 (default 3)." },
+        timezone: { type: "string", description: 'IANA time zone name, e.g. "Europe/Berlin" (default "UTC").' },
         default_seed: { type: "string", description: 'The seed a DM private nest gets: a bundled seed id (default "generic-team"), "<library nest id>:<seed id>", or "" for none.' },
         seed_library_nests: { type: "array", items: { type: "string" }, description: "Nests whose seeds/<id>/seed nodes are offered as seeds (reads still follow each caller's access)." },
       },
@@ -208,7 +208,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_windows_list",
-    description: "The judgement verdict log for this nest: one row per conversation window (verdict, reason, counts, model, cost). Never message text.",
+    description: "List the judgement verdict log for this nest: one row per conversation window (verdict, reason, counts, model, cost). Never message text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -222,21 +222,21 @@ export const SURFACES_TOOL_DEFINITIONS = [
   {
     name: "context_surfaces_proposals_list",
     description:
-      "Proposals Nest made from conversations bound to this nest, with their state (posted / held / queued / decided / expired / withdrawn) and per-item outcome. " +
+      "List the proposals Nest made from conversations bound to this nest, with their state (posted / held / queued / decided / expired / withdrawn) and per-item outcome. " +
       "Personal (DM) nests are redacted for anyone but their owner. Never message text.",
     inputSchema: { type: "object", properties: { state: { type: "string", description: "Filter by proposal state." } }, required: [] as string[] },
   },
   {
     name: "context_surfaces_my_pending",
     description:
-      "Your My pending: proposals waiting for a reviewer, only from nests you already read and can review — in threads, held (not posted), and queued for you — " +
+      "List your pending proposals, the ones waiting for a reviewer, only from nests you already read and can review — in threads, held (not posted), and queued for you — " +
       "plus your daily card limit. Approving goes through the existing review tools as you (context_approve / context_reject); MCP never commits for a Slack user.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
   {
     name: "context_surfaces_commits_list",
     description:
-      "The commit audit for this nest: every proposal approved from a surface — the approving Community user, the surface, the Slack user id kept for audit, " +
+      "List the commit audit for this nest: every proposal approved from a surface — the approving Community user, the surface, the Slack user id kept for audit, " +
       "the window and its message count, the proposal — proposed by the Nest listener.",
     inputSchema: {
       type: "object",
@@ -246,7 +246,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_budget_get",
-    description: "This nest's monthly model-spend budget for Surfaces (cap, spent, reserved, in micros) and whether the 90% / 100% alerts fired. Owner/admin only.",
+    description: "Show this nest's monthly model-spend budget for Surfaces (cap, spent, reserved, in micros) and whether the 90% / 100% alerts fired. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
   {
@@ -288,12 +288,12 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_seed_list",
-    description: "The seeds you can apply to this nest: the bundled ones, and seeds in seed-library nests you can read. Owner/admin only.",
+    description: "List the seeds you can apply to this nest: the bundled ones, and seeds in seed-library nests you can read. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
   {
     name: "context_surfaces_seed_status",
-    description: "Which seeds this nest has applied (id, version, source). no_seed = true means its conversations propose nowhere yet. Owner/admin only.",
+    description: "List the seeds this nest has applied (id, version, source). no_seed = true means its conversations propose nowhere yet. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
 ];
