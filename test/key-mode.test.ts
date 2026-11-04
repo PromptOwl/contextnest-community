@@ -41,6 +41,21 @@ describe("key mode (auth required)", () => {
     expect(data.code).toBe("invalid_key");
   });
 
+  it.each(["/mcp", "/nests/some-nest/mcp"])(
+    "answers a dead API key on %s with 403, so MCP clients don't start a sign-in",
+    async (path) => {
+      const { status, data } = await jsonRequest(
+        app,
+        "POST",
+        path,
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        "cnst_" + "0".repeat(64),
+      );
+      expect(status).toBe(403);
+      expect(data.code).toBe("invalid_key");
+    },
+  );
+
   it("accepts requests with valid API key", async () => {
     const { status, data } = await jsonRequest(
       app,
