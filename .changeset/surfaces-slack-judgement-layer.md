@@ -1,5 +1,0 @@
----
-"@promptowl/contextnest-community": minor
----
-
-**Surfaces for Slack: install and the judgement layer.** A server admin installs a customer-owned Slack app (manifest in `docs/surfaces/slack-app-manifest.json`), then binds channels to nests under the two-way privacy guard. Nest listens to events only and never bulk-reads history. A deterministic gate drops bot and system messages, emoji-only replies and anything too short. What survives sits in an encrypted, short-lived buffer (`SURFACES_BUFFER_KEY`) until the conversation goes quiet. A judge then reviews the whole window once and proposes only a decision, a durable fact, a correction, a commitment or a recurring ask. Everything else is a recorded no-op. A 🧠 reaction or "@nest remember this" always gets a proposal. Proposals are review-queue drafts, hidden from readers until a person approves them. Dedup, a 7-day hold after rejection and a per-nest monthly spend cap keep it quiet and bounded. `npm run eval:surfaces` runs the judgement eval. Cards and approve-in-Slack follow in the next release.
