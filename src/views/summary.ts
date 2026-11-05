@@ -21,7 +21,8 @@ import type { SummaryInput, SummaryResult, ViewDeps } from "./core.js";
 const INPUT_CHAR_BUDGET = 60_000;
 const MAX_OUTPUT_TOKENS = 2048;
 const TIMEOUT_MS = 30_000;
-/** Rows kept per nest: at most ~8 KB of text each, so ~4 MB per nest. */
+/** Rows kept per nest, oldest written out first: at most ~8 KB of text each,
+ *  so ~4 MB per nest. */
 const MAX_ROWS_PER_NEST = 500;
 
 const SYSTEM = `You summarize documents for readers of a dashboard. Say only what the documents say and add no facts.
@@ -49,9 +50,9 @@ export async function summarizeNodes(
   const truncated = eligible.length > picked.length;
   const refs = picked.map((id) => `${id}@${approved.get(id)}`);
   const model = hootieModel();
-  const key = createHash("sha256")
-    .update(JSON.stringify({ refs, style: input.style, model }))
-    .digest("hex");
+  // The whole prompt, not just the style name: rewording it regenerates.
+  const system = `${SYSTEM}\n${LENGTH[input.style]}`;
+  const key = createHash("sha256").update(JSON.stringify({ refs, system, model })).digest("hex");
 
   const hit = (await getDb().get(
     "SELECT text, refs FROM view_summaries WHERE nest_id = ? AND cache_key = ?",
@@ -62,7 +63,7 @@ export async function summarizeNodes(
   const flightKey = `${nestId}|${key}`;
   let flight = inFlight.get(flightKey);
   if (!flight) {
-    flight = generate(nestId, key, picked, approved, input.style, model, truncated, readMd).finally(() =>
+    flight = generate(nestId, key, picked, approved, system, model, truncated, readMd).finally(() =>
       inFlight.delete(flightKey),
     );
     inFlight.set(flightKey, flight);
@@ -75,7 +76,7 @@ async function generate(
   key: string,
   ids: string[],
   approved: Map<string, number>,
-  style: SummaryInput["style"],
+  system: string,
   modelName: string,
   truncated: boolean,
   readMd: ViewDeps["readMd"],
@@ -99,7 +100,7 @@ async function generate(
       credential,
       request: {
         model: await resolveGatewayModel(credential, modelName),
-        system: `${SYSTEM}\n${LENGTH[style]}`,
+        system,
         messages: [{ role: "user", content }],
         tools: [],
         max_tokens: MAX_OUTPUT_TOKENS,

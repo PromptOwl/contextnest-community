@@ -37,6 +37,19 @@ const page = async (viewId: string) => {
   return res.text() as Promise<string>;
 };
 
+/** context_get over the nest's MCP endpoint: the prose an agent reads. */
+async function contextGet(id: string): Promise<string> {
+  const res = await app.request(`/nests/${nestId}/mcp`, {
+    method: "POST",
+    headers: { ...authed(owner.apiKey), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_get", arguments: { id } } }),
+  });
+  expect(res.status).toBe(200);
+  const raw = await res.text();
+  const json = raw.split("\n").find((l: string) => l.startsWith("data: "))?.slice(6) ?? raw;
+  return JSON.parse(json).result.content[0].text;
+}
+
 async function create(body: Record<string, unknown>) {
   const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, body, owner.apiKey);
   expect(r.status, JSON.stringify(r.data)).toBe(201);
@@ -177,6 +190,64 @@ describe("summary block", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("unsupported_kind");
     expect(calls).toHaveLength(0);
+  });
+
+  it("context_get carries the label and sources, from the same cache as the page", async () => {
+    const a = await create({ title: "Agent Read", content: "agent", tags: ["agentread"] });
+    const v = await view("Agent Read View", { select: "#agentread" });
+    await page(v);
+    const text = await contextGet(v);
+    expect(text).toContain("**Generated summary:**\nThe documents describe risk.");
+    expect(text).toContain(`**Sources:** ${a}@1`);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("context_get says when a summary was truncated", async () => {
+    await create({ title: "Agent Trunc A", content: "a", tags: ["agenttrunc"] });
+    await create({ title: "Agent Trunc B", content: "b", tags: ["agenttrunc"] });
+    const text = await contextGet(await view("Agent Trunc View", { select: "#agenttrunc", max_nodes: 1 }));
+    expect(text).toContain("Truncated: this covers the first matching documents only.");
+  });
+
+  it("context_get makes no call for a view written for people only", async () => {
+    await create({ title: "People Only", content: "p", tags: ["peopleonly"] });
+    const v = await create({
+      title: "People View",
+      type: "view",
+      content: "intro",
+      view: { audience: ["human"], blocks: [{ id: "s", summary: { select: "#peopleonly" } }] },
+    });
+    expect(await contextGet(v)).not.toContain("Generated summary");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a reader with a smaller input set never gets a summary of the larger one", async () => {
+    const { summarizeNodes } = await import("../src/views/summary.js");
+    const a = await create({ title: "Scope A", content: "a" });
+    const b = await create({ title: "Scope B", content: "b" });
+    const readMd: ViewDeps["readMd"] = async () => ({ ok: true, text: "body", version: 1 });
+    const input = { style: "brief" as const, maxNodes: 25 };
+    await summarizeNodes(nestId, { ...input, ids: [a, b].sort() }, readMd);
+    answer = says("Only the smaller set.");
+    const out = await summarizeNodes(nestId, { ...input, ids: [a] }, readMd);
+    expect(calls).toHaveLength(2);
+    expect(out).toMatchObject({ ok: true, text: "Only the smaller set.", refs: [`${a}@1`] });
+  });
+
+  it("splits the input budget so every document is still read", async () => {
+    const { summarizeNodes } = await import("../src/views/summary.js");
+    const a = await create({ title: "Budget A", content: "a" });
+    const b = await create({ title: "Budget B", content: "b" });
+    const readMd: ViewDeps["readMd"] = async (_n, id) => ({
+      ok: true,
+      text: (id === a ? "A" : "B").repeat(100_000),
+      version: 1,
+    });
+    await summarizeNodes(nestId, { ids: [a, b].sort(), style: "brief", maxNodes: 25 }, readMd);
+    const content = calls[0].messages[0].content as string;
+    expect(content.length).toBeLessThan(61_000);
+    expect(content).toContain("AAAA");
+    expect(content).toContain("BBBB");
   });
 });
 

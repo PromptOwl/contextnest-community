@@ -27,6 +27,7 @@ import { assertSafeNodeId } from "../shared/node-id.js";
 import { queryTableNode } from "../tables/query.js";
 import { summarizeNodes } from "./summary.js";
 import { NotFoundError, ForbiddenError, ValidationError } from "../shared/errors.js";
+import { blockIdOf, blockKindOf, resolveBlocks, servedBlocks } from "./core.js";
 import type { AuthorInfo, ErrorCode, NodeSummary, Principal, TableRows, ViewDeps } from "./core.js";
 
 /** Version rows that were releases when they were cut. */
@@ -66,7 +67,7 @@ async function visibleTo(nestId: string, ids: string[], p: Principal[]): Promise
 }
 
 export function createViewDeps(): ViewDeps {
-  return {
+  const deps: ViewDeps = {
     async resolveRef(nestId, ref) {
       const id = assertSafeNodeId(refToId(ref));
       const { storage } = await engineCache.get(nestId);
@@ -188,10 +189,9 @@ export function createViewDeps(): ViewDeps {
       }
     },
 
-    summarize(nestId, input) {
-      return summarizeNodes(nestId, input, this.readMd);
-    },
+    summarize: (nestId, input) => summarizeNodes(nestId, input, deps.readMd),
   };
+  return deps;
 }
 
 /**
@@ -300,4 +300,27 @@ export async function readViewVersion(nestId: string, viewId: string, version: n
 /** The live working copy of a view. */
 export function liveViewVersion(viewId: string, doc: ContextNode): ViewVersion {
   return viewVersionOf(viewId, doc as any);
+}
+
+/**
+ * A view's `summary` blocks as prose for an agent (context_get): the approved
+ * layout, resolved for `userId`, each with its label and sources. Empty when
+ * there is nothing to add, or the view is not written for agents.
+ */
+export async function agentSummaryProse(nestId: string, viewId: string, userId: string): Promise<string> {
+  const approved = await getApprovedVersion(nestId, viewId);
+  if (approved == null) return "";
+  const { meta } = await readViewVersion(nestId, viewId, approved);
+  if (!meta || (meta.audience && !meta.audience.includes("agent"))) return "";
+  const ids = servedBlocks(meta).flatMap((b, i) => (blockKindOf(b) === "summary" ? [blockIdOf(b, i)] : []));
+  if (ids.length === 0) return "";
+  const blocks = await resolveBlocks(meta, nestId, [await viewerPrincipal(nestId, userId)], createViewDeps(), ids);
+  return blocks
+    .map((b) =>
+      b.ok && b.kind === "summary"
+        ? `**Generated summary:**\n${b.text}\n\n**Sources:** ${b.refs.join(", ")}` +
+          (b.truncated ? "\n\nTruncated: this covers the first matching documents only." : "")
+        : "**Generated summary:** unavailable.",
+    )
+    .join("\n\n");
 }
