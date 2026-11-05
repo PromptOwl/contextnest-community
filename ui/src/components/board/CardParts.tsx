@@ -104,7 +104,7 @@ export function TagPill({ tag, label }: { tag: string; label?: string }) {
   const i = bare.indexOf(":");
   const tone = i > 0 ? tagPillTone(bare) : undefined;
   if (!tone) {
-    return <span title={tag} className="max-w-full truncate rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">{tag}</span>;
+    return <span title={`#${bare}`} className="max-w-full truncate rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">{tag}</span>;
   }
   return (
     <span title={`#${bare}`} className={`max-w-full truncate rounded px-1.5 py-0.5 text-[10px] font-medium ${tone}`}>

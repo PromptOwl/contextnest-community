@@ -13,4 +13,9 @@ describe("TagPill", () => {
       expect(h).toContain(`title="${tag}"`);
     },
   );
+
+  it("writes the tooltip the same way with or without a leading #", () => {
+    expect(renderToStaticMarkup(<TagPill tag="projects" />)).toContain('title="#projects"');
+    expect(renderToStaticMarkup(<TagPill tag="#projects" />)).toContain('title="#projects"');
+  });
 });
