@@ -100,12 +100,13 @@ afterAll(() => {
 describe("MCP transport — no standalone SSE stream (stateless)", () => {
   // A 200 here opened a stream we closed at once; clients reconnected in a
   // tight loop and pinned prod's CPU. 405 tells them there is no stream.
-  for (const method of ["GET", "DELETE"]) {
+  for (const method of ["GET", "DELETE", "PUT", "PATCH"]) {
     for (const path of [() => `/nests/${nestId}/mcp`, () => "/mcp"]) {
       it(`${method} ${path().replace(nestId, ":id")} answers 405`, async () => {
         const res = await app.request(path(), { method, headers: { Accept: "text/event-stream" } });
         expect(res.status).toBe(405);
         expect(res.headers.get("allow")).toBe("POST");
+        expect((await res.json()).error.code).toBe(-32000);
       });
     }
   }

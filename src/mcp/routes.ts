@@ -140,12 +140,12 @@ function createMcpServerForNest(
   return server;
 }
 
-// POST/GET/DELETE /nests/:nestId/mcp
 /**
- * Stateless transport: no standalone SSE stream and no session to delete, so
- * GET/DELETE answer 405 (the spec's "no stream offered"). Serving GET instead
- * built a full server, opened an SSE stream and closed it at once — clients
- * reconnected in a tight loop and pinned prod's CPU (Nov 2026 incident).
+ * Stateless transport: POST only. No standalone SSE stream and no session to
+ * delete, so GET/DELETE (and anything else) answer 405 — the spec's "no stream
+ * offered". Serving GET instead built a full server, opened an SSE stream and
+ * closed it at once — clients reconnected in a tight loop and pinned prod's
+ * CPU (Nov 2026 incident). OPTIONS never gets here: cors() answers it first.
  */
 export const mcpNoStream = (c: Context) =>
   c.json(
@@ -154,9 +154,8 @@ export const mcpNoStream = (c: Context) =>
     { Allow: "POST" },
   );
 
-mcpRoutes.on(["GET", "DELETE"], "/", mcpNoStream);
-
-mcpRoutes.all("/", async (c) => {
+// POST /nests/:nestId/mcp
+mcpRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const caller = await getCaller(userId);
@@ -201,3 +200,4 @@ mcpRoutes.all("/", async (c) => {
     await server.server.close();
   }
 });
+mcpRoutes.all("/", mcpNoStream);

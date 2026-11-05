@@ -770,10 +770,8 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number
 export const serverMcpRoutes = new Hono<AuthEnv>();
 
 // POST /mcp — stateless, one server per request, same transport shape as the
-// per-nest endpoint (GET/DELETE get 405, see mcpNoStream).
-serverMcpRoutes.on(["GET", "DELETE"], "/", mcpNoStream);
-
-serverMcpRoutes.all("/", async (c) => {
+// per-nest endpoint. Every other method gets 405 (see mcpNoStream).
+serverMcpRoutes.post("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
   const headless = await isHeadlessIdentity(userId);
@@ -820,6 +818,7 @@ serverMcpRoutes.all("/", async (c) => {
     await server.server.close();
   }
 });
+serverMcpRoutes.all("/", mcpNoStream);
 
 // ─── GET /index — the person nest index ──────────────────────────────────
 
