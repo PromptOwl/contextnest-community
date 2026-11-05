@@ -10,7 +10,7 @@ import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
 import { adminFolderRefusal } from "../surfaces/admin-folders.js";
-import { ConflictError } from "../shared/errors.js";
+import { ConflictError, ValidationError } from "../shared/errors.js";
 import { assertDeletionRequestable } from "../structure/writes.js";
 import {
   notifyReviewRequested,
@@ -65,6 +65,12 @@ export async function submitForReview(params: {
   client?: ClientMetadata;
 }): Promise<ReviewRequest> {
   const db = getDb();
+
+  const { storage: vault } = await engineCache.get(params.nestId);
+  const live = await vault.readDocument(params.nodeId).catch(() => null);
+  if (live?.frontmatter.archived) {
+    throw new ValidationError("This document is archived. Restore it first.");
+  }
 
   // Everything that decides WHICH version goes to review — and the chain append
   // that seals it — runs under the same per-node lock approve/reject take, and

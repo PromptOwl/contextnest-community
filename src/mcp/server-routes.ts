@@ -95,6 +95,8 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_submit_review",
   "context_request_access",
   "context_task_log",
@@ -316,6 +318,8 @@ const SERVER_NEST_TOOLS = [
   "context_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_submit_review",
   "context_request_access",
   "context_task_log",
@@ -956,7 +960,7 @@ Streamable HTTP, stateless. Two endpoints:
   - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`,
     \`context_boards\`, \`context_board_items\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
-    \`context_delete\`, \`context_move\`, \`context_submit_review\`,
+    \`context_delete\`, \`context_archive\`, \`context_unarchive\`, \`context_move\`, \`context_submit_review\`,
     \`context_request_access\` (ask for write access when a write is refused),
     \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)

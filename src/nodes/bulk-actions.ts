@@ -5,7 +5,7 @@
  *
  * Same contract as bulk-update: not a transaction, and not a shortcut. Every
  * document goes through moveNode / deleteNode on its own, so the review
- * freeze, structure rules, PDF refusal and tombstones apply exactly as for a
+ * freeze, structure rules and tombstones apply exactly as for a
  * single document. A document the caller can't edit is skipped (a delete
  * points at the deletion-request path instead), one they can't read is
  * reported as not found, and every document gets its own row in the result.

@@ -2264,6 +2264,35 @@ export async function moveNode(nestId: string, nodeId: string, folder: string) {
   );
 }
 
+/** Who archived a document, when and why (spec §1.13). */
+export interface ArchivedDocument {
+  at: string;
+  by: string;
+  reason?: string;
+}
+
+/** Take a document out of lists and retrieval, recoverably. */
+export async function archiveNode(nestId: string, nodeId: string, reason?: string) {
+  return request<{ ok: boolean }>(`/nests/${nestId}/nodes/${nodeId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** Bring an archived document back in the status it left. */
+export async function unarchiveNode(nestId: string, nodeId: string) {
+  return request<{ ok: boolean; status: string }>(`/nests/${nestId}/nodes/${nodeId}/unarchive`, {
+    method: "POST",
+  });
+}
+
+/** The archived documents this caller can restore. */
+export async function listArchivedNodes(nestId: string) {
+  return request<{ nodes: Array<{ id: string; title: string; archived?: { at: string; by: string; reason?: string } }> }>(
+    `/nests/${nestId}/nodes?archived=1`,
+  );
+}
+
 // ─── Search & Query ─────────────────────────────────────────────────────
 
 export async function searchNodes(nestId: string, query: string) {
