@@ -98,6 +98,7 @@ import {
   fieldsOfRaw,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
+import { agentSummaryProse } from "../views/deps.js";
 import {
   addComputedFields,
   createFieldDefinition,
@@ -3043,8 +3044,13 @@ async function runTool(
       ]
         .filter(Boolean)
         .join("\n");
+      // Prose only: the catalog's context_get payload has no field for it yet.
+      const summaries =
+        node.frontmatter.type === "view"
+          ? await agentSummaryProse(nestId, node.id, ctx.userId).catch(() => "")
+          : "";
       return {
-        text: `${meta}\n\n---\n\n${body || "(no content)"}`,
+        text: `${meta}\n\n---\n\n${body || "(no content)"}${summaries && `\n\n---\n\n${summaries}`}`,
         // `body` is the gated one, not node.body — under stewardship that is
         // the APPROVED snapshot, which can be older than the live draft this
         // frontmatter came from. So the payload carries only the fields the
