@@ -151,6 +151,7 @@ describe("GWT 8 — create", () => {
     expect(row).toBeTruthy();
     expect(row.permission).toBe("write");
     expect(row.principal_kind).toBe("system");
+    expect(row.name).toBe("GitHub sync");
   });
 });
 
@@ -186,6 +187,7 @@ describe("GWT 9 — writes are attributed to the system; governance intact", () 
     const authors = JSON.stringify(versions);
     expect(authors).toContain(systemEmail);
     expect(authors).not.toContain(creator.email);
+    expect(versions[0].editedBySystem).toBe("GitHub sync");
     // Not published: the public view would not see it, and it's a draft.
     const latest = Array.isArray(versions) ? versions[0] : null;
     if (latest?.status) expect(latest.status).not.toBe("published");
@@ -199,6 +201,10 @@ describe("GWT 9 — writes are attributed to the system; governance intact", () 
     expect(selfApprove.status).toBe(403);
     const a = await jsonRequest(app, "POST", `/nests/${nestA}/nodes/${nodeId}/approve`, {}, owner.apiKey);
     expect(a.status).toBe(200);
+    // A person's version never picks up a system name.
+    const v = await jsonRequest(app, "GET", `/nests/${nestA}/nodes/${nodeId}/versions`, undefined, owner.apiKey);
+    const human = (v.data.versions ?? v.data).filter((x: any) => x.editedBy === owner.email);
+    for (const row of human) expect(row.editedBySystem).toBeUndefined();
   });
 });
 

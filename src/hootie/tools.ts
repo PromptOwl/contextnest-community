@@ -17,11 +17,13 @@
  * against the turn's allowlist BEFORE anything runs (`validate`), and the
  * allowlist grows only from what these tools' own results returned.
  */
+import { config } from "../config.js";
 import { resolveContext, type ContextNodeSummary } from "../nodes/context-service.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { engineCache } from "../nodes/engine.js";
 import { handleToolCall, type ToolResult } from "../mcp/tools.js";
 import { canUserApproveMany } from "../governance/stewardship-service.js";
+import { canOpenNode } from "../governance/mention-notify.js";
 import type { BoardListResult } from "../nests/board-items.js";
 import type { RelationsResult } from "../nodes/relations.js";
 import { defuseFence, type Gathered } from "./retrieval.js";
@@ -185,6 +187,26 @@ async function callOp(ctx: ToolContext, op: string, args: Record<string, unknown
   });
 }
 
+/**
+ * May this person open THIS page, now? Asked right before every read that
+ * names a page (get_node, node_relations). The loop's nest re-check passes
+ * anyone who still holds some share (access.ts), and `canReadNode` is open on
+ * a nest without stewardship, so a share on this one page revoked mid-question
+ * would otherwise still read. The listing ops already narrow their rows by the
+ * live grants, so they need no such check.
+ *
+ * Open mode has no per-person access to check: on a nest they don't own the
+ * caller holds no permission of their own, so `canOpenNode` would refuse every
+ * read that canStillAsk and the middleware admit. A check that fails is a no.
+ */
+async function mayOpen(ctx: ToolContext, nodeId: string): Promise<boolean> {
+  if (config.AUTH_MODE === "open") return true;
+  return canOpenNode(ctx.nestId, nodeId, ctx.userId, ctx.userEmail).catch((err) => {
+    console.error("[hootie] page access check failed; refusing the read", ctx.nestId, err);
+    return false;
+  });
+}
+
 /** The op's structured payload, or null when it refused / found nothing. */
 function dataOf<T>(r: ToolResult): T | null {
   return typeof r === "string" || r.isError ? null : (r.data as T);
@@ -250,6 +272,7 @@ function getNodeTool(ctx: ToolContext): HootieTool {
     run: async (input) => {
       const id = admitNodeRef(ctx.turn, input);
       if (!id) return { content: NOT_ALLOWED, isError: true };
+      if (!(await mayOpen(ctx, id))) return UNAVAILABLE;
       const d = dataOf<{
         id: string;
         frontmatter: { title: string; type?: string; tags?: string[]; metadata?: { fields?: Record<string, unknown> } };
@@ -475,6 +498,7 @@ function nodeRelationsTool(ctx: ToolContext): HootieTool {
     run: async (input) => {
       const id = admitNodeRef(ctx.turn, input);
       if (!id) return { content: NOT_ALLOWED, isError: true };
+      if (!(await mayOpen(ctx, id))) return UNAVAILABLE;
       const d = dataOf<RelationsResult>(await callOp(ctx, "context_relations", { id }));
       if (!d) return { content: "No relations to show for that document.", isError: true };
       const lines = relationLines(ctx, d.relations);

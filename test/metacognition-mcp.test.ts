@@ -2,7 +2,7 @@
  * Metacognition over MCP (CU-wdqcq05rqq), and metacognition as an owner/admin
  * feature end to end.
  *
- * The MCP tools (context_metacognition_list / _suggest / _configure / _run / _remove) wrap the same
+ * The MCP tools (context_metacognition_list / _suggest / _preview / _configure / _run / _remove) wrap the same
  * service functions the REST routes call, so the gates, parseConfig's messages,
  * the 409s and the saved config are the REST ones. Every metacognition action
  * — list, view, stats, run, configure, remove, and pointing a schedule or hook
@@ -25,7 +25,7 @@ const MCP_HEADERS = {
   Accept: "application/json, text/event-stream",
 };
 
-const TOOLS = ["context_metacognition_list", "context_metacognition_suggest", "context_metacognition_configure", "context_metacognition_run", "context_metacognition_remove"];
+const TOOLS = ["context_metacognition_list", "context_metacognition_suggest", "context_metacognition_preview", "context_metacognition_configure", "context_metacognition_run", "context_metacognition_remove"];
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -153,6 +153,75 @@ describe("who sees the tools", () => {
     expect(configure.description).toMatch(/type agent/i);
     expect(configure.description).toMatch(/approved/i);
     expect(configure.description).toContain('"persona"');
+  });
+});
+
+describe("one operation per tool (OpenAI review)", () => {
+  const described = async (name: string) => (await listTools(owner.apiKey)).find((t) => t.name === name)!;
+
+  it("preview validates and summarizes, and saves nothing", async () => {
+    const r = await call("context_metacognition_preview", { agent: "nodes/scout", ...CONFIG });
+    expect(r.result?.isError).not.toBe(true);
+    const data = r.result.structuredContent;
+    expect(data.saved).toBe(false);
+    expect(data).not.toHaveProperty("dry_run");
+    expect(data.node_id).toBe("nodes/scout");
+    expect(data.summary).toContain("Archivist");
+    expect(text(r)).toMatch(/nothing saved/i);
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition`, undefined, owner.apiKey);
+    expect(rest.data.agents.map((a: any) => a.node_id)).not.toContain("nodes/scout");
+  });
+
+  it("preview is refused for a writer who doesn't administer the nest", async () => {
+    const out = await direct("context_metacognition_preview", { agent: "nodes/scout", ...CONFIG }, editor);
+    expect(out.isError).toBe(true);
+    expect(outText(out)).toMatch(/owner or an admin/);
+  });
+
+  it("preview has no dry_run field, because it never saves", async () => {
+    const preview = await described("context_metacognition_preview");
+    expect(Object.keys(preview.inputSchema.properties)).not.toContain("dry_run");
+  });
+
+  it("preview refuses what configure would refuse, with the same message", async () => {
+    const bad = { agent: "nodes/scout", persona: { name: "A", avatar: "https://x.test/a.png" } };
+    const preview = await call("context_metacognition_preview", bad);
+    const dryRun = await call("context_metacognition_configure", { ...bad, dry_run: true });
+    expect(preview.result?.isError).toBe(true);
+    expect(text(preview)).toBe(text(dryRun));
+  });
+
+  it("configure still honours dry_run for existing callers, and says it is deprecated", async () => {
+    const configure = await described("context_metacognition_configure");
+    expect(configure.inputSchema.properties.dry_run.description).toMatch(/deprecated/i);
+    expect(configure.inputSchema.properties.dry_run.description).toContain("context_metacognition_preview");
+    const r = await call("context_metacognition_configure", { agent: "nodes/scout", ...CONFIG, dry_run: true });
+    expect(r.result.structuredContent.saved).toBe(false);
+  });
+
+  it("each tool states its one operation and its side effects", async () => {
+    const suggest = await described("context_metacognition_suggest");
+    expect(suggest.description).toMatch(/read-only/i);
+    expect(suggest.description).toMatch(/fetches nothing/i);
+    expect(suggest.inputSchema.properties.agent.description).toBeTruthy();
+
+    const preview = await described("context_metacognition_preview");
+    expect(preview.description).toMatch(/read-only/i);
+
+    const configure = await described("context_metacognition_configure");
+    expect(configure.description).toMatch(/replaces/i);
+    expect(configure.description).toMatch(/feeds/i);
+    expect(configure.description).toContain("context_metacognition_preview");
+
+    const run = await described("context_metacognition_run");
+    expect(run.description).toMatch(/one run/i);
+    expect(run.description).toMatch(/feeds/i);
+    expect(run.description).toMatch(/model/i);
+    expect(run.description).toMatch(/never publishes/i);
+    expect(run.description).toMatch(/access requests/i);
+    expect(run.description).toMatch(/withdraws/i);
+    expect(run.description).toMatch(/deleting/i);
+    expect(run.inputSchema.properties.inputs.description).toBeTruthy();
   });
 });
 

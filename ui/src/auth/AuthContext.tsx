@@ -68,6 +68,7 @@ export interface AuthContextValue {
   /** The server accepts `task` nodes — the board's "+ Add task" makes tasks
    *  (which skip review) rather than documents. */
   typeTaskEnabled: boolean;
+  typeViewEnabled: boolean;
   /** Public feature flag from /health — Hootie in the nest (default OFF;
    *  admins opt in). Off → the launcher is hidden exactly when
    *  POST /nests/:id/chat would 404. */
@@ -130,6 +131,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
   const [mcpOauthEnabled, setMcpOauthEnabled] = useState(false);
   const [typeTaskEnabled, setTypeTaskEnabled] = useState(false);
+  const [typeViewEnabled, setTypeViewEnabled] = useState(false);
   // Default OFF (mirrors config.ts: only an explicit "true" enables), so the
   // launcher never flashes on a server that has it off while /health loads.
   const [hootieEnabled, setHootieEnabled] = useState(false);
@@ -173,6 +175,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setTypeTableEnabled(h.type_table_enabled !== false);
       setMcpOauthEnabled(h.mcp_oauth_enabled === true);
       setTypeTaskEnabled(h.type_task_enabled === true);
+      setTypeViewEnabled(h.type_view_enabled === true);
       setHootieEnabled(h.hootie_enabled === true);
       setMetacognitionEnabled(h.metacognition_enabled === true);
       setDocStreamEnabled(h.experimental?.doc_stream === true);
@@ -224,6 +227,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setTypeTableEnabled(h.type_table_enabled !== false);
         setMcpOauthEnabled(h.mcp_oauth_enabled === true);
         setTypeTaskEnabled(h.type_task_enabled === true);
+        setTypeViewEnabled(h.type_view_enabled === true);
         setHootieEnabled(h.hootie_enabled === true);
         setMetacognitionEnabled(h.metacognition_enabled === true);
         setDocStreamEnabled(h.experimental?.doc_stream === true);
@@ -411,6 +415,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         typeTableEnabled,
         mcpOauthEnabled,
         typeTaskEnabled,
+        typeViewEnabled,
         hootieEnabled,
         metacognitionEnabled,
         docStreamEnabled,

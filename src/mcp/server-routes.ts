@@ -19,7 +19,7 @@
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
- * Metacognition (`context_metacognition_list` / `_suggest` / `_configure` / `_run` / `_remove`, nest
+ * Metacognition (`context_metacognition_list` / `_suggest` / `_preview` / `_configure` / `_run` / `_remove`, nest
  * required) is offered to people who own or administer a nest while its flags
  * are on, and re-checked on the named nest per call.
  *
@@ -66,6 +66,8 @@ import {
   toolShape,
   type ToolResult,
 } from "./tools.js";
+import { toolAnnotations, toolTitle } from "./annotations.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
@@ -345,7 +347,7 @@ export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
+      "List every nest these credentials can read, with name, id, permission and document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -646,7 +648,7 @@ function createServerMcp(
   instructions?: string,
 ): McpServer {
   const server = new McpServer(
-    { name: "contextnest-server", version: "1.0.0" },
+    { name: "contextnest-server", title: "ContextNest", version: SERVICE_VERSION },
     { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
@@ -659,7 +661,8 @@ function createServerMcp(
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     if (isMetacognitionTool(tool.name) && !offerMetacognition) continue;
     const shape = toolShape(tool.inputSchema);
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
       const granted = c.get("oauthScope");
@@ -969,9 +972,9 @@ Streamable HTTP, stateless. Two endpoints:
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too — also on
     \`${B}/mcp\` with \`nest\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
-    (a starting config read off the agent document), \`context_metacognition_configure\`
-    (call with \`dry_run: true\` first and show the person the returned \`summary\`
-    before saving), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
+    (a starting config read off the agent document), \`context_metacognition_preview\`
+    (validates a config and saves nothing: show the person the returned \`summary\`),
+    \`context_metacognition_configure\` (saves it), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
     \`workflow_runs_list { agent, agent_stats: true }\`
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`

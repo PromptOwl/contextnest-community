@@ -149,16 +149,17 @@ function blockHtml(
 ): string {
   if (!b.ok) {
     switch (b.kind) {
-      // An md block that cannot be served renders nothing: missing, denied,
-      // unpublished all look the same.
+      // Missing, denied and unpublished share one neutral line, so a reader
+      // cannot tell a hidden node from an absent one.
       case "md":
-        return "";
+        return placeholder("This content is unavailable.");
       case "html":
         return placeholder("This embedded page is unavailable.");
       case "list":
       case "data":
         return placeholder("This data is unavailable.");
       case "summary":
+        return placeholder("This summary is unavailable.");
       case "table":
       case "kpi":
       case "chart":
@@ -177,6 +178,17 @@ function blockHtml(
       return tableHtml(b.columns, b.rows) + (b.truncated ? truncatedNote : "");
     case "callout":
       return `<aside class="cn-block cn-callout cn-${b.tone}">${esc(b.text)}</aside>`;
+    case "summary":
+      // Escaped, not rendered as markdown: the text is model output over
+      // untrusted documents, so it must not be able to carry a link.
+      return (
+        `<div class="cn-block cn-summary"><p class="cn-meta">Generated summary</p>` +
+        b.text.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join("") +
+        (b.truncated ? truncatedNote : "") +
+        `<details class="cn-sources"><summary>Sources (${b.refs.length})</summary><ul class="cn-list">` +
+        b.refs.map((r) => `<li><code>${esc(r)}</code></li>`).join("") +
+        `</ul></details></div>`
+      );
     case "html":
       // No allow-popups, no allow-same-origin: the frame runs on an opaque
       // origin, and its response carries the matching CSP sandbox.

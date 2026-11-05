@@ -272,6 +272,7 @@ export async function getHealth() {
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
     type_task_enabled?: boolean;
+    type_view_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -361,6 +362,8 @@ export interface AdminSettings {
   type_table_enabled: boolean;
   /** The server accepts `task` nodes (its engine knows the type). */
   type_task_enabled?: boolean;
+  /** The server accepts `view` nodes (its engine knows the type). */
+  type_view_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -2021,6 +2024,11 @@ export async function listNodesMeta(nestId: string, approvedOnly = false) {
   );
 }
 
+/** Every `type: view` node, body-free — the sidebar's Views group. */
+export async function listViewNodes(nestId: string) {
+  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes?type=view`);
+}
+
 /** The nest-wide shape — one per nest, not per folder level. */
 export async function getNestCensus(nestId: string) {
   return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
@@ -2062,6 +2070,8 @@ export async function createNode(
     parent?: string | null;
     /** Custom field values, key → value (see lib/custom-fields.ts). */
     fields?: Record<string, unknown>;
+    /** type: view only. */
+    view?: unknown;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -2225,6 +2235,8 @@ export async function updateNode(
     parent?: string | null;
     /** Custom field values to set; `null` clears one, omitted keys stay. */
     fields?: Record<string, unknown>;
+    /** type: view only — replaces the block list wholesale. */
+    view?: unknown;
   },
   baseVersion?: number,
 ) {
