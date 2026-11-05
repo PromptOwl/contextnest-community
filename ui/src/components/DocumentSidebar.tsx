@@ -115,7 +115,7 @@ export function DocumentSidebar({
 }: Props) {
   // Only inside a nest — the dashboard rail is app pages, not nests.
   const nests = useQuery({ ...reads.nestList(), enabled: nestId !== null });
-  const { isAdmin, authMode, workflowPlaneEnabled } = useAuth();
+  const { isAdmin, authMode, workflowPlaneEnabled, pluginsEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -282,6 +282,7 @@ export function DocumentSidebar({
                   isOwner={nestTarget(n).isOwner}
                   isAdmin={isAdmin}
                   workflowPlaneEnabled={workflowPlaneEnabled}
+                  pluginsEnabled={pluginsEnabled}
                   activeView={activeView}
                   onOpen={(view) => onOpenView(nestTarget(n), view)}
                   currentNodeId={current ? nodeId : null}
@@ -438,6 +439,7 @@ function NestViews({
   isOwner,
   isAdmin,
   workflowPlaneEnabled,
+  pluginsEnabled,
   activeView,
   onOpen,
   currentNodeId,
@@ -448,6 +450,7 @@ function NestViews({
   isOwner: boolean;
   isAdmin: boolean;
   workflowPlaneEnabled: boolean;
+  pluginsEnabled: boolean;
   activeView: NestSidebarView["id"] | null;
   onOpen: (view: NestSidebarView) => void;
   /** The node on screen, so its View row highlights. */
@@ -496,11 +499,12 @@ function NestViews({
       caps
         ? nestSidebarViews(caps, {
           workflowPlaneEnabled,
+          pluginsEnabled,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, pluginsEnabled, stewardshipEnabled, pending],
   );
 
   // The "Views" group folds by default (remembered per browser) and opens

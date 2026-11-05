@@ -54,6 +54,9 @@ export interface AuthContextValue {
   /** Public feature flag from /health — the server's route gate, so the UI
    *  hides the workflow plane exactly when the API would 404 it. */
   workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — Nest Plugins (default OFF). Off →
+   *  /nests/:id/plugins 404s, so the nest's Plugins page is not listed. */
+  pluginsEnabled: boolean;
   /** Public feature flag from /health — import teams from PromptOwl (default
    *  OFF). Off → /teams/promptowl 404s, so the UI hides the panel to match. */
   promptowlTeamsEnabled: boolean;
@@ -121,6 +124,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [pluginsEnabled, setPluginsEnabled] = useState(false);
   const [promptowlTeamsEnabled, setPromptowlTeamsEnabled] = useState(false);
   // Content types default ON (mirrors config.ts — only an explicit "false"
   // disables), so the picker doesn't flicker types away while /health loads.
@@ -170,6 +174,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const h = await api.getHealth();
       setLogoUrl(h.logo_url ?? null);
       setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setPluginsEnabled(h.plugins_enabled === true);
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
@@ -222,6 +227,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setLogoUrl(h.logo_url ?? null);
         setServerVersion(h.version ?? null);
         setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setPluginsEnabled(h.plugins_enabled === true);
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
@@ -410,6 +416,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         authenticated,
         isAdmin,
         workflowPlaneEnabled,
+        pluginsEnabled,
         promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,

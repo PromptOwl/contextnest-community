@@ -4,7 +4,7 @@ import { nestPageForPath, nestPageForView, nestPages, visibleNestPages } from ".
 // Built from pages/nest/*/meta.ts — guards what a new page could break.
 describe("nest page registry", () => {
   it("finds every page folder in sidebar order", () => {
-    expect(nestPages.map((p) => p.id)).toEqual(["board", "graph", "definitions", "workflows", "structure"]);
+    expect(nestPages.map((p) => p.id)).toEqual(["board", "graph", "definitions", "workflows", "structure", "plugins"]);
   });
 
   it("gives every page a unique URL segment and a unique app view", () => {
@@ -28,5 +28,15 @@ describe("nest page registry", () => {
     expect(visibleNestPages({ ...base, canEditDocs: false }).map((p) => p.id)).toEqual(["board", "graph", "definitions", "structure"]);
     // Every nest has its own rules; a docs-site reader is not shown them.
     expect(visibleNestPages({ ...base, isReaderView: true }).map((p) => p.id)).not.toContain("structure");
+  });
+
+  it("gates plugins on the plugins flag only: viewers read, a docs-site reader never sees it", () => {
+    const base = { isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled: false };
+    expect(visibleNestPages(base).map((p) => p.id)).not.toContain("plugins");
+    expect(visibleNestPages({ ...base, pluginsEnabled: false }).map((p) => p.id)).not.toContain("plugins");
+    expect(visibleNestPages({ ...base, pluginsEnabled: true }).map((p) => p.id)).toContain("plugins");
+    expect(visibleNestPages({ ...base, pluginsEnabled: true, isReadOnly: true, canEditDocs: false }).map((p) => p.id)).toContain("plugins");
+    expect(visibleNestPages({ ...base, pluginsEnabled: true, isReaderView: true }).map((p) => p.id)).not.toContain("plugins");
+    expect(nestPageForPath("plugins")?.viewPage).toBe("plugins");
   });
 });

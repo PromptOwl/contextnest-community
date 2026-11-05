@@ -192,6 +192,15 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
     expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, stewardshipEnabled: true }))).toContain("review");
   });
 
+  it("lists Plugins under Views only when the server has plugins on", () => {
+    expect(ids(nestSidebarViews(full, governed))).not.toContain("plugins");
+    const v = nestSidebarViews(full, { ...governed, pluginsEnabled: true });
+    expect(v.find((x) => x.id === "plugins")).toMatchObject({ page: "plugins", group: "views", label: "Plugins" });
+    // A viewer reads what is connected; a docs-site reader never sees it.
+    expect(ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, { ...governed, pluginsEnabled: true }))).toContain("plugins");
+    expect(ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { ...governed, pluginsEnabled: true }))).toEqual(["overview"]);
+  });
+
   it("hides the review queue and workflows from a read-only caller", () => {
     const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, governed));
     expect(v).toEqual(["overview", "board", "graph", "definitions", "structure"]);

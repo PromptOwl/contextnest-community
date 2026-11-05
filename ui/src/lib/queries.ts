@@ -82,6 +82,7 @@ export const keys = {
   edges: (nestId: string) => [...keys.nest(nestId), "edges"] as const,
   schedules: (nestId: string) => [...keys.nest(nestId), "schedules"] as const,
   env: (nestId: string) => [...keys.nest(nestId), "env"] as const,
+  plugins: (nestId: string) => [...keys.nest(nestId), "plugins"] as const,
   connectors: (nestId: string) => [...keys.nest(nestId), "connectors"] as const,
   nestTeams: (nestId: string) => [...keys.nest(nestId), "teams"] as const,
   externalEdits: (nestId: string) =>
@@ -668,6 +669,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.schedules(nestId),
       queryFn: () => api.listSchedules(nestId),
+      staleTime: STALE.reference,
+    }),
+  plugins: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.plugins(nestId),
+      queryFn: () => api.listNestPlugins(nestId),
       staleTime: STALE.reference,
     }),
   env: (nestId: string) =>

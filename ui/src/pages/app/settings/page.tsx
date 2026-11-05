@@ -6,7 +6,7 @@
  * tabs by role so the page stays short. Add a new setting to a tab's <Card>
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,8 @@ import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
+import { PluginsSettingsCard } from "./PluginsSettingsCard";
+import { adminSettingsAfterSave } from "../../../lib/nest-plugins";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -121,6 +123,8 @@ const TABS: {
     label: "Features",
     keys: [
       "workflow_plane_enabled",
+      "plugins_enabled",
+      "plugins_packages",
       "subagent_runs_enabled",
       "metacognition_enabled",
       "surfaces_enabled",
@@ -1250,6 +1254,17 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Nest Plugins — outside sources into nests (FEATURE_PLUGINS) */}
+            <PluginsSettingsCard
+              enabled={!!draft.plugins_enabled}
+              packages={draft.plugins_packages ?? ""}
+              loaded={settings?.plugins_loaded ?? []}
+              loadErrors={settings?.plugins_load_errors ?? []}
+              dirty={dirtyKeys.includes("plugins_packages") || dirtyKeys.includes("plugins_enabled")}
+              error={fieldErrors.plugins_packages}
+              onChange={set}
+            />
 
             {/* Metacognition agents — server-run, so they need the plane */}
             <Card>
@@ -2893,6 +2908,8 @@ export default function SettingsRoute() {
   const qc = useQueryClient();
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
+  const serverSettingsRef = useRef(serverSettings);
+  serverSettingsRef.current = serverSettings;
   useEffect(() => {
     if (!isAdmin) return;
     getAdminSettings()
@@ -2904,7 +2921,9 @@ export default function SettingsRoute() {
   ) => {
     try {
       const res = await updateAdminSettings(patch);
-      setServerSettings(res.settings);
+      // What loaded from the plugin allowlist comes only with GET (the server
+      // reloads the set on save), so re-read when the plugin settings moved.
+      setServerSettings(await adminSettingsAfterSave(patch, res.settings, serverSettingsRef.current, getAdminSettings));
       // Feature flags gate other views (workflow-plane nav, sub-agent picker,
       // PromptOwl teams …) off the /health-sourced AuthContext state, not
       // serverSettings. Always re-read health after a save so ANY flag exposed
