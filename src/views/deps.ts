@@ -25,6 +25,7 @@ import { getApprovedVersion, getApprovedVersions, getVersion } from "../governan
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { queryTableNode } from "../tables/query.js";
+import { summarizeNodes } from "./summary.js";
 import { NotFoundError, ForbiddenError, ValidationError } from "../shared/errors.js";
 import type { AuthorInfo, ErrorCode, NodeSummary, Principal, TableRows, ViewDeps } from "./core.js";
 
@@ -185,6 +186,10 @@ export function createViewDeps(): ViewDeps {
         if (err instanceof ValidationError) return { error: "unsupported_binding" };
         return { error: "query_failed" };
       }
+    },
+
+    summarize(nestId, input) {
+      return summarizeNodes(nestId, input, this.readMd);
     },
   };
 }

@@ -2460,6 +2460,21 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("082_surfaces_seeds");
   }
+
+  // 083: cached `summary` block text, keyed by its exact input set.
+  if (!hasMigration("083_view_summaries")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS view_summaries (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        cache_key TEXT NOT NULL,
+        text TEXT NOT NULL,
+        refs TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, cache_key)
+      )
+    `);
+    recordMigration("083_view_summaries");
+  }
 }
 
 /**
