@@ -93,6 +93,9 @@ import {
   moveFolder,
   listNodesForCallerByEmail,
   getNodeForCaller,
+  archiveNode,
+  unarchiveNode,
+  canArchiveNode,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
@@ -570,6 +573,15 @@ const TASK_FIELD_PROPERTIES = {
       'Id of the parent node in this nest (e.g. "nodes/launch") — makes this a sub-item. Cycles are refused. null or "" clears it.',
   },
 };
+
+/** A tool's input schema from the engine catalog, for tools that mirror an op. */
+function engineToolSchema(op: string) {
+  const desc = engineApi.getOperation(op);
+  if (!desc) throw new Error(`The engine has no "${op}" operation. Check the engine version.`);
+  const schema = inputJsonSchema(desc) as { type: "object"; properties?: Record<string, unknown> };
+  const { uri: _uri, ...properties } = schema.properties ?? {};
+  return { ...schema, properties };
+}
 
 /**
  * The `view` argument of context_create / context_update (§1.12), taken from
@@ -1095,6 +1107,18 @@ export const TOOL_DEFINITIONS = [
         },
       },
     },
+  },
+  {
+    // Schema straight from the engine's catalog, less `uri`: no resolver here.
+    name: "context_archive",
+    description:
+      "Archive a node: out of lists and retrieval with its history kept, until context_unarchive brings it back. Use this rather than context_delete when it might be wanted again. Stewards only; refused while a review is pending.",
+    inputSchema: engineToolSchema("context_archive"),
+  },
+  {
+    name: "context_unarchive",
+    description: "Bring an archived node back in the status it was archived from. Name it by id. Stewards only.",
+    inputSchema: engineToolSchema("context_unarchive"),
   },
   {
     name: "context_move",
@@ -3894,6 +3918,32 @@ async function runTool(
           title: node.frontmatter.title,
           deleted: true as const,
         },
+      };
+    }
+
+    case "context_archive":
+    case "context_unarchive": {
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      const verb = toolName === "context_archive" ? "archive" : "unarchive";
+      if (!(await canArchiveNode(nestId, node.id, userEmail))) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to ${verb} "${node.frontmatter.title}": only a steward of this document can.`,
+          { type: "node", id: node.id },
+        );
+      }
+      if (verb === "unarchive") {
+        const { status } = await unarchiveNode(nestId, node.id, userEmail, { client: ctx.client });
+        return { text: `Unarchived **${node.frontmatter.title}** (${node.id}), back as ${status}.`, data: { id: node.id, status } };
+      }
+      const archived = await archiveNode(nestId, node.id, userEmail, {
+        ...(typeof args.reason === "string" ? { reason: args.reason } : {}),
+        client: ctx.client,
+      });
+      return {
+        text: `Archived **${node.frontmatter.title}** (${node.id}). Nothing was deleted: context_unarchive brings it back.`,
+        data: { id: node.id, status: "rejected", archived },
       };
     }
 

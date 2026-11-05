@@ -65,6 +65,9 @@ import {
   discardDraft,
   restoreVersion,
   listNodesForCaller,
+  archiveNode,
+  unarchiveNode,
+  canArchiveNode,
   nestCensus,
   getNodeForCaller,
   resolveAuthorship,
@@ -190,7 +193,15 @@ nodeRoutes.get("/", async (c) => {
     }),
     // Custom fields: ?field.<key>=<value>, every one must match.
     ...(fieldFiltersFromQuery(q) ? { fields: fieldFiltersFromQuery(q) } : {}),
+    // Stewards only, enforced below: the archive is theirs to look through.
+    ...(q.archived === "1" ? { archived: true } : {}),
   });
+  if (q.archived === "1") {
+    const email = await resolveCallerEmail(userId);
+    const mine = [];
+    for (const n of nodes) if (await canArchiveNode(nestId, n.id, email)) mine.push(n);
+    return c.json({ count: mine.length, nodes: mine });
+  }
   // The nest-wide shape is NOT bundled here: it describes the whole nest
   // whatever level was asked for, so bundling recomputed it on every folder
   // expand. It has its own endpoint and its own cache entry.
@@ -437,6 +448,29 @@ nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
+// POST /nests/:nestId/nodes/:nodeId/archive and .../unarchive — out of lists and
+// retrieval and back, history kept (spec §1.13). A steward's call, like approving.
+for (const action of ["archive", "unarchive"] as const) {
+  nodeRoutes.post(`/:nodeId{.+}/${action}`, async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const userEmail = await resolveCallerEmail(c.get("userId"));
+    if (!(await canArchiveNode(nestId, nodeId, userEmail))) {
+      return c.json({ error: `Only a steward of this document can ${action} it.` }, 403);
+    }
+    if (action === "unarchive") {
+      return c.json({ ok: true, ...(await unarchiveNode(nestId, nodeId, userEmail)) });
+    }
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({}) as { reason?: unknown });
+    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
+    const archived = await archiveNode(nestId, nodeId, userEmail, {
+      ...(reason ? { reason } : {}),
+      client: attributeRequest(c, undefined),
+    });
+    return c.json({ ok: true, archived });
+  });
+}
+
 // POST /nests/:nestId/nodes/:nodeId/revert — restore an old version by writing
 // its reconstructed content as a NEW version (history is append-only; nothing
 // is lost). Read-gated; updateNode applies the write. POST suffix route — no
@@ -593,7 +627,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     { id: nodeId },
     userId,
     userEmail,
-    { verifyChecksum: true },
+    { verifyChecksum: true, includeArchived: true },
   );
   if (node.pendingChange) {
     try {

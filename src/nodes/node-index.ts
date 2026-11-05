@@ -438,6 +438,7 @@ export async function indexedFolderCounts(
   const rows = (await getDb().all(
     `SELECT folder, COUNT(*) AS count FROM node_index
       WHERE nest_id = ? AND folder <> ''
+        AND frontmatter_json NOT LIKE '%"archived":{"at":%'
       GROUP BY folder`,
     [nestId],
   )) as Array<{ folder: string; count: number | string }>;

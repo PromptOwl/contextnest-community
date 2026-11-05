@@ -11,20 +11,23 @@ import {
   parseDocument,
   normalizeStatus,
   isRejected,
+  isArchived,
+  moveDocument,
+  readVersionSource,
+  restoreSealedVersion,
   filterDocuments,
   DocumentNotFoundError,
   NODE_TYPES,
   TAG_PATTERN,
   generateIndexMd,
-  readPdfBinary,
   pdfSidecarPath,
   viewMetaSchema,
   TITLE_MAX_LENGTH,
   withVaultLock,
 } from "@promptowl/contextnest-engine";
-import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
-import { rename, mkdir, rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import type { ArchivedMeta, ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
+import { rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
@@ -484,6 +487,8 @@ export function setStoredFields(r: { fields?: Record<string, unknown> }, fields:
 }
 
 export interface NodeResponse extends TaskFields {
+  /** Who archived it, when and why — set only while it is archived. */
+  archived?: ArchivedMeta;
   id: string;
   title: string;
   type: string;
@@ -715,6 +720,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       ]
     : [];
   return {
+    ...(fm.archived ? { archived: fm.archived } : {}),
     id: node.id,
     title,
     type: fm.type || "document",
@@ -933,6 +939,8 @@ export interface ListNodesFilters {
    * content (MCP under stewardship). Implied by approvedOnly / public readers.
    */
   approvedFields?: boolean;
+  /** List the archived documents instead of the live ones. */
+  archived?: boolean;
 }
 
 /**
@@ -958,7 +966,8 @@ export async function getNodeForCaller(
   selector: { id?: string; title?: string },
   userId: string,
   userEmail: string,
-  opts: { verifyChecksum?: boolean } = {},
+  /** `includeArchived`: an archived node still opens for someone who can restore it. */
+  opts: { verifyChecksum?: boolean; includeArchived?: boolean } = {},
 ): Promise<ContextNode> {
   // Gate BEFORE the read whenever the caller named an id. Reading first and
   // gating after answers a question the caller was not entitled to ask: a
@@ -1006,6 +1015,13 @@ export async function getNodeForCaller(
     throw new ForbiddenError(
       "Access denied — no steward assignment for this node",
     );
+  }
+  // Answers as a miss: to everyone else an archived node is simply not there.
+  if (
+    got.frontmatter.archived &&
+    !(opts.includeArchived && (await canArchiveNode(nestId, got.id, userEmail)))
+  ) {
+    throw new NotFoundError(`Node not found: ${selector.id ?? selector.title}`);
   }
   return {
     id: got.id,
@@ -1114,6 +1130,8 @@ export async function listNodesForCaller(
   if (!filters.includeDerived) {
     documents = documents.filter((d) => !isDerivedAnnotationsNode(d.id));
   }
+  // Archived documents are out of every list but the one that asks for them.
+  documents = documents.filter((d) => Boolean(d.frontmatter.archived) === Boolean(filters.archived));
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
   // the engine already scoped the crawl: it is the correctness guarantee, and
@@ -1436,7 +1454,7 @@ async function readableFolderCounts(
   userEmail: string,
 ): Promise<Array<{ path: string; count: number }>> {
   const documents = (await readIndexedNodes(nestId)).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
+    (d) => !isDerivedAnnotationsNode(d.id) && !isArchived(d),
   );
   const visible = await filterAccessible(nestId, userId, userEmail, documents);
   const direct = new Map<string, number>();
@@ -1554,7 +1572,7 @@ export async function nestCensus(
   // Same exclusion as the listing — the counts must describe the documents the
   // Documents tab shows, not those plus the annotation projections.
   const documents = (await readIndexedNodes(nestId)).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
+    (d) => !isDerivedAnnotationsNode(d.id) && !isArchived(d),
   );
 
   // Same gate as the listing, so the counts describe what this caller can
@@ -2612,13 +2630,7 @@ export async function alignOnDiskStatus(
     const { storage } = await engineCache.get(nestId);
     const node = await storage.readDocument(documentId);
     if (node.frontmatter.status === status) return;
-    await storage.writeDocument(
-      documentId,
-      serializeNodeSafe({
-        ...node,
-        frontmatter: { ...node.frontmatter, status: status as any },
-      }),
-    );
+    await storage.patchFrontmatter(node, { status: status as any });
   } catch (err) {
     console.warn(
       `[import] could not align on-disk status for ${nestId}/${documentId}:`,
@@ -2856,6 +2868,9 @@ export async function updateNode(
         node = await storage.readDocument(nodeId);
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
+      }
+      if (isArchived(node)) {
+        throw new ValidationError("This document is archived. Restore it first.");
       }
       // The exact stored bytes, for undoing a PDF replace whose second write
       // fails (see stagePdfImport).
@@ -3565,17 +3580,6 @@ async function moveNodeInner(
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
 
-  // A pdf node's binary is bound to its id (`<id>.pdf`, its archived versions
-  // under the id's .versions/), and a move rewrites the id without carrying
-  // either — the moved node would name a sidecar that is not there and the
-  // delete of the old id would take the binary with it. Refuse until the
-  // engine can relocate a pdf node as one unit.
-  if (node.frontmatter.type === PDF_NODE_TYPE) {
-    throw new ValidationError(
-      "PDF documents can't be moved to another folder yet. Upload the PDF again in the destination folder instead.",
-    );
-  }
-
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "moving");
@@ -3617,25 +3621,9 @@ async function moveNodeInner(
     // On a folder board a move IS the column change, so a task gets the same
     // moved_at stamp a tag swap gives it (updateNode).
     const movedAt = new Date().toISOString();
-    const moved: ContextNode = {
-      ...node,
-      id: newId,
-      frontmatter: {
-        ...node.frontmatter,
-        updated_at: movedAt,
-        ...(node.frontmatter.type === TASK_NODE_TYPE
-          ? { metadata: { ...(node.frontmatter.metadata as object), moved_at: movedAt } }
-          : {}),
-      },
-    };
     // Under enforced rules a move is judged as a delete there and a create
     // here — before anything is written.
-    const plan = await assertMovable(storage, nodeId, newId, moved);
-    // serializeNodeSafe, not serializeDocument: `moved` came from
-    // readDocument, so an empty `tags: []` on disk is back as
-    // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through serializeNodeSafe),
-    // which is why drafts and pending-review docs were the ones failing.
+    const plan = await assertMovable(storage, nodeId, newId, node);
     // No document at the destination (checked above), so any rows there are
     // orphans — same as create, clear them or the repoint trips UNIQUE. Before
     // the write: its index write-through creates fresh rows at newId.
@@ -3643,26 +3631,12 @@ async function moveNodeInner(
       await purgeNodeKeyedRows(tx, nestId, newId);
       await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
     });
-    await storage.writeDocument(newId, serializeNodeSafe(moved));
-
-    // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
-    // doc) so reconstructVersion keeps working for pre-move versions. Layout is
-    // engine-owned, so this is best-effort: if the chain isn't where the
-    // structured layout puts it (e.g. flat imported nests), history still
-    // serves from the governance DB rows migrated below.
-    try {
-      const nestPath = resolveNestPath(nestId);
-      const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
-      const newChain = join(nestPath, dirname(newId), ".versions", leaf);
-      if (oldChain !== newChain) {
-        await mkdir(dirname(newChain), { recursive: true });
-        await rename(oldChain, newChain);
-      }
-    } catch {
-      /* no on-disk chain to carry */
-    }
-
-    await storage.deleteDocument(nodeId);
+    const moved = await moveDocument(storage as NestStorage, nodeId, newId, {
+      frontmatter:
+        node.frontmatter.type === TASK_NODE_TYPE
+          ? { metadata: { ...(node.frontmatter.metadata as object), moved_at: movedAt } }
+          : {},
+    });
     await scaffold(storage, plan);
 
     // Repoint every node-keyed table for the source doc and its derived
@@ -3761,6 +3735,7 @@ export async function discardDraft(
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     await assertHead(nestId, nodeId, opts.expectHead);
     await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
+    await assertNotArchived(nestId, nodeId);
 
     const sealed = await versions.getSealedVersion(nestId, nodeId);
     if (sealed == null) {
@@ -3769,9 +3744,12 @@ export async function discardDraft(
     }
 
     const { storage, versions: versionManager } = await engineCache.get(nestId);
-    let raw: string;
+    let result: Awaited<ReturnType<typeof restoreSealedVersion>>;
     try {
-      raw = await versionManager.reconstructVersion(nodeId, sealed);
+      // Written back as stored rather than patched through context_update: the
+      // reconstructed bytes carry the checksum they were published with, so the
+      // drift scanner stays quiet, and a discard must not cost a version.
+      result = await restoreSealedVersion(storage as NestStorage, versionManager, nodeId, sealed);
     } catch (err) {
       console.error(
         "reconstructVersion failed (discard draft)",
@@ -3785,36 +3763,18 @@ export async function discardDraft(
       );
     }
 
-    // Written back verbatim rather than patched through context_update: the
-    // reconstructed bytes carry the checksum they were published with, so the
-    // file matches its own frontmatter again and the drift scanner stays quiet.
-    // Same move rejectSuggestion makes, and for the same reason — a discard
-    // must not cost a version.
-    await storage.writeDocument(nodeId, raw);
     await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
-    const restored = parseDocument(`${nodeId}.md`, raw, nodeId);
-    // A pdf node's draft also replaced the binary beside it. The restored
-    // frontmatter names the sealed version's bytes; put them back as the live
-    // sidecar (the engine resolves them from the archive and verifies the
-    // hash), so the file and its binary agree again.
-    let warning: string | undefined;
-    if (restored.frontmatter.type === PDF_NODE_TYPE) {
-      try {
-        const bytes = await readPdfBinary(storage as NestStorage, nodeId);
-        await storage.writeVaultBinary(pdfSidecarPath(nodeId), bytes);
-      } catch (err) {
-        // The text is back; the binary could not be. Reads stay safe (the
-        // served PDF is hash-verified, so a mismatch is refused, not served),
-        // but the caller should hear it now rather than from a later 500.
-        console.error("[pdf] could not restore the sealed binary on discard", nestId, nodeId, err);
-        warning =
-          `The draft was discarded, but the PDF of version ${sealed} could not be restored ` +
-          "(its archived copy is missing or no longer matches). Upload the PDF again, or ask an admin to verify the nest.";
-      }
-    }
+    const restored = result.node;
+    // The text is back; the binary may not be. Reads stay safe (the served PDF
+    // is hash-verified, so a mismatch is refused, not served), but the caller
+    // should hear it now rather than from a later 500.
+    const warning = result.pdfRestored
+      ? undefined
+      : `The draft was discarded, but the PDF of version ${sealed} could not be restored ` +
+        "(its archived copy is missing or no longer matches). Upload the PDF again, or ask an admin to verify the nest.";
     await syncNodeTags(
       nestId,
       nodeId,
@@ -3847,27 +3807,20 @@ export async function restoreVersion(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   let raw: string;
+  let restoredPdf: Buffer | null;
   try {
-    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
-  } catch {
-    throw new NotFoundError(`Version ${targetVersion} not found for ${nodeId}`);
-  }
-  let pdfMeta: unknown;
-  try {
-    pdfMeta = parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.pdf;
-  } catch {
-    pdfMeta = undefined;
-  }
-  let restoredPdf: Buffer | null = null;
-  if (pdfMeta) {
-    try {
-      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
-        version: targetVersion,
-      });
-    } catch (err) {
-      console.error("[pdf] restore could not read the version's binary", nestId, nodeId, targetVersion, err);
-      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
+    ({ raw, pdf: restoredPdf } = await readVersionSource(
+      storage as unknown as NestStorage,
+      versionManager,
+      nodeId,
+      targetVersion,
+    ));
+  } catch (err) {
+    if ((err as { code?: string }).code !== "INTEGRITY_ERROR") {
+      throw new NotFoundError(`Version ${targetVersion} not found for ${nodeId}`);
     }
+    console.error("[pdf] restore could not read the version's binary", nestId, nodeId, targetVersion, err);
+    throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
   }
   return updateNode(
     nestId,
@@ -3880,6 +3833,64 @@ export async function restoreVersion(
     userEmail,
     { expectHead: opts.expectHead },
   );
+}
+
+/** Archived means frozen: discarding or editing would quietly bring it back. */
+async function assertNotArchived(nestId: string, nodeId: string): Promise<void> {
+  const { storage } = await engineCache.get(nestId);
+  const node = await storage.readDocument(nodeId).catch(() => null);
+  if (node && isArchived(node)) {
+    throw new ValidationError("This document is archived. Restore it first.");
+  }
+}
+
+/** Archiving is a steward's call: nest owners, admins and reviewers of this node. */
+export async function canArchiveNode(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
+  return canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }));
+}
+
+/**
+ * Take a node out of lists and retrieval, recoverably (spec §1.13). History,
+ * review records and the approved pin all stay; only the file's status changes.
+ * Permission is the caller's job, as for deleteNode.
+ */
+export function archiveNode(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { reason?: string; client?: ClientMetadata } = {},
+): Promise<ArchivedMeta> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    // Refused for reviewers too: approving later could not publish it.
+    if (await getPendingReview(nestId, nodeId)) {
+      throw new LockedError("This document is awaiting review. Approve or reject it before archiving.");
+    }
+    const { archived } = await engineApi.run<{ archived: ArchivedMeta }>(
+      "context_archive",
+      { id: nodeId, ...(opts.reason ? { reason: opts.reason } : {}), ...(opts.client ? { client: opts.client } : {}) },
+      await opContext(nestId, userEmail),
+    );
+    await trackEvent("node.archive", { nestId, nodeId });
+    return archived;
+  });
+}
+
+/** Bring an archived node back in the status it left. */
+export function unarchiveNode(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { client?: ClientMetadata } = {},
+): Promise<{ status: string }> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    const result = await engineApi.run<{ status: string }>(
+      "context_unarchive",
+      { id: nodeId, ...(opts.client ? { client: opts.client } : {}) },
+      await opContext(nestId, userEmail),
+    );
+    await trackEvent("node.unarchive", { nestId, nodeId });
+    return result;
+  });
 }
 
 /**

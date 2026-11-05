@@ -70,6 +70,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_update: overwrite("Update document", "Replaces content, tags and fields of an existing node."),
   context_bulk_update: overwrite("Update many documents", "Changes tags, fields and columns on up to 100 existing nodes."),
   context_delete: overwrite("Delete documents", "Deletes nodes with their history, irreversibly."),
+  context_archive: add("Archive document", "Takes a node out of lists and retrieval; nothing is deleted and context_unarchive restores it."),
+  context_unarchive: add("Unarchive document", "Brings an archived node back in the status it left."),
   context_move: add("Move document or folder", "Refiles a node or folder; an occupied destination is refused, history follows, and it can be moved back."),
   context_table_rows: overwrite("Change table rows", "Updates and deletes rows of a table node."),
   context_instructions_update: overwrite("Replace nest instructions", "Replaces the whole of CONTEXT.md."),

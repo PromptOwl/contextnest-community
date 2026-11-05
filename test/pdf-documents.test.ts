@@ -510,16 +510,14 @@ describe("POST /nests/:id/nodes/pdf — governed upload", () => {
     expect(res.status).toBe(403);
   });
 
-  it("moving a pdf node is refused rather than orphaning its binary", async () => {
-    const res = await jsonRequest(
-      app,
-      "POST",
-      `/nests/${nestId}/nodes/${pdfId}/move`,
-      { folder: "archive" },
-      owner.apiKey,
-    );
-    expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/pdf/i);
+  it("moving a pdf node carries its binary, there and back", async () => {
+    const move = (id: string, folder: string) =>
+      jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/move`, { folder }, owner.apiKey);
+    const res = await move(pdfId, "archive");
+    expect(res.status).toBe(200);
+    const moved = await app.request(`/nests/${nestId}/nodes/${res.data.node.id}/pdf`, { headers: authed(owner.apiKey) });
+    expect(moved.status).toBe(200);
+    expect((await move(res.data.node.id, "")).data.node.id).toBe(pdfId);
   });
 
   it("deleting a pdf node removes its binary", async () => {

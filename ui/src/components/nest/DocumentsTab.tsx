@@ -22,7 +22,6 @@ import { FolderDeleteDialog } from "./FolderDeleteDialog";
 import { FolderMoveDialog } from "./FolderMoveDialog";
 import { BulkSelectionBar } from "./BulkSelectionBar";
 import { Checkbox } from "@/components/ui/checkbox";
-import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -194,6 +193,7 @@ export function DocumentsTab({
     ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
     : 0;
 
+  const [archivedDocs, setArchivedDocs] = useState<Array<{ id: string; title: string }> | null>(null);
   // Folder being renamed or moved (admin/owner).
   const [moveFolderTarget, setMoveFolderTarget] = useState<
     { path: string; label: string } | null
@@ -1241,7 +1241,6 @@ export function DocumentsTab({
                   // so reorganizing an under-review doc stays possible.
                   const canMove =
                     canEditNode(node) &&
-                    nodeTypeSupportsMove(nodeType) &&
                     (node.status !== "pending_review" ||
                       isOwner ||
                       isAdmin ||
@@ -1940,6 +1939,33 @@ export function DocumentsTab({
                 );
               })()}
 
+              {/* Archived documents, for stewards to find and restore. Fetched on
+                  open; the server returns only the ones this caller can restore. */}
+              {(canManage || canEditDocs) && (
+                <details
+                  className="mt-4 text-xs text-muted-foreground"
+                  data-testid="archived-documents"
+                  onToggle={(e) => {
+                    if (e.currentTarget.open) void api.listArchivedNodes(nestId).then((r) => setArchivedDocs(r.nodes));
+                  }}
+                >
+                  <summary className="cursor-pointer select-none">Archived documents</summary>
+                  <div className="mt-2 space-y-1 pl-1">
+                    {archivedDocs?.length === 0 && <div>Nothing archived that you can restore.</div>}
+                    {archivedDocs?.map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        className="block text-left text-primary hover:underline"
+                        onClick={() => onOpenDocument(d.id)}
+                      >
+                        {d.title}
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              )}
+
               {/* Wiki link health — orphans + broken [[links]]. Answering it
                   needs every document's body, so opening the block is what
                   fetches the whole nest. */}
@@ -2050,7 +2076,7 @@ export function DocumentsTab({
         nestId={nestId}
         nodes={selectedNodes}
         folders={allFolders}
-        canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
+        canEdit={selectedNodes.every((n) => canEditNode(n))}
         canDelete={selectedNodes.every((n) => canManage || isMine(n))}
         canSubmit={stewardshipEnabled && selectedNodes.some((n) => n.status === "draft" && canEditNode(n))}
         onClear={() => setSelected(new Map())}

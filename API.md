@@ -894,7 +894,7 @@ Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; con
 Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
 
 ### Bulk move and delete — `POST /nests/:nestId/nodes/bulk-move`, `/bulk-delete`
-Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal or a PDF move is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
+Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
 
 ### Ticket backfill — `POST /nests/:nestId/tickets/backfill` (admin/owner)
 Numbers the tasks a nest already has, oldest first (`created_at`, then id), once `task_rules.ticket_numbering` is on (which needs a `ticket_prefix`). Body `{ "limit"?: 1–100, "dry_run"?: boolean }` (default 100). Tasks that already have a ticket are skipped; every other task is numbered whatever surface it is in. A dry run writes nothing. Each numbered task is published as its own version (change note `Assigned ticket PO-1`) and never drafts. Call again until `remaining` is `0`.
@@ -1294,6 +1294,14 @@ Restore an earlier version by writing its content as a **new** version (history 
 { "targetVersion": 3 }
 ```
 Response: `{ "ok": true, "version": <new>, "node": { ... } }`. `400` without a valid `targetVersion`; `404` if that version doesn't exist. Only **sealed** versions can be reverted to — a draft revision is not in the version chain (see below).
+
+### POST `/nests/:nestId/nodes/:nodeId/archive`
+
+Body `{ "reason": "…" }` (optional). Takes the document out of lists, counts, search and agent reads, keeping its history (spec §1.13). Stewards only: nest owner, admin, or a reviewer of this document, otherwise `403`. `423` while a review is pending; `400` when already archived or a suggestion is staged. The document stays readable by id for stewards, with an `archived` block, and answers `404` to everyone else. Edits, discards and review submissions answer `400` until it is restored.
+
+### POST `/nests/:nestId/nodes/:nodeId/unarchive`
+
+Brings an archived document back in the status it left, same version and content. Same permission as archive. List what can be restored with `GET /nests/:nestId/nodes?archived=1`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/discard`
 
@@ -2858,6 +2866,8 @@ The server guarantees **delivery**, not obedience: an outside client (Claude Cod
 - `context_list` filters by `assignee` (`none` = unassigned), `priority` (`none` = unset) and `due_before` (inclusive).
 - `context_task_log` — `{ id | title, note, status?: working|done|blocked, claim? }` — registers what the agent did on a task, attributed to the caller plus the API key and `client.agent` (see `POST …/task-log`). It shows in the task's activity timeline in the UI, e.g. *Claude Code (key ctx CLI (laptop)) on behalf of Misha · working · drafted the hero section*. Also on the server-level `/mcp` endpoint (with `nest`).
 Every write here needs edit access; a read-only collaborator's key gets `UNAUTHORIZED_ACTION`, and a headless access key is refused like any other write.
+
+**Archive.** `context_archive` and `context_unarchive` mirror the REST routes: stewards only, and `context_get` answers not found for an archived node. Prefer archive to `context_delete` when a document may be wanted again.
 
 **Deletion requests** mirror the REST + UI flow, so an agent isn't left at a dead end when `context_delete` refuses:
 - `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
