@@ -111,6 +111,7 @@ export const HISTORICAL_MIGRATIONS = [
   "080_surfaces_ingest",
   "081_surfaces_cards",
   "082_surfaces_seeds",
+  "083_view_summaries",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1336,6 +1337,17 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   // Migration 082 parity: Surfaces seeds (S3).
   await db.exec(surfacesS3Ddl(NOW));
   await db.exec(surfacesS3AlterPostgres());
+  // Migration 083 parity: cached `summary` block text.
+  await db.exec(`
+      CREATE TABLE IF NOT EXISTS view_summaries (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        cache_key TEXT NOT NULL,
+        text TEXT NOT NULL,
+        refs TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, cache_key)
+      )
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

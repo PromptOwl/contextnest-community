@@ -138,7 +138,8 @@ export const METACOGNITION_TOOL_DEFINITIONS = [
       "Start one run of a metacognition agent now. One operation: the server runs it in the background and returns its run_id at once; follow it with " +
       "workflow_run_get { run_id }, and see its track record with workflow_runs_list { agent, agent_stats: true }. " +
       "Side effects: the run calls the model (spending the nest's budget), may fetch the agent's configured feeds, may call its configured MCP servers' allowed tools, " +
-      "and may notify the people its owner listed. In the nest it can only leave comments and draft proposals for a reviewer: it never publishes or deletes. " +
+      "and may notify the people its owner listed. In the nest it never publishes: it leaves comments, files access requests, and writes draft proposals for a reviewer, " +
+      "which replace a document's working copy but not its approved text. It also withdraws the agent's own rejected drafts, deleting a proposed document that was never published. " +
       "Refused while the same agent is already running, and after too many starts in an hour. Owner/admin only.",
     inputSchema: {
       type: "object",
@@ -207,12 +208,12 @@ function configBody(args: Record<string, any>): Record<string, unknown> {
 }
 
 /** Validate and summarize; never saves. `next` tells the harness how to save. */
-async function previewConfig(args: Record<string, any>, ctx: McpToolContext, next: string): Promise<ToolResult> {
+async function previewConfig(args: Record<string, any>, ctx: McpToolContext, next: string, dryRun = false): Promise<ToolResult> {
   const v = await validateAgentConfig(ctx.nestId, agentArg(args), configBody(args));
   const summary = summarizeConfig(v.config, { enabled: v.enabled });
   return {
-    text: `Dry run — nothing saved.\n\n${summary}\n\nShow the user this summary; ${next}.`,
-    data: { dry_run: true, saved: false, node_id: v.nodeId, enabled: v.enabled, config: v.config, summary },
+    text: `${dryRun ? "Dry run — nothing" : "Nothing"} saved.\n\n${summary}\n\nShow the user this summary; ${next}.`,
+    data: { ...(dryRun && { dry_run: true }), saved: false, node_id: v.nodeId, enabled: v.enabled, config: v.config, summary },
   };
 }
 
@@ -284,7 +285,7 @@ export async function runMetacognitionTool(
         if (dry_run !== undefined && typeof dry_run !== "boolean") {
           throw new ValidationError("dry_run must be true or false");
         }
-        if (dry_run === true) return previewConfig(args, ctx, "call again without dry_run to save it");
+        if (dry_run === true) return previewConfig(args, ctx, "call again without dry_run to save it", true);
         const agent = await configureAgent({
           nestId: ctx.nestId,
           nodeId: agentArg(args),
