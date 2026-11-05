@@ -28,6 +28,7 @@
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import { mcpNoStream } from "./routes.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -768,8 +769,10 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number
 
 export const serverMcpRoutes = new Hono<AuthEnv>();
 
-// POST/GET/DELETE /mcp — stateless, one server per request, same transport
-// shape as the per-nest endpoint.
+// POST /mcp — stateless, one server per request, same transport shape as the
+// per-nest endpoint (GET/DELETE get 405, see mcpNoStream).
+serverMcpRoutes.on(["GET", "DELETE"], "/", mcpNoStream);
+
 serverMcpRoutes.all("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
