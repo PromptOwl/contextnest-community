@@ -1440,6 +1440,8 @@ export function DocumentEditor({
     if (!isDirty || isReviewerOnly) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (leavingRef.current) return;
+      // A reload with focus still in a field never blurs it, so park here too.
+      saveOnBlurRef.current();
       e.preventDefault();
     };
     window.addEventListener("beforeunload", onBeforeUnload);
