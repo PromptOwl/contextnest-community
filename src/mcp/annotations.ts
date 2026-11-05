@@ -91,7 +91,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_submit_review: add("Opens a review request on an existing version; content is unchanged."),
   context_approve: overwrite("Publishes the version, replacing the text served to AI."),
   context_reject: add("Marks the version rejected; the published text and the draft stay."),
-  context_assign_steward: addOutside("Adds a steward; an unknown email address is emailed an invitation. An existing assignment is refused, not replaced."),
+  context_assign_steward: addOutside("Adds a steward and turns on governed mode; an unknown email address is emailed an invitation. An existing assignment is refused, not replaced."),
   context_share_nest: addOutside("Adds a collaborator; an unknown email address is emailed an invitation. An existing collaborator is refused, not changed."),
   context_grant: overwriteOutside("Shares a document or folder; an unknown email address is emailed an invitation, and an existing grant's role is overwritten."),
   context_sync_folder: overwrite("Imports a server folder into a new nest, then deletes the source folder from disk."),
@@ -106,7 +106,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_metacognition_suggest: read("Derives a config from the agent document; it saves nothing and fetches nothing, feed links included."),
   context_metacognition_preview: read("Validates a config and summarizes it; it saves nothing and fetches nothing."),
   context_metacognition_configure: overwriteOutside("Replaces an agent's stored settings and points it at arbitrary public feeds and MCP servers, which its schedules and hooks then reach."),
-  context_metacognition_run: addOutside("Starts one run that may fetch the agent's feeds, call its MCP servers and the model; its changes are drafts and comments, never published or deleted."),
+  context_metacognition_run: overwriteOutside("Starts one run that may fetch the agent's feeds, call its MCP servers and the model; its drafts replace working copies, and it withdraws its own rejected drafts, deleting any never published."),
   context_metacognition_remove: overwrite("Removes an agent's settings; the document and past runs stay."),
 
   // ─── Workflow plane ─────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_binding_resume: addOutside("Resumes capture after re-reading members from the workspace."),
   context_surfaces_binding_invite: addOutside("Brings Nest back to a conversation after checking its members in the workspace."),
   context_surfaces_link_revoke: overwriteOutside("Revokes an identity link and can DM the linked owner in the workspace."),
-  context_surfaces_link_unblock: add("Clears a matching block; it removes no link and no content."),
+  context_surfaces_link_unblock: overwrite("Clears a matching block, so auto-matching can link that user again; it removes no link and no content."),
   context_surfaces_link_review_decide: add("Records the decision and creates the link on approval; an existing link is refused."),
   context_surfaces_slack_install_create: add("Creates a pending install and returns the manifest; it contacts nothing."),
   context_surfaces_settings_update: overwriteOutside("Overwrites settings; turning DM capture off deletes DM buffers, and sign-in alert changes DM and email owners."),

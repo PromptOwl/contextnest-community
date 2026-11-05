@@ -164,6 +164,7 @@ describe("one operation per tool (OpenAI review)", () => {
     expect(r.result?.isError).not.toBe(true);
     const data = r.result.structuredContent;
     expect(data.saved).toBe(false);
+    expect(data).not.toHaveProperty("dry_run");
     expect(data.node_id).toBe("nodes/scout");
     expect(data.summary).toContain("Archivist");
     expect(text(r)).toMatch(/nothing saved/i);
@@ -217,6 +218,9 @@ describe("one operation per tool (OpenAI review)", () => {
     expect(run.description).toMatch(/feeds/i);
     expect(run.description).toMatch(/model/i);
     expect(run.description).toMatch(/never publishes/i);
+    expect(run.description).toMatch(/access requests/i);
+    expect(run.description).toMatch(/withdraws/i);
+    expect(run.description).toMatch(/deleting/i);
     expect(run.inputSchema.properties.inputs.description).toBeTruthy();
   });
 });
