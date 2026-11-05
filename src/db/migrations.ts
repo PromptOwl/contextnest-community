@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
+import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
+import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2339,6 +2343,170 @@ export function runMigrations(db: Database.Database): void {
       `);
     })();
     recordMigration("072_nest_plugins");
+  }
+
+  // 073: nests.always_include_tags (CU-wdqcq05rn0). Tags whose documents'
+  //   APPROVED text is pushed to every agent and model that enters the nest
+  //   (MCP initialize, context_init, Hootie, metacognition, run bundles). Comma
+  //   list like prime_tags; defaults to "always-include". (072 is claimed by an
+  //   open branch.)
+  if (!hasMigration("073_nest_always_include_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("always_include_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN always_include_tags TEXT NOT NULL DEFAULT 'always-include'");
+    }
+    recordMigration("073_nest_always_include_tags");
+  }
+
+  // 074: org contributors (CU-wdqcq05rz6). Numbered past 072 (nest plugins)
+  // and 073 (always-include tags), both claimed by open branches.
+  //   - nests.org_contributions: 'off' | 'drafts'. 'drafts' lets anyone in the
+  //     organization create documents and propose edits on an org-visibility
+  //     nest, always as drafts for review (src/shared/access.ts). Any other
+  //     value reads as off.
+  //   - nests.org_domains: JSON array of bare email domains. On a shared
+  //     deployment it IS the org boundary (required to turn the setting on).
+  //   - users.email_verified_at: when an identity provider (OIDC, token
+  //     exchange, PromptOwl) last vouched for the address. A password sign-up
+  //     never sets it, so a domain match can't be claimed by signing up as
+  //     someone@their-domain.
+  if (!hasMigration("074_org_contributions")) {
+    const nestColumns = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestColumns.includes("org_contributions")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_contributions TEXT NOT NULL DEFAULT 'off'");
+    }
+    if (!nestColumns.includes("org_domains")) {
+      db.exec("ALTER TABLE nests ADD COLUMN org_domains TEXT");
+    }
+    const userColumns = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!userColumns.includes("email_verified_at")) {
+      db.exec("ALTER TABLE users ADD COLUMN email_verified_at TEXT");
+    }
+    recordMigration("074_org_contributions");
+  }
+
+  // 075: node_index.manifest_json — each document's engine manifest entry, so
+  // the index update and the checkpoint read the nest from here (see
+  // indexedManifest). NULL on existing rows; the first write that finds one
+  // flags the nest stale, and the rebuild fills them all in.
+  if (!hasMigration("075_node_index_manifest")) {
+    const cols = (db.prepare("PRAGMA table_info(node_index)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("manifest_json")) {
+      db.exec("ALTER TABLE node_index ADD COLUMN manifest_json TEXT");
+    }
+    recordMigration("075_node_index_manifest");
+  }
+
+  // 076: nest_write_jobs — writes whose checkpoint and index update still
+  // have to run (src/nodes/seal-queue.ts). A row lives from the write until
+  // its batch is sealed; whatever a restart leaves is sealed at boot.
+  if (!hasMigration("076_nest_write_jobs")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_write_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
+    `);
+    recordMigration("076_nest_write_jobs");
+  }
+
+  // 077: nest_seal_leases — which instance seals a nest's queued writes. One
+  // row per nest while a drain runs; expires_at (epoch ms) lets another
+  // instance take over from one that died holding it.
+  if (!hasMigration("077_nest_seal_leases")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_seal_leases (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        owner TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+    `);
+    recordMigration("077_nest_seal_leases");
+  }
+
+  // 078: task rules + ticket counters.
+  //   - nests.task_rules: JSON (src/nodes/task-rules.ts) — exclusive tag
+  //     namespaces, the default stage tag, and ticket numbering settings. NULL
+  //     reads as "no rules", so existing nests behave exactly as before.
+  //   - nest_ticket_counters: the last ticket number handed out per (nest,
+  //     prefix). One row per prefix; the number is allocated by a single
+  //     INSERT … ON CONFLICT DO UPDATE … RETURNING, so two writers can never be
+  //     handed the same value (src/nodes/ticket-numbers.ts).
+  if (!hasMigration("078_task_rules_ticket_counters")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("task_rules")) {
+      db.exec("ALTER TABLE nests ADD COLUMN task_rules TEXT");
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        prefix TEXT NOT NULL,
+        last_value INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (nest_id, prefix)
+      );
+    `);
+    recordMigration("078_task_rules_ticket_counters");
+  }
+
+  // 079: Surfaces core (conversation ↔ nest bindings with the two-flag guard,
+  //   identity links, one-time link tokens and reviews, opt-outs, notices).
+  //   The DDL is shared with Postgres (src/surfaces/schema-ddl.ts).
+  if (!hasMigration("079_surfaces_core")) {
+    db.transaction(() => {
+      db.exec(surfacesS1Ddl("(datetime('now'))"));
+    })();
+    recordMigration("079_surfaces_core");
+  }
+
+  // 080: Surfaces ingestion (S2a): install secrets, OAuth state, event dedup,
+  //   the encrypted buffer, windows/verdicts, fetch queue, proposals,
+  //   fingerprints, counters, purge runs, spend budgets. Shared DDL with
+  //   Postgres (src/surfaces/schema-ddl-s2a.ts).
+  if (!hasMigration("080_surfaces_ingest")) {
+    db.transaction(() => {
+      db.exec(surfacesS2aDdl("(datetime('now'))"));
+    })();
+    recordMigration("080_surfaces_ingest");
+  }
+
+  // 081: Surfaces cards and commit (S2b): interaction idempotency, the commit
+  //   audit, reviewer/conversation daily usage, personal (DM) nests, DM
+  //   opt-outs, plus the card columns on proposals/items and the DM capture
+  //   setting. Shared DDL with Postgres (src/surfaces/schema-ddl-s2b.ts).
+  if (!hasMigration("081_surfaces_cards")) {
+    db.transaction(() => {
+      db.exec(surfacesS2bDdl("(datetime('now'))"));
+      db.exec(surfacesS2bAlterSqlite());
+    })();
+    recordMigration("081_surfaces_cards");
+  }
+  // Guarded (re-review R3-L2): a database that ran an earlier 081 lacks
+  // surface_personal_nests.sealed — add it (default sealed).
+  {
+    const pcols = db.prepare("PRAGMA table_info(surface_personal_nests)").all() as Array<{ name: string }>;
+    if (pcols.length && !pcols.some((c) => c.name === "sealed")) {
+      db.exec("ALTER TABLE surface_personal_nests ADD COLUMN sealed INTEGER NOT NULL DEFAULT 1");
+    }
+  }
+
+  // 082: Surfaces seeds (S3, PRD §13): seed applications and apply claims,
+  //   the seed_origin / seed_hash record of everything a seed wrote, org-mirror
+  //   proposals made, and the default_seed / seed_library_nests settings.
+  //   Shared DDL with Postgres (src/surfaces/schema-ddl-s3.ts).
+  if (!hasMigration("082_surfaces_seeds")) {
+    db.transaction(() => {
+      db.exec(surfacesS3Ddl("(datetime('now'))"));
+      db.exec(surfacesS3AlterSqlite());
+    })();
+    recordMigration("082_surfaces_seeds");
   }
 }
 

@@ -199,7 +199,7 @@ export async function addCollaborator(params: {
       actor: inviteeEmail,
       permission: params.permission,
       by: params.grantedByEmail || undefined,
-    });
+    }, { nestId });
     void notifyNestInvite({
       nestId,
       inviteeEmail,

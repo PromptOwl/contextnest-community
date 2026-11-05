@@ -9,7 +9,7 @@ import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { revokeAllHeadlessKeys } from "../auth/headless.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, parseOrgDomains } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import { assertCanGrant, billingConfirmed } from "../auth/seats.js";
@@ -17,6 +17,7 @@ import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
+import { defaultTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
 
 /**
  * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
@@ -285,6 +286,120 @@ export async function setCreatorIsReviewer(
   ]);
 }
 
+/**
+ * Org contributions (CU-wdqcq05rz6): whether anyone in the organization may
+ * suggest documents and edits on this org nest as drafts for review, and —
+ * on a shared deployment, where it is the org boundary — which email domains
+ * count as the organization. Who actually qualifies is decided in
+ * resolveNestAccess (src/shared/access.ts); this is only the stored setting.
+ */
+export type OrgContributions = "off" | "drafts";
+
+export async function nestOrgContributions(
+  nestId: string,
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] }> {
+  const row = (await getDb().get(
+    "SELECT org_contributions, org_domains FROM nests WHERE id = ?",
+    [nestId],
+  )) as { org_contributions: string | null; org_domains: string | null } | undefined;
+  return {
+    org_contributions: row?.org_contributions === "drafts" ? "drafts" : "off",
+    org_domains: parseOrgDomains(row?.org_domains),
+  };
+}
+
+/** A bare registrable-looking host: labels of [a-z0-9-] (no edge hyphens),
+ *  at least one dot, an alphabetic TLD. No wildcards, schemes, ports, paths
+ *  or local parts — a domain list is matched by exact equality. */
+const DOMAIN_RE = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+/** Trim, lowercase, drop one leading '@', dedupe. Throws on anything else. */
+export function normalizeOrgDomains(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+  }
+  if (input.length > 50) throw new ValidationError("org_domains takes at most 50 domains");
+  const out: string[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "string") {
+      throw new ValidationError("org_domains must be a list of email domains, like [\"acme.com\"]");
+    }
+    const d = raw.trim().toLowerCase().replace(/^@/, "");
+    if (!DOMAIN_RE.test(d)) {
+      throw new ValidationError(
+        `"${raw}" isn't an email domain. Use the bare domain after the @, like acme.com — no wildcards, no https://.`,
+      );
+    }
+    if (!out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Validate an org-contributions change against the state it would leave, so
+ * a refused body writes nothing. Returns the new state, or null when the body
+ * doesn't touch these fields.
+ *
+ * - Turning it ON needs visibility 'org': on a private nest there is no
+ *   "anyone in the org" to admit, and on a public one the readers are the
+ *   whole internet. (A nest that later leaves 'org' keeps the stored value,
+ *   but resolveNestAccess admits nobody until it is 'org' again.)
+ * - On a shared deployment it needs a non-empty domain list, including when
+ *   a later change would empty the list under a setting that is on —
+ *   "everyone on the server" there is every customer.
+ */
+export async function validateOrgContributionsPatch(
+  nestId: string,
+  body: { org_contributions?: unknown; org_domains?: unknown },
+): Promise<{ org_contributions: OrgContributions; org_domains: string[] } | null> {
+  if (body.org_contributions === undefined && body.org_domains === undefined) return null;
+  if (
+    body.org_contributions !== undefined &&
+    body.org_contributions !== "off" &&
+    body.org_contributions !== "drafts"
+  ) {
+    throw new ValidationError('org_contributions must be "off" or "drafts"');
+  }
+  const current = await nestOrgContributions(nestId);
+  const next = {
+    org_contributions: (body.org_contributions ?? current.org_contributions) as OrgContributions,
+    org_domains:
+      body.org_domains === undefined ? current.org_domains : normalizeOrgDomains(body.org_domains),
+  };
+  if (next.org_contributions === "drafts") {
+    if (body.org_contributions === "drafts") {
+      const row = (await getDb().get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as
+        | { visibility: string }
+        | undefined;
+      if (row?.visibility !== "org") {
+        throw new ValidationError(
+          "Org contributions only apply to a nest shared with the organization (visibility 'org'). Change its visibility first.",
+        );
+      }
+    }
+    if (config.SHARED_DEPLOYMENT && next.org_domains.length === 0) {
+      throw new ValidationError(
+        "This server hosts several organizations, so org contributions need your organization's email domains (org_domains) — otherwise every account on the server could contribute.",
+      );
+    }
+  }
+  return next;
+}
+
+export async function setOrgContributions(
+  nestId: string,
+  next: { org_contributions: OrgContributions; org_domains: string[] },
+): Promise<void> {
+  await getDb().run(
+    "UPDATE nests SET org_contributions = ?, org_domains = ? WHERE id = ?",
+    [
+      next.org_contributions,
+      next.org_domains.length ? JSON.stringify(next.org_domains) : null,
+      nestId,
+    ],
+  );
+}
+
 /** Longest review SLA a nest may set: a year. Past that it isn't an SLA. */
 export const MAX_REVIEW_SLA_HOURS = 8760;
 
@@ -384,6 +499,31 @@ export async function setPrimeTags(
 }
 
 /**
+ * Tags that mark a document always-include (default "always-include"): its
+ * approved text is pushed to every agent and model entering the nest (see
+ * governance/always-include-service.ts). Same storage and normalisation as
+ * prime tags; empty means no tag does it (document flags still apply).
+ */
+export async function nestAlwaysIncludeTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get(
+    "SELECT always_include_tags FROM nests WHERE id = ?",
+    [nestId],
+  )) as { always_include_tags: string | null } | undefined;
+  return parsePrimeTags(row?.always_include_tags);
+}
+
+/** Replace the nest's always-include tag set (admin-only). */
+export async function setAlwaysIncludeTags(
+  nestId: string,
+  tags: string[],
+): Promise<void> {
+  await getDb().run("UPDATE nests SET always_include_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
  * Tags whose board column means "completed" for a task (default "done").
  * Same storage and normalisation as prime tags.
  */
@@ -397,6 +537,41 @@ export async function nestDoneTags(nestId: string): Promise<string[]> {
 export async function setDoneTags(nestId: string, tags: string[]): Promise<void> {
   await getDb().run("UPDATE nests SET done_tags = ? WHERE id = ?", [
     parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
+ * The nest's task rules (exclusive tag namespaces, default stage, ticket
+ * numbering — src/nodes/task-rules.ts). Nests that never set any read as
+ * "no rules", so task writes behave exactly as before.
+ */
+export async function nestTaskRules(nestId: string): Promise<TaskRules> {
+  const row = (await getDb().get("SELECT name, task_rules FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { name: string; task_rules: string | null } | undefined;
+  // A nest that has never saved rules numbers its tasks: every task gets a
+  // permanent ID, as in any tracker. Saving rules (even with numbering off)
+  // replaces this.
+  if (row && (row.task_rules === null || row.task_rules === undefined || row.task_rules === "")) {
+    return defaultTaskRules(row.name);
+  }
+  return parseTaskRules(row?.task_rules);
+}
+
+/** Write the default rules into a nest that has none, so its prefix stays put
+ *  if the nest is renamed. A no-op once rules are stored; safe to race. */
+export async function storeDefaultTaskRules(nestId: string): Promise<void> {
+  const rules = await nestTaskRules(nestId);
+  await getDb().run(
+    "UPDATE nests SET task_rules = ? WHERE id = ? AND (task_rules IS NULL OR task_rules = '')",
+    [serializeTaskRules(rules), nestId],
+  );
+}
+
+export async function setTaskRules(nestId: string, rules: TaskRules): Promise<void> {
+  await getDb().run("UPDATE nests SET task_rules = ? WHERE id = ?", [
+    serializeTaskRules(rules),
     nestId,
   ]);
 }
@@ -999,6 +1174,11 @@ export async function getNest(nestId: string): Promise<Nest | null> {
 export async function deleteNest(nestId: string): Promise<void> {
   const db = getDb();
 
+  // Queued seals would write the nest's files back after the folder is gone:
+  // drop them, and let a seal already running finish first.
+  const { dropSeals } = await import("../nodes/seal-queue.js");
+  await dropSeals(nestId);
+
   // Foreign-key CASCADE handles most of this (see migrations.ts) but the
   // explicit deletes inside a single transaction give us two guarantees:
   //   1. Behaviour stays correct even if a future migration drops a CASCADE
@@ -1039,6 +1219,9 @@ export async function deleteNest(nestId: string): Promise<void> {
     // reason as the rows above. No try/catch: the migration always creates the
     // table, and on Postgres a failed statement aborts the transaction anyway.
     await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
+    // Surfaces private (sealed) nest marker (migration 081, no FK): left behind
+    // it would keep the owner "sealed" forever (no admin reset, alerts on).
+    await tx.run("DELETE FROM surface_personal_nests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

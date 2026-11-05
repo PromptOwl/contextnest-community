@@ -7,6 +7,8 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  ctxLoginCommand,
+  setupSignInCommand,
   slugify,
   claudeDesktopConfig,
   claudeCodeCommand,
@@ -556,5 +558,34 @@ describe("isPrivateHost", () => {
       expect(isPrivateHost(u), u).toBe(true);
     for (const u of ["http://172.32.0.1/", "http://172.15.255.255/", "http://[::ffff:8.8.8.8]/"])
       expect(isPrivateHost(u), u).toBe(false);
+  });
+});
+
+describe("ctxLoginCommand", () => {
+  // No --as: ctx derives a collision-free alias from the host itself.
+  it("signs in to the server's origin and leaves the alias to ctx", () => {
+    expect(ctxLoginCommand("https://nest.promptowl.ai")).toBe("ctx login https://nest.promptowl.ai");
+    expect(ctxLoginCommand("https://www.acme.com/app/x?y=1")).toBe("ctx login https://www.acme.com");
+    expect(ctxLoginCommand("http://localhost:3838/")).toBe("ctx login http://localhost:3838");
+    expect(ctxLoginCommand("http://[::1]:3838")).toBe("ctx login http://[::1]:3838");
+    expect(ctxLoginCommand("http://127.0.0.1:3838")).toBe("ctx login http://127.0.0.1:3838");
+    expect(ctxLoginCommand("https://10.0.0.5")).toBe("ctx login https://10.0.0.5");
+  });
+
+  it("offers nothing for plain http off loopback, which ctx refuses", () => {
+    expect(ctxLoginCommand("http://10.0.0.5:3838")).toBeNull();
+    expect(ctxLoginCommand("http://nest.lan:3838")).toBeNull();
+    expect(ctxLoginCommand("null")).toBeNull();
+  });
+});
+
+describe("setupSignInCommand", () => {
+  const origin = "https://nest.example.com";
+  it("waits for /health, and never offers sign-in in open or cloud mode", () => {
+    expect(setupSignInCommand(origin, null, false)).toBeNull();
+    expect(setupSignInCommand(origin, "open", false)).toBeNull();
+    expect(setupSignInCommand(origin, "key", true)).toBeNull();
+    expect(setupSignInCommand("http://10.0.0.5:3838", "key", false)).toBeNull();
+    expect(setupSignInCommand(origin, "key", false)).toBe("ctx login https://nest.example.com");
   });
 });

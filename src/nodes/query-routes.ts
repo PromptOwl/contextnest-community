@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { surfaceEditsHiddenFor, isHidden, seesSurfaceDrafts } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody, swapSurfaceEditBodies } from "./readable-body.js";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
@@ -39,6 +41,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  folderToSegments,
   moveFolder,
   isDerivedAnnotationsNode,
 } from "./service.js";
@@ -376,7 +379,10 @@ queryRoutes.get("/search", async (c) => {
   // copy, which can hold an unapproved draft edit — so swap in the approved
   // body and re-match on it: no draft text in a snippet, and a hit that only
   // matched draft text doesn't reveal that it did (CU-wdqcq0538g).
-  if (await isPublicReader(nestId, userId)) {
+  // The same for a pending Surfaces edit seen by a caller below write
+  // (security round 2, M1d): its working copy is a chat-derived draft.
+  const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+  if ((await isPublicReader(nestId, userId)) || accessible.some((n) => isHidden(surfaceEdits, n.id))) {
     const approved = await Promise.all(
       accessible.map(async (n) => ({
         ...n,
@@ -484,6 +490,11 @@ queryRoutes.post("/folders", async (c) => {
   if (typeof body.folder !== "string" || !body.folder.trim()) {
     throw new ValidationError('folder (a string like "gtm/deals") is required');
   }
+  // A seed's admin-only folders (e.g. agents/): no new subfolders by non-admins.
+  const { adminFolderPathRefusal } = await import("../surfaces/admin-folders.js");
+  const path = folderToSegments(body.folder).join("/");
+  const adminOnly = await adminFolderPathRefusal(c.req.param("nestId")!, [path], await resolveCallerEmail(c.get("userId")));
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
   return c.json({ folder }, 201);
 });
@@ -587,9 +598,19 @@ queryRoutes.get("/export", async (c) => {
     const includeDrafts =
       (draftsParam === "1" || draftsParam === "true") &&
       !(await isPublicReader(nestId, bundleUser));
-    const narrow = (await readsWholeNest(nestId, bundleUser, bundleEmail))
-      ? undefined
-      : (docs: ContextNode[]) => filterAccessible(nestId, bundleUser, bundleEmail, docs);
+    // Below write, pending Surfaces drafts (chat-derived) never leave in a
+    // bundle: new ones are dropped by filterAccessible, and a pending edit
+    // ships its approved body (security round 2, M1a).
+    const seesDrafts = await seesSurfaceDrafts(nestId, bundleUser);
+    const narrow =
+      (await readsWholeNest(nestId, bundleUser, bundleEmail)) && seesDrafts
+        ? undefined
+        : async (docs: ContextNode[]) => {
+            const ok = await filterAccessible(nestId, bundleUser, bundleEmail, docs);
+            if (seesDrafts) return ok;
+            const edits = await surfaceEditsHiddenFor(nestId, bundleUser);
+            return Promise.all(ok.map(async (d) => (isHidden(edits, d.id) ? { ...d, body: await approvedReadableBody(nestId, d.id) } : d)));
+          };
     const zip = await exportNestBundle(nestId, includeDrafts, narrow);
     recordNodeAccess({
       nestId,
@@ -625,7 +646,9 @@ queryRoutes.get("/export", async (c) => {
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
-  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
+  // A pending Surfaces edit ships its approved body to callers below write
+  // (judge round 1: ctx export/pull paths).
+  const accessible = await swapSurfaceEditBodies(nestId, userId, await filterAccessible(nestId, userId, userEmail, documents));
 
   // Export is APPROVED-ONLY for every caller — drafts never export. On a
   // governed nest, nodes with no approved version are dropped; the body is the

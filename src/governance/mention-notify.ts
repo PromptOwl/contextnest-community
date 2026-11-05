@@ -31,7 +31,7 @@ import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
-import { insertNotification } from "../notify/inbox.js";
+import { insertNotification, personLabel } from "../notify/inbox.js";
 import { listWatchers } from "./notify-service.js";
 import { resolveStewardsForNode } from "./stewardship-service.js";
 
@@ -238,7 +238,7 @@ async function deliverMentionMessages(params: {
       link: ctx.link,
       actor: actorEmail,
       note: excerpt || null,
-    });
+    }, { nestId });
   }
   if (throttled > 0) {
     // Logged, not silent: the inbox rows landed, so nobody lost the mention —
@@ -347,7 +347,7 @@ export async function notifyMentions(params: {
     if (recipients.length === 0) return 0;
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
-    const message = `${actorEmail} mentioned you in "${ctx.label}"`;
+    const message = `${await personLabel(actorEmail)} mentioned you in "${ctx.label}"`;
     const created = await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,
@@ -404,7 +404,7 @@ async function commentMentionFanOut(params: {
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
-    const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
+    const message = `${await personLabel(actorEmail)} mentioned you in a comment on "${ctx.label}"`;
     await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,
@@ -511,7 +511,7 @@ async function notifyThreadParticipants(params: {
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
-    const message = `${actorEmail} replied to a comment thread on "${ctx.label}"`;
+    const message = `${await personLabel(actorEmail)} replied to a comment thread on "${ctx.label}"`;
     await insertInboxRows({
       nestId,
       nodeId,
@@ -533,7 +533,7 @@ async function notifyThreadParticipants(params: {
         link: ctx.link,
         actor: actorEmail,
         note: excerpt || null,
-      });
+      }, { nestId });
     }
     if (throttled > 0) {
       console.warn(
@@ -674,7 +674,7 @@ async function notifyCommentFollowers(params: {
         link: ctx.link,
         actor: actorEmail,
         note: excerpt || null,
-      });
+      }, { nestId });
     }
     if (throttled > 0) {
       console.warn(

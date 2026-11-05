@@ -24,29 +24,33 @@ import { mapBatched } from "../shared/batch.js";
 export class FlatNestStorage extends NestStorage {
   async discoverDocuments(): Promise<ContextNode[]> {
     const root = this.root;
-    let entries: Dirent[];
+    const ids: string[] = [];
+    // Async walk that prunes hidden dirs / node_modules BEFORE entering them: a
+    // recursive readdir also crawled .versions/, where the write lock folder
+    // (.versions/.lock) comes and goes, and one vanished dir failed the listing.
+    const walk = async (dir: string): Promise<void> => {
+      let entries: Dirent[];
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch (err: any) {
+        if (dir !== root && err?.code === "ENOENT") return; // removed mid-walk
+        throw err;
+      }
+      await Promise.all(entries.map(async (e) => {
+        if (isSkippedSegment(e.name)) return;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) return walk(full);
+        // Engine- and agent-generated files ride along on import but are not
+        // documents (isMetaFile).
+        if (!e.isFile() || !e.name.endsWith(".md") || isMetaFile(e.name)) return;
+        ids.push(relative(root, full).split(sep).join("/").replace(/\.md$/, ""));
+      }));
+    };
     try {
-      // Async, not readdirSync: on a Cloud Storage mount this crawl is a
-      // network listing per directory level, and the sync call held the event
-      // loop for all of them — freezing every other request on the instance.
-      entries = await readdir(root, { recursive: true, withFileTypes: true });
+      await walk(root);
     } catch (err) {
       console.error("[FlatNestStorage] cannot read folder", root, err);
       return [];
-    }
-
-    const ids: string[] = [];
-    for (const e of entries) {
-      if (!e.isFile() || !e.name.endsWith(".md")) continue;
-      // Engine- and agent-generated files ride along on import but are not
-      // documents (isMetaFile).
-      if (isMetaFile(e.name)) continue;
-      // Dirent.parentPath (Node ≥20.12); `path` is the older alias.
-      const dir = (e as any).parentPath ?? (e as any).path ?? root;
-      const rel = relative(root, join(dir, e.name)).split(sep).join("/");
-      // Skip anything inside a hidden dir or node_modules.
-      if (rel.split("/").some(isSkippedSegment)) continue;
-      ids.push(rel.replace(/\.md$/, ""));
     }
 
     // Read in bounded-parallel batches: on a Cloud Storage mount every read is

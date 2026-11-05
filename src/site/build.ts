@@ -25,6 +25,7 @@ import { engineCache } from "../nodes/engine.js";
 import { hashContent } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
+import { pickHomeNode } from "../shared/reader-home.js";
 import { describe, renderMarkdown, rewriteDocumentLinks, slugifyHeading, type Heading } from "./markdown.js";
 import {
   renderGlossary,
@@ -56,6 +57,7 @@ import {
 import { pingIndexNow } from "./indexnow.js";
 import { siteNestsGeneration } from "./invalidate.js";
 import { config } from "../config.js";
+import { isHtmlBody } from "../shared/artifact-sandbox.js";
 
 export interface SiteNest {
   id: string;
@@ -365,7 +367,11 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
       continue;
     }
     // HTML artifacts render under the artifact sandbox (/p), not as a docs page.
-    if (fm.type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body)) continue;
+    if (isHtmlBody(fm.type, body)) continue;
+    // A §1.12 view is intro-only on the open web, as on /p: its blocks resolve
+    // other nodes and feed data to frames, which only a nest member may see.
+    // The `view:` frontmatter is never emitted; a note stands in for the blocks.
+    if (fm.type === "view") body = viewIntroForSite(body);
     const rel = row.node_id.replace(/^nodes\//, "");
     sources.push({
       nodeId: row.node_id,
@@ -379,6 +385,14 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
     });
   }
   return sources;
+}
+
+/** Notice that stands in for a view's blocks on the public docs site. */
+export const SITE_VIEW_NOTICE = "This page is a live view. Its data is available to nest members.";
+
+function viewIntroForSite(intro: string): string {
+  const text = intro.trim();
+  return `${text ? `${text}\n\n` : ""}> ${SITE_VIEW_NOTICE}\n`;
 }
 
 /**
@@ -435,7 +449,8 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
     sources.map((s) => [s.nodeId, (s.rel.startsWith(strip) ? s.rel.slice(strip.length) : s.rel).toLowerCase()]),
   );
   const home =
-    sources.find((s) => s.nodeId === nest.home) ??
+    // Same rule as the SPA reader: full id or bare slug, case-insensitively.
+    pickHomeNode(sources, nest.home, (s) => s.nodeId) ??
     sources.find((s) => !pathOf.get(s.nodeId)!.includes("/") && LEAD.test(leafOf(pathOf.get(s.nodeId)!)));
   const custom = new Map(paths.filter((p) => p.kind === "custom").map((p) => [p.nodeId, p.path]));
   for (const s of sources) {

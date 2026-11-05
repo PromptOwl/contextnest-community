@@ -21,7 +21,13 @@
  * from: `discoverDocuments()`.
  */
 
-import { listSuggestions, type ContextNode, type SuggestionMeta } from "@promptowl/contextnest-engine";
+import {
+  listSuggestions,
+  manifestEntry,
+  type ContextNode,
+  type ManifestEntry,
+  type SuggestionMeta,
+} from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { insertOrIgnore, insertOrReplace, nowExpr } from "../db/sql.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
@@ -34,8 +40,8 @@ interface IndexRow {
 }
 
 const INSERT_COLS =
-  "(nest_id, node_id, folder, title, type, status, updated_at, frontmatter_json)";
-const INSERT_VALUES = "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+  "(nest_id, node_id, folder, title, type, status, updated_at, frontmatter_json, manifest_json)";
+const INSERT_VALUES = "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 /** Postgres upsert body — mirrors SQLite's INSERT OR REPLACE full-row swap. */
 const UPSERT_SET = [
   "folder = excluded.folder",
@@ -44,6 +50,7 @@ const UPSERT_SET = [
   "status = excluded.status",
   "updated_at = excluded.updated_at",
   "frontmatter_json = excluded.frontmatter_json",
+  "manifest_json = excluded.manifest_json",
 ].join(", ");
 
 /** The column values for one document, in INSERT_COLS order after nest_id. */
@@ -57,6 +64,10 @@ function rowValues(node: ContextNode): SqlParam[] {
     (fm.status as string) || "draft",
     fm.updated_at ?? null,
     JSON.stringify(fm ?? {}),
+    // The engine's manifest entry (index fields + raw links), so the index
+    // update and the checkpoint read the nest from here instead of crawling
+    // the storage mount (see indexedManifest).
+    JSON.stringify(manifestEntry(node)),
   ];
 }
 
@@ -362,6 +373,38 @@ export async function indexedNodeIds(nestId: string): Promise<Set<string>> {
     [nestId],
   )) as Array<{ node_id: string }>;
   return new Set(rows.map((r) => r.node_id));
+}
+
+/**
+ * The nest's manifest for the engine (`NestStorageOptions.manifest`): every
+ * document's entry, straight from the mirror. Null — the engine then crawls —
+ * while the mirror cannot vouch for the whole nest: flagged stale, or holding
+ * a row written before manifest_json existed. Such a row flags the nest, so
+ * the next read's rebuild fills every row in.
+ */
+export async function indexedManifest(
+  nestId: string,
+): Promise<Record<string, ManifestEntry> | null> {
+  const db = getDb();
+  const nest = (await db.get("SELECT index_synced_at FROM nests WHERE id = ?", [nestId])) as
+    | { index_synced_at?: string | null }
+    | undefined;
+  if (!nest?.index_synced_at) return null;
+  const rows = (await db.all(
+    "SELECT node_id, manifest_json FROM node_index WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string; manifest_json: string | null }>;
+  const documents: Record<string, ManifestEntry> = {};
+  for (const row of rows) {
+    try {
+      if (!row.manifest_json) throw new Error("no manifest entry");
+      documents[row.node_id] = JSON.parse(row.manifest_json);
+    } catch {
+      await markIndexStale(nestId);
+      return null;
+    }
+  }
+  return documents;
 }
 
 export async function readIndexedNodes(

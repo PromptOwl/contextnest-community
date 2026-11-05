@@ -36,6 +36,7 @@ import {
 import { MarkdownEditor } from "../MarkdownEditor";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
+import { rowDiffLines, tableRowDiff } from "../../lib/table-row-diff";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import type { ReviewRequest } from "./ReviewQueue";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,8 @@ interface ReviewPaneProps {
    *  refuses prime documents — offer it only when it can work. */
   canEditDocs: boolean;
   primeTags: string[];
+  /** Always-include documents are prime too. */
+  alwaysIncludeTags?: string[];
   onApprove: (note?: string) => Promise<void>;
   onRequestChanges: (note: string) => Promise<void>;
   /** Open the document in the editor (Edit, Save & approve). */
@@ -77,6 +80,7 @@ export function ReviewPane({
   currentUser,
   canEditDocs,
   primeTags,
+  alwaysIncludeTags = [],
   onApprove,
   onRequestChanges,
   onEditDraft,
@@ -137,7 +141,7 @@ export function ReviewPane({
     !!stewardData &&
     !isReviewerOnly(stewardData.stewards ?? [], currentUser) &&
     !!node &&
-    !api.isPrimeNode(node, primeTags);
+    !api.isPrimeNode(node, primeTags, alwaysIncludeTags);
 
   const decide = async (kind: "approve" | "changes") => {
     if (kind === "changes") {
@@ -288,10 +292,13 @@ export function ReviewPane({
                   The published version can't be reconstructed, so there's nothing to compare.
                 </p>
               ) : (
-                <DiffViewer
-                  patch={unifiedDiff(publishedBody, body)}
-                  className="max-h-[70vh] border-0"
-                />
+                <>
+                  {type === "table" && <TableRowChanges before={publishedBody} after={body || ""} />}
+                  <DiffViewer
+                    patch={unifiedDiff(publishedBody, body)}
+                    className="max-h-[70vh] border-0"
+                  />
+                </>
               )
             ) : (
               <MarkdownEditor
@@ -411,6 +418,32 @@ export function ReviewPane({
           )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** A table draft's changes by row (added / changed / removed, by `:key`),
+ *  above the line diff. Renders nothing when a keyed diff would mislead. */
+function TableRowChanges({ before, after }: { before: string; after: string }) {
+  const diff = tableRowDiff(before, after);
+  if (!diff) return null;
+  return (
+    <div className="border-b px-4 py-3" data-testid="review-pane-row-diff">
+      <p className="mb-1 text-xs font-medium text-muted-foreground">Row changes (by {diff.keyColumn})</p>
+      <ul className="space-y-0.5 font-mono text-xs">
+        {rowDiffLines(diff).map((line, i) => (
+          <li
+            key={i}
+            className={cn(
+              line.startsWith("+") && "text-green-700 dark:text-green-400",
+              line.startsWith("-") && "text-red-700 dark:text-red-400",
+              line.startsWith("~") && "text-amber-700 dark:text-amber-400",
+            )}
+          >
+            {line}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -3,7 +3,7 @@
  * (CU-wdqcq03ewc).
  *
  * The assistant's name, logo, accent colour and greeting are server-level
- * settings an admin edits from Settings → General. Setting them is an
+ * settings an admin edits from Server settings → Hootie. Setting them is an
  * enterprise entitlement enforced on the server: a non-enterprise licence is
  * refused (403, nothing written) and every surface shows the default Hootie
  * identity, even if values were stored earlier (a lapsed licence reverts).

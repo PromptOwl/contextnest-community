@@ -34,8 +34,6 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Copy,
-  Check,
   Monitor,
   Bot,
   AlertCircle,
@@ -53,7 +51,7 @@ import {
   Pencil,
 } from "lucide-react";
 import * as api from "../lib/api";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useApiKeys } from "../lib/queries";
 import { keyCapability, nestOnlyKeyLabel } from "../lib/api-key-scope";
@@ -62,6 +60,8 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  ctxLoginCommand,
+  PLUGIN_SETUP_COMMANDS,
   claudeDesktopConfig,
   claudeCodeCommand,
   mcpHttpConfig,
@@ -223,6 +223,7 @@ export function ConnectModal({
     nestName,
     showOpenModeBanner,
   );
+  const ctxLogin = ctxLoginCommand(serverUrl);
   // Same rule for push: the key travels in the environment, never on argv.
   const ctxPush = showOpenModeBanner
     ? `ctx push --server ${serverUrl} --nest ${nestId}`
@@ -259,30 +260,20 @@ export function ConnectModal({
               paste, all-purpose.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                onClick={() =>
-                  copyTextWithToast(
-                    nestChatPrompt(nestName),
-                    "Chat prompt copied",
-                  )
-                }
-              >
-                <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
-                Chat with this nest
-              </Button>
-              <Button
-                size="sm"
-                onClick={() =>
-                  copyTextWithToast(
-                    nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner),
-                    "Setup prompt copied",
-                  )
-                }
-              >
-                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                Set up an agent
-              </Button>
+              <CopyButton
+                text={nestChatPrompt(nestName)}
+                variant="default"
+                icon={MessageSquareText}
+                label="Chat with this nest"
+                toastMessage="Chat prompt copied"
+              />
+              <CopyButton
+                text={nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner)}
+                variant="default"
+                icon={Sparkles}
+                label="Set up an agent"
+                toastMessage="Setup prompt copied"
+              />
             </div>
           </div>
           {showLoginBanner && (
@@ -572,7 +563,7 @@ export function ConnectModal({
                   </p>
                   <Snippet
                     label="Run inside Claude Code"
-                    value={"/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup"}
+                    value={PLUGIN_SETUP_COMMANDS}
                     multiline
                   />
                 </div>
@@ -800,23 +791,41 @@ export function ConnectModal({
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       ctx
                     </code>{" "}
-                    CLI
-                    {!showOpenModeBanner && (
-                      <>
-                        {" "}
-                        (export{" "}
-                        <code className="text-[11px] bg-muted px-1 rounded">
-                          CONTEXTNEST_API_KEY
-                        </code>{" "}
-                        first — the key never goes on the command line)
-                      </>
-                    )}
-                    :
+                    CLI (needs Node 20 or later):
                   </p>
                   <Snippet
                     label="Install"
                     value="npm i -g @promptowl/contextnest-cli"
                   />
+                  {!showOpenModeBanner && (
+                    <>
+                      {ctxLogin && (
+                        <>
+                          <Snippet
+                            label="Sign in to this server (ctx 3.4+) — no key to copy"
+                            value={ctxLogin}
+                          />
+                          <p className="text-xs text-muted-foreground mb-3">
+                            Opens your browser to approve. Every nest you can open
+                            here, this one included, then appears in{" "}
+                            <code className="text-[10px]">ctx vault list</code> as{" "}
+                            <code className="text-[10px]">&lt;alias&gt;/&lt;nest&gt;</code>.
+                            Signing in uploads nothing. No browser sign-in on this
+                            server? Add{" "}
+                            <code className="text-[10px]">--key-stdin</code> and
+                            paste your API key.
+                          </p>
+                        </>
+                      )}
+                      <p className="text-sm mb-3">
+                        {ctxLogin ? "Or use a key: export" : "Export"}{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          CONTEXTNEST_API_KEY
+                        </code>{" "}
+                        first — the key never goes on the command line.
+                      </p>
+                    </>
+                  )}
                   <Snippet
                     label="Register this nest as a vault alias, then query it"
                     value={ctxAliasSnippet}
@@ -950,7 +959,7 @@ export function ConnectModal({
               <code className="flex-1 bg-muted px-2 py-1 rounded text-[11px] font-mono truncate">
                 {nestId}
               </code>
-              <CopyButton value={nestId} />
+              <CopyButton text={nestId} variant="ghost" className="h-6 px-2" />
             </div>
           </div>
           </>
@@ -1077,12 +1086,6 @@ export function KeyRevealModal({
    *  URL it works with. */
   scopedTo?: { nestName: string; mcpUrl: string };
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(apiKey))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
   const downloadEnv = () => {
     const serverUrl =
       typeof window !== "undefined"
@@ -1128,13 +1131,7 @@ export function KeyRevealModal({
             <code className="flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
               {apiKey}
             </code>
-            <Button size="sm" variant="outline" onClick={copy}>
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </Button>
+            <CopyButton text={apiKey} />
           </div>
           <Button
             variant="outline"
@@ -1185,7 +1182,7 @@ function Snippet({
         <span className="text-xs font-medium text-muted-foreground truncate">
           {label}
         </span>
-        <CopyButton value={value} />
+        <CopyButton text={value} variant="ghost" className="h-6 px-2" />
       </div>
       <pre
         className={`${
@@ -1199,23 +1196,5 @@ function Snippet({
         {value}
       </pre>
     </div>
-  );
-}
-
-function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(value))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <Button variant="ghost" size="sm" className="h-6 px-2" onClick={copy}>
-      {copied ? (
-        <Check className="h-3 w-3 text-green-600" />
-      ) : (
-        <Copy className="h-3 w-3" />
-      )}
-    </Button>
   );
 }

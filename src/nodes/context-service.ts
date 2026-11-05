@@ -48,7 +48,17 @@ export interface ContextResult {
   /** The same content as `context`, one entry per included node, so a caller
    *  merging two retrievals (Hootie: open document + question) can de-dupe by
    *  id instead of by text. Not part of the /context wire shape. */
-  blocks: Array<{ id: string; title: string; markdown: string }>;
+  blocks: Array<{
+    id: string;
+    title: string;
+    markdown: string;
+    /** `markdown` is `header + body`: the title/tags/source lines, then the
+     *  readable body — split out so a caller can reshape the body (Hootie
+     *  reduces an HTML artifact to its text) and keep the header. */
+    header: string;
+    body: string;
+    type: string;
+  }>;
   trace: {
     selector_used: string | null;
     from_prompt: string | null;
@@ -77,15 +87,19 @@ export function approxTokens(text: string): number {
 }
 
 export function formatContextBlock(node: ContextNode, url?: string): string {
+  return contextBlockHeader(node, url) + (node.body || "").trim();
+}
+
+/** The title/tags/source lines a context block opens with. */
+export function contextBlockHeader(node: ContextNode, url?: string): string {
   const tags = (node.frontmatter.tags || []).join(" ");
   const meta = [
     tags ? `_tags: ${tags}_` : null,
     url ? `_source: ${url}_` : null,
   ].filter(Boolean);
-  const header = meta.length
+  return meta.length
     ? `# ${node.frontmatter.title}\n\n${meta.join("\n")}\n\n`
     : `# ${node.frontmatter.title}\n\n`;
-  return header + (node.body || "").trim();
 }
 
 
@@ -376,6 +390,9 @@ export async function resolveContext(params: {
       id: n.id,
       title: n.frontmatter.title,
       markdown: formatContextBlock(n, n.url),
+      header: contextBlockHeader(n, n.url),
+      body: (n.body || "").trim(),
+      type: n.frontmatter.type || "document",
     })),
     nodes: included.map((n) => ({
       id: n.id,

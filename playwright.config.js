@@ -150,6 +150,14 @@ const testRun = [
     independent: true, // Reads the accounts; never saves to them
   },
   {
+    // Sidebar rail (CN-RAIL-001 … CN-RAIL-008). Serial: the cases read the rail
+    // as two accounts. Read-only; /health switches are stubbed per browser.
+    file: 'sidebar-rail/sidebar_rail.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the rail; writes nothing
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -174,6 +182,62 @@ const testRun = [
     mode: 'serial',
     enabled: true,
     independent: true, // Arranges its own nest, artifact, doc and comments
+  },
+  {
+    // Nests → Import Folder (CN-IMP-001 … CN-IMP-012). Serial: each case
+    // imports through the dialog and deletes the nests it created.
+    file: 'import-folder/import_folder.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Imports its own nests from run-time fixtures
+  },
+  {
+    // Nest page → Archive (CN-ARCH-001 … CN-ARCH-010). Serial: the cases
+    // archive, restore and request archives of the nests they create.
+    file: 'archive/nest_archive.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → New Document (CN-CREATE-001 … CN-CREATE-018). Serial: each
+    // case creates documents through the editor in a nest it then deletes.
+    file: 'new-document/new_document.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests
+  },
+  {
+    // Nest page → New Folder (CN-FOLDER-001 … CN-FOLDER-012). Serial: each
+    // case creates folders through the dialog in a nest it then deletes.
+    file: 'new-folder/new_folder.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → Import (CN-NIMP-001 … CN-NIMP-014). Serial: each case
+    // imports files through the dialog into a nest it then deletes.
+    file: 'nest-import/nest_import.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → Overview tab (CN-OVR-001 … CN-OVR-021). Serial: each case
+    // checks the Overview of a nest it arranges and then deletes.
+    file: 'nest-overview/nest_overview.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → Documents tab (CN-DOC-001 … CN-DOC-023). Serial: each case
+    // works in a nest it arranges and then deletes.
+    file: 'nest-documents/nest_documents.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
@@ -258,7 +322,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -515,9 +579,97 @@ export default defineConfig({
           },
         },
         {
+          name: 'sidebar-rail',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/sidebar-rail/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
           name: 'access-requests',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/access-requests/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'import-folder',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/import-folder/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'archive',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/archive/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'new-document',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/new-document/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'new-folder',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/new-folder/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-import',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-import/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-overview',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-overview/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-documents',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-documents/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

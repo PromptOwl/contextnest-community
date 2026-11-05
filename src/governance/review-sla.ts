@@ -210,7 +210,7 @@ async function notifyEscalation(
     // The template already says it passed the SLA and was escalated; a note
     // would render as "with the note: …", which reads as the submitter's words.
     note: null,
-  });
+  }, { nestId: r.nest_id });
 }
 
 /**

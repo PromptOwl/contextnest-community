@@ -72,6 +72,13 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
 
   const { frontmatter, body } = splitFrontmatter(data.content);
   const revision = data.revision;
+  // Always-include documents (CU-wdqcq05rn0) travel with these instructions;
+  // counted from what this reader can read, including any past the budget.
+  const standing = data.always_included;
+  const alwaysIncluded = standing ? standing.documents.length + standing.overflow.length : 0;
+  const standingTitles = standing
+    ? [...standing.documents, ...standing.overflow].map((d) => d.title).join(", ")
+    : "";
 
   const startEdit = () => {
     setDraft(body);
@@ -138,6 +145,17 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
                 <code className="text-xs">context_init</code>). Every change is recorded.
               </span>
             </CardDescription>
+            {alwaysIncluded > 0 && (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="instructions-always-included"
+                title={standingTitles}
+              >
+                Plus {alwaysIncluded} always-included document
+                {alwaysIncluded === 1 ? "" : "s"}, sent with these instructions to
+                every agent (approved versions only).
+              </p>
+            )}
             {revision && (
               <p className="text-xs text-muted-foreground" data-testid="instructions-last-change">
                 Revision {revision.seq} · {who(revision)} · {relTime(revision.createdAt)} ·{" "}
@@ -255,6 +273,23 @@ export function InstructionsTab({ nestId, canEdit }: InstructionsTabProps) {
                 <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap rounded-md border bg-muted/40 p-3 text-xs">
                   {opened.data.content}
                 </pre>
+              )}
+            </div>
+          ) : !body.trim() ? (
+            // Empty CONTEXT.md (an imported nest often has one): say so instead
+            // of a blank card (CU-wdqcq06259).
+            <div className="py-8 text-center" data-testid="instructions-empty">
+              <p className="font-medium">No instructions yet</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+                {canEdit
+                  ? "Agents read these first when they work in this nest. Tell them what the nest is for and how to use it."
+                  : "The nest owner or an admin can add instructions for agents working in this nest."}
+              </p>
+              {canEdit && (
+                <Button size="sm" className="mt-4" onClick={startEdit}>
+                  <Pencil className="mr-1.5 h-4 w-4" />
+                  Add instructions
+                </Button>
               )}
             </div>
           ) : (

@@ -338,6 +338,12 @@ async function parseAuthz(
   // must describe the same thing.
   if (scopes.includes(SCOPE_WRITE) && !scopes.includes(SCOPE_READ))
     scopes.unshift(SCOPE_READ);
+  // Every grant stays connected. Registration already promises the
+  // refresh_token grant, and a client that skipped the challenge's scope (a
+  // local app, typically) otherwise lost its only token after an hour. A
+  // client that never refreshes just ignores the extra field. Added here, like
+  // read above, so the consent screen lists it.
+  if (!scopes.includes(SCOPE_OFFLINE)) scopes.push(SCOPE_OFFLINE);
 
   return {
     ok: true,

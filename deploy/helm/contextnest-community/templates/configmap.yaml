@@ -1,0 +1,41 @@
+{{- include "contextnest-community.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "contextnest-community.fullname" . }}
+  labels:
+    {{- include "contextnest-community.labels" . | nindent 4 }}
+data:
+  PORT: "3838"
+  DATA_ROOT: "/data"
+  AUTH_MODE: {{ .Values.config.authMode | quote }}
+  {{- with .Values.config.publicBaseUrl }}
+  PUBLIC_BASE_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.trustedProxies }}
+  TRUSTED_PROXIES: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.nestStorageRoot }}
+  NEST_STORAGE_ROOT: {{ . | quote }}
+  {{- end }}
+  {{- if include "contextnest-community.postgresConfigured" . }}
+  DB_DRIVER: "postgres"
+  {{- with .Values.postgres }}
+  {{- if and .host (not .url) (not .existingSecret) }}
+  DB_HOST: {{ .host | quote }}
+  DB_PORT: {{ .port | toString | quote }}
+  DB_USER: {{ .user | quote }}
+  DB_NAME: {{ .database | quote }}
+  {{- end }}
+  DB_SSL: {{ .ssl | toString | quote }}
+  {{- with .poolMax }}
+  DB_POOL_MAX: {{ . | toString | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.metrics.enabled }}
+  METRICS_ENABLED: "true"
+  {{- end }}
+  {{- range $k, $v := .Values.config.env }}
+  {{ $k }}: {{ toString $v | quote }}
+  {{- end }}

@@ -1,0 +1,78 @@
+{
+  "A create": {
+    "status": 400,
+    "nodeId": null,
+    "nodeType": null,
+    "error": "A view block is required when type is \"view\" (§13 rule 30), and this node has none. Pass view: { blocks: [...] } — e.g. view: { blocks: [{ md: { ref: \"nodes/overview\" } }, { list: { select: \"#board-metric\" } }] }."
+  },
+  "A reads": null,
+  "B /hosted": {
+    "status": 404,
+    "contentType": "application/json",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": null,
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "125a1ac855a76442bcc3412548c10f622476cd42cb811788b78b0cf0ccd4f831",
+    "bodyLength": 33
+  },
+  "B /hosted?embed=1": {
+    "status": 404,
+    "contentType": "application/json",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": null,
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "125a1ac855a76442bcc3412548c10f622476cd42cb811788b78b0cf0ccd4f831",
+    "bodyLength": 33
+  },
+  "B ?format=raw": {
+    "status": 200,
+    "contentType": "text/markdown; charset=utf-8",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "d0f68c260d7fa2ed9d2d1a95a1ea6678f3b27ab04605e1a4c35aae607816670d",
+    "bodyLength": 43
+  },
+  "B ?format=raw&frontmatter=1": {
+    "status": 200,
+    "contentType": "text/markdown; charset=utf-8",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "b67a5bc9bbd57a6d09175d43df76ed84ae9ca18f7319a3bb4acc3ecc66641fad",
+    "bodyLength": 574
+  },
+  "B json GET": {
+    "status": 200,
+    "topLevelKeys": [
+      "node"
+    ],
+    "nodeKeys": [
+      "author",
+      "collaborators",
+      "content",
+      "deletionRequest",
+      "id",
+      "myGrant",
+      "status",
+      "tags",
+      "title",
+      "type",
+      "version"
+    ],
+    "type": "view",
+    "title": "Golden Disk View",
+    "contentSha256": "d0f68c260d7fa2ed9d2d1a95a1ea6678f3b27ab04605e1a4c35aae607816670d",
+    "contentHasNestData": false,
+    "error": null,
+    "code": null
+  }
+}

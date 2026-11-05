@@ -7,9 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../../lib/queries";
 import { parseServerDate } from "../../../lib/dates";
 import { useAuth } from "../../../auth/AuthContext";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
-  UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
+  UserPlus, Shield, ShieldCheck, ShieldOff, Users, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -53,11 +53,7 @@ export default function TeammatesPage() {
   const [newKey, setNewKey] = useState<{ email: string; password: string; promptowl: boolean; emailed: boolean } | null>(null);
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
-  const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
-  // "Copied" flash on the temp-password Copy button. Reset whenever a new
-  // password is generated so a prior flash doesn't leak across resets.
-  const [resetCopied, setResetCopied] = useState(false);
-  useEffect(() => setResetCopied(false), [resetPw?.password]);
+  const [resetPw, setResetPw] = useState<{ email: string; password: string | null; notice?: string } | null>(null);
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -228,7 +224,7 @@ export default function TeammatesPage() {
                               className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
                             >
                               <Shield className="h-3 w-3" />
-                              Admin
+                              Superadmin
                             </Badge>
                           )}
                           {!!t.is_invited && (
@@ -293,6 +289,8 @@ export default function TeammatesPage() {
                                 setResetPw({
                                   email: t.email,
                                   password: r.temporary_password || "",
+                                  // Sealed private-nest owner: a link was emailed, no password.
+                                  notice: r.reset_link_sent ? r.message : undefined,
                                 });
                                 await fetchTeammates();
                               } catch (e: any) {
@@ -407,8 +405,17 @@ export default function TeammatesPage() {
             className="w-full max-w-sm rounded-lg border bg-background p-5 shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="font-semibold mb-1">Temporary password</h3>
-            {resetPw.password === null ? (
+            <h3 className="font-semibold mb-1">{resetPw.notice ? "Reset link sent" : "Temporary password"}</h3>
+            {resetPw.notice ? (
+              <>
+                <p className="text-sm text-muted-foreground">{resetPw.notice}</p>
+                <div className="mt-4 text-right">
+                  <Button variant="outline" size="sm" onClick={() => setResetPw(null)}>
+                    Done
+                  </Button>
+                </div>
+              </>
+            ) : resetPw.password === null ? (
               <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">
@@ -429,32 +436,14 @@ export default function TeammatesPage() {
                   <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
                     {resetPw.password}
                   </code>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      const ok = await copyTextWithToast(
-                        resetPw.password!,
-                        "Temporary password copied",
-                      );
-                      if (ok) {
-                        setResetCopied(true);
-                        setTimeout(() => setResetCopied(false), 1500);
-                      }
-                    }}
-                  >
-                    {resetCopied ? (
-                      <>
-                        <Check className="h-3.5 w-3.5 mr-1 text-green-600" />
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3.5 w-3.5 mr-1" />
-                        Copy
-                      </>
-                    )}
-                  </Button>
+                  {/* Keyed by the password so a "Copied" flash never
+                      carries over to the next reset. */}
+                  <CopyButton
+                    key={resetPw.password}
+                    text={resetPw.password}
+                    label="Copy"
+                    toastMessage="Temporary password copied"
+                  />
                 </div>
                 <div className="mt-4 text-right">
                   <Button
@@ -705,12 +694,6 @@ function NewKeyModal({
   emailed: boolean;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (!(await copyTextWithToast(password))) return;
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -733,13 +716,7 @@ function NewKeyModal({
             <code className="min-w-0 flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
               {password}
             </code>
-            <Button size="sm" variant="outline" onClick={copy}>
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </Button>
+            <CopyButton text={password} />
           </div>
           <p className="text-xs text-muted-foreground pt-2">
             They sign in at this server with their email + this password, then

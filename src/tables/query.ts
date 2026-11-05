@@ -11,6 +11,7 @@
  * too, not the live working copy. Without both, a caller who cannot open a
  * table could still read it one query at a time, pending rows included.
  */
+import { approvedOnlyForSurfaceEdit } from "../surfaces/draft-visibility.js";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { bodyOnly } from "../nodes/service.js";
@@ -19,7 +20,8 @@ import { getApprovedVersion } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
-import { parseTable, parseQuery, runQuery } from "./service.js";
+import { parseTable, parseQuery, runQuery, type RefResolver } from "./service.js";
+import { callerRefResolver } from "./refs.js";
 
 export interface TableQueryResult {
   table: string;
@@ -102,7 +104,9 @@ export async function queryTableNode(
 
   let body = doc.body || "";
   let version = (doc.frontmatter.version as number) ?? null;
-  if (caller.approvedOnly) {
+  // A pending Surfaces edit is a chat-derived draft: below write, the
+  // approved rows only (round 3, N4). Views read tables through here too.
+  if (caller.approvedOnly || (await approvedOnlyForSurfaceEdit(nestId, doc.id, caller.userId))) {
     const approved = await getApprovedVersion(nestId, doc.id);
     if (approved == null) throw new NotFoundError(`Table not found: ${ref}`);
     const rebuilt = await reconstructApproved(versionManager, nestId, doc.id, approved);
@@ -111,7 +115,26 @@ export async function queryTableNode(
   }
 
   const parsed = parseTable(body);
-  const result = runQuery(parsed, parseQuery(q));
+  const query = parseQuery(q);
+  // `=`/`!=` on a :ref column compare resolved targets. Resolve over what THIS
+  // caller can read only, so a hidden node's title can't be used to probe
+  // which rows point at it — under the same visibility as the table lookup
+  // (published unless include_drafts), and, for an approved-only reader, by
+  // id/slug only: a working-copy title may be an unapproved rename. Ref
+  // matches therefore depend on the nest's documents as well as the table's
+  // version (see API.md, Table :ref columns). Built only when a condition needs it — a ref-less
+  // query never pays for the nest scan.
+  const refCols = new Set(
+    parsed.columns.filter((c) => c.ref).map((c) => c.name.toLowerCase()),
+  );
+  let resolveRef: RefResolver | undefined;
+  if (query.where.some((w) => refCols.has(w.column.toLowerCase()))) {
+    resolveRef = await callerRefResolver(nestId, caller.userId, caller.userEmail, {
+      approvedOnly: caller.approvedOnly,
+      publishedOnly: !caller.approvedOnly && !includeDrafts,
+    });
+  }
+  const result = runQuery(parsed, query, resolveRef);
   return {
     table: doc.id,
     version,

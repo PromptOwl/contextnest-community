@@ -661,7 +661,13 @@ test.describe('Message log', () => {
     await ml.waitIdle();
     await expect(ml.rows.first()).toBeVisible();
     await expect(ml.table).toContainText('cnst_[REDACTED]');
-    await expect(ml.table).not.toContainText(fakeKey);
+    // The Subject cell shows the stored subject (also its tooltip), then " · <nest>":
+    // the nest's live name, which this test chose to carry the keys — not stored message text.
+    const subject = ml.cell(0, 'Subject');
+    await expect(subject).toContainText('cnst_[REDACTED]');
+    expect(await subject.getAttribute('title')).not.toContain(fakeKey);
+    const shown = (await ml.table.innerText()).split(nest.name).join('');
+    expect(shown).not.toContain(fakeKey);
   });
 
   test('CN-MSG-023: requesting a non-existent message returns "Message not found." and is recorded in the Access log', async ({ primary_user }) => {
@@ -724,14 +730,16 @@ test.describe('Message log', () => {
   test('CN-MSG-026: the Access log records searches, opened messages and Access log views', async ({ primary_user }) => {
     await asAdmin(primary_user);
     const { messageLogPage: ml } = primary_user;
-    const { body } = await ml.gotoAndRead();
+    await ml.gotoAndRead();
     const term = `qa-access-${Date.now().toString(36)}`;
     await ml.nextRead(() => ml.search.fill(term), { where: (q) => q.q === term });
     await ml.waitIdle();
     await ml.nextRead(() => ml.search.fill(''), { where: (q) => q.q === null });
     await ml.waitIdle();
-    const opened = body.messages[0].id;
-    await ml.openRow(0);
+    // The message actually opened: on a busy server a newer message can top the
+    // list between the first read and the click.
+    const opened = (await ml.openRow(0)).body?.message?.id;
+    expect(opened, 'the opened message has an id').toBeTruthy();
     await primary_user.page.keyboard.press('Escape');
 
     const views = await ml.openAccessLog();

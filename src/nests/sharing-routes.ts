@@ -1,5 +1,3 @@
-import { invalidateSiteNests } from "../site/invalidate.js";
-import { claimSiteKeyIfLive } from "../site/settings.js";
 import { Hono } from "hono";
 import { dropPersonalPinsIfGone } from "../nodes/doc-pins.js";
 import { isSystemUser } from "../auth/systems.js";
@@ -19,7 +17,7 @@ import { addCollaborator } from "./sharing-service.js";
 import { assertCanGrant, permissionClass } from "../auth/seats.js";
 import { canSeeRoster, listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
-import { isNestHeadless } from "../auth/headless.js";
+import { setNestVisibility } from "./visibility-service.js";
 import {
   isServerAdminUserId,
   resolveNestAccess,
@@ -36,7 +34,7 @@ sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
   const nestId = c.req.param("nestId")!;
   const collabs = (await db.all(
-    `SELECT nc.*, u.email,
+    `SELECT nc.*, u.email, u.name,
             CASE WHEN EXISTS (SELECT 1 FROM system_accounts sa WHERE sa.user_id = nc.user_id)
                  THEN 'system' ELSE 'human' END AS principal_kind
        FROM nest_collaborators nc
@@ -89,6 +87,15 @@ sharingRoutes.post("/collaborators", async (c) => {
     callerPermission: c.get("nestPermission"),
     baseUrl: requestBaseUrl(c.req.url),
   });
+  // A sealed personal nest (Surfaces): sharing it is the owner's choice — say
+  // plainly that it is no longer private to them alone (re-review R3-L1).
+  const { sealedNest } = await import("../surfaces/sealed.js");
+  if (await sealedNest(c.req.param("nestId")!)) {
+    return c.json(
+      { collaborator: collab, warning: "This private nest is no longer private to you alone: the person you added can now open it." },
+      201,
+    );
+  }
   return c.json({ collaborator: collab }, 201);
 });
 
@@ -183,7 +190,8 @@ sharingRoutes.get("/mentionable", async (c) => {
   });
 });
 
-// PATCH /nests/:nestId/visibility
+// PATCH /nests/:nestId/visibility — the rules (server cap, acknowledgement,
+// headless) live in visibility-service.ts, shared with MCP context_set_visibility.
 sharingRoutes.patch("/visibility", async (c) => {
   const body = await c.req.json<{
     visibility?: string;
@@ -195,83 +203,16 @@ sharingRoutes.patch("/visibility", async (c) => {
   ) {
     throw new ValidationError("visibility must be private, org or public");
   }
-
-  // Outside-org publish guardrail: flipping a nest to public makes it readable
-  // by anyone on the internet, outside your organization. Require an explicit
-  // acknowledgement so this can never happen on a stray click. Going back to
-  // private needs no acknowledgement. 'org' stays inside the deployment — on
-  // a single-company server that crosses no organizational boundary, but on
-  // a SHARED deployment (the PromptOwl-hosted server) the deployment is many
-  // customers, so 'org' needs the same acknowledgement there. Enforced here,
-  // not only in the UI, so a client that bypasses the UI can't skip it.
-  const ack = body.acknowledge_public === true;
-  const shared = config.SHARED_DEPLOYMENT;
-  if (body.visibility === "public" && !ack) {
-    return c.json(
-      {
-        error: "Publishing this nest requires acknowledgement.",
-        requires_acknowledgement: true,
-        warning: shared
-          ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organizations too."
-          : "This makes the nest readable by anyone on the internet, outside your organization.",
-      },
-      409,
-    );
-  }
-  if (body.visibility === "org" && shared && !ack) {
-    return c.json(
-      {
-        error: "Opening this nest to the organization requires acknowledgement.",
-        requires_acknowledgement: true,
-        warning:
-          "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours.",
-      },
-      409,
-    );
-  }
-
-  const db = getDb();
-  const nestId = c.req.param("nestId")!;
-  // A nest published headless (API-only, CU-wdqcq0314u) stays private: org or
-  // public would let people read it without a key.
-  if (body.visibility !== "private" && (await isNestHeadless(nestId))) {
-    return c.json(
-      {
-        error:
-          "This nest is published API-only (headless), so it stays private. Stop headless publishing first to make it org or public.",
-      },
-      409,
-    );
-  }
-  // Widening is conditional on the nest not being headless (CU-wdqcq0314u), so
-  // a headless toggle racing this request can't leave it both public and
-  // headless. A zero-row result is then told apart from "no such nest" below.
-  const result = await db.run(
-    body.visibility === "private"
-      ? "UPDATE nests SET visibility = ? WHERE id = ?"
-      : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
-    [body.visibility, nestId],
+  const r = await setNestVisibility(
+    c.req.param("nestId")!,
+    c.get("userId"),
+    body.visibility,
+    body.acknowledge_public === true,
   );
-  invalidateSiteNests();
-  if (result.changes > 0) await claimSiteKeyIfLive(nestId);
-  if (result.changes === 0 && body.visibility !== "private" && (await isNestHeadless(nestId))) {
-    return c.json(
-      { error: "This nest is published API-only (headless), so it stays private." },
-      409,
-    );
-  }
-  // A zero-row update means the nest id didn't resolve — report it instead of
-  // echoing success, which previously let the UI flip to a state the DB never
-  // took (the "made it private but it still shows public" symptom).
-  if (result.changes === 0) {
-    throw new NotFoundError("Nest not found");
-  }
-  // Re-read the persisted value so the client reconciles against the DB truth,
-  // not the value it sent.
-  const row = (await db.get("SELECT visibility FROM nests WHERE id = ?", [
-    nestId,
-  ])) as { visibility: string };
-  return c.json({ visibility: row.visibility });
+  if (r.ok) return c.json({ visibility: r.visibility });
+  if (r.status === 404) throw new NotFoundError(r.error);
+  const { ok: _ok, status, ...payload } = r;
+  return c.json(payload, status);
 });
 
 // PATCH /nests/:nestId/reader-mode — configure Public Docs Reader Mode.

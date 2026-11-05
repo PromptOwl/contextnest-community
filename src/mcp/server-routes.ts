@@ -19,15 +19,19 @@
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
+ * Metacognition (`context_metacognition_list` / `_suggest` / `_configure` / `_run` / `_remove`, nest
+ * required) is offered to people who own or administer a nest while its flags
+ * are on, and re-checked on the named nest per call.
+ *
  * Governance tools that manage people or nest settings (`context_approve`,
  * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { z } from "zod";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
@@ -35,14 +39,13 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
-import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
+  isServerAdminUserId,
   type NestPermission,
 } from "../shared/access.js";
 import {
@@ -60,6 +63,7 @@ import {
   TOOL_DEFINITIONS,
   headlessToolError,
   MCP_READ_TOOLS,
+  toolShape,
   type ToolResult,
 } from "./tools.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
@@ -69,6 +73,13 @@ import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../a
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
+import {
+  METACOGNITION_TOOL_DEFINITIONS,
+  isMetacognitionTool,
+  requestMayUseMetacognition,
+} from "./metacognition-tools.js";
+import { metacognitionEnabled } from "../metacognition/manage.js";
+import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -78,6 +89,7 @@ import { isSystemUser } from "../auth/systems.js";
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",
@@ -85,6 +97,9 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_request_access",
   "context_task_log",
   "context_bulk_update",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -295,6 +310,7 @@ const SERVER_NEST_TOOLS = [
   "context_comments",
   "context_versions",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",
@@ -309,7 +325,7 @@ const SERVER_NEST_TOOLS = [
   "context_bulk_update",
 ];
 
-function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
+function withNestArg(tool: { name: string; description: string; inputSchema: unknown }) {
   const fanout = FANOUT_READ_TOOLS.has(tool.name);
   const schema = tool.inputSchema as { properties?: object; required?: string[] };
   return {
@@ -350,6 +366,11 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
+  // Metacognition agents (CU-wdqcq05rqq): the per-nest definitions with
+  // `nest` required. Advertised per request only while both feature flags are
+  // on and the caller administers some nest (createServerMcp); each call
+  // re-checks owner/admin on the named nest.
+  ...METACOGNITION_TOOL_DEFINITIONS.map(withNestArg),
 ];
 
 /**
@@ -408,6 +429,8 @@ async function handleServerToolCall(
   client?: ClientMetadata,
   headless = false,
   capability: "read" | "write" = "write",
+  /** A person's own full credential (CU-wdqcq05rz6) — see McpToolContext. */
+  contributorCredential = false,
 ): Promise<ToolResult> {
   // Headless access keys (CU-wdqcq0314u): nest_create and every other
   // server-only tool are refused here; per-nest tools are re-checked in
@@ -602,6 +625,7 @@ async function handleServerToolCall(
     apiKeyLabel,
     client,
     capability,
+    contributorCredential,
   });
 }
 
@@ -615,10 +639,15 @@ function createServerMcp(
   c: Context<AuthEnv>,
   headless = false,
   capability: "read" | "write" = "write",
+  /** Offer the metacognition tools: flags on, and a person with a full
+   *  credential who owns or administers at least one nest (route handler). */
+  offerMetacognition = false,
+  /** Returned in the `initialize` result (connect-instructions.ts). */
+  instructions?: string,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
   const toolDefs = headless
@@ -628,20 +657,8 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
-      else field = z.any();
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Same §9.4 and billing-confirm fields the per-nest surface advertises.
-    Object.assign(shape, clientToolField, confirmBillingToolField);
+    if (isMetacognitionTool(tool.name) && !offerMetacognition) continue;
+    const shape = toolShape(tool.inputSchema);
     server.tool(tool.name, tool.description, shape, async (args) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
@@ -669,11 +686,81 @@ function createServerMcp(
         attributeRequest(c, undefined, connectionClient(server)),
         headless,
         capability,
+        credentialMayContribute(c),
       );
       return toCallToolResult(out);
     });
   }
   return server;
+}
+
+/**
+ * Does this caller get the metacognition tools on the server-level endpoint?
+ * Both flags on, a person (not a system or access key), and owner/admin on at
+ * least one nest these credentials reach — the per-nest endpoint's rule, over
+ * every nest, since the nest is only named at call time.
+ */
+async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise<boolean> {
+  if (!metacognitionEnabled()) return false;
+  // The server is rebuilt per request, so only pay for the lookup when this
+  // request can use the answer: a tools/list, or a call to one of these tools
+  // (which re-checks owner/admin on the named nest anyway). The peek never
+  // reads past 64 KB: those requests are a few KB at most, so anything bigger
+  // (declared, or read so far on a chunked body) is some other write.
+  const CAP = 64 * 1024;
+  if (Number(c.req.header("content-length") ?? 0) > CAP) return false;
+  const text = await readCapped(c.req.raw.clone().body, CAP);
+  if (text === null) return false;
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const wants = requestMayUseMetacognition(body);
+  if (!wants) return false;
+  if (await isSystemUser(userId)) return false;
+  const person = (await getDb().get("SELECT COALESCE(is_service, 0) AS s FROM users WHERE id = ?", [userId])) as
+    | { s: number }
+    | undefined;
+  if (config.AUTH_MODE !== "open" && (!person || person.s)) return false;
+  // Open mode is the owner everywhere; a server admin administers any nest
+  // (resolveNestPermission), the ones it can only reach by link included.
+  if (config.AUTH_MODE === "open" || (await isServerAdminUserId(userId))) return true;
+  // Owning a nest settles it without a lookup per nest; otherwise check the
+  // nests shared with the caller (no document counts — buildNestIndex's cost).
+  const scope = c.get("nestScope");
+  const owned = (await listNests(userId)).filter((n) => !scope || n.id === scope);
+  if (owned.length) return true;
+  for (const n of await listSharedNests(userId)) {
+    if (scope && n.id !== scope) continue;
+    const perm = await resolveNestPermission(n.id, userId);
+    if (perm === "owner" || perm === "admin") return true;
+  }
+  return false;
+}
+
+/** The stream's text, or null once it passes `cap` bytes (or can't be read). */
+async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number): Promise<string | null> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > cap) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 export const serverMcpRoutes = new Hono<AuthEnv>();
@@ -683,16 +770,36 @@ export const serverMcpRoutes = new Hono<AuthEnv>();
 serverMcpRoutes.all("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
+  const headless = await isHeadlessIdentity(userId);
+  const capability = c.get("keyCapability") ?? "write";
+  const baseUrl = requestBaseUrl(c.req.url);
+  // Every readable nest's standing instructions, on the initialize request
+  // only (CU-wdqcq05rn0). The index is the same scoped, deduped list
+  // nest_index serves, so a nest-scoped key hears about its nest alone.
+  let instructions: string | undefined;
+  if (await isInitializeRequest(c.req.raw)) {
+    try {
+      instructions = await serverConnectInstructions(
+        await buildNestIndex(userId, c.get("nestScope")),
+        { userId, userEmail },
+        baseUrl,
+      );
+    } catch (err) {
+      console.error("[mcp] server connect instructions unavailable", err);
+    }
+  }
   const server = createServerMcp(
     userId,
     userEmail,
     c.get("nestScope"),
-    requestBaseUrl(c.req.url),
+    baseUrl,
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
     c,
-    await isHeadlessIdentity(userId),
-    c.get("keyCapability") ?? "write",
+    headless,
+    capability,
+    !headless && capability === "write" && (await offersMetacognition(c, userId)),
+    instructions,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -852,19 +959,30 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
-  - read: \`context_init\` (operating instructions — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
+  - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too — also on
+    \`${B}/mcp\` with \`nest\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
+    (a starting config read off the agent document), \`context_metacognition_configure\`
+    (call with \`dry_run: true\` first and show the person the returned \`summary\`
+    before saving), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
+    \`workflow_runs_list { agent, agent_stats: true }\`
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
   — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
   (\`nodes/gtm/deals\`). The recipient reaches exactly that document, or
   everything under that folder, and nothing else in the nest. Owner/admin only.
+
+Both endpoints answer \`initialize\` with \`instructions\`: the nest's CONTEXT.md
+(per-nest) and the approved text of its **always-include** documents — the
+standing rules for any work in the nest, filtered to what these credentials can
+read. Most clients put them in the system prompt; follow them.
 
 Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`Authorization: Bearer\` header. Claude Desktop needs the mcp-remote bridge:

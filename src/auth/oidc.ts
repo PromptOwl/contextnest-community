@@ -21,11 +21,13 @@
  * Every failure redirects to "/?sso_error=<code>" so the SPA surfaces a
  * friendly toast and falls back to the normal sign-in options.
  */
+import { signInAlertSoon } from "../surfaces/signin-alerts.js";
 import { Hono } from "hono";
 import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { idpVouchesForEmail, markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -493,11 +495,18 @@ oidcRoutes.get("/callback", async (c) => {
       console.error("[oidc] department upsert failed (login continues):", err);
     }
 
+    // Record it only when the token actually vouches for the address (see
+    // idpVouchesForEmail): sign-in tolerates an absent claim, a domain match
+    // on a shared server does not.
+    if (idpVouchesForEmail(claims)) await markEmailVerified(user.id, "oidc");
+
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the
     // non-secret SSO marker so the SPA routes logout through the IdP.
     const sessionId = await createSession(user.id, c.req.header("User-Agent"));
     clearFlowCookies();
+    // Round 8: a sealed-nest owner hears about every OIDC session.
+    signInAlertSoon(user.id, "oidc", c.req.header("User-Agent"));
     c.header("Set-Cookie", buildSessionCookie(sessionId, { secure }), {
       append: true,
     });

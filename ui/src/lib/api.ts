@@ -272,6 +272,7 @@ export async function getHealth() {
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
     type_task_enabled?: boolean;
+    type_view_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -305,6 +306,9 @@ export async function getHealth() {
     email_configured?: boolean;
     /** Who may create nests; "admins" hides the create CTAs from everyone else. */
     nest_creation?: "admins" | "everyone";
+    /** Who may widen a nest to public / org; "admins" = server admins only. */
+    nest_public_visibility?: "owners" | "admins";
+    nest_org_visibility?: "owners" | "admins";
     suspended_reason?: string;
   }>("/health");
 }
@@ -345,6 +349,8 @@ export interface AdminSettings {
    * user in instead of carrying a shared API key. Requires public_base_url.
    */
   mcp_oauth_enabled: boolean;
+  /** OpenAI's ChatGPT-app domain token, served at /.well-known/openai-apps-challenge. "" = off. */
+  openai_apps_challenge: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
@@ -356,6 +362,8 @@ export interface AdminSettings {
   type_table_enabled: boolean;
   /** The server accepts `task` nodes (its engine knows the type). */
   type_task_enabled?: boolean;
+  /** The server accepts `view` nodes (its engine knows the type). */
+  type_view_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -372,6 +380,24 @@ export interface AdminSettings {
   hootie_model: string;
   subagent_runs_enabled: boolean;
   metacognition_enabled: boolean;
+  /** Surfaces (Slack → nest), FEATURE_SURFACES. Needs the plane and metacognition. */
+  surfaces_enabled?: boolean;
+  /** Whether SURFACES_BUFFER_KEY is set; the key itself is never returned. */
+  surfaces_buffer_key_set?: boolean;
+  /** Write-only: the buffer key to set, or null to clear. */
+  surfaces_buffer_key?: string | null;
+  surfaces_judge_model?: string;
+  /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
+  surfaces_default_cap_usd?: number | string | null;
+  surfaces_org_name?: string;
+  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
+  surfaces_slack_hosted_enabled?: boolean;
+  surfaces_slack_hosted_client_id?: string;
+  surfaces_slack_hosted_client_secret_set?: boolean;
+  surfaces_slack_hosted_signing_secret_set?: boolean;
+  /** Write-only: set, or null to clear. */
+  surfaces_slack_hosted_client_secret?: string | null;
+  surfaces_slack_hosted_signing_secret?: string | null;
   /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
@@ -401,6 +427,10 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   nest_creation: "admins" | "everyone";
+  /** Who may widen a nest to public / org (default owners). Narrowing is
+   *  always allowed; server admins are never restricted. */
+  nest_public_visibility: "owners" | "admins";
+  nest_org_visibility: "owners" | "admins";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
@@ -450,6 +480,21 @@ export interface AdminSettings {
 
 export async function getAdminSettings() {
   return request<AdminSettings>("/admin/settings");
+}
+
+/** Admin: is a newer release on npm, and the command that updates this install. */
+export interface UpdateStatus {
+  enabled: boolean;
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+  install: "container" | "npm";
+  command: string;
+}
+
+export async function getUpdateStatus() {
+  return request<UpdateStatus>("/admin/update-status");
 }
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
@@ -939,6 +984,8 @@ export async function resetUserPassword(userId: string, password?: string) {
     email: string;
     keys_revoked?: boolean;
     temporary_password?: string;
+    reset_link_sent?: boolean;
+    message?: string;
   }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify(password ? { password } : {}),
@@ -1016,6 +1063,8 @@ export interface ConnectedApp {
   redirectOrigin: string | null;
   connectedAt: string;
   lastUsedAt: string | null;
+  /** Its sign-in ran out; it has to be reconnected from the app itself. */
+  expired: boolean;
 }
 
 export async function listConnectedApps() {
@@ -1030,13 +1079,42 @@ export async function disconnectApp(clientId: string) {
 
 // ─── Nest settings ─────────────────────────────────────────────────────
 
+/** A product area. Sorts and filters tasks; never part of the ticket number. */
+export interface TaskSurface {
+  name: string;
+  tags: string[];
+}
+
+export interface TaskRules {
+  /** Tag namespaces a task holds only one tag from (e.g. "stage"). */
+  exclusive_namespaces: string[];
+  /** Tag a new task gets when it arrives with none from an exclusive namespace. */
+  default_stage_tag: string | null;
+  surfaces: TaskSurface[];
+  /** Name of the surface the create dialog preselects; null = none. */
+  default_surface: string | null;
+  ticket_numbering: boolean;
+  /** The nest's single ticket prefix ("PO"); required for numbering. */
+  ticket_prefix?: string | null;
+  /** First number issued; null = 1. */
+  ticket_start_at?: number | null;
+  /** Stage columns in workflow order (bare values). Empty: alphabetical. */
+  stage_order?: string[];
+  /** Priority levels, most urgent first. Empty: the built-in four. */
+  priorities?: { key: string; label: string }[];
+}
+
 export interface NestSettings {
   stewardship_enabled: boolean;
+  task_rules?: TaskRules;
   allow_self_approve: boolean;
   /** Review only prime documents; everything else self-publishes. */
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** Tags that mark a document always-include: its approved text is pushed
+   *  to every agent and model entering the nest. Default ["always-include"]. */
+  always_include_tags?: string[];
   /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
@@ -1046,14 +1124,31 @@ export interface NestSettings {
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
+  /** "drafts": anyone in the organization may suggest documents and edits on
+   *  this org nest, as drafts for review (CU-wdqcq05rz6). */
+  org_contributions?: "off" | "drafts";
+  /** Email domains that count as the organization — required on a shared
+   *  deployment. Bare domains, matched exactly. */
+  org_domains?: string[];
 }
 
 // ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
 
+/** An always-include document as the instructions page reports it. */
+export interface StandingRef {
+  id: string;
+  title: string;
+  version: number;
+}
+
 export async function getInstructions(nestId: string) {
-  return request<{ content: string; revision: InstructionsRevision | null }>(
-    `/nests/${nestId}/instructions`,
-  );
+  return request<{
+    content: string;
+    revision: InstructionsRevision | null;
+    /** The always-include documents agents receive with these instructions
+     *  (those this reader can read); `overflow` is past the size budget. */
+    always_included?: { documents: StandingRef[]; overflow: StandingRef[] };
+  }>(`/nests/${nestId}/instructions`);
 }
 
 /** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
@@ -1104,12 +1199,17 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    always_include_tags?: string[];
+    /** Replaces the whole object. */
+    task_rules?: TaskRules;
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
     review_sla_hours?: number | null;
     /** Owner / server admin only to turn OFF; any nest admin may turn on. */
     access_log_enabled?: boolean;
+    org_contributions?: "off" | "drafts";
+    org_domains?: string[];
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -1221,15 +1321,32 @@ export async function removeFromAllowlist(
 /**
  * Does this document need steward approval regardless of who edits it?
  * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
- * the badge is advisory, the server gate is authoritative.
+ * the badge is advisory, the server gate is authoritative. An always-include
+ * document is prime whatever its own prime flag says.
  */
 export function isPrimeNode(
-  node: { tags?: string[]; prime?: boolean },
+  node: { tags?: string[]; prime?: boolean; always_include?: boolean },
   primeTags: string[],
+  alwaysIncludeTags: string[] = [],
 ): boolean {
+  if (isAlwaysIncludeNode(node, alwaysIncludeTags)) return true;
   if (typeof node.prime === "boolean") return node.prime;
   if (!primeTags.length) return false;
   const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
+  );
+}
+
+/** Same resolution as the server's `isAlwaysIncludeDocument`: the document
+ *  flag, else the nest's always-include tags. */
+export function isAlwaysIncludeNode(
+  node: { tags?: string[]; always_include?: boolean },
+  alwaysIncludeTags: string[],
+): boolean {
+  if (typeof node.always_include === "boolean") return node.always_include;
+  if (!alwaysIncludeTags.length) return false;
+  const wanted = new Set(alwaysIncludeTags);
   return (node.tags || []).some((t) =>
     wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
@@ -1531,6 +1648,51 @@ export async function revokeNestHeadlessKey(nestId: string, keyId: string) {
   });
 }
 
+// Named systems (CU-wdqcq0538g) — machine identities a nest admin manages
+// (src/auth/system-routes.ts). The key comes back once, on create and rotate.
+export interface SystemInfo {
+  id: string;
+  name: string;
+  capability: "read" | "write";
+  key_prefix: string | null;
+  nests: Array<{ id: string; name: string; permission: string }>;
+  other_nest_count: number;
+  created_by_email: string | null;
+  last_used_at: string | null;
+}
+
+export async function listNestSystems(nestId: string) {
+  return request<{ systems: SystemInfo[] }>(`/nests/${nestId}/systems`);
+}
+
+export async function createSystem(name: string, capability: "read" | "write", nestIds: string[]) {
+  return request<SystemInfo & { api_key: string }>("/systems", {
+    method: "POST",
+    body: JSON.stringify({ name, capability, nest_ids: nestIds }),
+  });
+}
+
+export async function rotateSystem(systemId: string) {
+  return request<SystemInfo & { api_key: string }>(`/systems/${systemId}/rotate`, { method: "POST" });
+}
+
+export async function revokeSystem(systemId: string) {
+  return request<{ deleted: true }>(`/systems/${systemId}`, { method: "DELETE" });
+}
+
+export async function addSystemNest(systemId: string, nestId: string) {
+  return request<SystemInfo>(`/systems/${systemId}/nests`, {
+    method: "POST",
+    body: JSON.stringify({ nest_id: nestId }),
+  });
+}
+
+export async function removeSystemNest(systemId: string, nestId: string) {
+  return request<{ removed: true; system_deleted: boolean }>(`/systems/${systemId}/nests/${nestId}`, {
+    method: "DELETE",
+  });
+}
+
 // Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
 // on its own; home_node: null clears the designated landing node.
 export async function setNestReaderMode(
@@ -1804,6 +1966,8 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a live published version, whatever their latest status. */
+  aiReady?: number;
   authors: string[];
   editedLast7d: number;
   recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
@@ -1860,6 +2024,11 @@ export async function listNodesMeta(nestId: string, approvedOnly = false) {
   );
 }
 
+/** Every `type: view` node, body-free — the sidebar's Views group. */
+export async function listViewNodes(nestId: string) {
+  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes?type=view`);
+}
+
 /** The nest-wide shape — one per nest, not per folder level. */
 export async function getNestCensus(nestId: string) {
   return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
@@ -1891,6 +2060,9 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Push this document to every agent entering the nest (it becomes
+     *  prime too). Owner/admin only. */
+    always_include?: boolean;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
     assignee?: string | null;
     due?: string | null;
@@ -1898,12 +2070,63 @@ export async function createNode(
     parent?: string | null;
     /** Custom field values, key → value (see lib/custom-fields.ts). */
     fields?: Record<string, unknown>;
+    /** type: view only. */
+    view?: unknown;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+// ── Org contributions (CU-wdqcq05rz6) ─────────────────────────────────────
+
+/** A review request as an org contribution returns it. */
+export interface ContributionReview {
+  id: string;
+  status: string;
+  version: number;
+}
+
+/** Suggest a new document as an org contributor: it is saved as a draft and
+ *  sent to review — never published by this call. */
+export async function suggestDocument(
+  nestId: string,
+  data: { title: string; content: string; folder?: string; tags?: string[] },
+) {
+  return request<{ node: any; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Propose an edit as an org contributor: a draft version for review; the
+ *  published text is unchanged until a reviewer approves it. */
+export async function suggestEdit(
+  nestId: string,
+  nodeId: string,
+  data: { content?: string; title?: string; changeNote?: string },
+) {
+  return request<{ node: any; version: number; review: ContributionReview | null; org_contribution: true }>(
+    `/nests/${nestId}/nodes/${nodeId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
+  );
+}
+
+export interface MyContribution {
+  node_id: string;
+  title: string | null;
+  version: number;
+  status: "draft" | "pending_review" | "rejected" | string;
+  created_at: string;
+  review_id: string | null;
+  content: string;
+}
+
+/** The caller's own unpublished contributions in this nest. */
+export async function listMyContributions(nestId: string) {
+  return request<{ contributions: MyContribution[] }>(`/nests/${nestId}/contributions/mine`);
 }
 
 /** The `pdf:` block a pdf node carries (engine §1.11). */
@@ -1947,6 +2170,31 @@ export async function createPdfNode(
 }
 
 /**
+ * Upload a .pptx, .docx or .xlsx as a governed markdown document (multipart). The
+ * server extracts the slides/text into the body and keeps the original file
+ * as a download linked from it.
+ */
+export async function createOfficeNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[] } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/office`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
  * Same-origin URL of a pdf node's binary. The server picks the version a
  * caller may see (a public reader always gets the approved one); `approvedOnly`
  * asks for that view explicitly, `download` for an attachment disposition.
@@ -1976,6 +2224,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Owner/admin only; `null` clears it back to the always-include tags. */
+    always_include?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
     /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
@@ -1985,6 +2235,8 @@ export async function updateNode(
     parent?: string | null;
     /** Custom field values to set; `null` clears one, omitted keys stay. */
     fields?: Record<string, unknown>;
+    /** type: view only — replaces the block list wholesale. */
+    view?: unknown;
   },
   baseVersion?: number,
 ) {
@@ -2360,6 +2612,8 @@ export interface FeedChangeItem {
   status: string;
   priority: string;
   canReview: boolean;
+  /** Requester reaches the nest only as an org contributor (CU-wdqcq05rz6). */
+  requestedByOrgContributor?: boolean;
   createdAt: string;
 }
 
@@ -2702,6 +2956,18 @@ export function hostedArtifactUrl(
   // server accepts either spelling; this one says the segment once.
   const path = nodeId.replace(/^nodes\//, "");
   return `${API_BASE}/nests/${nestId}/nodes/${path}/hosted${qs ? `?${qs}` : ""}`;
+}
+
+/**
+ * URL of a §1.12 view node's server-rendered page (iframe `src`). `v` pins the
+ * layout of that version; the data its blocks show is always live. Unlike the
+ * artifact URL above, the node id keeps its own `nodes/` prefix: a doc or
+ * folder share grant is matched against the path under /nodes/, so only the
+ * full id lets a grantee open a view shared with them.
+ */
+export function viewPageUrl(nestId: string, nodeId: string, version?: number | null): string {
+  const qs = version != null ? `?v=${encodeURIComponent(String(version))}` : "";
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/view/hosted${qs}`;
 }
 
 /**
@@ -3351,7 +3617,16 @@ export interface GraphNode {
 
 export interface NestGraph {
   nodes: GraphNode[];
-  links: Array<{ source: string; target: string }>;
+  /** `type`/`rows`/`rowCount` (and `refs` when several columns point at the
+   *  same target) only on typed edges — a table's :ref columns. */
+  links: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    rows?: string[];
+    rowCount?: number;
+    refs?: Array<{ type: string; rows: string[]; rowCount: number }>;
+  }>;
   stewards: Array<{
     /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
     id: string;
@@ -3455,6 +3730,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
+    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    waiting_on_me_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -4034,6 +4311,20 @@ export type HootieMention =
     }
   | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
 
+/** What Hootie is doing mid-answer: `tool` is the tool that's running
+ *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's
+ *  own broader search). `text` is a server template; `node`, when present,
+ *  is the document the line names. */
+export interface HootieStatus {
+  tool: string;
+  text: string;
+  node?: { id: string; title: string };
+}
+
+/** Why a turn ran without tools: the model connection refused them, or the
+ *  model asked for something it may not have and the turn stopped looking. */
+export type HootieAnswerOnly = "tools_refused" | "rejected_call";
+
 export interface HootieTurn {
   role: "user" | "assistant";
   content: string;
@@ -4053,10 +4344,15 @@ export async function chatWithHootie(
   on: {
     meta?: (m: { nodes: HootieNode[]; anchor: HootieNode | null }) => void;
     delta?: (text: string) => void;
+    /** Hootie is working (searching the nest again). Text received before
+     *  it is superseded: the answer starts over with the next delta. */
+    status?: (s: HootieStatus) => void;
     done?: (d: {
       answer: string;
       cited: HootieNode[];
       mention: HootieMention | null;
+      answer_only?: HootieAnswerOnly | null;
+      trail?: { searches: number; reads: number; broadened: boolean };
     }) => void;
     error?: (message: string) => void;
   },
@@ -4105,6 +4401,7 @@ export async function chatWithHootie(
     }
     if (event === "meta") on.meta?.(payload);
     else if (event === "delta") on.delta?.(payload.text ?? "");
+    else if (event === "status") on.status?.({ tool: String(payload.tool ?? ""), text: String(payload.text ?? "") });
     else if (event === "done") on.done?.(payload);
     else if (event === "error") on.error?.(payload.error ?? "Something went wrong.");
   };
@@ -4335,6 +4632,15 @@ export interface MetacognitionAgentConfig {
   feeds: Array<{ name: string; url: string }>;
   mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
   model: string | null;
+  /** Who it may notify (CU-wdqcq05rkq). Empty recipients = off. */
+  notify?: MetacognitionNotifyConfig;
+}
+
+/** "owner" = the nest owner, "reviewers" = its reviewers, else a member's email. */
+export interface MetacognitionNotifyConfig {
+  recipients: string[];
+  channels: Array<"email" | "connectors">;
+  max_per_run: number;
 }
 
 export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
@@ -4358,6 +4664,7 @@ export interface MetacognitionTrace {
   };
   est_cost_usd?: number | null;
   proposals?: number;
+  notifications?: number;
   stopped_by?: string;
   summary?: string;
   skipped?: string;
@@ -4381,6 +4688,28 @@ export async function saveMetacognitionAgent(
   return r.agent;
 }
 
+/** GET /nests/:id/metacognition/:node/suggest — a starting config read off
+ *  the agent document (never saved), each field with a plain-words `why`. */
+export interface MetacognitionSuggestion {
+  config: MetacognitionAgentConfig;
+  why: Record<string, string>;
+  /** MCP links in the instructions; a person names their tools before saving. */
+  mcp_candidates: Array<{ name: string; url: string }>;
+  /** "none" when the document has no approved instructions yet. */
+  instructions: "approved" | "none";
+}
+
+export async function suggestMetacognitionConfig(nestId: string, nodeId: string) {
+  const r = await request<{ suggestion: MetacognitionSuggestion }>(`/nests/${nestId}/metacognition/${nodeId}/suggest`);
+  return r.suggestion;
+}
+
+/** GET /nests/:id/folders — every folder path in the nest (no documents). */
+export async function listNestFolderPaths(nestId: string) {
+  const r = await request<{ folders: Array<{ path: string; count: number; total: number }> }>(`/nests/${nestId}/folders`);
+  return r.folders.map((f) => f.path);
+}
+
 export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
 }
@@ -4400,6 +4729,7 @@ export interface AgentRunSummary {
   approved: number;
   rejected: number;
   comments: number;
+  notifications?: number;
   error: string | null;
 }
 
@@ -4419,6 +4749,7 @@ export interface AgentStats {
     approval_rate: number | null;
   };
   comments: number;
+  notifications?: number;
   access_requests: number;
   blocked_by_scope: number;
   last_run_at: string | null;
@@ -4438,4 +4769,13 @@ export async function runMetacognitionAgent(nestId: string, nodeId: string) {
     method: "POST",
     body: "{}",
   });
+}
+
+export async function backfillTickets(nestId: string, body: { limit?: number; dry_run?: boolean } = {}) {
+  return request<{
+    numbered: number;
+    failed: number;
+    remaining: number;
+    results: { id: string; ticket?: string; outcome: string; reason?: string }[];
+  }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }

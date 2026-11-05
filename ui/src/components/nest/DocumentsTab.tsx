@@ -11,6 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { toast } from "sonner";
 import { reads } from "../../lib/queries";
+import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
 import { documentFacets } from "../../lib/document-facets";
@@ -111,6 +112,8 @@ interface Props {
   stewardshipEnabled: boolean;
   allowSelfApprove: boolean;
   primeTags: string[];
+  /** Always-include tags — those documents are prime too. */
+  alwaysIncludeTags?: string[];
   visibility: api.NestVisibility;
   hasRoleOnNode: (node: Node, role: string) => boolean;
   canReviewNode: (node: Node) => boolean;
@@ -155,6 +158,7 @@ export function DocumentsTab({
   stewardshipEnabled,
   allowSelfApprove,
   primeTags,
+  alwaysIncludeTags = [],
   visibility,
   hasRoleOnNode,
   canReviewNode,
@@ -173,6 +177,8 @@ export function DocumentsTab({
   // Per-node comment counts drive the activity and "most comments" sorts —
   // a Documents-tab need, so it is read here, not on the nest page.
   const commentCounts = useQuery(reads.commentCounts(nestId)).data?.counts ?? {};
+  // Roster for author chips' display names; signed-out readers keep the email.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled: !!currentEmail });
   const fetchData = onRefresh;
 
 
@@ -378,6 +384,10 @@ export function DocumentsTab({
       return false;
     });
   };
+  // Who gets a select box: anyone who could act on the row (edit/move/tag, or
+  // delete as admin or author). Row, select-all and folder boxes share it.
+  const canSelect = (node: any) =>
+    !isReadOnly && (canEditNode(node) || canManage || isMine(node));
 
 
   // Node ids the caller can review right now (authoritative, from the queue
@@ -417,6 +427,7 @@ export function DocumentsTab({
     const node = deleteNodeTarget;
     try {
       await api.deleteNode(nestId, node.id);
+      toast.success(`Deleted "${node.title || node.id}"`);
       fetchData();
     } catch (err: any) {
       console.error("[NestView] deleteNode failed", nestId, node?.id, err);
@@ -560,6 +571,17 @@ export function DocumentsTab({
   }, [nestId, filter.search]);
 
   const hasActiveFilters = hasActiveFiltersOn(filter);
+  // A filtered tree opens fully (matches come from the whole nest), so its
+  // collapse state is separate from expandedFolders and starts fresh per filter.
+  const [filterCollapsed, setFilterCollapsed] = useState<Set<string>>(new Set());
+  useEffect(() => setFilterCollapsed(new Set()), [filter]);
+  const setFilterFolderOpen = (path: string, open: boolean) =>
+    setFilterCollapsed((prev) => {
+      const next = new Set(prev);
+      if (open) next.delete(path);
+      else next.add(path);
+      return next;
+    });
 
   useEffect(() => {
     if (hasActiveFilters) void loadFullNest();
@@ -571,10 +593,15 @@ export function DocumentsTab({
   //
   // Unfiltered, the levels on screen ARE the answer; filtered, the answer
   // spans the nest, so use the full listing as soon as it lands.
+  // Grid view lists the whole nest — it has no folders to expand. Metadata
+  // only, the read (and cache) the Board shares; list view stays lazy.
+  const gridQuery = useQuery({ ...reads.nodesMeta(nestId), enabled: viewMode === "cards" });
+  const gridNodes = viewMode === "cards" ? (gridQuery.data?.nodes ?? null) : null;
   const filtered = visibleDocuments({
     ...filter,
     levelNodes: nodes,
     fullNodes,
+    gridNodes,
     folderFilter,
     updatedAfter,
     contentHits,
@@ -629,6 +656,14 @@ export function DocumentsTab({
         a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
       );
   })();
+
+  // Loaded, filtered docs the caller may select — what "Select all" covers.
+  const selectableVisible = sorted.filter(canSelect);
+  const selectableIn = (folder: string) =>
+    selectableVisible.filter((n) => {
+      const f = folderOfNode(n.id);
+      return f === folder || f.startsWith(`${folder}/`);
+    });
 
   // Every folder in the nest, so the tree can show one whose documents have
   // never been fetched. Memoised — FolderTree keys a useMemo on this.
@@ -719,7 +754,8 @@ export function DocumentsTab({
     cancelDragExpand();
     dragExpandTimer.current = setTimeout(() => {
       dragExpandTimer.current = null;
-      expandFolder(path);
+      if (hasActiveFilters) setFilterFolderOpen(path, true);
+      else expandFolder(path);
     }, 600);
   };
 
@@ -1098,7 +1134,17 @@ export function DocumentsTab({
                   ))}
                 </div>
               )}
-              {initialLoad || loadingFolders.has(baseFolder) ? (
+              {!initialLoad && selectableVisible.length > 0 && (
+                <label className="mb-2 flex w-fit items-center gap-2 px-2 text-xs text-muted-foreground cursor-pointer">
+                  <Checkbox
+                    checked={selectionState(selected, selectableVisible)}
+                    onCheckedChange={() => setSelected((prev) => toggleMany(prev, selectableVisible))}
+                    data-testid="select-all-docs"
+                  />
+                  Select all ({selectableVisible.length})
+                </label>
+              )}
+              {initialLoad || loadingFolders.has(baseFolder) || (viewMode === "cards" && gridQuery.isLoading) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
@@ -1217,7 +1263,9 @@ export function DocumentsTab({
                   // Cards: collapse every row action into a 3-dot menu kept on
                   // the title line. List keeps inline hover buttons below.
                   const actionMenu = (
-                    <div onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                      {/* Same pin control the list rows and document header use (CU-wdqcq06256). */}
+                      <DocPinControl nestId={nestId} nodeId={node.id} />
                       <DropdownMenu modal={false}>
                         <DropdownMenuTrigger asChild>
                           <Button
@@ -1297,7 +1345,7 @@ export function DocumentsTab({
                     </div>
                   );
                   const selectBox =
-                    !isReadOnly && (canEditNode(node) || canDelete) ? (
+                    canSelect(node) ? (
                       <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
                         <Checkbox
                           checked={selected.has(node.id)}
@@ -1367,6 +1415,18 @@ export function DocumentsTab({
                               {nodePill.label}
                             </span>
                           )}
+                          {/* A newer version in review / sent back still
+                              leaves the published one live — lead with it. */}
+                          {node.approvedVersion && node.status !== "published" && node.status !== "approved" && (
+                            <LifecycleStatusBadge
+                              status="published"
+                              approvedVersion={node.approvedVersion}
+                              currentVersion={node.version}
+                              size="sm"
+                              className="shrink-0 whitespace-nowrap"
+                              title={`v${node.approvedVersion} is published and served to agents`}
+                            />
+                          )}
                           <LifecycleStatusBadge
                             status={(node.status as DocumentLifecycleStatus) || "draft"}
                             size="sm"
@@ -1379,7 +1439,7 @@ export function DocumentsTab({
                           {/* Prime — the doc always needs approval, whoever
                               edits it. Only meaningful in a governed nest. */}
                           {stewardshipEnabled &&
-                            api.isPrimeNode(node, primeTags) && (
+                            api.isPrimeNode(node, primeTags, alwaysIncludeTags) && (
                             <span
                               className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
                               title={
@@ -1457,6 +1517,7 @@ export function DocumentsTab({
                               <AuthorshipChips
                                 author={node.author}
                                 collaborators={node.collaborators}
+                                people={roster?.people}
                               />
                             </>
                           )}
@@ -1581,8 +1642,7 @@ export function DocumentsTab({
                       // as one "F1 / F2 / F3" row per chain.
                       known={hasActiveFilters ? undefined : knownFolders}
                       isCollapsed={(p) =>
-                        // A filtered list shows every match, wherever it lives.
-                        hasActiveFilters ? false : !expandedFolders.has(p)
+                        hasActiveFilters ? filterCollapsed.has(p) : !expandedFolders.has(p)
                       }
                       renderFolder={(node, { collapsed }) => {
                         // Valid drop = a doc is being dragged and this isn't
@@ -1603,6 +1663,7 @@ export function DocumentsTab({
                         // genuinely empty folder stays a static row, no chevron.
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
+                        const folderDocs = selectableIn(node.path);
                         // Same split as a document: admins/owners delete the
                         // folder (and everything under it), editors raise a
                         // request. Hidden while one is already pending, and
@@ -1649,7 +1710,10 @@ export function DocumentsTab({
                               }`}
                             onClick={
                               collapsible
-                                ? () => toggleFolderExpanded(node.path)
+                                ? () =>
+                                    hasActiveFilters
+                                      ? setFilterFolderOpen(node.path, collapsed)
+                                      : toggleFolderExpanded(node.path)
                                 : undefined
                             }
                             onDragOver={(e) => {
@@ -1707,6 +1771,18 @@ export function DocumentsTab({
                               // Spacer so names still line up under sibling
                               // collapsible folders.
                               <span className="h-3.5 w-3.5 shrink-0" />
+                            )}
+                            {/* Expanded only: a collapsed folder's docs aren't
+                                loaded, so its box would select nothing. */}
+                            {!collapsed && folderDocs.length > 0 && (
+                              <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                                <Checkbox
+                                  checked={selectionState(selected, folderDocs)}
+                                  onCheckedChange={() => setSelected((prev) => toggleMany(prev, folderDocs))}
+                                  aria-label={`Select documents in ${prettyFolderPath(node.path)}`}
+                                  data-testid={`select-folder-${node.path}`}
+                                />
+                              </div>
                             )}
                             <FolderOpen className="h-4 w-4 text-blue-500" />
                             <span className="text-sm font-medium">
@@ -1976,6 +2052,7 @@ export function DocumentsTab({
         folders={allFolders}
         canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
         canDelete={selectedNodes.every((n) => canManage || isMine(n))}
+        canSubmit={stewardshipEnabled && selectedNodes.some((n) => n.status === "draft" && canEditNode(n))}
         onClear={() => setSelected(new Map())}
         onDone={fetchData}
       />

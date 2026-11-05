@@ -1,4 +1,5 @@
 import { recordNodeAccess } from "../governance/access-log.js";
+import { approvedOnlyForSurfaceEdit } from "../surfaces/draft-visibility.js";
 import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
@@ -19,11 +20,20 @@ import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
 } from "../governance/access-guard.js";
-import { isPublicReader } from "../shared/access.js";
+import { isPublicReader, permissionLevel } from "../shared/access.js";
+import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import {
   holdWriteIfGated,
   heldWriteResponse,
@@ -81,6 +91,13 @@ function customFieldsFromBody(body: Record<string, unknown>): { fields?: Record<
     throw new ValidationError("fields must be an object of field key → value");
   }
   return { fields: v as Record<string, unknown> };
+}
+
+/** The `view:` block of a type: view node (§1.12), when the body carries one.
+ *  Shape and type are validated in the service (assertViewBlock) so REST, MCP
+ *  and a held write's replay refuse the same blocks the same way. */
+function viewFromBody(body: Record<string, unknown>): { view?: unknown } {
+  return body.view === undefined ? {} : { view: body.view };
 }
 
 /** `?field.<key>=<value>` query params → the list's field filters. */
@@ -245,12 +262,14 @@ nodeRoutes.post("/", async (c) => {
     model?: string;
     folder?: string;
     prime?: boolean;
+    always_include?: boolean;
     client?: unknown;
     assignee?: string | null;
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -262,6 +281,39 @@ nodeRoutes.post("/", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const authorEmail = await getUserEmail(c);
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier by the access gate
+  // for exactly this route. Their document is a draft sent to review, never
+  // published, whatever the nest's self-publish postures.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorCreate(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const { node, review } = await contributeDocument(
+      nestId,
+      {
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        folder: body.folder,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json(
+      {
+        node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+        review,
+        org_contribution: true,
+      },
+      201,
+    );
+  }
 
   // Agent-write gate. Only an API-key caller is held: a person creating a
   // document in the web UI authenticates with a session cookie and is exactly
@@ -287,7 +339,9 @@ nodeRoutes.post("/", async (c) => {
             model: body.model,
             folder: body.folder,
             prime: body.prime,
+            alwaysInclude: body.always_include,
             ...customFieldsFromBody(body),
+            ...viewFromBody(body),
           },
         ],
       },
@@ -308,18 +362,24 @@ nodeRoutes.post("/", async (c) => {
       model: body.model,
       folder: body.folder,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );
 
   // Resolve stewards for the response
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
+  // A table with :ref columns reports refs that name no readable node. Never
+  // blocks: the write above already landed. Absent for everything else.
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -606,7 +666,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // the same body on purpose — an owner previewing the public reader — and
   // mirrors the listing's flag; it narrows what is served, never widens it.
   const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
-  if (publicReader || approvedOnly) {
+  // A pending Surfaces edit is a chat-derived draft: below write, serve the
+  // approved body as a public reader gets it (security round 2, M1d).
+  const surfaceEdit = await approvedOnlyForSurfaceEdit(nestId, nodeId, userId);
+  if (publicReader || approvedOnly || surfaceEdit) {
     let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
@@ -661,6 +724,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
 
+  // The block list (refs, selectors) goes to writers only: views/core.ts treats
+  // denied and missing refs alike, and handing a reader the refs would undo that.
+  const viewBlock = node.frontmatter?.view;
+  if (
+    response.type === "view" &&
+    viewBlock &&
+    (permissionLevel(c.get("nestPermission")) >= permissionLevel("write") ||
+      (await stewardship.canUserEdit(nestId, nodeId, await getUserEmail(c))).allowed)
+  ) {
+    (response as any).view = viewBlock;
+  }
+
   // Resolved-from-DB workflow status; on-disk frontmatter status is
   // ignored entirely so the file never gets rewritten on workflow
   // transitions.
@@ -705,10 +780,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     tags?: string[];
     status?: string;
     title?: string;
+    description?: string;
     changeNote?: string;
     schedule?: string;
     model?: string;
     prime?: boolean | null;
+    always_include?: boolean | null;
     client?: unknown;
     type?: string;
     assignee?: string | null;
@@ -716,9 +793,49 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
+  }
+
+  // Org contributor (CU-wdqcq05rz6): admitted at read tier for this route
+  // only. The edit is proposed as a draft for review; the published text
+  // stays exactly as it is until a reviewer approves. Ahead of the
+  // X-Base-Version check on purpose: that 409 names who last changed the
+  // document and echoes the working version, which for a contributor could
+  // be someone else's unapproved draft. proposeEdit's own checks decide.
+  if (c.get("orgContribution") === true && c.get("nestPermission") === "read") {
+    assertContributorPatch(body as Record<string, unknown>);
+    await assertNotPushGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const authorEmail = await getUserEmail(c);
+    const { node, version, review } = await proposeEdit(
+      nestId,
+      nodeId,
+      c.get("userId"),
+      {
+        content: body.content,
+        append: body.append,
+        title: body.title,
+        description: body.description,
+        tags: body.tags,
+        changeNote: body.changeNote,
+        client: attributeRequest(c, body.client),
+      },
+      authorEmail,
+      { baseUrl: requestBaseUrl(c.req.url) },
+    );
+    return c.json({
+      node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+      version,
+      review,
+      org_contribution: true,
+    });
   }
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -742,6 +859,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   }
 
   const authorEmail = await getUserEmail(c);
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -750,22 +868,27 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       append: body.append,
       tags: body.tags,
       title: body.title,
+      description: body.description,
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
       model: body.model,
       prime: body.prime,
+      alwaysInclude: body.always_include,
       client: attributeRequest(c, body.client),
       type: body.type,
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );
+  const tableRefs = await tableRefReport(nestId, node, c.get("userId"), authorEmail);
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });
 

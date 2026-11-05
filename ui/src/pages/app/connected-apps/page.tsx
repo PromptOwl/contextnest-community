@@ -36,7 +36,7 @@ export default function ConnectedAppsPage() {
   const apps = data?.apps ?? [];
   // One id at a time: which row is mid-request, so only its button spins.
   const [busy, setBusy] = useState<string | null>(null);
-  const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
+  const [target, setTarget] = useState<{ id: string; name: string; expired: boolean } | null>(null);
 
   async function disconnect(id: string) {
     setBusy(id);
@@ -98,6 +98,11 @@ export default function ConnectedAppsPage() {
               <div className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <p className="truncate text-sm font-medium">{a.clientName}</p>
+                  {a.expired && (
+                    <Badge variant="destructive" className="shrink-0" data-testid="connected-app-expired">
+                      Expired
+                    </Badge>
+                  )}
                   {a.scopes.map((s) => (
                     <Badge key={s} variant="outline" className="shrink-0">
                       {SCOPE_LABEL[s] ?? s}
@@ -112,20 +117,25 @@ export default function ConnectedAppsPage() {
                   )}
                   connected {when(a.connectedAt)} · last used {when(a.lastUsedAt)}
                 </p>
+                {a.expired && (
+                  <p className="text-xs text-muted-foreground">
+                    Signed out. Reconnect it from {a.clientName} to use it again.
+                  </p>
+                )}
               </div>
               <Button
                 variant="outline"
                 size="sm"
                 className="shrink-0"
                 disabled={busy === a.clientId}
-                onClick={() => setTarget({ id: a.clientId, name: a.clientName })}
+                onClick={() => setTarget({ id: a.clientId, name: a.clientName, expired: a.expired })}
               >
                 {busy === a.clientId ? (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <Unplug className="mr-1.5 h-3.5 w-3.5" />
                 )}
-                Disconnect
+                {a.expired ? "Remove" : "Disconnect"}
               </Button>
             </li>
           ))}
@@ -141,9 +151,13 @@ export default function ConnectedAppsPage() {
         <ReasonDialog
           open
           onOpenChange={(open) => !open && setTarget(null)}
-          title={`Disconnect "${target.name}"?`}
-          description="It loses access right away. To use it again, connect it and approve it again."
-          confirmLabel="Disconnect"
+          title={target.expired ? `Remove "${target.name}"?` : `Disconnect "${target.name}"?`}
+          description={
+            target.expired
+              ? "It is already signed out. This removes it from the list."
+              : "It loses access right away. To use it again, connect it and approve it again."
+          }
+          confirmLabel={target.expired ? "Remove" : "Disconnect"}
           destructive
           onConfirm={() => disconnect(target.id)}
         />

@@ -3,6 +3,9 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { adminFolderRefusal, adminFolderPathRefusal } from "../surfaces/admin-folders.js";
+import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "./readable-body.js";
 import { assertFolderCreatable, assertFolderMovable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
@@ -15,14 +18,17 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  viewMetaSchema,
   TITLE_MAX_LENGTH,
+  withVaultLock,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
+import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
-import { withIoStats } from "./io-stats.js";
+import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -51,9 +57,13 @@ import {
   nestReviewsPrimeOnly,
   nestCreatorIsReviewer,
 } from "../nests/service.js";
-import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
+import {
+  isPrimeDocument,
+  documentPrimeFlag,
+  documentAlwaysIncludeFlag,
+} from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
-import { notifyMentions } from "../governance/mention-notify.js";
+import { notifyMentions as sendMentions } from "../governance/mention-notify.js";
 import {
   resolveUserRoles,
   stewardDocumentCreator,
@@ -85,8 +95,20 @@ import {
 } from "./node-index.js";
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
-import { nestDoneTags } from "../nests/service.js";
-import { notifyAssigned } from "../governance/assign-notify.js";
+import { nestDoneTags, nestTaskRules, storeDefaultTaskRules } from "../nests/service.js";
+import {
+  applyExclusiveNamespaces,
+  bareTag,
+  effectivePriorities,
+  tagNamespace,
+  ticketPrefixOf,
+  ticketTag,
+  ticketTagOf,
+  TICKET_NAMESPACE,
+  type TaskRules,
+} from "./task-rules.js";
+import { allocateTicket } from "./ticket-numbers.js";
+import { notifyAssigned as sendAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
@@ -111,6 +133,24 @@ import {
   type FieldDefinition,
   type FieldsPatch,
 } from "./custom-fields.js";
+
+/**
+ * The document as the write just left it. The discovery cache folds every
+ * write in on the spot (engine.ts), so only a cold cache reads it back — a
+ * round trip a network mount charges ~0.5 s for. A copy, so a caller that
+ * shapes the result can't edit the cached set.
+ */
+async function writtenDocument(nestId: string, id: string): Promise<ContextNode> {
+  const engine = await engineCache.get(nestId);
+  const cached = engine.cachedDocument(id);
+  return cached ? structuredClone(cached) : engine.storage.readDocument(id);
+}
+
+// Awaited inside a write, so timed as part of it (io-stats).
+const notifyMentions = (p: Parameters<typeof sendMentions>[0]) =>
+  timed(p.nestId, "notify:mentions", () => sendMentions(p));
+const notifyAssigned = (p: Parameters<typeof sendAssigned>[0]) =>
+  timed(p.nestId, "notify:assigned", () => sendAssigned(p));
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -461,6 +501,8 @@ export interface NodeResponse extends TaskFields {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** The published version agents are served, null if none. Lists only. */
+  approvedVersion?: number | null;
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
@@ -473,9 +515,15 @@ export interface NodeResponse extends TaskFields {
   prime?: boolean;
   /** Nest Plugin provenance (`metadata.provenance`) when a plugin wrote it. */
   provenance?: Record<string, unknown>;
+  /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
+   *  doc inherits from the nest's `always_include_tags`. */
+  always_include?: boolean;
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** The Office file a document was extracted from (`metadata.original`):
+   *  served at /nests/:nestId/originals/:file. Absent on every other node. */
+  original?: OriginalFile;
   /** Blocking relations from nodes that aren't done yet (src/nodes/
    *  relations.ts). Absent when nothing open blocks this node. */
   open_blockers?: number;
@@ -527,6 +575,35 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
     ? [TASK_NODE_TYPE]
     : []),
 ]);
+
+/**
+ * An uploaded Office file kept beside the nest (`<nest>/.originals/<file>`)
+ * and bound to the document extracted from it. `file` is the server-minted
+ * `<uuid>.<kind>` name; `sha256` is checked before the file is served.
+ */
+export interface OriginalFile {
+  file: string;
+  filename: string;
+  kind: "pptx" | "docx" | "xlsx";
+  bytes: number;
+  sha256: string;
+  /** Hash of the body this file produced, to tell hand edits apart on re-upload. */
+  body_sha256?: string;
+}
+
+/** Server-minted original names only — the traversal defense for the route. */
+export const ORIGINAL_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pptx|docx|xlsx)$/;
+
+export function isOriginalFile(v: unknown): v is OriginalFile {
+  const o = v as OriginalFile | null | undefined;
+  return (
+    !!o &&
+    typeof o === "object" &&
+    typeof o.file === "string" &&
+    ORIGINAL_FILE_NAME.test(o.file) &&
+    typeof o.sha256 === "string"
+  );
+}
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
 export const PDF_NODE_TYPE = "pdf";
@@ -663,7 +740,11 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     prime: documentPrimeFlag(fm.metadata),
     // Nest Plugin provenance — "ingested by <plugin> from <url>".
     ...((fm.metadata as any)?.provenance ? { provenance: (fm.metadata as any).provenance } : {}),
+    always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...(isOriginalFile((fm.metadata as any)?.original)
+      ? { original: (fm.metadata as any).original as OriginalFile }
+      : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
@@ -1154,10 +1235,10 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayStatuses, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions
     ? [null, null]
     : await Promise.all([
-        versions.getDisplayStatuses(nestId),
+        versions.getDisplayState(nestId),
         // From the DB, not a vault walk. The disk truth behind it is
         // reconciled by the index rebuild and kept current by the stage /
         // approve / reject paths.
@@ -1222,8 +1303,9 @@ export async function listNodesForCaller(
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = displayStatuses?.get(r.id) ?? "draft";
+        r.status = displayState?.statuses.get(r.id) ?? "draft";
       }
+      r.approvedVersion = displayState?.approved.get(r.id) ?? null;
       return r;
     })
   );
@@ -1241,6 +1323,16 @@ export async function listNodesForCaller(
     }
   }
 
+  // A pending Surfaces edit is a chat-derived draft: callers below write get
+  // the approved body in listings too (security round 2, M1d).
+  const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+  if (surfaceEdits.size || (surfaceEdits as any)[SURFACE_HIDE_ALL]) {
+    for (const r of enriched as Array<{ id: string; content?: string }>) {
+      if (isSurfaceHidden(surfaceEdits, r.id) && typeof r.content === "string" && r.content) {
+        r.content = await approvedReadableBody(nestId, r.id);
+      }
+    }
+  }
   return addComputedFields(enriched, fieldDefs);
 }
 
@@ -1441,6 +1533,9 @@ export interface NestCensus {
   tags: Record<string, number>;
   types: Record<string, number>;
   statuses: Record<string, number>;
+  /** Documents with a published version agents are served, whatever the
+   *  status of their latest version. */
+  aiReady: number;
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
@@ -1513,11 +1608,13 @@ export async function nestCensus(
     [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
   );
 
-  const statusMap = await versions.getDisplayStatuses(nestId);
+  const { statuses: statusMap, approved } = await versions.getDisplayState(nestId);
   const statuses: Record<string, number> = {};
+  let aiReady = 0;
   for (const d of visible) {
     const st = statusMap.get(d.id) ?? "draft";
     statuses[st] = (statuses[st] || 0) + 1;
+    if (approved.has(d.id)) aiReady++;
   }
 
   const authorship = await resolveAuthorship(
@@ -1556,6 +1653,7 @@ export async function nestCensus(
     tags,
     types,
     statuses,
+    aiReady,
     authors,
     editedLast7d,
     recent,
@@ -1599,6 +1697,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Document-scope always-include flag — see `isAlwaysIncludeDocument`.
+   *  Owner/admin only, like `prime`. */
+  alwaysInclude?: boolean;
   /** Caller attribution recorded on the version this create seals (§9.4).
    *  Optional everywhere — an unattributed write is a valid write. */
   client?: ClientMetadata;
@@ -1606,12 +1707,19 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** The uploaded Office file this document's text was extracted from
+   *  (office-service.ts). Stored as `metadata.original`, so the binding is
+   *  part of every version's hash. */
+  original?: OriginalFile;
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
   /** Nest Plugin provenance, stored as `metadata.provenance`. System writers
    *  only (src/plugins/writer.ts) — no REST or MCP body maps onto it. */
   provenance?: Record<string, unknown>;
+  /** The `view:` block of a type: view node (§1.12) — validated against the
+   *  engine's view schema, refused on any other type. */
+  view?: unknown;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1619,6 +1727,9 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   append?: string;
   tags?: string[];
   title?: string;
+  /** Frontmatter one-line summary (the docs site's meta description). An
+   *  empty string removes it. */
+  description?: string;
   status?: string;
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
@@ -1627,6 +1738,12 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Document-scope always-include flag. `null` clears it back to the tags. */
+  alwaysInclude?: boolean | null;
+  /** A re-uploaded Office file (office-service.ts): the new `metadata.original`,
+   *  and every earlier one, so each version's file stays downloadable. */
+  original?: OriginalFile;
+  previousOriginals?: OriginalFile[];
   /** See CreateNodeInput.client. */
   client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
@@ -1641,6 +1758,33 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   fields?: FieldsPatch;
   /** See CreateNodeInput.provenance — replaces the stored block. */
   provenance?: Record<string, unknown>;
+  /** Replacement `view:` block (§1.12), for a node that is or is becoming
+   *  type: view. Replaces the block wholesale; validated like create. */
+  view?: unknown;
+}
+
+/**
+ * Validate a `view:` block with the engine's own schema (§13 rules 30–36) and
+ * the type it is meant for. The engine re-validates on write; checking here
+ * turns its refusal into a 400 that names the rule, before any governance
+ * work, on every surface (REST, MCP, a held write's replay).
+ */
+export function assertViewBlock(view: unknown, type: string): void {
+  if (type !== "view") {
+    throw new ValidationError(
+      `A view block is only valid on type: view (§13 rule 31), and this node is type: "${type}". Pass type: "view" in the same call, or drop the view parameter.`,
+    );
+  }
+  if (view === null || typeof view !== "object" || Array.isArray(view)) {
+    throw new ValidationError("view must be an object: { blocks: [...] } (§1.12)");
+  }
+  const parsed = viewMetaSchema.safeParse(view);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) =>
+      i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message,
+    );
+    throw new ValidationError(`Invalid view block — ${issues.join("; ")}`);
+  }
 }
 
 /**
@@ -1656,6 +1800,12 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
  */
 export interface WriteOptions {
   notifyMentions?: boolean;
+  /**
+   * Allow this write to ADD a `ticket:` tag to a task that has none. Only the
+   * backfill (ticket-backfill.ts) sets it — everywhere else the server draws
+   * the number and a caller supplying one is refused.
+   */
+  assignTicket?: boolean;
   /**
    * False keeps a create out of the nest's creator-reviews posture: the
    * author is not stewarded and v1 is not published on their authority. For
@@ -1740,12 +1890,13 @@ async function actorAutoPublishes(
  */
 async function assertMayFlagPrime(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  what = "prime flag",
 ): Promise<void> {
   const roles = await resolveUserRoles(nestId, userEmail);
   if (!roles.includes("owner") && !roles.includes("admin")) {
     throw new ForbiddenError(
-      "Only the nest owner or an admin can change a document's prime flag."
+      `Only the nest owner or an admin can change a document's ${what}.`
     );
   }
 }
@@ -1803,6 +1954,8 @@ function taskFieldsContext(
   return {
     nodeId,
     now: new Date().toISOString(),
+    priorities: async () =>
+      effectivePriorities(await nestTaskRules(nestId)).map((p) => p.key),
     roster: async () =>
       new Set((await listNestPeople(nestId)).map((p) => p.email.toLowerCase())),
     nodeExists: async (id: string) => {
@@ -1843,7 +1996,7 @@ export async function createNode(
   const generatedId = !input.id && !slugify(input.title);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await createNodeOnce(nestId, input, userEmail, opts);
+      return await withWriteStats(nestId, "create", () => createNodeOnce(nestId, input, userEmail, opts));
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
         // A rule refusing the document is the caller's to fix — kept as a 400
@@ -1852,6 +2005,85 @@ export async function createNode(
       }
     }
   }
+}
+
+/**
+ * Task rules on CREATE (see task-rules.ts): at most one tag per exclusive
+ * namespace, a default stage when none was given, and a server-assigned ticket
+ * number. Mutates `tags` and `metadata` in place — the caller has not written
+ * anything yet, so a refusal here leaves nothing behind. Runs inside the node's
+ * write lock, right before the write, so a number is drawn only for a create
+ * that is going ahead.
+ */
+async function applyTaskRulesOnCreate(
+  nestId: string,
+  tags: string[],
+  rules: TaskRules,
+): Promise<void> {
+  const clash = applyExclusiveNamespaces([], tags, rules.exclusive_namespaces);
+  if (clash.ambiguous.length > 0) {
+    throw new ValidationError(
+      `A task takes one tag from each of: ${clash.ambiguous.map((n) => `${n}:`).join(", ")} — got several. Pick one.`,
+    );
+  }
+  tags.splice(0, tags.length, ...clash.tags);
+
+  if (rules.default_stage_tag) {
+    const ns = tagNamespace(rules.default_stage_tag);
+    const has = ns
+      ? tags.some((t) => tagNamespace(t) === ns)
+      : tags.some((t) => bareTag(t) === rules.default_stage_tag);
+    if (!has) tags.push(`#${rules.default_stage_tag}`);
+  }
+
+  if (rules.ticket_numbering) {
+    if (ticketTagOf(tags)) {
+      throw new ValidationError(
+        `Ticket numbers are assigned by the server — remove the ${TICKET_NAMESPACE}: tag and it will be given one.`,
+      );
+    }
+    const prefix = ticketPrefixOf(rules);
+    if (prefix) {
+      // First number in a nest on the default rules: pin them, so the prefix
+      // survives a rename of the nest.
+      await storeDefaultTaskRules(nestId);
+      const ticket = await allocateTicket(nestId, prefix);
+      tags.push(ticketTag(ticket));
+    }
+  }
+}
+
+/**
+ * Task rules on a tag EDIT. A tag the caller added replaces the existing one in
+ * the same exclusive namespace (so adding `stage:in-review` swaps the stage,
+ * never doubles it), and the ticket number can't be changed or removed — it is
+ * how everything outside the nest refers to this task.
+ */
+function enforceTaskTagRules(
+  priorTags: readonly string[],
+  nextTags: string[],
+  rules: TaskRules,
+  allowNewTicket = false,
+): string[] {
+  let tags = applyExclusiveNamespaces(priorTags, nextTags, rules.exclusive_namespaces).tags;
+  const priorTicket = ticketTagOf(priorTags);
+  const nextTicket = ticketTagOf(tags);
+  if (priorTicket) {
+    if (nextTicket && nextTicket !== priorTicket) {
+      throw new ValidationError(
+        `This task is ${priorTicket.slice(TICKET_NAMESPACE.length + 1).toUpperCase()}. Ticket numbers are assigned once and can't be changed.`,
+      );
+    }
+    // An editor echoing a stale tag set, or a caller that dropped the tag:
+    // keep the number rather than orphan the ticket.
+    tags = tags.filter((t) => tagNamespace(t) !== TICKET_NAMESPACE);
+    tags.push(`#${priorTicket}`);
+  } else if (nextTicket && rules.ticket_numbering && !allowNewTicket) {
+    throw new ValidationError(
+      `Ticket numbers are assigned by the server — remove the ${TICKET_NAMESPACE}: tag and it will be given one.`,
+    );
+  }
+  return tags;
 }
 
 async function createNodeOnce(
@@ -1888,6 +2120,9 @@ async function createNodeOnce(
     // addresses. Generate one instead of refusing the title.
     id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
+  // A seed's admin-only folders take documents from nest admins only (S7-R2 L4).
+  const adminOnly = await adminFolderRefusal(nestId, id, userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   const tags = requireTags(input.tags);
 
   // Content-type toggles: creation of a disabled type is refused here — the
@@ -1906,6 +2141,7 @@ async function createNodeOnce(
   if (input.pdf && requestedType !== PDF_NODE_TYPE) {
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
+  if (input.view !== undefined) assertViewBlock(input.view, requestedType);
 
   assertModelId(input.model);
   for (const field of ["schedule", "model"] as const) {
@@ -1939,6 +2175,9 @@ async function createNodeOnce(
         `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
       );
     }
+    // A view's page and frames are served at <view>/view/…: neither may be
+    // taken by another node, nor a view placed where one already is.
+    await assertNoViewCollision(storage, id, requestedType);
 
     // Rows can outlive their document when a file goes missing outside the app
     // — deleteNode's purge never runs because the delete 404s first. Those rows
@@ -1968,6 +2207,14 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    // Always-include pushes this document to every agent entering the nest,
+    // so flagging it is a governance act too (CU-wdqcq05rn0).
+    if (input.alwaysInclude !== undefined) {
+      if (typeof input.alwaysInclude !== "boolean") {
+        throw new ValidationError("always_include must be true or false");
+      }
+      await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+    }
     const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
@@ -1975,7 +2222,12 @@ async function createNodeOnce(
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.provenance ? { provenance: input.provenance } : {}),
+      ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
+      ...(input.original ? { original: input.original } : {}),
     };
+    if (input.type === TASK_NODE_TYPE) {
+      await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
+    }
     if (input.type === TASK_NODE_TYPE) {
       const done = new Set(await nestDoneTags(nestId));
       if (tags.some((t) => done.has(String(t).toLowerCase().replace(/^#/, "")))) {
@@ -2091,6 +2343,7 @@ async function createNodeOnce(
                 : {}),
               ...(tags.length ? { tags } : {}),
               ...(input.status ? { status: input.status } : {}),
+              ...(input.view !== undefined ? { view: input.view } : {}),
               metadata,
               publish: published,
               ...(publishNote ? { note: publishNote } : {}),
@@ -2131,7 +2384,7 @@ async function createNodeOnce(
       throw err;
     }
 
-    const node = await storage.readDocument(id);
+    const node = await writtenDocument(nestId, id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
@@ -2238,11 +2491,60 @@ async function stageImportedFilesInner(
   // `.context/` is the source vault's own settings, which the engine refuses
   // to import; dropped too, so an exported nest doesn't report it as a failure.
   // Everything else travels verbatim, `.versions/` history included.
-  const carried = files.filter((f) => {
-    const segs = String(f?.path || "").split(/[\\/]/);
-    return !segs.includes("_suggestions") && !segs.includes(".context");
-  });
+  // The engine reads exactly CONTEXT.md; on a case-sensitive disk a root
+  // `context.md` would be skipped as meta. An exact-case file, if sent, wins.
+  const hasExact = files.some((f) => String(f?.path) === "CONTEXT.md");
+  const carried = files
+    .filter((f) => {
+      const segs = String(f?.path || "").split(/[\\/]/);
+      if (hasExact && /^context\.md$/i.test(String(f?.path)) && f.path !== "CONTEXT.md") return false;
+      return !segs.includes("_suggestions") && !segs.includes(".context");
+    })
+    .map((f) => (/^context\.md$/i.test(String(f.path)) ? { ...f, path: "CONTEXT.md" } : f));
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
+  // View addresses (see views/collision.ts): a document arriving at a view's
+  // <view>/view/… address, or a view arriving over an occupied one, is refused
+  // like any other unusable file — named, with the reason.
+  const viewRefusals: Array<{ path: string; why: string }> = [];
+  {
+    const idOf = (path: string) => path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.md$/i, "");
+    const docsIn = carried
+      .filter((f) => /\.md$/i.test(String(f.path)) && !String(f.path).split(/[\\/]/).some((seg) => seg.startsWith(".")))
+      .map((f) => {
+        const id = idOf(String(f.path));
+        let type = "document";
+        try {
+          type = String(parseDocument(`${id}.md`, String(f.content ?? ""), id).frontmatter.type || "document");
+        } catch {
+          /* unparseable: the engine reports it */
+        }
+        return { id, type, path: String(f.path) };
+      });
+    if (docsIn.some((d) => d.type === "view" || /(^|\/)view(\/|$)/.test(d.id))) {
+      const { storage } = await engineCache.get(nestId);
+      const existing = (await storage.discoverDocuments({ includeRetired: true } as any)).map((d) => ({
+        id: d.id,
+        type: String(d.frontmatter.type || "document"),
+      }));
+      const refused = batchViewCollisions(docsIn, existing);
+      for (const d of docsIn) {
+        const why = refused.get(d.id);
+        if (why) viewRefusals.push({ path: d.path, why });
+      }
+    }
+  }
+  if (viewRefusals.length) {
+    const drop = new Set(viewRefusals.map((r) => r.path));
+    for (let i = carried.length - 1; i >= 0; i--) if (drop.has(String(carried[i].path))) carried.splice(i, 1);
+    if (!carried.length) {
+      return {
+        written: 0,
+        rejected: viewRefusals.map((r) => r.path),
+        problems: viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+        warnings: [],
+      };
+    }
+  }
   const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
@@ -2258,7 +2560,10 @@ async function stageImportedFilesInner(
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
-  const rejected = (result.failed ?? []).map((f) => f.id ?? "(unnamed)");
+  const rejected = [
+    ...viewRefusals.map((r) => r.path),
+    ...(result.failed ?? []).map((f) => f.id ?? "(unnamed)"),
+  ];
   if (rejected.length) {
     console.warn(
       `[import] ${rejected.length} file(s) rejected:`,
@@ -2266,9 +2571,12 @@ async function stageImportedFilesInner(
     );
   }
   // The reason travels too, as a readable `path: reason` line for the user.
-  const problems = (result.failed ?? []).map((f) =>
-    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
-  );
+  const problems = [
+    ...viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+    ...(result.failed ?? []).map((f) =>
+      f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+    ),
+  ];
   return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
@@ -2502,7 +2810,7 @@ async function stagePdfImport(
     try {
       await storage.writeDocument(nodeId, priorRaw);
       if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId] });
     } catch (err) {
       console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
     }
@@ -2525,6 +2833,20 @@ async function stagePdfImport(
   }
 }
 
+/** Longest frontmatter description accepted — a summary, not a second body. */
+export const MAX_DESCRIPTION_LENGTH = 500;
+
+/** A trimmed, single-line description, or a ValidationError saying why not. */
+function normalizeDescription(value: unknown): string {
+  if (typeof value !== "string") throw new ValidationError("description must be a string");
+  const description = value.trim();
+  if (/[\r\n]/.test(description)) throw new ValidationError("description must be a single line");
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new ValidationError(`description must be at most ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
+  return description;
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -2532,7 +2854,7 @@ export async function updateNode(
   userEmail: string,
   opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+  return withWriteStats(nestId, "update", () => withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
@@ -2593,6 +2915,9 @@ export async function updateNode(
           patch = { ...patch, content: undefined };
         }
       }
+      // A seed's admin-only folders take edits from nest admins only (S7-R2 L4).
+      const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+      if (adminOnly) throw new ForbiddenError(adminOnly);
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
@@ -2617,7 +2942,15 @@ export async function updateNode(
         // save, so a union made removals impossible (CU: removed tag returns
         // after reopen). MCP context_update replaces too, per the engine
         // catalog; a caller wanting to add a tag sends the full set.
-        const nextTags = requireTags(patch.tags);
+        let nextTags = requireTags(patch.tags);
+        if (node.frontmatter.type === TASK_NODE_TYPE) {
+          nextTags = enforceTaskTagRules(
+            priorTags,
+            nextTags,
+            await nestTaskRules(nestId),
+            opts.assignTicket === true,
+          );
+        }
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
         // projection above only feeds the governance decisions below. It
@@ -2661,11 +2994,23 @@ export async function updateNode(
         };
         opInput.title = patch.title;
       }
+      if (patch.description !== undefined) {
+        const description = normalizeDescription(patch.description);
+        if (description !== (node.frontmatter.description ?? "")) {
+          const frontmatter: Record<string, unknown> = { ...node.frontmatter };
+          if (description) frontmatter.description = description;
+          else delete frontmatter.description;
+          node = { ...node, frontmatter: frontmatter as any };
+          // The engine stores it; an empty string removes the key.
+          opInput.description = description;
+        }
+      }
       // Re-type BEFORE the schedule gate below, so "turn this document into
       // an agent and schedule it" is one call — the gate reads the type the
       // node is becoming, as create does.
       if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
         assertAcceptedType(patch.type);
+        if (patch.type === "view") await assertNoViewCollision(storage, nodeId, "view");
         // A skill node is invalid without a skill block and this surface has
         // no field for one — default the trigger from the title, as create
         // does. The engine requires the block in the same call as the re-type.
@@ -2683,6 +3028,12 @@ export async function updateNode(
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
+      }
+      if (patch.view !== undefined) {
+        // Validated against the type the node is becoming, as create does.
+        assertViewBlock(patch.view, String(node.frontmatter.type || "document"));
+        node = { ...node, frontmatter: { ...node.frontmatter, view: patch.view as any } };
+        opInput.view = patch.view;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
@@ -2731,6 +3082,25 @@ export async function updateNode(
         const metadata = { ...(node.frontmatter.metadata as any), provenance: patch.provenance };
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), provenance: patch.provenance };
+      }
+      if (patch.alwaysInclude !== undefined) {
+        if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {
+          throw new ValidationError("always_include must be true, false or null");
+        }
+        await assertMayFlagPrime(nestId, userEmail, "always-include flag");
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.alwaysInclude === null) delete metadata.always_include;
+        else metadata.always_include = patch.alwaysInclude;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          always_include: patch.alwaysInclude,
+        };
+      }
+      if (patch.original) {
+        const files = { original: patch.original, previous_originals: patch.previousOriginals ?? [] };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: { ...(node.frontmatter.metadata as any), ...files } } };
+        opInput.metadata = { ...(opInput.metadata as object), ...files };
       }
       if (hasTaskFieldsPatch(patch)) {
         const { metadata, opMetadata } = await applyTaskFields(
@@ -2885,7 +3255,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // A draft revision is NOT appended to the engine's history chain. That
@@ -2951,7 +3321,7 @@ export async function updateNode(
           if (pdfRollback) await pdfRollback();
           throw err;
         }
-        node = await storage.readDocument(nodeId);
+        node = await writtenDocument(nestId, nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
@@ -3014,7 +3384,7 @@ export async function updateNode(
         "Couldn't save your changes. Please reload the document and try again."
       );
     }
-  });
+  }));
 }
 
 /**
@@ -3186,7 +3556,16 @@ export interface MoveNodeResult {
  * prefix, so a doc moved out of a shared folder leaves that share and a
  * doc moved into one joins it. That asymmetry is the feature.
  */
-export async function moveNode(
+export function moveNode(
+  nestId: string,
+  nodeId: string,
+  folder: string,
+  userEmail: string,
+): Promise<MoveNodeResult> {
+  return withWriteStats(nestId, "move", () => moveNodeInner(nestId, nodeId, folder, userEmail));
+}
+
+async function moveNodeInner(
   nestId: string,
   nodeId: string,
   folder: string,
@@ -3220,12 +3599,19 @@ export async function moveNode(
   const segments = folderToSegments(folder);
   const newId =
     segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
+  // A seed's admin-only folders: non-admins may move nothing into or out of them (S7-R3 R2-L3).
+  const adminOnly = (await adminFolderRefusal(nestId, nodeId, userEmail)) ?? (await adminFolderRefusal(nestId, newId, userEmail));
+  if (adminOnly) throw new ForbiddenError(adminOnly);
   if (newId === nodeId) return { node, previousId: nodeId };
 
   // Destination check through write under the destination's lock — same
   // check-then-write race create takes it for, and the same key, so a
-  // concurrent create at that id can't slip in between either.
-  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+  // concurrent create at that id can't slip in between either. The vault lock
+  // inside it is the one every engine write op takes: a move rewrites the doc,
+  // its .versions chain and the index outside the catalog, so without it a
+  // concurrent publish could checkpoint the nest mid-move. Node lock first,
+  // vault lock second — the order create and update take them in.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), () => withVaultLock(storage.root, async () => {
     try {
       await storage.readDocument(newId);
       throw new ConflictError(
@@ -3236,13 +3622,25 @@ export async function moveNode(
       // Fail closed: only a missing document leaves the destination free.
       if (!(err instanceof DocumentNotFoundError)) throw err;
     }
+    await assertNoViewCollision(
+      storage,
+      newId,
+      String(node.frontmatter.type || "document"),
+      new Set([nodeId]),
+    );
 
+    // On a folder board a move IS the column change, so a task gets the same
+    // moved_at stamp a tag swap gives it (updateNode).
+    const movedAt = new Date().toISOString();
     const moved: ContextNode = {
       ...node,
       id: newId,
       frontmatter: {
         ...node.frontmatter,
-        updated_at: new Date().toISOString(),
+        updated_at: movedAt,
+        ...(node.frontmatter.type === TASK_NODE_TYPE
+          ? { metadata: { ...(node.frontmatter.metadata as object), moved_at: movedAt } }
+          : {}),
       },
     };
     // Under enforced rules a move is judged as a delete there and a create
@@ -3253,6 +3651,13 @@ export async function moveNode(
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
     // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
+    // No document at the destination (checked above), so any rows there are
+    // orphans — same as create, clear them or the repoint trips UNIQUE. Before
+    // the write: its index write-through creates fresh rows at newId.
+    await getDb().transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, newId);
+      await purgeNodeKeyedRows(tx, nestId, derivedIdOf(newId));
+    });
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
@@ -3330,14 +3735,14 @@ export async function moveNode(
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
     try {
-      await storage.regenerateIndex();
+      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
     } catch (err) {
       console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });
     return { node: moved, previousId: nodeId };
-  });
+  }));
 }
 
 /**
@@ -3401,7 +3806,7 @@ export async function discardDraft(
     // Same move rejectSuggestion makes, and for the same reason — a discard
     // must not cost a version.
     await storage.writeDocument(nodeId, raw);
-    await storage.regenerateIndex();
+    await storage.regenerateIndex({ changedIds: [nodeId] });
 
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
@@ -3511,7 +3916,7 @@ export async function deleteNodeIfUnchanged(
   });
 }
 
-export async function deleteNode(
+export function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
@@ -3521,7 +3926,20 @@ export async function deleteNode(
     client?: ClientMetadata;
   } = {},
 ): Promise<void> {
+  return withWriteStats(nestId, "delete", () => deleteNodeInner(nestId, nodeId, userEmail, opts));
+}
+
+async function deleteNodeInner(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  opts: { client?: ClientMetadata },
+): Promise<void> {
   const { storage } = await engineCache.get(nestId);
+
+  // A seed's admin-only folders: non-admins delete nothing there (S7-R3 R2-L3).
+  const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
@@ -3602,6 +4020,9 @@ export async function deleteFolder(
     throw new ValidationError("folder is required");
   }
   const rel = segments.join("/");
+  // A seed's admin-only folders: also when empty (no per-node check runs then).
+  const adminOnly = await adminFolderPathRefusal(nestId, [rel], userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
@@ -3666,6 +4087,9 @@ export async function moveFolder(
   if (to.startsWith(`${from}/`)) {
     throw new ValidationError("A folder can't be moved into itself.");
   }
+  // A seed's admin-only folders: no rename, move-out or move-in by non-admins (S7-R3 R2-L3).
+  const adminOnly = await adminFolderPathRefusal(nestId, [from, to], userEmail);
+  if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
   const all = (await storage.discoverDocuments()).map((d) => d.id);
@@ -3688,6 +4112,20 @@ export async function moveFolder(
   const taken = new Set(all);
   const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
   if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+  // View addresses (see views/collision.ts), checked for every node BEFORE
+  // the first one moves, so a refusal never leaves the folder half-moved.
+  {
+    const leaving = new Set(targets);
+    for (const id of targets) {
+      const doc = await storage.readDocument(id);
+      await assertNoViewCollision(
+        storage,
+        `nodes/${destOf(id)}/${id.split("/").pop()}`,
+        String(doc.frontmatter.type || "document"),
+        leaving,
+      );
+    }
+  }
 
   // Sequential, like deleteFolder: a failure names how far it got, and what
   // moved stays coherent (each move is atomic).

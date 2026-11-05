@@ -1,0 +1,206 @@
+# Default values for contextnest-community.
+# Every server setting is an environment variable; CONFIGURATION.md in the
+# repository is the full reference. This file covers the ones a Kubernetes
+# install needs, and `config.env` / `secrets.env` take any other.
+
+# -- Pod count. Keep 1 unless Postgres is configured AND persistence is
+# ReadWriteMany: nests are files on the volume, and SQLite can't be shared
+# between pods. The chart refuses to render otherwise.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/promptowl/contextnest-community
+  # -- Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Non-secret server settings, rendered into a ConfigMap.
+config:
+  # -- `key` (every request needs a cnst_ key or session) or `open` (no auth;
+  # local/LAN only). See CONFIGURATION.md → Auth modes.
+  authMode: key
+  # -- This server's external URL, e.g. https://nest.example.com. Set it
+  # whenever OIDC, emailed publish links or citations are used.
+  publicBaseUrl: ""
+  # -- Peers allowed to set X-Forwarded-For / X-Forwarded-Proto. `private`
+  # trusts the cluster network (where the ingress controller runs).
+  trustedProxies: private
+  # -- Nest vault directory. Empty keeps the server default, $DATA_ROOT/nests
+  # (on the data volume).
+  nestStorageRoot: ""
+  # -- Any other non-secret env vars, e.g. TELEMETRY_ENABLED: "true",
+  # DRIFT_SCAN_INTERVAL_MS: "0" (do this on network storage). Refused here:
+  # keys the chart sets itself (PORT, DATA_ROOT, AUTH_MODE, DB_*, ...) and
+  # known secret names (PROMPTOWL_KEY, DATABASE_URL, ..., and anything ending
+  # _SECRET, _TOKEN, _PASSWORD or _API_KEY; best effort).
+  # Put secrets in secrets.env.
+  env: {}
+
+# -- Sensitive settings, rendered into a Secret. Ignored when existingSecret
+# is set. These are kept in the Helm release history: for production prefer
+# existingSecret (see the README).
+secrets:
+  # -- PromptOwl license key (pk_...). Without one the server runs on the
+  # Free tier (up to 10 users). Can also be installed from the browser.
+  promptowlKey: ""
+  # -- Master key for credentials the server stores encrypted. Optional;
+  # stronger than the generated default. Don't change it once set.
+  secretsKey: ""
+  # -- Any other sensitive env vars, e.g. OIDC_CLIENT_SECRET, SMTP_URL,
+  # MCP_SIGNING_SECRET, ANTHROPIC_API_KEY.
+  env: {}
+
+# -- Name of an existing Secret whose keys are env var names (PROMPTOWL_KEY,
+# SECRETS_KEY, OIDC_CLIENT_SECRET, ...). Loaded with envFrom in place of
+# `secrets`.
+existingSecret: ""
+
+# -- External PostgreSQL. Unset = SQLite on the data volume. Configure one of:
+# url, existingSecret, or host (+ user/database/password).
+postgres:
+  # -- Connection string, e.g. postgres://user:pass@host:5432/db. Stored in
+  # the chart's Secret as DATABASE_URL.
+  url: ""
+  # -- Existing Secret holding the connection string.
+  existingSecret: ""
+  # -- Key in postgres.existingSecret.
+  existingSecretKey: DATABASE_URL
+  # -- Discrete connection (DB_HOST and friends), used when url and
+  # existingSecret are empty.
+  host: ""
+  port: 5432
+  user: ""
+  database: ""
+  # -- Stored in the chart's Secret as DB_PASSWORD.
+  password: ""
+  # -- Existing Secret holding the password (overrides postgres.password).
+  passwordSecret:
+    name: ""
+    key: DB_PASSWORD
+  # -- DB_SSL: require TLS on the connection.
+  ssl: false
+  # -- DB_POOL_MAX. Empty keeps the server default (10).
+  poolMax: ""
+
+# -- The /data volume: the SQLite database (when not on Postgres) and the
+# nest vault files. Losing it loses every nest.
+persistence:
+  enabled: true
+  # -- Use this PVC instead of creating one. Set accessMode to the claim's
+  # real mode: the replica guard reads it.
+  existingClaim: ""
+  # -- Empty = the cluster's default StorageClass.
+  storageClass: ""
+  # -- ReadWriteOnce (default, single pod) or ReadWriteMany (needed for
+  # replicaCount > 1, together with Postgres). RWX storage must also support
+  # file locking (NFSv4, EFS, Filestore); FUSE object-store mounts don't.
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 3838
+  annotations: {}
+
+metrics:
+  # -- Serve Prometheus metrics at /metrics (sets METRICS_ENABLED). To require
+  # a scrape token, put METRICS_TOKEN in secrets.env.
+  enabled: false
+  serviceMonitor:
+    # -- Render a prometheus-operator ServiceMonitor (needs its CRDs).
+    enabled: false
+    interval: 30s
+    # -- Extra labels, e.g. the release label your Prometheus selects on.
+    labels: {}
+    # -- When METRICS_TOKEN is set: {name: <secret>, key: METRICS_TOKEN}.
+    bearerTokenSecret: {}
+
+ingress:
+  enabled: false
+  className: ""
+  # -- MCP streams over HTTP; with ingress-nginx, consider
+  # nginx.ingress.kubernetes.io/proxy-buffering: "off" and a longer
+  # proxy-read-timeout.
+  annotations: {}
+  hosts:
+    - host: contextnest.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- e.g. [{secretName: contextnest-tls, hosts: [contextnest.example.com]}]
+  tls: []
+
+serviceAccount:
+  # -- Create a ServiceAccount. The server doesn't call the Kubernetes API,
+  # so this is only for workload identity (cloud IAM annotations).
+  create: false
+  # -- Name to use. Empty = the release fullname when create is true, else
+  # the namespace's default.
+  name: ""
+  annotations: {}
+  # -- Mount the ServiceAccount token. Off: the server doesn't need it.
+  automount: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # -- The server writes only to /data and /tmp (an emptyDir), so the image
+  # filesystem can be read-only.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# -- Startup allows up to 10 minutes: the first boot after some upgrades runs
+# a one-shot pass over every document before the server listens.
+startupProbe:
+  httpGet:
+    path: /livez
+    port: http
+  periodSeconds: 5
+  failureThreshold: 120
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: http
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Extra volumes / mounts, e.g. a CA bundle for NODE_EXTRA_CA_CERTS or DB_SSL_CA.
+extraVolumes: []
+extraVolumeMounts: []

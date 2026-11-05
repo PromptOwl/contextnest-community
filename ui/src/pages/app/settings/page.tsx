@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
+import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
@@ -30,6 +30,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { BetaBadge } from "@/components/ui/beta-badge";
 import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../../../lib/api";
@@ -40,7 +50,7 @@ import {
   removeCommunitySite,
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/SearchableSelect";
@@ -113,6 +123,7 @@ const TABS: {
       "workflow_plane_enabled",
       "subagent_runs_enabled",
       "metacognition_enabled",
+      "surfaces_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
       "subagent_max_depth",
@@ -122,10 +133,13 @@ const TABS: {
       "type_table_enabled",
       "telemetry_enabled",
       "nest_creation",
+      "nest_public_visibility",
+      "nest_org_visibility",
       "people_suggest_all_users",
       "shared_deployment",
       "oidc_enabled",
       "sso_token_exchange_enabled",
+      "openai_apps_challenge",
     ],
   },
   {
@@ -147,6 +161,22 @@ const TABS: {
       "google_token_exchange_enabled",
       "google_client_id",
       "mcp_oauth_enabled",
+    ],
+  },
+  {
+    // Surfaces (Slack → nest): shown while the Features switch is on.
+    id: "surfaces",
+    label: "Surfaces",
+    visible: (d) => !!d.surfaces_enabled,
+    keys: [
+      "surfaces_buffer_key",
+      "surfaces_judge_model",
+      "surfaces_default_cap_usd",
+      "surfaces_org_name",
+      "surfaces_slack_hosted_enabled",
+      "surfaces_slack_hosted_client_id",
+      "surfaces_slack_hosted_client_secret",
+      "surfaces_slack_hosted_signing_secret",
     ],
   },
   {
@@ -368,6 +398,45 @@ function HootieModelField({
   );
 }
 
+/** A write-only secret: shows set / not set, takes a new value, or clears (null). */
+function SecretField({
+  id,
+  label,
+  isSet,
+  value,
+  onChange,
+  placeholder,
+  error,
+}: {
+  id: string;
+  label: string;
+  isSet: boolean;
+  value: string | null | undefined;
+  onChange: (v: string | null | undefined) => void;
+  placeholder?: string;
+  error?: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <div className="text-xs text-muted-foreground">
+        {value === null ? "Will be cleared when you save." : isSet ? "Set (hidden)." : "Not set."}
+      </div>
+      <TextField id={id} type="password" error={error} value={typeof value === "string" ? value : ""} placeholder={placeholder} onChange={onChange} />
+      {isSet && value !== null && (
+        <button type="button" className="text-xs text-destructive hover:underline" onClick={() => onChange(null)}>
+          Clear
+        </button>
+      )}
+      {value === null && (
+        <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => onChange(undefined)}>
+          Keep current value
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TextField({
   id,
   value,
@@ -511,7 +580,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
-  const [copiedRedirect, setCopiedRedirect] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
@@ -607,6 +675,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
     }
   };
 
+  // Same alphabet and length the server serves (OPENAI_APPS_CHALLENGE_RE in
+  // src/config.ts); checked here so a bad paste is flagged before the 400.
+  const openaiToken = (draft?.openai_apps_challenge ?? "").trim();
+  const openaiTokenError =
+    openaiToken && !/^[A-Za-z0-9._-]{1,512}$/.test(openaiToken)
+      ? "Paste the token exactly as OpenAI shows it: letters, digits, dashes, underscores or dots, no spaces."
+      : undefined;
+
   const set = (patch: Partial<AdminSettings>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d));
     // Any edit invalidates a prior save error — let the admin retry cleanly.
@@ -627,7 +703,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
-        k === "ses_secret_access_key"
+        k === "ses_secret_access_key" ||
+        k === "surfaces_buffer_key" ||
+        k === "surfaces_slack_hosted_client_secret" ||
+        k === "surfaces_slack_hosted_signing_secret"
       ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
@@ -674,7 +753,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setSaving(false);
     }
   };
+  // Discard asks first — it throws away every unsaved edit (CU-wdqcq06a1t).
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const discard = () => {
+    setConfirmDiscard(false);
     if (settings) setDraft(settings);
     setOidcPick(null);
     setSaveError(null);
@@ -742,7 +824,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={discard}
+                onClick={() => setConfirmDiscard(true)}
                 disabled={!isDirty || saving}
               >
                 Discard
@@ -755,6 +837,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           )
         }
       />
+
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your edits go back to the last saved settings. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={discard} data-testid="settings-discard-confirm">
+              Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {saveError && (
         <div
@@ -1144,7 +1243,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         // Turning the plane off makes sub-agent runs inert; keep
                         // the two consistent so the server never sees the
                         // dependent-flag-without-parent state.
-                        ...(v ? {} : { subagent_runs_enabled: false, metacognition_enabled: false }),
+                        ...(v ? {} : { subagent_runs_enabled: false, metacognition_enabled: false, surfaces_enabled: false }),
                       })
                     }
                   />
@@ -1178,7 +1277,36 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <Switch
                     checked={draft.metacognition_enabled}
                     disabled={!draft.workflow_plane_enabled}
-                    onCheckedChange={(v) => set({ metacognition_enabled: v })}
+                    onCheckedChange={(v) => set({ metacognition_enabled: v, ...(v ? {} : { surfaces_enabled: false }) })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Surfaces — Slack → nest; reuses the plane and metacognition */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Surfaces</CardTitle>
+                <CardDescription>
+                  Nest listens in connected Slack channels and drafts what's
+                  worth keeping into the nest for a person to approve. Requires
+                  the workflow plane and metacognition agents. Its settings open
+                  in the Surfaces tab.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.surfaces_enabled ? "On" : "Off"}
+                    {!(draft.workflow_plane_enabled && draft.metacognition_enabled) && (
+                      <span className="text-muted-foreground"> · enable the workflow plane and metacognition first</span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={!!draft.surfaces_enabled}
+                    disabled={!(draft.workflow_plane_enabled && draft.metacognition_enabled)}
+                    onCheckedChange={(v) => set({ surfaces_enabled: v })}
+                    aria-label="Surfaces"
                   />
                 </div>
               </CardContent>
@@ -1461,6 +1589,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   flat refusal. Existing API keys keep working exactly as
                   before.
                 </p>
+
+                <div className="space-y-1 pt-2">
+                  <Label htmlFor="openai-apps-challenge">OpenAI domain token</Label>
+                  <TextField
+                    id="openai-apps-challenge"
+                    error={fieldErrors.openai_apps_challenge ?? openaiTokenError}
+                    value={draft.openai_apps_challenge ?? ""}
+                    placeholder="Paste the token from OpenAI's app setup"
+                    onChange={(v) => set({ openai_apps_challenge: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    To publish this server as a ChatGPT app, OpenAI checks that
+                    you own the domain by reading this token at{" "}
+                    <code>/.well-known/openai-apps-challenge</code>. It is
+                    public by design. Leave empty to turn the check off.
+                  </p>
+                </div>
               </CardContent>
             </Card>
 
@@ -1519,6 +1664,55 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     }
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Who may widen a nest past its roster. Owners (default) is
+                today's behaviour; server admins only stops an owner publishing
+                by accident. The server enforces it on REST and MCP; the
+                visibility pickers disable the tier and say why. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Globe2 className="h-4 w-4 text-muted-foreground" />
+                  Nest visibility
+                </CardTitle>
+                <CardDescription>
+                  Who can open a nest beyond the people added to it. Making a
+                  nest private is always allowed, and nests that are already
+                  public or organization-wide stay as they are. This covers
+                  whole nests only: single-document public links are separate.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {([
+                  ["nest_public_visibility", "Who can make nests public", "Public nests are readable by anyone on the internet with the URL."],
+                  ["nest_org_visibility", "Who can make nests organization-wide", draft.shared_deployment
+                    ? "Organization nests are readable by every account on this server — other organizations included."
+                    : "Organization nests are readable by everyone signed in to this server."],
+                ] as const).map(([field, label, hint], i) => (
+                  <div
+                    key={field}
+                    className={`flex items-start justify-between gap-4 ${i > 0 ? "pt-4 border-t" : ""}`}
+                  >
+                    <div className="pr-4">
+                      <div className="text-sm font-medium">{label}</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>
+                    </div>
+                    <Select
+                      value={draft[field] ?? "owners"}
+                      onValueChange={(v) => set({ [field]: v as "owners" | "admins" })}
+                    >
+                      <SelectTrigger className="h-8 w-[190px]" aria-label={label} data-testid={`settings-${field}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="owners">Nest owners</SelectItem>
+                        <SelectItem value="admins">Server admins only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
               </CardContent>
             </Card>
 
@@ -1685,25 +1879,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                           <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
                             {redirectUri}
                           </code>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              if (!(await copyTextWithToast(redirectUri))) return;
-                              setCopiedRedirect(true);
-                              setTimeout(() => setCopiedRedirect(false), 1500);
-                            }}
-                          >
-                            {copiedRedirect ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
-                            <span className="ml-1.5">
-                              {copiedRedirect ? "Copied" : "Copy"}
-                            </span>
-                          </Button>
+                          <CopyButton text={redirectUri} label="Copy" />
                         </div>
                       );
                     })()}
@@ -2113,6 +2289,79 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </CardContent>
               </Card>
             )}
+          </TabsContent>
+
+          {/* Surfaces — Slack → nest */}
+          <TabsContent value="surfaces" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Surfaces</CardTitle>
+                <CardDescription>
+                  Without a buffer key, Nest stores nothing from chat and never
+                  proposes anything. Slack also needs the public URL (Basic) and a
+                  model key (Hootie). Empty fields fall back to the server's
+                  environment or the default.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <SecretField
+                  id="surfaces-buffer-key"
+                  label="Buffer key"
+                  isSet={!!settings?.surfaces_buffer_key_set}
+                  value={draft.surfaces_buffer_key}
+                  onChange={(v) => set({ surfaces_buffer_key: v })}
+                  placeholder="32 bytes, base64 or hex — e.g. openssl rand -base64 32"
+                  error={fieldErrors.surfaces_buffer_key}
+                />
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-judge-model">Judge model</Label>
+                  <TextField id="surfaces-judge-model" error={fieldErrors.surfaces_judge_model} value={draft.surfaces_judge_model ?? ""} placeholder="Default: the nest's model" onChange={(v) => set({ surfaces_judge_model: v })} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-cap">Monthly spend cap per nest (USD)</Label>
+                  <TextField id="surfaces-cap" error={fieldErrors.surfaces_default_cap_usd} value={draft.surfaces_default_cap_usd == null ? "" : String(draft.surfaces_default_cap_usd)} placeholder="Default: 50" onChange={(v) => set({ surfaces_default_cap_usd: v })} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-org-name">Organization name (in Slack messages)</Label>
+                  <TextField id="surfaces-org-name" error={fieldErrors.surfaces_org_name} value={draft.surfaces_org_name ?? ""} placeholder="Default: your organization" onChange={(v) => set({ surfaces_org_name: v })} />
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Hosted Slack app</CardTitle>
+                <CardDescription>
+                  One-click install with PromptOwl's own Slack app. Leave off to
+                  install your own app from the manifest instead.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">{draft.surfaces_slack_hosted_enabled ? "On" : "Off"}</span>
+                  <Switch checked={!!draft.surfaces_slack_hosted_enabled} onCheckedChange={(v) => set({ surfaces_slack_hosted_enabled: v })} aria-label="Hosted Slack app" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-slack-client-id">Client ID</Label>
+                  <TextField id="surfaces-slack-client-id" error={fieldErrors.surfaces_slack_hosted_client_id} value={draft.surfaces_slack_hosted_client_id ?? ""} onChange={(v) => set({ surfaces_slack_hosted_client_id: v })} />
+                </div>
+                <SecretField
+                  id="surfaces-slack-client-secret"
+                  label="Client secret"
+                  isSet={!!settings?.surfaces_slack_hosted_client_secret_set}
+                  value={draft.surfaces_slack_hosted_client_secret}
+                  onChange={(v) => set({ surfaces_slack_hosted_client_secret: v })}
+                  error={fieldErrors.surfaces_slack_hosted_client_secret}
+                />
+                <SecretField
+                  id="surfaces-slack-signing-secret"
+                  label="Signing secret"
+                  isSet={!!settings?.surfaces_slack_hosted_signing_secret_set}
+                  value={draft.surfaces_slack_hosted_signing_secret}
+                  onChange={(v) => set({ surfaces_slack_hosted_signing_secret: v })}
+                  error={fieldErrors.surfaces_slack_hosted_signing_secret}
+                />
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* Hootie */}

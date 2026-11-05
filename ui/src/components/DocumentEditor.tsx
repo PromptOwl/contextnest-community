@@ -10,18 +10,20 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
-import { saveOutcome } from "../lib/save-outcome";
+import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { nestPath } from "../lib/nest-url";
+import { documentLink } from "../lib/nest-url";
 import { useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
   newTags,
   normalizeTagInput,
   tagKey,
+  tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -75,14 +77,15 @@ import {
   GitCompare,
   ChevronDown,
   Check,
-  Copy,
   Star,
+  Megaphone,
   Undo2,
   PanelLeft,
   Globe,
   Building2,
   Lock,
   Activity,
+  LayoutPanelTop,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -97,6 +100,9 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
+import { TaskAssignee } from "./board/TaskAssignee";
+import { TaskDetails } from "./board/TaskDetails";
+import { AssigneeMenu } from "./board/CardParts";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -141,11 +147,15 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
+import { ViewNodePage } from "./ViewNodePage";
+import { ViewBlocksEditor } from "./ViewBlocksEditor";
+import { VIEW_SEED_BLOCK, viewJson, type ViewMeta } from "../lib/view-blocks";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -198,7 +208,7 @@ interface DocumentEditorProps {
    *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
-  onSaved?: (savedNodeId: string) => void;
+  onSaved?: (savedNodeId: string, info?: { publishedDraft?: boolean }) => void;
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
@@ -267,7 +277,7 @@ export function DocumentEditor({
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
   const typeRoving = useRovingFocus<HTMLDivElement>();
-  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, typeViewEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -323,8 +333,6 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");
@@ -339,6 +347,13 @@ export function DocumentEditor({
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
   const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
+  // Document-scope always-include flag (CU-wdqcq05rn0): same shape as prime —
+  // null inherits from the nest's always-include tags. Owner/admin only.
+  const [alwaysInclude, setAlwaysInclude] = useState<boolean | null>(null);
+  const loadedAlwaysIncludeRef = useRef<boolean | null>(null);
+  const alwaysIncludeTags = ((nestSettings.data as any)?.always_include_tags ?? [
+    "always-include",
+  ]) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -364,6 +379,9 @@ export function DocumentEditor({
   // Saved by NodeFieldsPanel on their own, outside the body's Save.
   const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
   const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
+  const [assignee, setAssignee] = useState<string | undefined>(undefined);
+  const [taskPriority, setTaskPriority] = useState<string | undefined>(undefined);
+  const [taskDue, setTaskDue] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -385,6 +403,9 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // CU-wdqcq05rz6: may suggest edits here as drafts for review.
+  const isOrgContributor = !!(nestMeta.data as { org_contributor?: boolean } | undefined)?.org_contributor;
+  const [suggestOpen, setSuggestOpen] = useState(false);
   // Read straight off the same GET /nests/:id response `permission` above
   // comes from, rather than a prop threaded down through App.tsx's View
   // state — the document page is reachable via wiki-link nav, a board/graph
@@ -470,20 +491,31 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill" | "tool" | "table"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view"
   >("document");
   // Type switch that would reinterpret existing content — confirmed before
   // it's applied (see requestTypeChange below).
   const [pendingType, setPendingType] = useState<{
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table";
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view";
     label: string;
   } | null>(null);
+  // The `view:` block of a type: view node (null for other types, and for
+  // read-only callers, whom the server withholds it from). Other keys ride along.
+  const [viewMeta, setViewMeta] = useState<ViewMeta | null>(null);
+  const loadedViewRef = useRef("");
+  // Bumped after each save so the preview frame reloads the saved layout.
+  const [previewNonce, setPreviewNonce] = useState(0);
   const isArtifactDraft = isNew && newType === "artifact";
+  // A new View starts with one block, since the engine refuses an empty list.
+  useEffect(() => {
+    if (!isNew) return;
+    setViewMeta((v) => (newType === "view" ? (v ?? { blocks: [VIEW_SEED_BLOCK] }) : null));
+  }, [isNew, newType]);
   // How a type's body is interpreted — switching within the same class
   // (e.g. Document → Agent, both markdown prose) doesn't change how
   // existing content reads, so only a cross-class switch needs a warning.
   const typeBodyKind = (
-    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
   ): "markdown" | "html" | "csv" | "code" =>
     t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
   // New-doc Type switch: warn before applying when there's existing content
@@ -491,7 +523,7 @@ export function DocumentEditor({
   // code) — nothing to reinterpret on an empty draft, and same-class
   // switches (e.g. Document ↔ Agent) don't change how the body is read.
   const requestTypeChange = (
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
     label: string,
   ) => {
     if (
@@ -525,12 +557,6 @@ export function DocumentEditor({
   const serverOrigin =
     typeof window !== "undefined" ? window.location.origin : "";
   const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
-  const [copiedRunnables, setCopiedRunnables] = useState(false);
-  const copyRunnablesUrl = async () => {
-    if (!(await copyTextWithToast(runnablesUrl))) return;
-    setCopiedRunnables(true);
-    setTimeout(() => setCopiedRunnables(false), 1500);
-  };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
   // select-to-comment and painted highlights are reachable without TipTap
@@ -550,13 +576,16 @@ export function DocumentEditor({
   // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
   // opened from the page count as inside, or opening one would hide the toolbar.
   const pageRef = useRef<HTMLDivElement | null>(null);
+  // The top bar counts as inside too: putting the controls away on a press
+  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
+  const topBarRef = useRef<HTMLDivElement | null>(null);
   const [pageActive, setPageActive] = useState(isNew);
   useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pageActive) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t)) return;
+      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
       if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
       setPageActive(false);
     };
@@ -931,10 +960,15 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
+  useBreadcrumb([
+    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
+  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
-    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+    Array<{ id: string; title: string; content?: string; tags?: string[]; type?: string }>
   >([]);
   // The nest's folders, including any holding no document. Same cached census
   // the nest views read, so this costs no extra request in practice.
@@ -969,6 +1003,7 @@ export function DocumentEditor({
               title: string;
               content?: string;
               tags?: string[];
+              type?: string;
             }>,
           );
         }
@@ -1029,6 +1064,9 @@ export function DocumentEditor({
       ...(typeTaskEnabled
         ? [{ value: "task", label: "Task", Icon: ListTodo, expects: "Markdown notes for a unit of work. Tasks skip review and carry an assignee, due date and priority on the board." }]
         : []),
+      ...(typeViewEnabled
+        ? [{ value: "view", label: "View", Icon: LayoutPanelTop, expects: "A layout of blocks over other nodes. The body becomes its intro, and one starter block is added." }]
+        : []),
       ...(workflowPlaneEnabled
         ? [
           { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
@@ -1038,12 +1076,17 @@ export function DocumentEditor({
         : []),
     ];
     return all.filter((o) => o.value !== (nodeType ?? "document"));
-  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, workflowPlaneEnabled, nodeType]);
+  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, typeViewEnabled, workflowPlaneEnabled, nodeType]);
   const handleTurnInto = async () => {
     if (!turnInto || isNew) return;
     setTurningInto(true);
     try {
-      await api.updateNode(nestId, nodeId, { type: turnInto });
+      // Engine rule 32 refuses a view with no blocks, so the switch carries a seed.
+      await api.updateNode(
+        nestId,
+        nodeId,
+        turnInto === "view" ? { type: turnInto, view: { blocks: [VIEW_SEED_BLOCK] } } : { type: turnInto },
+      );
       invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
       toast.success(`Turned into ${turnIntoOptions.find((o) => o.value === turnInto)?.label ?? turnInto}`);
       setTurnInto(null);
@@ -1140,6 +1183,10 @@ export function DocumentEditor({
       setContent(loadedContent);
       setTags(loadedTags);
       setNodeType(node?.type ?? null);
+      // Withheld by the server from read-only callers, so null means no editor.
+      const loadedView = node?.type === "view" && node?.view ? (node.view as ViewMeta) : null;
+      setViewMeta(loadedView);
+      loadedViewRef.current = loadedView ? viewJson(loadedView) : "";
       setPdfMeta(node?.type === "pdf" && node?.pdf ? (node.pdf as api.PdfMeta) : null);
       const loadedSchedule =
         node?.schedule == null ? "" : String(node.schedule);
@@ -1147,9 +1194,16 @@ export function DocumentEditor({
       const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
       setPrime(loadedPrime);
       loadedPrimeRef.current = loadedPrime;
+      const loadedAlwaysInclude =
+        typeof node?.always_include === "boolean" ? node.always_include : null;
+      setAlwaysInclude(loadedAlwaysInclude);
+      loadedAlwaysIncludeRef.current = loadedAlwaysInclude;
       setBaseVersion(node?.version);
       setNodeFields((node as any)?.fields ?? undefined);
       setStatusSince((node as any)?.status_since ?? undefined);
+      setAssignee((node as any)?.assignee ?? undefined);
+      setTaskPriority((node as any)?.priority ?? undefined);
+      setTaskDue((node as any)?.due ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -1184,6 +1238,7 @@ export function DocumentEditor({
           setContent(draft.content);
           setTags(draft.tags);
           setSchedule(draft.schedule);
+          if (draft.view) setViewMeta(draft.view as ViewMeta);
           setTouched(true);
           setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
@@ -1305,6 +1360,8 @@ export function DocumentEditor({
   // Existing document: the Type control is the Turn into entry point.
   const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
+  // Locked while a review holds the node, or for a viewer/archived nest.
+  const viewReadOnly = isViewOnly || isLocked || isArchived;
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
@@ -1358,13 +1415,19 @@ export function DocumentEditor({
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
     if (prime !== loadedPrimeRef.current) return true;
+    if (alwaysInclude !== loadedAlwaysIncludeRef.current) return true;
+    if (viewMeta && viewJson(viewMeta) !== loadedViewRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule, prime]);
+  }, [touched, title, content, tags, schedule, prime, alwaysInclude, viewMeta]);
 
   // Save is a no-op on a clean document (it would only bump the version), so
   // the button says so by being disabled — the enabled/disabled pair IS the
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
+
+  // Editing the title or body is the user fixing what the last error asked
+  // for, so the stale banner goes (CU-wdqcq06fjw).
+  useEffect(() => setError(null), [title, content]);
 
   // Set once the user has answered the leave dialog and the navigation is
   // going through — the browser-level guards below must not ask a second time.
@@ -1481,8 +1544,54 @@ export function DocumentEditor({
     };
   }, [tagInput, tags]);
 
-  const addTag = useCallback(() => {
-    const { tags: accepted, notes } = tagPreview;
+  // Nest tag vocabulary for the tag field's suggestions (cached reference read).
+  const { data: nestTags } = useQuery({ ...reads.tags(nestId), enabled: !!nestId && canEditContent });
+  const suggestedTags = useMemo(() => tagSuggestions(nestTags ?? [], tags), [nestTags, tags]);
+
+  // Save just the tags where that publishes cleanly (CU-wdqcq02a1q). Saves run
+  // one at a time off the latest base version, so quick clicks don't conflict.
+  const baseVersionRef = useRef(baseVersion);
+  baseVersionRef.current = baseVersion;
+  const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+    const run = async () => {
+      const snap = initialSnapshotRef.current;
+      const otherFieldsDirty =
+        title.trim() !== snap.title.trim() ||
+        normalizeHtml(content) !== normalizeHtml(snap.content) ||
+        schedule.trim() !== snap.schedule.trim() ||
+        prime !== loadedPrimeRef.current ||
+        alwaysInclude !== loadedAlwaysIncludeRef.current;
+      if (!canSaveTagsAlone({ isNew, status, outcome, otherFieldsDirty })) return "deferred" as const;
+      try {
+        const res: any = await api.updateNode(nestId, nodeId, { tags: next }, baseVersionRef.current);
+        const v = res?.version ?? res?.node?.version;
+        if (typeof v === "number") {
+          baseVersionRef.current = v;
+          setBaseVersion(v);
+        }
+        setUpdatedAt(res?.node?.updated_at ?? new Date().toISOString());
+        initialSnapshotRef.current = { ...initialSnapshotRef.current, tags: [...next] };
+        setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
+        return "saved" as const;
+      } catch (err) {
+        console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
+        return "failed" as const;
+      }
+    };
+    const p = tagSaveChain.current.then(run);
+    tagSaveChain.current = p;
+    return p;
+  };
+
+  // A real failure says so; a deferred tag says it waits for Save.
+  const tagSaveFailed = () =>
+    toast.error("Couldn't save the tag", { id: "tag-added", description: "Save the document to keep it." });
+
+  // `picked` is a suggestion chosen from the list — already a valid nest tag.
+  const addTag = (picked?: string) => {
+    const { tags: accepted, notes } =
+      picked === undefined ? tagPreview : { tags: newTags(tags, [picked]), notes: [] as string[] };
     // A paste commits several tags at once, and one transient toast per
     // rewrite is unreadable — stack them into a single summary and leave the
     // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
@@ -1496,20 +1605,30 @@ export function DocumentEditor({
       setTagInput("");
       return;
     }
-    setTags([...tags, ...accepted]);
+    const next = [...tags, ...accepted];
+    setTags(next);
     setTagInput("");
     setTouched(true);
-    // Local until Save — say so, or "added" reads as persisted.
-    toast.success(
-      accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
-      // One toast slot: adding tags one after another updates it instead of stacking.
-      { id: "tag-added", description: "Save the document to keep it." },
+    // Say whether it's kept, or "added" reads as persisted when it's local.
+    void saveTagsAlone(next).then((r) =>
+      r === "failed"
+        ? tagSaveFailed()
+        : toast.success(
+            accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+            // One toast slot: adding tags one after another updates it instead of stacking.
+            { id: "tag-added", description: r === "saved" ? "Saved." : "Save the document to keep it." },
+          ),
     );
-  }, [tagPreview, tags]);
+  };
 
   const removeTag = (t: string) => {
-    setTags(tags.filter((x) => x !== t));
+    const next = tags.filter((x) => x !== t);
+    setTags(next);
     setTouched(true);
+    void saveTagsAlone(next).then((r) => {
+      if (r === "saved") toast.success(`Tag "${t}" removed`, { id: "tag-added", description: "Saved." });
+      else if (r === "failed") tagSaveFailed();
+    });
   };
 
   const persistCurrent = async (): Promise<{
@@ -1538,6 +1657,7 @@ export function DocumentEditor({
       const res = await api.createNode(nestId, {
         ...payload,
         type: newType,
+        ...(newType === "view" ? { view: viewMeta ?? { blocks: [VIEW_SEED_BLOCK] } } : {}),
         ...(folder.trim() ? { folder: folder.trim() } : {}),
         // schedule is server-rejected on non-runnable types, so only send it
         // for agent/skill drafts.
@@ -1545,22 +1665,45 @@ export function DocumentEditor({
         // Only sent when explicitly flagged — the server 403s a non-admin who
         // sends `prime` at all, so an inherited (null) flag stays off the wire.
         ...(prime === null ? {} : { prime }),
+        ...(alwaysInclude === null ? {} : { always_include: alwaysInclude }),
+        // A new task carries what was picked above the editor, so it need not
+        // be saved and reopened to be assigned.
+        ...(newType === "task"
+          ? {
+              ...(assignee ? { assignee } : {}),
+              ...(taskPriority ? { priority: taskPriority } : {}),
+              ...(taskDue ? { due: taskDue } : {}),
+            }
+          : {}),
       });
       savedId = (res as any)?.node?.id;
       createdStatus = (res as any)?.node?.status;
     } else {
-      const primePatch =
-        prime === loadedPrimeRef.current ? {} : { prime };
+      const primePatch = {
+        ...(prime === loadedPrimeRef.current ? {} : { prime }),
+        ...(alwaysInclude === loadedAlwaysIncludeRef.current
+          ? {}
+          : { always_include: alwaysInclude }),
+      };
+      // The block list replaces wholesale server-side, so it is sent only when
+      // it changed; locked blocks stay in `viewMeta` and go back unchanged.
+      const viewPatch =
+        nodeType === "view" && viewMeta && viewJson(viewMeta) !== loadedViewRef.current
+          ? { view: viewMeta }
+          : {};
       const res = await api.updateNode(
         nestId,
         nodeId,
         // Only runnable nodes accept schedule; "" clears it server-side.
         isRunnable
-          ? { ...payload, ...primePatch, schedule: schedule.trim() }
-          : { ...payload, ...primePatch },
+          ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
+          : { ...payload, ...primePatch, ...viewPatch },
         baseVersion,
       );
+      if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
+      setPreviewNonce((n) => n + 1);
       loadedPrimeRef.current = prime;
+      loadedAlwaysIncludeRef.current = alwaysInclude;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -1648,7 +1791,11 @@ export function DocumentEditor({
     }
   };
 
-  const handleSave = () => runSave((savedId) => onSaved?.(savedId));
+  const handleSave = () => {
+    // Read before the save: a draft this save publishes (the caller may leave the page).
+    const publishedDraft = !isNew && status === "draft" && outcome === "publish";
+    return runSave((savedId) => onSaved?.(savedId, { publishedDraft }));
+  };
 
   // Clear the "Saved" hint the moment the doc is edited again.
   useEffect(() => {
@@ -1670,6 +1817,7 @@ export function DocumentEditor({
       content,
       tags: [...tags],
       schedule: schedule.trim(),
+      ...(viewMeta ? { view: viewMeta } : {}),
       baseVersion,
     });
     // Couldn't back the edits up locally — the leave dialog still guards
@@ -1709,6 +1857,7 @@ export function DocumentEditor({
     setContent(snap.content);
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
+    if (!isNew) setViewMeta(loadedViewRef.current ? JSON.parse(loadedViewRef.current) : null);
     setTouched(false);
     setRestoredDraftAt(null);
   };
@@ -1834,7 +1983,13 @@ export function DocumentEditor({
   const primeByTag =
     primeTags.length > 0 &&
     tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
-  const effectivePrime = prime === null ? primeByTag : prime;
+  // Always-include mirrors the server the same way; an always-include
+  // document is prime whatever its own prime flag says.
+  const alwaysIncludeByTag =
+    alwaysIncludeTags.length > 0 &&
+    tags.some((t) => alwaysIncludeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectiveAlwaysInclude = alwaysInclude === null ? alwaysIncludeByTag : alwaysInclude;
+  const effectivePrime = effectiveAlwaysInclude || (prime === null ? primeByTag : prime);
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
@@ -2009,7 +2164,7 @@ export function DocumentEditor({
             ...base,
             icon: LinkIcon,
             onSelect: () => {
-              const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
+              const url = documentLink(window.location.origin, nestId, nodeId);
               void copyTextWithToast(
                 url,
                 "Link copied — recipient needs access to this nest",
@@ -2094,6 +2249,14 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {isOrgContributor && (
+        <SuggestDialog
+          nestId={nestId}
+          open={suggestOpen}
+          onOpenChange={setSuggestOpen}
+          edit={{ nodeId, title, content }}
+        />
+      )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
       )}
@@ -2212,6 +2375,7 @@ export function DocumentEditor({
           nestId={nestId}
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
+          documentUrl={documentLink(window.location.origin, nestId, nodeId)}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
@@ -2300,6 +2464,7 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
+        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
@@ -2600,7 +2765,7 @@ export function DocumentEditor({
                           className="ml-auto text-xs text-muted-foreground"
                           title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
                         >
-                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -2657,7 +2822,22 @@ export function DocumentEditor({
               {/* A viewer gets the way to ask instead of no Edit at all. Not on
                   an archived nest (nobody edits it) or for a signed-out reader
                   (nobody to grant it to). */}
-              {isViewOnly && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+              {/* An org contributor (CU-wdqcq05rz6) can suggest the edit
+                  instead of asking for access — it goes to review. */}
+              {isViewOnly && isOrgContributor && !isArchived && !isNew && !isPdfNode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setSuggestOpen(true)}
+                  data-testid="document-editor-suggest-edit"
+                  title="Suggest a change. It goes to review; the document stays as it is until a reviewer approves it."
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Suggest an edit
+                </Button>
+              )}
+              {isViewOnly && !isOrgContributor && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -2875,7 +3055,7 @@ export function DocumentEditor({
                                 ?.focus();
                           }
                         }}
-                        placeholder="Untitled"
+                        placeholder={loading ? "Loading…" : "Untitled"}
                         // A hard stop here so the server's 400 is unreachable from the UI.
                         // maxLength never truncates an existing longer value, so
                         // grandfathered titles still load and save.
@@ -3074,7 +3254,15 @@ export function DocumentEditor({
                       {canEditContent && !fieldsDisabled && (
                         <input
                           value={tagInput}
-                          onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                          onChange={(e) => {
+                            // Picking a datalist suggestion arrives as a replacement — add it straight away.
+                            if ((e.nativeEvent as InputEvent).inputType === "insertReplacementText") {
+                              addTag(e.target.value);
+                              return;
+                            }
+                            setTagInput(clampTagInput(e.target.value));
+                          }}
+                          list="document-editor-tag-suggestions"
                           onKeyDown={(e) => {
                             // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                             if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -3093,6 +3281,13 @@ export function DocumentEditor({
                           className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
                           data-testid="document-editor-tag-input"
                         />
+                      )}
+                      {canEditContent && !fieldsDisabled && (
+                        <datalist id="document-editor-tag-suggestions">
+                          {suggestedTags.map((t) => (
+                            <option key={t} value={t} />
+                          ))}
+                        </datalist>
                       )}
                       {tags.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
@@ -3119,7 +3314,7 @@ export function DocumentEditor({
                                 {/* Long tags truncate rather than eat the row; the
                             full value stays in the chip's title. */}
                                 <span className="truncate max-w-[16rem]">{t}</span>
-                                {!fieldsDisabled && (
+                                {!fieldsDisabled && !/^#?ticket:/i.test(t) && (
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -3155,21 +3350,36 @@ export function DocumentEditor({
 
                 {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-                {stewardshipEnabled && canFlagPrime && pageActive && (
-                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                {/* Always in the layout (not only while editing): a row that
+              appears on the first click shoves the whole page down under
+              the cursor. One compact line, the full wording on hover. */}
+                {stewardshipEnabled && canFlagPrime && (
+                  <div className="flex items-start justify-between gap-4 py-1">
                     <div className="space-y-0.5">
-                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                      <span
+                        className="flex items-center gap-1.5 text-sm font-medium"
+                        title={
+                          primeByTag && prime === null
+                            ? "Inherited from a prime tag on this document — it always needs steward approval."
+                            : "Always require steward approval for this document, even from an owner or admin with auto-publish on."
+                        }
+                      >
                         <Star className="h-4 w-4" />
                         Prime document
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {primeByTag && prime === null
+                            ? "Inherited from a prime tag"
+                            : "Every change needs steward approval"}
+                        </span>
                       </span>
-                      <p className="text-xs text-muted-foreground">
-                        {primeByTag && prime === null
-                          ? "Inherited from a prime tag on this document — it always needs steward approval."
-                          : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
-                      </p>
-                      {primeByTag && prime === false && (
+                      {primeByTag && prime === false && !effectiveAlwaysInclude && (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
                           Exempted from its prime tag.
+                        </p>
+                      )}
+                      {effectiveAlwaysInclude && (
+                        <p className="text-xs text-muted-foreground">
+                          Prime because it is always-included — turn that off first.
                         </p>
                       )}
                       {/* The one case people get wrong: an owner with auto-publish on
@@ -3183,7 +3393,7 @@ export function DocumentEditor({
                     </div>
                     <Switch
                       checked={effectivePrime}
-                      disabled={fieldsDisabled}
+                      disabled={fieldsDisabled || effectiveAlwaysInclude}
                       onCheckedChange={(next) => {
                         // Turning the switch back to whatever the tags already imply
                         // clears the override rather than pinning a redundant flag.
@@ -3192,6 +3402,50 @@ export function DocumentEditor({
                       }}
                       aria-label="Prime document"
                       data-testid="document-editor-prime"
+                    />
+                  </div>
+                )}
+
+                {/* Always include — any nest, owner/admin only. It reaches every
+              agent and model, governed or not; in a governed nest it also
+              makes the document prime. */}
+                {canFlagPrime && (
+                  <div className="flex items-start justify-between gap-4 py-1">
+                    <div className="space-y-0.5">
+                      <span
+                        className="flex items-center gap-1.5 text-sm font-medium"
+                        title={
+                          (alwaysIncludeByTag && alwaysInclude === null
+                            ? "Inherited from an always-include tag on this document."
+                            : "Send this document's approved text to every agent and model that works in this nest — MCP connections, Hootie, agents and workflow runs.") +
+                          (stewardshipEnabled
+                            ? " It is also prime: every change to it needs steward approval."
+                            : "")
+                        }
+                      >
+                        <Megaphone className="h-4 w-4" />
+                        Always include
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {alwaysIncludeByTag && alwaysInclude === null
+                            ? "Inherited from a tag"
+                            : "Sent to every agent in this nest"}
+                        </span>
+                      </span>
+                      {alwaysIncludeByTag && alwaysInclude === false && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Exempted from its always-include tag.
+                        </p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={effectiveAlwaysInclude}
+                      disabled={fieldsDisabled}
+                      onCheckedChange={(next) => {
+                        setAlwaysInclude(next === alwaysIncludeByTag ? null : next);
+                        setTouched(true);
+                      }}
+                      aria-label="Always include"
+                      data-testid="document-editor-always-include"
                     />
                   </div>
                 )}
@@ -3223,6 +3477,77 @@ export function DocumentEditor({
                       </span>
                     )}
                   </div>
+                )}
+
+                {/* Assignee — tasks only, the board card's picker (saved on pick). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskAssignee
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    assignee={assignee}
+                    people={roster?.people ?? []}
+                    me={currentEmail}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setAssignee(n?.assignee ?? undefined);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
+                )}
+
+                {/* A task being written: the same pickers, held until the first save. */}
+                {isNew && newType === "task" && (
+                  <div className="space-y-2" data-testid="new-task-details">
+                    <section className="flex items-center gap-2" aria-label="Assignee">
+                      <h3 className="text-xs font-medium text-muted-foreground">Assignee</h3>
+                      <AssigneeMenu
+                        assignee={assignee}
+                        people={(roster?.people ?? []).filter((p: any) => p.member !== false)}
+                        me={currentEmail}
+                        editable
+                        onChange={(email) => {
+                          setAssignee(email ?? undefined);
+                          setTouched(true);
+                        }}
+                        showName
+                      />
+                    </section>
+                    <TaskDetails
+                      nestId={nestId}
+                      tags={tags}
+                      priority={taskPriority}
+                      due={taskDue}
+                      canEdit
+                      onChange={(patch) => {
+                        if (patch.tags) setTags(newTags([], patch.tags.map((t) => tagKey(String(t)))));
+                        if ("priority" in patch) setTaskPriority(patch.priority ?? undefined);
+                        if ("due" in patch) setTaskDue(patch.due ?? undefined);
+                        setTouched(true);
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Stage, priority and due — tasks only, saved on pick like the assignee. */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskDetails
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    tags={tags}
+                    priority={taskPriority}
+                    due={taskDue}
+                    canEdit={canEditContent && !isArchived}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      setTaskPriority(n?.priority ?? undefined);
+                      setTaskDue(n?.due ?? undefined);
+                      if (Array.isArray(n?.tags)) {
+                        setTags(newTags([], n.tags.map((t: unknown) => tagKey(String(t)))));
+                      }
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                    }}
+                  />
                 )}
 
                 {/* Relations — tasks only: blocks / blocked by / related /
@@ -3271,8 +3596,15 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {canEditContent && pageActive && (isNew || isRunnable || canTurnIntoHere) && (
-                  <div className="flex flex-col sm:flex-row gap-4 w-full">
+                {/* Held in place (invisible, unfocusable) while idle — like the
+              editor toolbar below — so activating the page doesn't push the
+              body down. */}
+                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                  <div
+                    className={`flex flex-col sm:flex-row gap-4 w-full ${pageActive ? "" : "invisible"}`}
+                    aria-hidden={!pageActive || undefined}
+                    {...(pageActive ? {} : ({ inert: "" } as object))}
+                  >
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
                         <label className="block text-sm font-medium mb-1">Type</label>
@@ -3322,6 +3654,14 @@ export function DocumentEditor({
                                   },
                                 ]
                                 : []),
+                              ...(typeViewEnabled
+                                ? [
+                                  {
+                                    value: "view", label: "View", Icon: LayoutPanelTop,
+                                    on: "bg-sky-500/15 text-sky-700 dark:text-sky-300"
+                                  },
+                                ]
+                                : []),
                               ...(workflowPlaneEnabled
                                 ? [
                                   {
@@ -3356,12 +3696,14 @@ export function DocumentEditor({
                                         ? "Table — CSV fact store, queryable deterministically"
                                         : value === "tool"
                                           ? "Tool — the body is code an agent can call"
-                                          : `${label} (runnable)`
+                                          : value === "view"
+                                            ? "View — a layout of blocks over other nodes"
+                                            : `${label} (runnable)`
                                 }
                                 onClick={() => {
                                   if (isNew) {
                                     requestTypeChange(
-                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
                                       label,
                                     );
                                     return;
@@ -3470,19 +3812,12 @@ export function DocumentEditor({
                       <span className="text-xs font-medium text-muted-foreground">
                         Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
                       </span>
-                      <Button
+                      <CopyButton
+                        text={runnablesUrl}
                         variant="ghost"
-                        size="sm"
                         className="h-6 px-2 shrink-0"
-                        onClick={copyRunnablesUrl}
                         title="Copy URL"
-                      >
-                        {copiedRunnables ? (
-                          <Check className="h-3 w-3 text-green-600" />
-                        ) : (
-                          <Copy className="h-3 w-3" />
-                        )}
-                      </Button>
+                      />
                     </div>
                     <code className="block text-[11px] font-mono break-all text-foreground/80">
                       GET {runnablesUrl}
@@ -3509,6 +3844,7 @@ export function DocumentEditor({
                     {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
                     <div
                       ref={bodyRef}
+                      className={effectiveType === "view" && !viewMeta && !isNew ? "hidden" : undefined}
                       onClick={() => {
                         if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
                         // Table read view is interactive (query box + buttons), so a
@@ -3865,6 +4201,32 @@ export function DocumentEditor({
                         </div>
                       )}
                     </div>
+                    {/* A View's blocks sit under its intro. Writers edit the list and
+                        preview their draft (the live version); everyone else gets
+                        the approved layout in the frame and no editor. */}
+                    {effectiveType === "view" && (
+                      <div className="mt-4 space-y-3" data-testid="view-section">
+                        {viewMeta && (
+                          <ViewBlocksEditor
+                            blocks={viewMeta.blocks}
+                            disabled={viewReadOnly}
+                            onChange={(blocks) => {
+                              setViewMeta({ ...viewMeta, blocks });
+                              setTouched(true);
+                            }}
+                          />
+                        )}
+                        {!isNew && !loading && (
+                          <ViewNodePage
+                            nestId={nestId}
+                            nodeId={nodeId}
+                            title={title}
+                            version={viewMeta ? baseVersion : null}
+                            reloadKey={`${baseVersion ?? ""}-${previewNonce}`}
+                          />
+                        )}
+                      </div>
+                    )}
                   </div>
 
                 </div>
@@ -3911,6 +4273,13 @@ export function DocumentEditor({
                           }
                         >
                           {b.title}
+                          {/* A table's :ref rows: "Pipeline · account · r1". */}
+                          {backlinkRefLabels(b).map((label) => (
+                            <span key={label} className="text-muted-foreground">
+                              {" · "}
+                              {label}
+                            </span>
+                          ))}
                         </button>
                       ))}
                     </div>

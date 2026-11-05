@@ -22,10 +22,12 @@
  * rests on signature + issuer + audience + expiry + email_verified. This is the
  * standard token-exchange trust model and is documented in CONFIGURATION.md.
  */
+import { signInAlertSoon } from "../surfaces/signin-alerts.js";
 import type { Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { jwtVerify } from "jose";
 import { getDb } from "../db/client.js";
+import { idpVouchesForEmail, markEmailVerified } from "./email-verified.js";
 import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
@@ -94,7 +96,13 @@ function providerConfig(p: ExchangeProvider): {
 async function verifySubjectToken(
   provider: ExchangeProvider,
   subjectToken: string,
-): Promise<{ email: string; name: string | null; department: string | null }> {
+): Promise<{
+  email: string;
+  name: string | null;
+  department: string | null;
+  /** The token vouches for the address (idpVouchesForEmail). */
+  vouched: boolean;
+}> {
   const pc = providerConfig(provider);
   if (!pc.issuer || !pc.audience) {
     throw new ExchangeError("provider_misconfigured", 400);
@@ -165,7 +173,12 @@ async function verifySubjectToken(
     typeof claims.name === "string" && claims.name.trim()
       ? claims.name.trim()
       : null;
-  return { email, name, department: normalizeDepartment(claims.department) };
+  return {
+    email,
+    name,
+    department: normalizeDepartment(claims.department),
+    vouched: idpVouchesForEmail(claims),
+  };
 }
 
 /** Resolve or JIT-provision the user (mirrors the oidc.ts callback resolve). */
@@ -276,11 +289,16 @@ export async function handleTokenExchange(c: Context<AuthEnv>) {
   }
 
   try {
-    const { email, name, department } = await verifySubjectToken(
+    const { email, name, department, vouched } = await verifySubjectToken(
       provider,
       subjectToken,
     );
     const user = await resolveUser(email, name, department);
+    // Only a token that vouches for the address may later stand for its
+    // domain (org contributions, CU-wdqcq05rz6).
+    if (vouched) await markEmailVerified(user.id, "token-exchange");
+    // Round 9 (R5-M1): a sealed-nest owner hears about an agent sign-in.
+    signInAlertSoon(user.id, "token_exchange", { client: provider });
     const token = signMcpTicket(
       {
         sub: email,

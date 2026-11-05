@@ -1,0 +1,457 @@
+/**
+ * §1.12 view serving — HTTP handlers (thin; the rules live in core.ts).
+ *
+ *   GET /nests/:nestId/nodes/:viewId/view/hosted[?v=N]
+ *       The view page: blocks resolved for the viewer, server-rendered under
+ *       `script-src 'none'`. html blocks become sandboxed frames.
+ *   GET /nests/:nestId/nodes/:viewId/view/blocks/:blockId/hosted[?v=N]
+ *       One html block's frame: the artifact's HTML with one injected
+ *       `nest-data` element, under the no-popups artifact sandbox.
+ *
+ * Both paths end in `/hosted` on purpose: the headless access-key allowlist
+ * (src/auth/headless.ts) already refuses every node `…/hosted` sub-resource,
+ * so an access key gets the same 403 here that it gets on an artifact —
+ * without touching that list. Mounted ahead of the annotation routes, whose
+ * `/:nodeId{.+}/hosted` would otherwise read `<viewId>/view` as a node id;
+ * when the id is not a view node but a node exists at the longer id, the
+ * handler falls through (next()) so an artifact whose own id ends in `/view`
+ * still hosts exactly as before. Otherwise a non-view id is a plain 404.
+ *
+ * Gates, in order: the nest middleware (non-members 404, traversal ids
+ * rejected, doc/folder grantees confined to their grant), then the same
+ * `canReadNode` /hosted uses, then filterAccessible for the viewer (which,
+ * unlike canReadNode, narrows doc-grantees on ungoverned nests). A view the
+ * caller may not read is 404, like a missing one. The frame also refuses a
+ * Sec-Fetch-Dest other than `iframe` and pins `frame-ancestors 'self'`.
+ */
+import { Hono } from "hono";
+import type { ContextNode } from "@promptowl/contextnest-engine";
+import type { AuthEnv } from "../auth/middleware.js";
+import { applyArtifactSandboxHeaders, ARTIFACT_SANDBOX_CSP_NO_POPUPS } from "../shared/artifact-sandbox.js";
+import { canReadNode } from "../governance/access-guard.js";
+import { getApprovedVersion } from "../governance/version-service.js";
+import { recordNodeAccess } from "../governance/access-log.js";
+import { isStewardshipEnabled } from "../nests/service.js";
+import { engineCache } from "../nodes/engine.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
+import { readArtifact, resolveHostedNodeId } from "../annotations/service.js";
+import {
+  CAPS,
+  findHtmlBlock,
+  frameNestData,
+  injectNestData,
+  resolveBlocks,
+  serializeNestData,
+  type Principal,
+  type ResolvedBlock,
+} from "./core.js";
+import {
+  declaredWriteTo,
+  decideWriteTrust,
+  FRAME_TOKEN_RE,
+  frameTokenTag,
+  mintFrameToken,
+  rowsUrl,
+  viewWritesKillSwitch,
+  withWriteBridge,
+  writeConfigJson,
+  writeTargets,
+  type WriteFrames,
+} from "./write.js";
+import { renderViewPage, type LinkResolver } from "./render.js";
+import { callerRefResolver } from "../tables/refs.js";
+import {
+  authorInfos,
+  createViewDeps,
+  isSealedVersion,
+  listVersionAuthors,
+  liveViewVersion,
+  readViewVersion,
+  viewDataKillSwitch,
+  viewerPrincipal,
+  type ViewVersion,
+} from "./deps.js";
+
+export const viewRoutes = new Hono<AuthEnv>();
+
+const VIEW_NODE_TYPE = "view";
+
+/** The view page's CSP (spec §2.8). No `sandbox`: the page keeps the app
+ *  origin so its frames' requests carry the session cookie (a sandboxed,
+ *  opaque-origin parent would strip SameSite cookies from them). It runs no
+ *  script at all; every byte of it is server-escaped. */
+export const VIEW_PAGE_CSP = [
+  "default-src 'none'",
+  "script-src 'none'",
+  "style-src 'unsafe-inline'",
+  "img-src 'self' data:",
+  "frame-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+function decoded(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** ?v=N parsed exactly as /hosted parses it: a positive number pins, anything
+ *  else (missing, junk) means the default. */
+function versionParam(c: any): number | undefined {
+  const vRaw = c.req.query("v");
+  const vNum = vRaw !== undefined ? Number(vRaw) : NaN;
+  return Number.isFinite(vNum) && vNum > 0 ? Math.floor(vNum) : undefined;
+}
+
+const pathOf = (id: string) => id.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * `[[target]]` → `/nest/<nestId>?doc=<id>` (the app's document address, same
+ * origin as this page) for a node the viewer may read, by the wikilink rule
+ * the graph and tables use: id, then title, then slug. Built over the viewer's
+ * own scope, so a node they cannot read is never named; an approved-only
+ * reader resolves without working-copy titles. A failure to build it costs
+ * the links, never the page.
+ */
+async function viewerLinkResolver(nestId: string, viewer: Principal): Promise<LinkResolver | undefined> {
+  try {
+    const resolve = await callerRefResolver(nestId, viewer.userId, viewer.email, {
+      approvedOnly: viewer.approvedOnly,
+      publishedOnly: viewer.approvedOnly,
+    });
+    return (target) => {
+      const id = resolve(target, false);
+      return id ? `/nest/${encodeURIComponent(nestId)}?doc=${encodeURIComponent(id)}` : null;
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+interface Served {
+  nestId: string;
+  viewId: string;
+  viewer: Principal;
+  layout: ViewVersion;
+  /** The view version whose layout is served (null: a never-versioned live copy). */
+  served: number | null;
+  /** That version is a release (approved/published). */
+  viewApproved: boolean;
+  /** The ?v the caller asked for, echoed onto frame URLs. */
+  pinned: number | undefined;
+}
+
+type Gate = { next: true } | { status: 404; error: string } | { served: Served };
+
+/**
+ * Everything both routes share: the view node, the gates, and which version's
+ * layout to serve. A non-view id falls through to the next router.
+ */
+async function loadServedView(c: any, tail: string): Promise<Gate> {
+  const nestId = c.req.param("nestId")!;
+  const viewId = await resolveHostedNodeId(nestId, decoded(c.req.param("nodeId") as string));
+  const { storage } = await engineCache.get(nestId);
+  let live: ContextNode | null = null;
+  try {
+    live = await storage.readDocument(viewId);
+  } catch {
+    live = null;
+  }
+  if (!live || (live.frontmatter.type as string) !== VIEW_NODE_TYPE) {
+    // Not a view. Hand the request to /hosted only when a node really lives at
+    // the longer id this URL also spells (an artifact whose own id ends in
+    // `/view`…); otherwise answer 404 here, so a missing view and a denied one
+    // look the same to every caller.
+    try {
+      await storage.readDocument(assertSafeNodeId(`${viewId}/${tail}`));
+      return { next: true };
+    } catch {
+      return { status: 404, error: "Not found" };
+    }
+  }
+
+  const userId = c.get("userId");
+  const viewer = await viewerPrincipal(nestId, userId);
+  const deps = createViewDeps();
+  if (
+    !(await canReadNode(nestId, viewId, userId, viewer.email)) ||
+    !(await deps.visible(nestId, [viewId], [viewer])).has(viewId)
+  ) {
+    // 404, not 403: a view the caller cannot read looks exactly like no view.
+    return { status: 404, error: "Not found" };
+  }
+
+  const pinned = versionParam(c);
+  const liveVersion = typeof live.frontmatter.version === "number" ? live.frontmatter.version : null;
+  let layout: ViewVersion;
+  let served: number | null;
+  let viewApproved: boolean;
+  if (pinned !== undefined) {
+    const sealed = await isSealedVersion(nestId, viewId, pinned);
+    // A visibility-only reader may only pin a release, as everywhere else.
+    if (viewer.approvedOnly && !sealed) return { status: 404, error: "Version not found" };
+    try {
+      layout = await readViewVersion(nestId, viewId, pinned);
+    } catch {
+      // An unsealed working copy is not in the chain; serve it when it is
+      // exactly the version asked for.
+      if (sealed || pinned !== liveVersion) return { status: 404, error: "Version not found" };
+      layout = liveViewVersion(viewId, live);
+    }
+    served = pinned;
+    viewApproved = sealed;
+  } else {
+    const approved = await getApprovedVersion(nestId, viewId);
+    let fromChain: ViewVersion | null = null;
+    if (approved != null) {
+      try {
+        fromChain = await readViewVersion(nestId, viewId, approved);
+      } catch {
+        fromChain = null;
+      }
+    }
+    if (fromChain && approved != null) {
+      layout = fromChain;
+      served = approved;
+      viewApproved = true;
+    } else {
+      if (viewer.approvedOnly) return { status: 404, error: "Not found" };
+      layout = liveViewVersion(viewId, live);
+      served = liveVersion;
+      viewApproved = false;
+    }
+  }
+  // A view written for agents only is not served to people.
+  const audience = layout.meta?.audience;
+  if (audience && !audience.includes("human")) return { status: 404, error: "Not found" };
+  return { served: { nestId, viewId, viewer, layout, served, viewApproved, pinned } };
+}
+
+/**
+ * View write-back: for each html block of the served layout that declares
+ * `write_to`, the targets the viewer's page may write through (write.ts).
+ * Empty — so the page carries no script — unless the served layout is an
+ * approved version, no kill switch is on, the viewer is a member (not a
+ * visibility-only reader), and the block passes decideWriteTrust. Whether
+ * the viewer may write a given table is the rows endpoint's call, per request.
+ */
+async function writeFramesFor(
+  s: Served,
+  blocks: ResolvedBlock[],
+): Promise<{ frames: WriteFrames; artifactVersions: Record<string, number> }> {
+  const none = { frames: {}, artifactVersions: {} };
+  if (!s.layout.meta || !s.viewApproved || s.served == null || s.viewer.approvedOnly) return none;
+  const killSwitch = viewDataKillSwitch() || viewWritesKillSwitch();
+  if (killSwitch) return none;
+  const declared = declaredWriteTo(s.layout.meta);
+  if (declared.size === 0) return none;
+  const frames: WriteFrames = {};
+  const artifactVersions: Record<string, number> = {};
+  let viewAuthors: string[] | null | undefined;
+  for (const b of blocks) {
+    if (!b.ok || b.kind !== "html") continue;
+    const writeTo = declared.get(b.id);
+    if (!writeTo) continue;
+    const targets = writeTargets(writeTo, blocks);
+    if (Object.keys(targets).length === 0) continue;
+    // The frame serves the artifact's approved version (readArtifact), so
+    // that version's chain is the code that would ask for the write.
+    const artVersion = await getApprovedVersion(s.nestId, b.artifactId);
+    if (viewAuthors === undefined) viewAuthors = await listVersionAuthors(s.nestId, s.viewId, s.served);
+    const artAuthors = artVersion != null ? await listVersionAuthors(s.nestId, b.artifactId, artVersion) : null;
+    const authorsIncomplete = viewAuthors === null || artAuthors === null;
+    const trust = decideWriteTrust({
+      killSwitch,
+      viewApproved: s.viewApproved,
+      artifactApproved: artVersion != null,
+      authors: authorsIncomplete ? [] : await authorInfos(s.nestId, [...viewAuthors!, ...artAuthors!]),
+      authorsIncomplete,
+    });
+    if (!trust.ok || artVersion == null) continue;
+    frames[b.id] = {
+      token: mintFrameToken(),
+      targets: Object.fromEntries(
+        Object.entries(targets).map(([dataBlock, tableId]) => [dataBlock, rowsUrl(s.nestId, tableId)]),
+      ),
+    };
+    artifactVersions[b.id] = artVersion;
+  }
+  return { frames, artifactVersions };
+}
+
+function viewerHeaders(c: any, served: number | null) {
+  c.header("Cache-Control", "private, no-store");
+  if (served != null) c.header("X-View-Snapshot", String(served));
+}
+
+// GET …/:viewId/view/hosted — the view page.
+viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
+  const gate = await loadServedView(c, "view");
+  if ("next" in gate) return next();
+  if ("status" in gate) return c.json({ error: gate.error }, gate.status);
+  const s = gate.served;
+  const deps = createViewDeps();
+  const blocks = s.layout.meta ? await resolveBlocks(s.layout.meta, s.nestId, [s.viewer], deps) : [];
+  const q = s.pinned !== undefined ? `?v=${s.pinned}` : "";
+  const { frames: writeFrames, artifactVersions } = await writeFramesFor(s, blocks);
+  const writes = Object.keys(writeFrames).length > 0;
+  // A write frame's URL carries its token and the artifact version the trust
+  // check passed for; the frame echoes the token only when it serves exactly
+  // that approved version.
+  const writeQuery = (blockId: string) => {
+    const f = Object.prototype.hasOwnProperty.call(writeFrames, blockId) ? writeFrames[blockId] : null;
+    if (!f) return "";
+    return `${q ? "&" : "?"}wt=${f.token}&av=${artifactVersions[blockId]}`;
+  };
+  // The resolver scans the whole nest; build it only when something will link.
+  const links =
+    s.layout.body.includes("[[") ||
+    blocks.some((b) => b.ok && (b.kind === "list" || (b.kind === "md" && b.text.includes("[["))));
+  const html = renderViewPage({
+    title: s.layout.title,
+    intro: s.layout.body,
+    blocks,
+    resolveLink: links ? await viewerLinkResolver(s.nestId, s.viewer) : undefined,
+    frameUrl: (blockId) =>
+      `/nests/${encodeURIComponent(s.nestId)}/nodes/${pathOf(s.viewId)}/view/blocks/${encodeURIComponent(blockId)}/hosted${q}${writeQuery(blockId)}`,
+    truncated: !!s.layout.meta && s.layout.meta.blocks.length > CAPS.MAX_BLOCKS,
+    invalidLayout: !s.layout.meta,
+    ...(writes ? { writeConfigJson: writeConfigJson(writeFrames) } : {}),
+  });
+  c.header("Content-Security-Policy", writes ? withWriteBridge(VIEW_PAGE_CSP) : VIEW_PAGE_CSP);
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
+  viewerHeaders(c, s.served);
+  // One read event for the view per serve, recorded against the viewer.
+  recordNodeAccess({
+    nestId: s.nestId,
+    nodeIds: [s.viewId],
+    action: "read",
+    surface: "api",
+    userId: s.viewer.userId,
+    userEmail: s.viewer.email,
+    ...(s.served != null ? { versions: { [s.viewId]: s.served } } : {}),
+    detail: "view page",
+  });
+  return c.html(html);
+});
+
+// GET …/:viewId/view/blocks/:blockId/hosted — one html block's frame.
+viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
+  const gate = await loadServedView(c, `view/blocks/${decoded(c.req.param("blockId")!)}`);
+  if ("next" in gate) return next();
+  if ("status" in gate) return c.json({ error: gate.error }, gate.status);
+  const s = gate.served;
+  // A frame is only ever a frame: a browser that says it is loading this as
+  // a top-level document (or anything but an iframe) is refused, so the data
+  // never lands where the view page's `frame-src` and the sandbox's opaque
+  // parent do not apply. Clients that send no Sec-Fetch-Dest are allowed:
+  // this is defense in depth, not the control. Such a client is already
+  // authenticated as the viewer and receives only data that the viewer and
+  // every version author can read (the trust rule), so nothing beyond the
+  // viewer's own access is exposed.
+  const dest = c.req.header("Sec-Fetch-Dest");
+  if (dest !== undefined && dest.toLowerCase() !== "iframe") {
+    return c.json({ error: "This address only loads inside its view page." }, 403);
+  }
+  const notFound = () => c.json({ error: "Not found" }, 404);
+  if (!s.layout.meta) return notFound();
+  const block = findHtmlBlock(s.layout.meta, decoded(c.req.param("blockId")!));
+  if (!block) return notFound();
+
+  // The artifact must be one the viewer can open in its own right.
+  const deps = createViewDeps();
+  let target: { id: string; type: string } | null = null;
+  try {
+    target = await deps.resolveRef(s.nestId, block.ref);
+  } catch {
+    target = null;
+  }
+  if (
+    !target ||
+    target.type !== "artifact" ||
+    !(await canReadNode(s.nestId, target.id, s.viewer.userId, s.viewer.email)) ||
+    !(await deps.visible(s.nestId, [target.id], [s.viewer])).has(target.id)
+  ) {
+    return notFound();
+  }
+  // readArtifact reads the approved version once and reconstructs exactly
+  // that version, returning it as `artifact.version`: the author chain below
+  // is listed for the same version whose bytes are injected.
+  let artifact: Awaited<ReturnType<typeof readArtifact>>;
+  try {
+    artifact = await readArtifact(s.nestId, target.id);
+  } catch {
+    return notFound();
+  }
+
+  const killSwitch = viewDataKillSwitch();
+  const stewardship = await isStewardshipEnabled(s.nestId);
+  // Authors only matter when everything before them passed; looked up last.
+  // Every nest, governed or not: approval may have been self-publication.
+  let authors: Awaited<ReturnType<typeof authorInfos>> = [];
+  let authorsIncomplete = false;
+  if (!killSwitch && s.viewApproved && artifact.approved && s.served != null && artifact.version != null) {
+    const viewAuthors = await listVersionAuthors(s.nestId, s.viewId, s.served);
+    const artAuthors = await listVersionAuthors(s.nestId, target.id, artifact.version);
+    if (viewAuthors === null || artAuthors === null) authorsIncomplete = true;
+    else authors = await authorInfos(s.nestId, [...viewAuthors, ...artAuthors]);
+  }
+  const { data, sources } = await frameNestData({
+    view: s.layout.meta,
+    dataFrom: block.dataFrom,
+    nestId: s.nestId,
+    deps,
+    trust: {
+      stewardship,
+      viewApproved: s.viewApproved,
+      artifactApproved: artifact.approved,
+      viewer: s.viewer,
+      authors,
+      authorsIncomplete,
+      killSwitch,
+    },
+  });
+  let body = injectNestData(artifact.html, serializeNestData(data));
+  // View write-back: echo the page's frame token (view/write.ts) only when
+  // this serve is exactly the approved artifact version the page's trust
+  // check passed for. Anything else — a malformed token, another version, a
+  // draft fallback — gets no token, so the bridge refuses its messages.
+  const wt = c.req.query("wt");
+  const av = Number(c.req.query("av"));
+  if (
+    typeof wt === "string" &&
+    FRAME_TOKEN_RE.test(wt) &&
+    Number.isInteger(av) &&
+    artifact.approved &&
+    artifact.version === av &&
+    !viewDataKillSwitch() &&
+    !viewWritesKillSwitch()
+  ) {
+    const marker = '<script type="application/json" id="nest-data">';
+    const at = body.indexOf(marker);
+    if (at >= 0) body = body.slice(0, at) + frameTokenTag(wt) + body.slice(at);
+  }
+  applyArtifactSandboxHeaders(c, { popups: false });
+  // Only this app's own view page may frame a data-carrying frame, whatever
+  // FRAME_ANCESTORS allows the rest of the app (the global guard keeps a
+  // frame-ancestors a handler set).
+  c.header("Content-Security-Policy", `${ARTIFACT_SANDBOX_CSP_NO_POPUPS}; frame-ancestors 'self'`);
+  viewerHeaders(c, s.served);
+  // The frame is where data leaves the server: record the artifact and every
+  // node whose content was resolved into its nest-data, against the viewer.
+  recordNodeAccess({
+    nestId: s.nestId,
+    nodeIds: [target.id, ...sources],
+    action: "read",
+    surface: "api",
+    userId: s.viewer.userId,
+    userEmail: s.viewer.email,
+    ...(artifact.version != null ? { versions: { [target.id]: artifact.version } } : {}),
+    detail: `view frame ${s.viewId}#${decoded(c.req.param("blockId")!)}`,
+  });
+  return c.html(body);
+});

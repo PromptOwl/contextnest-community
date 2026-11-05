@@ -1,3 +1,4 @@
+import { signInAlertSoon } from "../surfaces/signin-alerts.js";
 import { Hono, type Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
@@ -57,6 +58,7 @@ import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { isEmailConfigured } from "../notify/email.js";
 import { createInvitedUser } from "./invited-user.js";
+import { markEmailVerified } from "./email-verified.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -269,8 +271,14 @@ async function provisionPromptowlUser(
     };
   }
 
+  // PromptOwl vouches for the address: its own login refuses an account
+  // whose email isn't verified (CU-wdqcq05rz6, see markEmailVerified).
+  await markEmailVerified(user.id, "promptowl");
+
   const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
+  // Round 8: a sealed-nest owner hears about every single-sign-on session.
+  signInAlertSoon(user!.id, "sso", c.req.header("User-Agent"));
 
   return { ok: true, user, isAdmin, claimBlocked };
 }
@@ -497,6 +505,8 @@ authRoutes.post("/login", async (c) => {
 
   const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
+  // Round 8: a sealed-nest owner hears about a password sign-in from a first-time device.
+  signInAlertSoon(user.id, "password", c.req.header("User-Agent"));
 
   return c.json({
     user: {
@@ -685,6 +695,11 @@ authRoutes.post("/keys/exchange", async (c) => {
     );
   }
   const userId = resolved.userId;
+  // Round 9 (R5-M1): a sealed-nest owner hears about a ticket-for-key exchange.
+  {
+    const act = typeof (resolved.claims as unknown as Record<string, unknown>).act === "string" ? String((resolved.claims as unknown as Record<string, unknown>).act) : "";
+    signInAlertSoon(userId, "key_exchange", { client: act });
+  }
 
   const body = await c.req
     .json<{ nest_id?: unknown; label?: unknown; capability?: unknown }>()
@@ -1288,6 +1303,53 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   return c.json({ ok: true });
 });
 
+// GET /auth/reset — the page a sealed-nest owner's emailed link opens
+// (re-review R3-M1, round 8 R4-H1). The link is `/auth/reset#t=<token>`: the
+// token lives in the URL FRAGMENT, which browsers never send to a server, so
+// it can't land in a path, the trace, an access log or a Referer. The page
+// reads it, strips it from the address bar and POSTs it in the body.
+authRoutes.get("/reset", async (c) => {
+  const { ownerResetPage } = await import("./owner-reset-page.js");
+  const { html, csp } = ownerResetPage();
+  c.header("Cache-Control", "no-store");
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("Content-Security-Policy", csp);
+  return c.html(html);
+});
+
+// POST /auth/reset {token, password} — unauthenticated: the token is the
+// credential (sha256-stored, 1 h, single use by compare-and-set). Using one
+// revokes every other outstanding reset token for that user.
+authRoutes.post("/reset", async (c) => {
+  let body: { token?: unknown; password?: unknown } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const token = typeof body.token === "string" ? body.token : "";
+  const password = body.password;
+  if (!token) return c.json({ error: "This link isn't valid any more." }, 410);
+  const { createHash } = await import("crypto");
+  const hash = createHash("sha256").update(token).digest("hex");
+  const db = getDb();
+  const row = (await db.get("SELECT * FROM surface_owner_reset_tokens WHERE token_hash = ?", [hash]).catch(() => undefined)) as
+    | { token_hash: string; user_id: string; expires_at: string; used_at: string | null }
+    | undefined;
+  if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) return c.json({ error: "This link isn't valid any more." }, 410);
+  if (typeof password !== "string") return c.json({ error: "password is required" }, 400);
+  assertValidPassword(password);
+  const now = new Date().toISOString();
+  const claimed = await db.run("UPDATE surface_owner_reset_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL", [now, hash]);
+  if (claimed.changes === 0) return c.json({ error: "This link isn't valid any more." }, 410);
+  // Round 8: every other outstanding link for this person dies with this one.
+  await db.run("UPDATE surface_owner_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", [now, row.user_id]);
+  await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [await hashPassword(password), row.user_id]);
+  await deleteAllSessionsForUser(row.user_id);
+  signInAlertSoon(row.user_id, "reset");
+  return c.json({ ok: true });
+});
+
 // POST /auth/admin/reset-password/:userId — license-admin sets/resets another
 // user's password IN-PLATFORM (no email server, no forgot-password flow). If
 // no password is supplied, a temporary one is generated and returned ONCE for
@@ -1327,6 +1389,51 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
       { error: "This user is a server admin — admins can't reset each other's passwords. They can change their own via their account." },
       403,
     );
+  }
+
+  // Re-review R3-M1: the owner of a SEALED personal nest is never given a
+  // password by an admin (that would let the admin sign in as them and open
+  // it). They get a single-use reset link at their own verified email; the
+  // admin sees neither the password nor the link. SSO sign-in is untouched.
+  {
+    const { ownsSealedNest } = await import("../surfaces/sealed.js");
+    if (await ownsSealedNest(target.id)) {
+      // Never build this link from the request Host: an admin could point it
+      // at their own site and capture the owner's token.
+      if (!config.PUBLIC_BASE_URL) {
+        const msg = "Set PUBLIC_BASE_URL before resetting the password of a private-nest owner. Nothing was changed.";
+        return c.json({ ok: false, reset_link_sent: false, error: msg, message: msg }, 409);
+      }
+      const { createHash, randomBytes } = await import("crypto");
+      const token = randomBytes(32).toString("base64url");
+      const now = Date.now();
+      await db.run("INSERT INTO surface_owner_reset_tokens (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)", [
+        createHash("sha256").update(token).digest("hex"),
+        target.id,
+        new Date(now + 60 * 60_000).toISOString(),
+        new Date(now).toISOString(),
+      ]);
+      const base = config.PUBLIC_BASE_URL.replace(/\/$/, "");
+      const { sendPlainEmail } = await import("../notify/email.js");
+      const outcome = await sendPlainEmail(
+        target.email,
+        "Reset your Nest password",
+        `An administrator asked for your password to be reset. Your private nest is sealed, so they can't set it for you.\n\nChoose a new password here (the link works once, for 1 hour):\n${base}/auth/reset#t=${token}\n\nIf you didn't expect this, you can ignore it — your password hasn't changed.`,
+        [token],
+      );
+      trackEvent("admin.reset_password_link", { adminId: callerId, userId: target.id });
+      const sent = outcome === "sent";
+      const message = sent
+        ? "This person owns a sealed private nest, so their password can't be set by an admin. They've been emailed a reset link at their own address."
+        : "This person owns a sealed private nest, so their password can't be set by an admin, and email isn't configured to send them a reset link. Nothing was changed.";
+      return c.json({
+        ok: sent,
+        email: target.email,
+        reset_link_sent: sent,
+        message,
+        ...(sent ? {} : { error: message }),
+      }, sent ? 200 : 409);
+    }
   }
 
   let supplied: string | undefined;

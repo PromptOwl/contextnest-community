@@ -4,11 +4,14 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { approvedOnlyForSurfaceEdit, surfaceEditsHiddenFor, isHidden as isSurfaceHidden } from "../surfaces/draft-visibility.js";
+import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
+import { standingBlockFor } from "../governance/always-include-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
 import {
   canReadNode,
@@ -31,7 +34,17 @@ import {
   NotFoundError,
   ValidationError,
   ConflictError,
+  LockedError,
 } from "../shared/errors.js";
+import {
+  assertContributorCreate,
+  assertContributorPatch,
+  assertNotPushGated,
+  contributeDocument,
+  isOrgContribution,
+  ownsWorkingDraft,
+  proposeEdit,
+} from "../governance/org-contribution.js";
 import { listBoards } from "../nests/board-service.js";
 import { listBoardItems } from "../nests/board-items.js";
 import { bulkUpdateNodes } from "../nodes/bulk-update.js";
@@ -44,6 +57,7 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import {
@@ -54,6 +68,8 @@ import {
   type InstructionsRevision,
 } from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
+import { writeTableRows } from "../tables/row-routes.js";
+import { tableRefProse, tableRefReport } from "../tables/refs.js";
 import {
   addComment,
   createThread,
@@ -96,7 +112,7 @@ import {
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
 import { AppError, BillingConfirmError } from "../shared/errors.js";
-import { billingConfirmed } from "../auth/seats.js";
+import { billingConfirmed, confirmBillingToolField } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -108,17 +124,23 @@ import {
 import { logTaskInteraction } from "../nodes/task-log.js";
 import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
+  clientToolField,
   mergeClient,
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isPluginTool, runPluginTool } from "./plugin-tools.js";
+import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
+import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
+import { setNestVisibility } from "../nests/visibility-service.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -133,6 +155,9 @@ import {
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
 const MAX_HOPS = 10;
+/** context_review_queue: rows read-checked per call, and rows listed. */
+const REVIEW_QUEUE_SCAN = 200;
+const REVIEW_QUEUE_PAGE = 50;
 
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
@@ -408,6 +433,14 @@ export interface McpToolContext {
    *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
    *  when unset (cookie sessions, unscoped legacy keys, open mode). */
   capability?: "read" | "write";
+  /**
+   * The call arrived on a person's own full credential — a session, an
+   * unscoped personal key or an OAuth grant — which is the only kind an org
+   * contributor may contribute with (CU-wdqcq05rz6;
+   * governance/org-contribution.ts credentialMayContribute). Unset is false:
+   * any other caller of handleToolCall gets no contributor reach.
+   */
+  contributorCredential?: boolean;
 }
 
 /**
@@ -422,6 +455,8 @@ export interface McpToolContext {
  * read-tier workflow-plane tools.
  */
 export const MCP_READ_TOOLS = new Set<string>([
+  // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
+  ...SURFACES_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -457,6 +492,32 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_plugins",
 ]);
 
+/** The zod field for an `array` property in a tool's JSON schema. A list of
+ *  objects (metacognition feeds, MCP servers): each item must be an object, its
+ *  fields are the handler's parser's to check. Everything else is strings. */
+function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
+  return def.items?.type === "object" ? z.array(z.object({}).passthrough()) : z.array(z.string());
+}
+
+/** A tool's JSON schema as its MCP zod shape, shared by the per-nest
+ *  (routes.ts) and server-level (server-routes.ts) surfaces. Caller attribution
+ *  (spec §9.4) and billing confirm ride on every tool, declared once here. */
+export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
+  const props = (inputSchema as any)?.properties || {};
+  const required: string[] = (inputSchema as any)?.required || [];
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
+    let field: z.ZodTypeAny;
+    if (def.type === "string") field = z.string();
+    else if (def.type === "number") field = z.number();
+    else if (def.type === "array") field = arrayToolField(def);
+    else field = z.any();
+    if (!required.includes(key)) field = field.optional();
+    shape[key] = field;
+  }
+  return Object.assign(shape, clientToolField, confirmBillingToolField);
+}
+
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
  *  UI/REST parity. Advertised only to a person who owns/administers the nest
  *  and holds a full credential (mcp/routes.ts), and re-checked on every call
@@ -464,10 +525,22 @@ export const MCP_READ_TOOLS = new Set<string>([
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
 export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
+  // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
+  "context_set_visibility",
   "context_systems",
   "context_instructions_update",
   // Nest Plugins: configuring provisions a system identity and stores secrets.
   "context_plugin_configure",
+  // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
+  // action; only advertised while both feature flags are on (mcp/routes.ts).
+  "context_metacognition_list",
+  "context_metacognition_suggest",
+  "context_metacognition_configure",
+  "context_metacognition_run",
+  "context_metacognition_remove",
+  // Surfaces (bindings, identity links): only advertised while
+  // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
+  ...SURFACES_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -490,7 +563,7 @@ const TASK_FIELD_PROPERTIES = {
   },
   priority: {
     type: ["string", "null"],
-    description: 'One of "urgent", "high", "medium", "low". null or "" clears it.',
+    description: 'One of the nest\'s priority keys (default: "urgent", "high", "medium", "low"; a nest can define its own). null or "" clears it.',
   },
   parent: {
     type: ["string", "null"],
@@ -499,11 +572,43 @@ const TASK_FIELD_PROPERTIES = {
   },
 };
 
+/**
+ * The `view` argument of context_create / context_update (§1.12), taken from
+ * the engine's own operation descriptor rather than written out here — the
+ * engine owns the view block's shape (see the Engine Logic Boundary). Throws
+ * at module load when the engine lacks the operation or the property, so an
+ * engine downgrade fails loudly instead of silently dropping the argument
+ * (test/views-mcp-schema.test.ts).
+ */
+export function engineViewProperty(
+  op: "context_create" | "context_update",
+  api: Pick<typeof engineApi, "getOperation"> = engineApi,
+): Record<string, unknown> {
+  const desc = api.getOperation(op);
+  if (!desc) {
+    throw new Error(
+      `The engine has no "${op}" operation, so its view argument cannot be advertised over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  let props: Record<string, unknown> = {};
+  try {
+    props = (inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {};
+  } catch {
+    props = {};
+  }
+  if (!props.view) {
+    throw new Error(
+      `The engine's "${op}" operation has no view property (§1.12), so view nodes cannot be authored over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  return { view: props.view };
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
     description:
-      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines. Call this FIRST in every conversation.",
+      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines, followed by the nest's always-include documents (standing instructions, approved versions). Call this FIRST in every conversation.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -595,6 +700,28 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_table_rows",
+    description:
+      "Change rows of a TABLE node by its :key column: append, update or delete. Typed against the header and all-or-nothing. Lands as a draft on a governed nest (submit_review to send it for review), published otherwise. Twin of REST POST …/rows.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        table: { type: "string", description: 'The table node — "[[Title]]" or a node id like nodes/pipeline' },
+        ops: {
+          type: "array",
+          description:
+            'Up to 100 ops, applied in order: {"op":"append","row":{col:value}} | {"op":"update","key":"<key>","set":{col:value}} | {"op":"delete","key":"<key>"}',
+          items: { type: "object" },
+          maxItems: 100,
+        },
+        base_version: { type: "number", description: "The head version you read; a different head is refused as a conflict." },
+        submit_review: { type: "boolean", description: "On a governed nest, submit the draft for review." },
+        change_note: { type: "string", description: "Version note (max 500 chars)." },
+      },
+      required: ["table", "ops"],
+    },
+  },
+  {
     name: "context_get",
     description: "Get the FULL content of a specific node by title or ID.",
     inputSchema: {
@@ -634,7 +761,7 @@ export const TOOL_DEFINITIONS = [
         },
         priority: {
           type: "string",
-          description: 'Only nodes with this priority: urgent | high | medium | low | none.',
+          description: "Only nodes with this priority key (default levels: urgent | high | medium | low), or 'none'.",
         },
         due_before: {
           type: "string",
@@ -824,8 +951,59 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_create"),
       },
       required: ["title", "content"],
+    },
+  },
+  {
+    name: "context_upload",
+    // NOT an engine operation: it fronts this server's own upload routes
+    // (src/nodes/upload-service.ts — the asset store, POST /nodes/pdf and
+    // POST /nodes/office) so an agent can attach a file without multipart.
+    // Mirrors their JSON body 1:1; adopt an engine descriptor if one ships.
+    description:
+      "Upload a file into the nest by URL or as base64 — no multipart. Routed by the file's extension: images (png, jpg, jpeg, gif, webp; 10 MB) and video (mp4, webm; VIDEO_MAX_MB, default 30 MB) go to the nest's asset store and come back as ready-to-paste `markdown` (an image reference, or a video URL on its own line) to put in a document with context_create/context_update; a PDF (PDF_MAX_MB, default 25 MB) becomes a governed pdf document with its text extracted; a .pptx, .docx or .xlsx (OFFICE_MAX_MB, default 25 MB) becomes a governed markdown document (a section per slide with speaker notes, the Word document's headings, lists and tables, or a table per spreadsheet sheet) with the original kept as a download. Documents follow the nest's review rules like context_create (a draft in a governed nest). SVG and other types are refused. Send exactly one of `content_base64` (with `filename`) or `url` (https only, fetched by the server; private and internal addresses are refused and redirects are not followed). base64 travels inside this MCP request, which the server caps (MAX_BODY_BYTES, default 10 MB, so about 7.5 MB of file) — use `url` for anything bigger.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filename: {
+          type: "string",
+          description:
+            'File name with its extension, e.g. "q3-deck.pptx" — the extension decides where the file goes. Required with content_base64; with url, defaults to the URL\'s file name.',
+        },
+        content_base64: {
+          type: "string",
+          description: "The file's bytes, base64-encoded (a data: URL prefix is accepted). Use this OR url.",
+        },
+        url: {
+          type: "string",
+          description: "An https:// URL the server downloads the file from. Use this OR content_base64.",
+        },
+        title: {
+          type: "string",
+          description: "Documents only: the document title (default: the file name without its extension).",
+        },
+        folder: {
+          type: "string",
+          description: 'Documents only: folder path under nodes/ (e.g. "gtm/decks").',
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Documents only: tags for the new document.",
+        },
+        as: {
+          type: "string",
+          description:
+            'Optional check on where the file should land: "asset" (images and video) or "document" (pdf, pptx, docx, xlsx). A file of the other kind is refused rather than rerouted.',
+        },
+        node_id: {
+          type: "string",
+          description:
+            "Office files only: the id of the document an earlier .pptx/.docx/.xlsx upload created. The file becomes that document's new version (same kind of file required) instead of a new document; the earlier file stays downloadable from its version. In a governed nest it lands as a draft for review.",
+        },
+      },
     },
   },
   {
@@ -850,6 +1028,12 @@ export const TOOL_DEFINITIONS = [
         content: {
           type: "string",
           description: "New content (replaces)",
+        },
+        description: {
+          type: "string",
+          maxLength: 500,
+          description:
+            "One-line summary stored in frontmatter (at most 500 characters) — the public docs site uses it as the page's meta description. An empty string removes it.",
         },
         append: { type: "string", description: "Content to append" },
         tags: {
@@ -878,6 +1062,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_update"),
       },
       // Neither is required alone — one of them is (the engine catalog's
       // `.refine(id || title)`, which JSON Schema can't express here).
@@ -1008,7 +1193,7 @@ export const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description:
-            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: one of the nest\'s priority keys (default urgent|high|medium|low), or null. assignee: email|null. due: YYYY-MM-DD|null. fields: custom field values by key (null clears). change_note: recorded in each version.",
           properties: {
             board_id: { type: "string" },
             column: { type: "string" },
@@ -1017,6 +1202,7 @@ export const TOOL_DEFINITIONS = [
             priority: { type: ["string", "null"] },
             assignee: { type: ["string", "null"] },
             due: { type: ["string", "null"] },
+            fields: { type: "object" },
             change_note: { type: "string" },
           },
         },
@@ -1499,6 +1685,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_set_visibility",
+    description:
+      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        visibility: {
+          type: "string",
+          enum: ["private", "org", "public"],
+          description: "The new tier.",
+        },
+        acknowledge: {
+          type: "boolean",
+          description: "The user confirmed who the nest will reach (needed to widen to public, and to org on a shared server).",
+        },
+      },
+      required: ["visibility"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -1584,6 +1790,19 @@ async function resolveLlmBody(
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
   if (!stewardship) {
+    // A pending Surfaces edit is a chat-derived draft: below write, the
+    // approved body only (security round 2, M1d).
+    if (await approvedOnlyForSurfaceEdit(ctx.nestId, node.id, ctx.userId)) {
+      const approvedV = await versions.getApprovedVersion(ctx.nestId, node.id);
+      if (approvedV == null) return null;
+      try {
+        const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approvedV)).raw;
+        ctx.servedVersions?.set(node.id, approvedV);
+        return raw;
+      } catch {
+        return null;
+      }
+    }
     // Ungoverned: the live body, which is the document's current version.
     const live = Number(node.frontmatter?.version);
     if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
@@ -1837,6 +2056,10 @@ export async function handleToolCall(
     status = 500;
     throw err;
   } finally {
+    if (config.METRICS_ENABLED) {
+      const ms = Date.now() - started;
+      void import("../ops/metrics.js").then((m) => m.recordToolCall(toolName, status, ms));
+    }
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,
@@ -1903,6 +2126,142 @@ async function resolveTargetNode(
       .join(", ")}`;
   }
   return matches[0] ?? `Node not found: ${args.title}`;
+}
+
+/**
+ * context_upload — the MCP face of src/nodes/upload-service.ts. Same type
+ * allowlist, caps, URL fence and write paths as the REST upload routes; the
+ * gates REST gets from its middleware are applied here: the create gate (the
+ * /mcp middleware admits read-tier callers), and for documents the agent-write
+ * hold, which can't queue a binary and so refuses instead.
+ */
+async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+    return writeRefusal(ctx, "You don't have permission to upload files to this nest.", {
+      type: "nest",
+      id: nestId,
+    });
+  }
+  if (args.as !== undefined && args.as !== "asset" && args.as !== "document") {
+    return toolError('as must be "asset" or "document".', "VALIDATION_FAILED");
+  }
+  if (args.tags !== undefined && !(Array.isArray(args.tags) && args.tags.every((t: unknown) => typeof t === "string"))) {
+    return toolError("tags must be a list of strings.", "VALIDATION_FAILED");
+  }
+  for (const k of ["title", "folder"] as const) {
+    if (args[k] !== undefined && typeof args[k] !== "string") {
+      return toolError(`${k} must be a string.`, "VALIDATION_FAILED");
+    }
+  }
+  const refusal = (err: unknown): ToolResult => {
+    if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+    if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
+    if (err instanceof AppError && err.statusCode < 500) return toolError(err.message, "VALIDATION_FAILED");
+    throw err;
+  };
+  try {
+    // Fetch/decode first (outside any lock — a URL can take a while); the
+    // type and size refusals inside happen before bytes are fetched or
+    // decoded wherever they can — and so does the agent-write hold, as on REST.
+    const upload = await uploads.resolveUpload(args, args.as === "asset" ? "asset" : "any", async (kind) => {
+      if (kind !== "pdf" && kind !== "office") return;
+      await uploads.assertDocumentUploadNotGated({
+        nestId,
+        userId,
+        keyId: ctx.apiKeyId ?? null,
+        agentSurface: true,
+      });
+    });
+    const isDocument = upload.kind === "pdf" || upload.kind === "office";
+    if (args.as === "document" && !isDocument) {
+      return toolError(
+        `"${upload.filename}" is ${upload.kind === "image" ? "an image" : "a video"}, which uploads as an asset, not a document. Leave out as, or pass as: "asset".`,
+        "VALIDATION_FAILED",
+      );
+    }
+    if (args.node_id && upload.kind !== "office") {
+      return toolError("node_id replaces an Office document's file; it only works with a .pptx, .docx or .xlsx.", "VALIDATION_FAILED");
+    }
+    if (!isDocument) {
+      const asset = await uploads.storeAsset(nestId, upload);
+      return {
+        text: `Uploaded ${upload.kind} **${upload.filename}**. Put this in a document to show it:\n\n${asset.markdown}`,
+        data: { kind: upload.kind, ...asset },
+      };
+    }
+    if (args.node_id) {
+      const saved = await uploads.saveOfficeUpload(
+        nestId,
+        upload,
+        { nodeId: String(args.node_id), ...(args.title?.trim() ? { title: args.title.trim() } : {}), ...(args.tags ? { tags: args.tags as string[] } : {}) },
+        userEmail,
+        ctx.client,
+      );
+      const { node, version } = saved;
+      const url = `/nests/${nestId}/originals/${saved.original!.file}`;
+      return {
+        text:
+          `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: String(node.frontmatter.title ?? ""),
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          original: { ...saved.original, url },
+          ...(saved.warnings?.length ? { warnings: saved.warnings } : {}),
+        },
+      };
+    }
+    const fields = {
+      ...(args.title?.trim() ? { title: args.title.trim() } : {}),
+      ...(args.folder?.trim() ? { folder: args.folder.trim() } : {}),
+      ...(args.tags ? { tags: args.tags as string[] } : {}),
+    };
+    const title = fields.title || uploads.titleFromUploadFilename(upload.filename);
+    // Same rule and lock as context_create: a title already used anywhere in
+    // the vault would be unreachable for the title-addressed tools.
+    return await withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+      const wanted = title.toLowerCase();
+      const twin = (await storage.discoverDocuments()).find(
+        (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+      );
+      if (twin) {
+        return toolError(
+          `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — pass a different title.`,
+          "DOCUMENT_ALREADY_EXISTS",
+        );
+      }
+      const saved =
+        upload.kind === "pdf"
+          ? await uploads.savePdfUpload(nestId, upload, fields, userEmail, ctx.client)
+          : await uploads.saveOfficeUpload(nestId, upload, fields, userEmail, ctx.client);
+      const { node, version } = saved;
+      const docTitle = String(node.frontmatter.title ?? title);
+      return {
+        text:
+          `Created ${upload.kind === "pdf" ? "PDF" : "document"}: **${docTitle}** (${node.id}) from ${upload.filename} — status: ${node.frontmatter.status}` +
+          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : "."),
+        data: {
+          kind: upload.kind,
+          id: node.id,
+          title: docTitle,
+          type: node.frontmatter.type || "document",
+          version,
+          status: node.frontmatter.status,
+          markdown: `[[${docTitle}]]`,
+          ...(saved.original
+            ? { original: { ...saved.original, url: `/nests/${nestId}/originals/${saved.original.file}` } }
+            : {}),
+        },
+      };
+    });
+  } catch (err) {
+    return refusal(err);
+  }
 }
 
 /** Service result → MCP tool result (prose + structuredContent). */
@@ -2055,6 +2414,136 @@ async function runSystemsTool(
 }
 
 /**
+ * Org contributors over MCP (CU-wdqcq05rz6) — the same service functions the
+ * REST create / PATCH call, so an agent acting for a contributor gets exactly
+ * what the web app gets: a draft sent to review, never a publish. Reached only
+ * after the ordinary write check refused AND isOrgContribution said yes for a
+ * person's own full credential (ctx.contributorCredential).
+ */
+const MCP_TRANSPORT_FIELDS = new Set(["client", "confirm_billing"]);
+
+function contributorFields(args: Record<string, any>, drop: string[] = []): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (MCP_TRANSPORT_FIELDS.has(k) || drop.includes(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function contributorError(err: unknown): ToolResult {
+  if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  // The suggestion cap (429) and size bound (413).
+  if (err instanceof AppError && (err.statusCode === 429 || err.statusCode === 413)) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
+  if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+  if (err instanceof ValidationError || err instanceof ConflictError || err instanceof LockedError) {
+    return toolError(err.message, "VALIDATION_FAILED");
+  }
+  throw err;
+}
+
+async function contributeOverMcp(ctx: McpToolContext, args: Record<string, any>): Promise<ToolResult> {
+  const { nestId, userId, userEmail, storage } = ctx;
+  try {
+    assertContributorCreate(contributorFields(args));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+  } catch (err) {
+    return contributorError(err);
+  }
+  const wanted = String(args.title ?? "").toLowerCase();
+  return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+    // Titles stay unique, as for every create. The message names no document:
+    // the twin may be someone else's draft, which a contributor can't see.
+    const existing = await storage.discoverDocuments();
+    if (existing.some((n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted)) {
+      return toolError(
+        `That title is already used in this nest. Suggest it under a different title, or propose an edit to the existing document with context_update.`,
+        "DOCUMENT_ALREADY_EXISTS",
+      );
+    }
+    let made: Awaited<ReturnType<typeof contributeDocument>>;
+    try {
+      made = await contributeDocument(
+        nestId,
+        { title: args.title, content: args.content, tags: args.tags, folder: args.folder, client: ctx.client },
+        userEmail,
+        { baseUrl: ctx.baseUrl },
+      );
+    } catch (err) {
+      return contributorError(err);
+    }
+    return {
+      text: `Suggested **${args.title}** (${made.node.id}) as an org contributor. It is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""} — not published until a reviewer approves it.`,
+      data: {
+        id: made.node.id,
+        version: made.version,
+        status: "draft",
+        checkpoint: null,
+        org_contribution: true,
+        review: made.review ? { id: made.review.id, status: made.review.status } : null,
+      },
+    };
+  });
+}
+
+async function proposeOverMcp(
+  ctx: McpToolContext,
+  nodeId: string,
+  args: Record<string, any>,
+): Promise<ToolResult> {
+  const { nestId, userId, userEmail } = ctx;
+  // context_update names the document by id or title, so it can't carry a new
+  // title too. A title sent alongside an id would otherwise be dropped while
+  // the reply says "proposed" — refuse it instead.
+  if (args.id && typeof args.title === "string" && args.title.trim()) {
+    const { storage } = ctx;
+    const current = await storage.readDocument(nodeId).catch(() => null);
+    if (!current || args.title.trim() !== String(current.frontmatter.title ?? "")) {
+      return toolError(
+        "As an org contributor you can't rename a document through context_update (its title names the document). Suggest the new title from the web app, or mention it in changeNote.",
+        "VALIDATION_FAILED",
+      );
+    }
+  }
+  let made: Awaited<ReturnType<typeof proposeEdit>>;
+  try {
+    // id / title name the document here; they aren't edits.
+    assertContributorPatch(contributorFields(args, ["id", "title"]));
+    await assertNotPushGated({ nestId, userId, keyId: ctx.apiKeyId ?? null, agentSurface: true });
+    made = await proposeEdit(
+      nestId,
+      nodeId,
+      userId,
+      {
+        content: args.content,
+        append: args.append,
+        tags: args.tags,
+        description: args.description,
+        changeNote: args.changeNote,
+        client: ctx.client,
+      },
+      userEmail,
+      { baseUrl: ctx.baseUrl },
+    );
+  } catch (err) {
+    return contributorError(err);
+  }
+  return {
+    text: `Proposed an edit to **${made.node.frontmatter.title}** as an org contributor — v${made.version} is a draft waiting for review${made.review ? ` (review ${made.review.id})` : ""}. The published text is unchanged until a reviewer approves it.`,
+    data: {
+      id: made.node.id,
+      version: made.version,
+      status: "draft",
+      checkpoint: null,
+      org_contribution: true,
+      review: made.review ? { id: made.review.id, status: made.review.status } : null,
+    },
+  };
+}
+
+/**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
  * distinguish reads from writes); per-tool permission checks in the cases
@@ -2083,6 +2572,43 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_set_visibility": {
+      const refused = await nestAdminRefusal(ctx);
+      if (refused) return refused;
+      const r = await setNestVisibility(
+        nestId,
+        ctx.userId,
+        args.visibility,
+        args.acknowledge === true,
+      );
+      if (!r.ok) {
+        // Same refusal as REST; the acknowledgement case carries the warning
+        // the agent should put to the user before retrying with acknowledge.
+        // The other 409s (headless, a concurrent change) are state conflicts,
+        // flagged as such so an agent re-reads instead of re-sending blindly.
+        const conflict = r.status === 409 && !r.requires_acknowledgement;
+        const msg = r.requires_acknowledgement
+          ? `${r.error} ${r.warning} Confirm with the user, then call again with acknowledge: true.`
+          : conflict
+            ? `${r.error} Re-read the nest (context_overview) before trying again.`
+            : r.error;
+        const code =
+          r.status === 404
+            ? "DOCUMENT_NOT_FOUND"
+            : r.status === 403
+              ? "UNAUTHORIZED_ACTION"
+              : "VALIDATION_FAILED";
+        // Machine-readable twins of the REST body, so an agent can branch on
+        // the cause without parsing text: the cap's `visibility_restricted`,
+        // the acknowledgement prompt, or a state conflict.
+        const extra: Record<string, unknown> = {};
+        if (r.code) extra.reason = r.code;
+        if (r.requires_acknowledgement) extra.requires_acknowledgement = true;
+        if (conflict) extra.conflict = true;
+        return toolError(msg, code, Object.keys(extra).length ? extra : undefined);
+      }
+      return { text: `This nest is now ${r.visibility}.`, data: { visibility: r.visibility } };
+    }
     case "context_systems":
       return runSystemsTool(args, ctx);
 
@@ -2092,9 +2618,13 @@ async function runTool(
         {},
         await opContext(nestId, userEmail),
       );
-      if (!context_md)
-        return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
+      // The nest's always-include documents follow CONTEXT.md (CU-wdqcq05rn0):
+      // the same approved, access-filtered set the connect message carries.
+      const { text: standing } = await standingBlockFor(nestId, { userId, userEmail });
+      const head = context_md
+        ? `# Vault Instructions (CONTEXT.md)\n\n${context_md}`
+        : "No CONTEXT.md found. Use context_overview to see what's available.";
+      return standing ? `${head}\n\n${standing}` : head;
     }
 
     case "context_instructions_history": {
@@ -2242,12 +2772,23 @@ async function runTool(
       // timeout on a 444-node governed nest while REST answered at once.
       const matches = matchDocuments(await discoverForSearch(storage), query)
         .filter((n) => !isDerivedAnnotationsNode(n.id));
-      const accessible = await filterAccessible(
+      let accessible = await filterAccessible(
         nestId,
         userId,
         userEmail,
         matches,
       );
+      // A hit on a pending Surfaces edit must not reveal it matched only the
+      // chat-derived draft: re-match those on the approved body (round 2, M1d).
+      const surfaceEdits = await surfaceEditsHiddenFor(nestId, userId);
+      if (accessible.some((n) => isSurfaceHidden(surfaceEdits, n.id))) {
+        const rebodied = await Promise.all(
+          accessible.map(async (n) =>
+            isSurfaceHidden(surfaceEdits, n.id) ? { ...n, body: await approvedReadableBody(nestId, n.id) } : n,
+          ),
+        );
+        accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
+      }
       const count = accessible.length;
       if (count === 0)
         return {
@@ -2931,6 +3472,9 @@ async function runTool(
       // (the MCP transport is always POST), so this per-tool check is what
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return contributeOverMcp(ctx, args);
+        }
         return writeRefusal(
           ctx,
           "You don't have permission to create documents in this nest.",
@@ -2997,6 +3541,7 @@ async function runTool(
                 scope: args.scope,
                 folder: args.folder,
                 ...(args.fields !== undefined ? { fields: args.fields } : {}),
+                ...(args.view !== undefined ? { view: args.view } : {}),
               },
             ],
           },
@@ -3025,6 +3570,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -3036,8 +3582,9 @@ async function runTool(
         }
         const { node, version } = made;
         const created = settableTaskFields(node.frontmatter.metadata);
+        const tableRefs = await tableRefReport(nestId, node, ctx.userId, ctx.userEmail);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -3046,10 +3593,14 @@ async function runTool(
             status: node.frontmatter.status,
             checkpoint: null,
             ...created,
+            ...(tableRefs ? { table_refs: tableRefs } : {}),
           },
         };
       });
     }
+
+    case "context_upload":
+      return runUploadTool(args, ctx);
 
     case "context_update": {
       const node = await resolveTargetNode(storage, args);
@@ -3064,6 +3615,9 @@ async function runTool(
       // and this gate runs on the resolved node, not on how it was named.
       const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
+        if (await isOrgContribution(nestId, userId, ctx.contributorCredential === true)) {
+          return proposeOverMcp(ctx, node.id, args);
+        }
         return writeRefusal(
           ctx,
           `You don't have permission to edit "${label}": ${editCheck.reason}`,
@@ -3087,12 +3641,14 @@ async function runTool(
             content: args.content,
             append: args.append,
             tags: args.tags,
+            ...(args.description !== undefined ? { description: args.description } : {}),
             status: args.status,
             ...(args.type !== undefined ? { type: args.type } : {}),
             changeNote: args.changeNote,
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -3106,8 +3662,9 @@ async function runTool(
       }
       const { node: updated, version } = result;
       const fields = settableTaskFields(updated.frontmatter.metadata);
+      const tableRefs = await tableRefReport(nestId, updated, ctx.userId, ctx.userEmail);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
@@ -3115,7 +3672,49 @@ async function runTool(
           status: updated.frontmatter.status,
           checkpoint: null,
           ...fields,
+          ...(tableRefs ? { table_refs: tableRefs } : {}),
         },
+      };
+    }
+
+    case "context_table_rows": {
+      const ref = typeof args.table === "string" ? args.table.trim() : "";
+      if (!ref) return toolError('table is required: "[[Title]]" or a node id', "VALIDATION_FAILED");
+      const title = /^\[\[(.+)\]\]$/.exec(ref)?.[1];
+      const node = await resolveTargetNode(storage, title ? { title } : { id: ref });
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // PRIMARY write gate, as context_update: the /mcp transport admits read-tier callers.
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to edit "${node.frontmatter.title}": ${editCheck.reason}`,
+          { type: "node", id: node.id },
+        );
+      }
+      let out: Awaited<ReturnType<typeof writeTableRows>>;
+      try {
+        const { ops, base_version, submit_review, change_note } = args;
+        out = await writeTableRows(
+          nestId,
+          node.id,
+          { ops, base_version, submit_review, change_note },
+          { userId, client: ctx.client, baseUrl: ctx.baseUrl },
+        );
+      } catch (err) {
+        return contributorError(err);
+      }
+      const r = out.body as Record<string, any>;
+      if (out.status === 409) {
+        const text = String(r.message ?? r.error);
+        return toolError(text, "VALIDATION_FAILED", { conflict: true, current_version: r.current_version, ...(r.code ? { reason: r.code } : {}) });
+      }
+      const a = r.applied;
+      return {
+        text: r.unchanged
+          ? `No change: ${node.frontmatter.title} already has those values (v${r.version}).`
+          : `Rows updated in **${node.frontmatter.title}** — ${a.appended} added, ${a.updated} updated, ${a.deleted} deleted; v${r.version}, ${r.state}${r.review_id ? `, review ${r.review_id}` : ""}${r.review_error ? ` (review not submitted: ${r.review_error})` : ""}`,
+        data: r,
       };
     }
 
@@ -3826,25 +4425,71 @@ async function runTool(
 
     case "context_review_queue": {
       const status = args.status || "pending";
+      // The same gate as REST /review-queue (CU-wdqcq05rz6): a visibility-only
+      // reader sees their OWN requests, not everyone's — a request names an
+      // unapproved draft. Everyone else sees only the rows whose document
+      // they can read (a share-only caller, for one). Enforced here, in the
+      // op, so every MCP caller and Hootie get the same answer.
+      const ownOnly = await isPublicReader(nestId, ctx.userId);
+      // Own-only is filtered in SQL, so its total is exact. Otherwise the
+      // readability filter runs over a bounded window BEFORE paging, and the
+      // total counts only readable rows in it — never a row this caller may
+      // not see (security r2 N2), never stuck at one page either.
       const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
+        ...(ownOnly ? { requestedByEmail: userEmail.toLowerCase() } : { limit: REVIEW_QUEUE_SCAN }),
       });
+      let readableRows = result.requests;
+      let total = result.total;
+      if (!ownOnly) {
+        const readable = new Set(
+          (
+            await filterAccessible(
+              nestId,
+              ctx.userId,
+              userEmail,
+              readableRows.map((r) => ({ id: r.nodeId })),
+            )
+          ).map((n) => n.id),
+        );
+        // ponytail: past REVIEW_QUEUE_SCAN rows the count is a floor; page in SQL if queues get that big.
+        readableRows = readableRows.filter((r) => readable.has(r.nodeId));
+        total = readableRows.length;
+      }
+      const requests = readableRows.slice(0, REVIEW_QUEUE_PAGE);
 
-      if (result.requests.length === 0) {
+      if (requests.length === 0) {
         return status === "pending"
           ? "No documents pending review. All caught up!"
           : `No reviews with status "${status}".`;
       }
 
-      const list = result.requests
+      const list = requests
         .map(
           (r, i) =>
             `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
-      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+      const more = total > requests.length ? `\n\nShowing the first ${requests.length}.` : "";
+      return {
+        text: `# Review Queue (${status})\n**${total} item(s)**\n\n${list}${more}`,
+        // The rows the prose lists, by node id — only rows this caller may
+        // see (above), so a caller can act on them without parsing prose.
+        data: {
+          total,
+          requests: requests.map((r) => ({
+            nodeId: r.nodeId,
+            title: r.title ?? null,
+            version: r.version,
+            priority: r.priority,
+            requestedBy: r.requestedBy,
+            requestedAt: r.requestedAt,
+            ...(r.requestNote ? { requestNote: r.requestNote } : {}),
+          })),
+        },
+      };
     }
 
     case "context_my_drafts": {
@@ -3918,7 +4563,12 @@ async function runTool(
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
-      if (!submitCheck.allowed) {
+      // An org contributor (CU-wdqcq05rz6) may send their OWN draft to review.
+      const ownContribution =
+        !submitCheck.allowed &&
+        (await isOrgContribution(ctx.nestId, userId, ctx.contributorCredential === true)) &&
+        (await ownsWorkingDraft(ctx.nestId, node.id, userEmail));
+      if (!submitCheck.allowed && !ownContribution) {
         return toolError(
           `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",
@@ -4251,6 +4901,14 @@ async function runTool(
       // Nest Plugin tools (FEATURE_PLUGINS): same service layer as REST.
       if (isPluginTool(toolName) && config.FEATURE_PLUGINS) {
         return runPluginTool(toolName, args, ctx);
+      }
+      // Metacognition tools: same deal, behind both flags; each call re-checks
+      // owner/admin and refuses system keys in metacognition/manage.ts.
+      if (isMetacognitionTool(toolName)) {
+        return runMetacognitionTool(toolName, args, ctx);
+      }
+      if (isSurfacesTool(toolName)) {
+        return runSurfacesTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

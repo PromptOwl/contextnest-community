@@ -145,7 +145,12 @@ export async function getVersions(
 ): Promise<DocumentVersion[]> {
   const db = getDb();
   const rows = (await db.all(
-    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC",
+    `SELECT nv.*, sa.name AS system_name
+       FROM node_versions nv
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ? AND nv.node_id = ?
+      ORDER BY nv.version DESC`,
     [nestId, nodeId],
   )) as any[];
 
@@ -583,6 +588,15 @@ export async function getDisplayStatus(
 export async function getDisplayStatuses(
   nestId: string,
 ): Promise<Map<string, DisplayStatus>> {
+  return (await getDisplayState(nestId)).statuses;
+}
+
+/** getDisplayStatuses plus the live (approved) version per node, which the same
+ *  queries already read — a row whose newer version is in review or sent back
+ *  is still serving this one. */
+export async function getDisplayState(
+  nestId: string,
+): Promise<{ statuses: Map<string, DisplayStatus>; approved: Map<string, number> }> {
   const db = getDb();
   const [pendingRows, currentRows, approvedRows] = await Promise.all([
     db.all(
@@ -622,7 +636,7 @@ export async function getDisplayStatuses(
       ),
     );
   }
-  return statuses;
+  return { statuses, approved };
 }
 
 // ─── My Drafts ──────────────────────────────────────────────────────────
@@ -768,6 +782,7 @@ function rowToVersion(row: any): DocumentVersion {
     version: row.version,
     content: "", // Content lives on disk, not in the versions table
     editedBy: row.author,
+    editedBySystem: row.system_name ?? undefined,
     editedAt: row.created_at,
     changeNote: row.change_note || undefined,
     status: row.status,

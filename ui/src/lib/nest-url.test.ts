@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./nest-url";
+import { documentLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./nest-url";
 
 describe("nest-url", () => {
   it("reads the nest id from the /nest/<id> path", () => {
@@ -55,5 +55,19 @@ describe("nest-url unknown view segment", () => {
     const loc = { pathname: "/nest/abc/My_View", search: "" };
     expect(nestIdFromLocation(loc)).toBe("abc");
     expect(nestViewFromLocation(loc)).toBe("My_View");
+  });
+});
+
+describe("documentLink", () => {
+  it("is the nest URL with the node id in ?doc=", () => {
+    expect(documentLink("https://nest.acme.dev", "abc-123", "nodes/win-loss-log")).toBe(
+      "https://nest.acme.dev/nest/abc-123?doc=nodes%2Fwin-loss-log",
+    );
+  });
+
+  it("round-trips: the app reads back the same nest and document", () => {
+    const url = new URL(documentLink("http://localhost:3000", "a b", "nodes/x y"));
+    expect(nestIdFromLocation({ pathname: url.pathname, search: url.search })).toBe("a b");
+    expect(new URLSearchParams(url.search).get("doc")).toBe("nodes/x y");
   });
 });
