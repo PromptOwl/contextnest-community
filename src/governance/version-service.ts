@@ -145,7 +145,12 @@ export async function getVersions(
 ): Promise<DocumentVersion[]> {
   const db = getDb();
   const rows = (await db.all(
-    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC",
+    `SELECT nv.*, sa.name AS system_name
+       FROM node_versions nv
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ? AND nv.node_id = ?
+      ORDER BY nv.version DESC`,
     [nestId, nodeId],
   )) as any[];
 
@@ -777,6 +782,7 @@ function rowToVersion(row: any): DocumentVersion {
     version: row.version,
     content: "", // Content lives on disk, not in the versions table
     editedBy: row.author,
+    editedBySystem: row.system_name ?? undefined,
     editedAt: row.created_at,
     changeNote: row.change_note || undefined,
     status: row.status,

@@ -85,6 +85,7 @@ import {
   Building2,
   Lock,
   Activity,
+  LayoutPanelTop,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -153,6 +154,8 @@ import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { CopyButton } from "@/components/ui/copy-button";
 import { ViewNodePage } from "./ViewNodePage";
+import { ViewBlocksEditor } from "./ViewBlocksEditor";
+import { VIEW_SEED_BLOCK, viewJson, type ViewMeta } from "../lib/view-blocks";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
@@ -274,7 +277,7 @@ export function DocumentEditor({
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
   const typeRoving = useRovingFocus<HTMLDivElement>();
-  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, typeViewEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -488,20 +491,31 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view"
   >("document");
   // Type switch that would reinterpret existing content — confirmed before
   // it's applied (see requestTypeChange below).
   const [pendingType, setPendingType] = useState<{
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task";
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view";
     label: string;
   } | null>(null);
+  // The `view:` block of a type: view node (null for other types, and for
+  // read-only callers, whom the server withholds it from). Other keys ride along.
+  const [viewMeta, setViewMeta] = useState<ViewMeta | null>(null);
+  const loadedViewRef = useRef("");
+  // Bumped after each save so the preview frame reloads the saved layout.
+  const [previewNonce, setPreviewNonce] = useState(0);
   const isArtifactDraft = isNew && newType === "artifact";
+  // A new View starts with one block, since the engine refuses an empty list.
+  useEffect(() => {
+    if (!isNew) return;
+    setViewMeta((v) => (newType === "view" ? (v ?? { blocks: [VIEW_SEED_BLOCK] }) : null));
+  }, [isNew, newType]);
   // How a type's body is interpreted — switching within the same class
   // (e.g. Document → Agent, both markdown prose) doesn't change how
   // existing content reads, so only a cross-class switch needs a warning.
   const typeBodyKind = (
-    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
   ): "markdown" | "html" | "csv" | "code" =>
     t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
   // New-doc Type switch: warn before applying when there's existing content
@@ -509,7 +523,7 @@ export function DocumentEditor({
   // code) — nothing to reinterpret on an empty draft, and same-class
   // switches (e.g. Document ↔ Agent) don't change how the body is read.
   const requestTypeChange = (
-    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
     label: string,
   ) => {
     if (
@@ -1050,6 +1064,9 @@ export function DocumentEditor({
       ...(typeTaskEnabled
         ? [{ value: "task", label: "Task", Icon: ListTodo, expects: "Markdown notes for a unit of work. Tasks skip review and carry an assignee, due date and priority on the board." }]
         : []),
+      ...(typeViewEnabled
+        ? [{ value: "view", label: "View", Icon: LayoutPanelTop, expects: "A layout of blocks over other nodes. The body becomes its intro, and one starter block is added." }]
+        : []),
       ...(workflowPlaneEnabled
         ? [
           { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
@@ -1059,12 +1076,17 @@ export function DocumentEditor({
         : []),
     ];
     return all.filter((o) => o.value !== (nodeType ?? "document"));
-  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, workflowPlaneEnabled, nodeType]);
+  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, typeViewEnabled, workflowPlaneEnabled, nodeType]);
   const handleTurnInto = async () => {
     if (!turnInto || isNew) return;
     setTurningInto(true);
     try {
-      await api.updateNode(nestId, nodeId, { type: turnInto });
+      // Engine rule 32 refuses a view with no blocks, so the switch carries a seed.
+      await api.updateNode(
+        nestId,
+        nodeId,
+        turnInto === "view" ? { type: turnInto, view: { blocks: [VIEW_SEED_BLOCK] } } : { type: turnInto },
+      );
       invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
       toast.success(`Turned into ${turnIntoOptions.find((o) => o.value === turnInto)?.label ?? turnInto}`);
       setTurnInto(null);
@@ -1161,6 +1183,10 @@ export function DocumentEditor({
       setContent(loadedContent);
       setTags(loadedTags);
       setNodeType(node?.type ?? null);
+      // Withheld by the server from read-only callers, so null means no editor.
+      const loadedView = node?.type === "view" && node?.view ? (node.view as ViewMeta) : null;
+      setViewMeta(loadedView);
+      loadedViewRef.current = loadedView ? viewJson(loadedView) : "";
       setPdfMeta(node?.type === "pdf" && node?.pdf ? (node.pdf as api.PdfMeta) : null);
       const loadedSchedule =
         node?.schedule == null ? "" : String(node.schedule);
@@ -1212,6 +1238,7 @@ export function DocumentEditor({
           setContent(draft.content);
           setTags(draft.tags);
           setSchedule(draft.schedule);
+          if (draft.view) setViewMeta(draft.view as ViewMeta);
           setTouched(true);
           setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
@@ -1333,6 +1360,8 @@ export function DocumentEditor({
   // Existing document: the Type control is the Turn into entry point.
   const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
+  // Locked while a review holds the node, or for a viewer/archived nest.
+  const viewReadOnly = isViewOnly || isLocked || isArchived;
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
@@ -1387,8 +1416,9 @@ export function DocumentEditor({
     if (schedule.trim() !== snap.schedule.trim()) return true;
     if (prime !== loadedPrimeRef.current) return true;
     if (alwaysInclude !== loadedAlwaysIncludeRef.current) return true;
+    if (viewMeta && viewJson(viewMeta) !== loadedViewRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule, prime, alwaysInclude]);
+  }, [touched, title, content, tags, schedule, prime, alwaysInclude, viewMeta]);
 
   // Save is a no-op on a clean document (it would only bump the version), so
   // the button says so by being disabled — the enabled/disabled pair IS the
@@ -1627,6 +1657,7 @@ export function DocumentEditor({
       const res = await api.createNode(nestId, {
         ...payload,
         type: newType,
+        ...(newType === "view" ? { view: viewMeta ?? { blocks: [VIEW_SEED_BLOCK] } } : {}),
         ...(folder.trim() ? { folder: folder.trim() } : {}),
         // schedule is server-rejected on non-runnable types, so only send it
         // for agent/skill drafts.
@@ -1654,15 +1685,23 @@ export function DocumentEditor({
           ? {}
           : { always_include: alwaysInclude }),
       };
+      // The block list replaces wholesale server-side, so it is sent only when
+      // it changed; locked blocks stay in `viewMeta` and go back unchanged.
+      const viewPatch =
+        nodeType === "view" && viewMeta && viewJson(viewMeta) !== loadedViewRef.current
+          ? { view: viewMeta }
+          : {};
       const res = await api.updateNode(
         nestId,
         nodeId,
         // Only runnable nodes accept schedule; "" clears it server-side.
         isRunnable
-          ? { ...payload, ...primePatch, schedule: schedule.trim() }
-          : { ...payload, ...primePatch },
+          ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
+          : { ...payload, ...primePatch, ...viewPatch },
         baseVersion,
       );
+      if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
+      setPreviewNonce((n) => n + 1);
       loadedPrimeRef.current = prime;
       loadedAlwaysIncludeRef.current = alwaysInclude;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
@@ -1778,6 +1817,7 @@ export function DocumentEditor({
       content,
       tags: [...tags],
       schedule: schedule.trim(),
+      ...(viewMeta ? { view: viewMeta } : {}),
       baseVersion,
     });
     // Couldn't back the edits up locally — the leave dialog still guards
@@ -1817,6 +1857,7 @@ export function DocumentEditor({
     setContent(snap.content);
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
+    if (!isNew) setViewMeta(loadedViewRef.current ? JSON.parse(loadedViewRef.current) : null);
     setTouched(false);
     setRestoredDraftAt(null);
   };
@@ -2417,12 +2458,6 @@ export function DocumentEditor({
     );
   }
 
-  // View nodes (§1.12) are a server-rendered layout over other nodes, not
-  // markdown. Views are authored via REST, MCP or the vault in v1 — no editor here.
-  if (!isNew && !loading && nodeType === "view") {
-    return <ViewNodePage nestId={nestId} nodeId={nodeId} title={title} onBack={onBack} />;
-  }
-
   return (
     <div className="flex min-h-full flex-col" data-testid="document-page">
       {/* Top bar — one row, Notion-style: where you are on the left, what you
@@ -2730,7 +2765,7 @@ export function DocumentEditor({
                           className="ml-auto text-xs text-muted-foreground"
                           title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
                         >
-                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -3619,6 +3654,14 @@ export function DocumentEditor({
                                   },
                                 ]
                                 : []),
+                              ...(typeViewEnabled
+                                ? [
+                                  {
+                                    value: "view", label: "View", Icon: LayoutPanelTop,
+                                    on: "bg-sky-500/15 text-sky-700 dark:text-sky-300"
+                                  },
+                                ]
+                                : []),
                               ...(workflowPlaneEnabled
                                 ? [
                                   {
@@ -3653,12 +3696,14 @@ export function DocumentEditor({
                                         ? "Table — CSV fact store, queryable deterministically"
                                         : value === "tool"
                                           ? "Tool — the body is code an agent can call"
-                                          : `${label} (runnable)`
+                                          : value === "view"
+                                            ? "View — a layout of blocks over other nodes"
+                                            : `${label} (runnable)`
                                 }
                                 onClick={() => {
                                   if (isNew) {
                                     requestTypeChange(
-                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task",
+                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table" | "task" | "view",
                                       label,
                                     );
                                     return;
@@ -3799,6 +3844,7 @@ export function DocumentEditor({
                     {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
                     <div
                       ref={bodyRef}
+                      className={effectiveType === "view" && !viewMeta && !isNew ? "hidden" : undefined}
                       onClick={() => {
                         if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
                         // Table read view is interactive (query box + buttons), so a
@@ -4155,6 +4201,32 @@ export function DocumentEditor({
                         </div>
                       )}
                     </div>
+                    {/* A View's blocks sit under its intro. Writers edit the list and
+                        preview their draft (the live version); everyone else gets
+                        the approved layout in the frame and no editor. */}
+                    {effectiveType === "view" && (
+                      <div className="mt-4 space-y-3" data-testid="view-section">
+                        {viewMeta && (
+                          <ViewBlocksEditor
+                            blocks={viewMeta.blocks}
+                            disabled={viewReadOnly}
+                            onChange={(blocks) => {
+                              setViewMeta({ ...viewMeta, blocks });
+                              setTouched(true);
+                            }}
+                          />
+                        )}
+                        {!isNew && !loading && (
+                          <ViewNodePage
+                            nestId={nestId}
+                            nodeId={nodeId}
+                            title={title}
+                            version={viewMeta ? baseVersion : null}
+                            reloadKey={`${baseVersion ?? ""}-${previewNonce}`}
+                          />
+                        )}
+                      </div>
+                    )}
                   </div>
 
                 </div>

@@ -34,6 +34,8 @@ export interface Version {
    */
   diff?: string;
   editedBy: string;
+  /** Display name when `editedBy` is a named system's generated address. */
+  editedBySystem?: string;
   editedAt: string;
   changeNote?: string;
   status: "draft" | "pending_review" | "approved" | "published" | "rejected";
@@ -118,6 +120,19 @@ interface VersionHistoryProps {
 
 /** What the preview pane shows for the selected version. */
 type PreviewMode = "changes" | "content" | "vs-current";
+
+/** Who wrote a version: a system by its name and badge, anyone else by email. */
+function EditedBy({ version }: { version: Version }) {
+  if (!version.editedBySystem) return <>{version.editedBy}</>;
+  return (
+    <span title={version.editedBy}>
+      {version.editedBySystem}{" "}
+      <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+        System
+      </Badge>
+    </span>
+  );
+}
 
 function formatDate(dateStr: string) {
   const date = parseServerDate(dateStr);
@@ -459,7 +474,7 @@ export function VersionHistory({
                 )}
               </div>
               <div className="text-xs text-muted-foreground">
-                {formatDate(previewVersion.editedAt)} · {previewVersion.editedBy}
+                {formatDate(previewVersion.editedAt)} · <EditedBy version={previewVersion} />
                 {previewVersion.changeNote && ` · ${previewVersion.changeNote}`}
               </div>
               {previewVersion.resolutionNote && (
@@ -654,7 +669,7 @@ export function VersionHistory({
                       <div className="text-xs text-muted-foreground break-words">
                         By:{" "}
                         <span className="font-medium text-foreground/80">
-                          {version.editedBy}
+                          <EditedBy version={version} />
                         </span>
                       </div>
                       <div className="text-xs text-muted-foreground">

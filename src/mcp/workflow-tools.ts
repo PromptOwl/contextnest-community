@@ -56,6 +56,8 @@ import {
   type EdgeTypeRow,
 } from "../workflow/edge-type-routes.js";
 
+const RUN_ID = { type: "string", description: "Run id, from workflow_run or workflow_runs_list." } as const;
+
 export const WORKFLOW_TOOL_DEFINITIONS = [
   // ── Execute ──────────────────────────────────────────────────────────
   {
@@ -83,7 +85,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        run_id: { type: "string" },
+        run_id: RUN_ID,
         action: { type: "string", description: "read | write | branch | notify | external" },
         node_id: { type: "string", description: "Node the step touched (optional)" },
         edge_id: { type: "string", description: "Edge the step followed (optional)" },
@@ -99,7 +101,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        run_id: { type: "string" },
+        run_id: RUN_ID,
         status: { type: "string", description: "succeeded | failed | cancelled (or running to update trace)" },
         trace: { type: "object", description: "Optional summary/totals recorded on the run" },
       },
@@ -112,7 +114,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "Fetch one run's full trace (steps in order). Freeform payloads (inputs, trace, step detail) are redacted unless you have write access to the nest.",
     inputSchema: {
       type: "object",
-      properties: { run_id: { type: "string" } },
+      properties: { run_id: RUN_ID },
       required: ["run_id"],
     },
   },
@@ -123,13 +125,13 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "With agent_stats: true and agent set to a metacognition agent, returns that agent's track record instead — run outcomes " +
       "(succeeded/failed/timeout/skipped), tokens and estimated cost, how its proposals were judged (approval rate), comments, " +
       "the last error, and its `limit` most recent runs — over the last `days` (default 30). Owner/admin only, like the agent's page. " +
-      "To list, set up, run or remove metacognition agents, use context_metacognition_list, context_metacognition_suggest, context_metacognition_configure, context_metacognition_run and context_metacognition_remove.",
+      "To list, set up, run or remove metacognition agents, use context_metacognition_list, context_metacognition_suggest, context_metacognition_preview, context_metacognition_configure, context_metacognition_run and context_metacognition_remove.",
     inputSchema: {
       type: "object",
       properties: {
-        agent: { type: "string" },
-        status: { type: "string" },
-        limit: { type: "number" },
+        agent: { type: "string", description: "Only runs of this agent node id. With agent_stats: the metacognition agent to report on." },
+        status: { type: "string", description: "Only runs with this status: running | succeeded | failed | cancelled." },
+        limit: { type: "number", description: "Max runs to return (default 50, max 500). With agent_stats: how many recent runs to include." },
         agent_stats: { type: "boolean", description: "Return the agent's activity stats (metacognition agents only)" },
         days: { type: "number", description: "agent_stats window in days, 1-365 (default 30)" },
       },
@@ -143,7 +145,10 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "List typed edges in this nest. Optional filters: type (edge-type name or id) and node (id appearing as either endpoint).",
     inputSchema: {
       type: "object",
-      properties: { type: { type: "string" }, node: { type: "string" } },
+      properties: {
+        type: { type: "string", description: "Only edges of this edge type (name or id)." },
+        node: { type: "string", description: "Only edges with this node id at either end." },
+      },
       required: [],
     },
   },
@@ -154,22 +159,22 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        from_node: { type: "string" },
-        to_node: { type: "string" },
+        from_node: { type: "string", description: "Node id the edge starts from. The node must exist." },
+        to_node: { type: "string", description: "Node id the edge points to. The node must exist." },
         type: { type: "string", description: "Edge-type name or id" },
         condition_mode: { type: "string", description: "structured | nl | open" },
         condition: { type: "object", description: "Predicate object (structured) or string (nl/open)" },
-        metadata: { type: "object" },
+        metadata: { type: "object", description: "Optional freeform JSON stored on the edge." },
       },
       required: ["from_node", "to_node", "type"],
     },
   },
   {
     name: "workflow_edge_delete",
-    description: "Delete an edge by id.",
+    description: "Delete one typed edge from this nest's workflow graph, by id. The two nodes stay.",
     inputSchema: {
       type: "object",
-      properties: { edge_id: { type: "string" } },
+      properties: { edge_id: { type: "string", description: "Edge id, from workflow_edges_list." } },
       required: ["edge_id"],
     },
   },
@@ -187,11 +192,11 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string" },
-        description: { type: "string" },
+        name: { type: "string", description: "Slug: letters, digits and dashes, 100 characters max. An existing type of this name is overwritten." },
+        description: { type: "string", description: "What this relation means, in words. Required." },
         direction: { type: "string", description: "directed | undirected (default directed)" },
-        is_flow: { type: "boolean" },
-        condition_schema: { type: "object" },
+        is_flow: { type: "boolean", description: "true for a control-flow relation, whose edges must stay a DAG (default false)." },
+        condition_schema: { type: "object", description: "Optional template for conditions on edges of this type: {params:[string…], mode_default?}." },
         color: { type: "string", description: "6-digit hex, e.g. #16a34a" },
       },
       required: ["name", "description"],
@@ -203,7 +208,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       "Delete an edge type by id. Refused while any edge still references it.",
     inputSchema: {
       type: "object",
-      properties: { edge_type_id: { type: "string" } },
+      properties: { edge_type_id: { type: "string", description: "Edge type id, from workflow_edge_types_list." } },
       required: ["edge_type_id"],
     },
   },

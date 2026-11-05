@@ -30,6 +30,8 @@ export const CAPS = {
   MAX_ROWS: 500,
   MAX_BLOCK_BYTES: 262144,
   MAX_NEST_DATA_BYTES: 1048576,
+  /** A `summary` block's `max_nodes` when it sets none. */
+  DEFAULT_SUMMARY_NODES: 25,
 } as const;
 
 export type Caps = { readonly [K in keyof typeof CAPS]: number };
@@ -62,6 +64,17 @@ export interface NodeSummary {
 
 export type TableRows = { columns: string[]; rows: Record<string, unknown>[] };
 
+/** What a `summary` block asks for: `ids` readable by the viewer, sorted. */
+export interface SummaryInput {
+  ids: string[];
+  style: "brief" | "detailed";
+  maxNodes: number;
+}
+
+export type SummaryResult =
+  | { ok: true; text: string; refs: string[]; truncated: boolean }
+  | { ok: false; error: ErrorCode };
+
 /** Every read the core needs, injected. deps.ts wires the real ones. */
 export interface ViewDeps {
   /** A `ref`/`binding` → the node it names. Path or contextnest:// URI only,
@@ -86,6 +99,9 @@ export interface ViewDeps {
     approvedOnly: boolean,
     p: Principal[],
   ): Promise<TableRows | { error: ErrorCode }>;
+  /** Generate or fetch a summary. Absent: `summary` blocks don't resolve, so
+   *  a frame (whose nest-data has no summary entry) never pays for a call. */
+  summarize?(nestId: string, input: SummaryInput): Promise<SummaryResult>;
 }
 
 interface BlockBase {
@@ -112,6 +128,16 @@ export type ResolvedBlock =
     })
   | (BlockBase & { kind: "callout"; ok: true; text: string; tone: "info" | "warning" })
   | (BlockBase & { kind: "html"; ok: true; artifactId: string; dataFrom: string[] })
+  | (BlockBase & {
+      kind: "summary";
+      ok: true;
+      /** Always true: model output, labeled as such wherever it is served. */
+      generated: true;
+      text: string;
+      /** `id@version` of each node the text was written from. */
+      refs: string[];
+      truncated?: true;
+    })
   | (BlockBase & { ok: false; error: ErrorCode });
 
 export type NestDataEntry = Record<string, unknown> & { ok: boolean };
@@ -187,6 +213,20 @@ async function visibleRef(
   return (await isVisible(deps, nestId, target.id, p)) ? target : null;
 }
 
+/** A selector's members, in selector order, that every principal can see. */
+async function selectVisible(
+  deps: ViewDeps,
+  nestId: string,
+  selector: string,
+  p: Principal[],
+): Promise<NodeSummary[]> {
+  const matched = await deps.selectNodes(nestId, selector, p);
+  // Belt and braces: whatever selectNodes returned, only members every
+  // principal can see survive.
+  const seen = await deps.visible(nestId, matched.map((m) => m.id), p);
+  return matched.filter((m) => seen.has(m.id));
+}
+
 async function resolveOne(
   raw: RawBlock,
   index: number,
@@ -224,11 +264,7 @@ async function resolveOne(
       );
       let matched: NodeSummary[];
       try {
-        matched = await deps.selectNodes(nestId, opts.select, p);
-        // Belt and braces: whatever selectNodes returned, only members every
-        // principal can see survive.
-        const seen = await deps.visible(nestId, matched.map((m) => m.id), p);
-        matched = matched.filter((m) => seen.has(m.id));
+        matched = await selectVisible(deps, nestId, opts.select, p);
       } catch {
         return fail(base, "query_failed");
       }
@@ -249,6 +285,32 @@ async function resolveOne(
         sources: shown.map((m) => m.id),
         ...(matched.length > limit ? { truncated: true as const } : {}),
       };
+    }
+    case "summary": {
+      if (!deps.summarize) return fail(base, "unsupported_kind");
+      if (typeof opts.select !== "string") return fail(base, "query_failed");
+      try {
+        const nodes = await selectVisible(deps, nestId, opts.select, p);
+        const out = await deps.summarize(nestId, {
+          // Sorted, so "the first max_nodes" is the same set on every render.
+          ids: nodes.map((n) => n.id).sort(),
+          style: opts.style === "detailed" ? "detailed" : "brief",
+          maxNodes: typeof opts.max_nodes === "number" ? opts.max_nodes : caps.DEFAULT_SUMMARY_NODES,
+        });
+        if (!out.ok) return fail(base, out.error);
+        return {
+          ...base,
+          kind: "summary",
+          ok: true,
+          generated: true,
+          text: out.text,
+          refs: out.refs,
+          sources: out.refs.map((r) => r.slice(0, r.lastIndexOf("@"))),
+          ...(out.truncated ? { truncated: true as const } : {}),
+        };
+      } catch {
+        return fail(base, "query_failed");
+      }
     }
     case "callout": {
       const tone = opts.tone === "warning" ? "warning" : "info";
@@ -289,7 +351,7 @@ async function resolveOne(
       };
     }
     default:
-      // summary / table / kpi / chart / metric — no renderer in v1.
+      // table / kpi / chart / metric — no renderer in v1.
       return fail(base, "unsupported_kind");
   }
 }
@@ -569,7 +631,8 @@ export async function frameNestData(i: {
   const trust = decideDataTrust(i.trust);
   if (!trust.ok) return { data: withheldNestData(i.view, i.dataFrom), trust, sources: [] };
   const ids = normalizeDataFrom(i.dataFrom).slice(0, caps.MAX_DATA_FROM);
-  const resolved = await resolveBlocks(i.view, i.nestId, trust.principals, i.deps, ids, caps);
+  const deps = { ...i.deps, summarize: undefined };
+  const resolved = await resolveBlocks(i.view, i.nestId, trust.principals, deps, ids, caps);
   const sources = [...new Set(resolved.flatMap((b) => (b.ok && b.sources) || []))];
   return { data: buildNestData(resolved, i.dataFrom, caps), trust, sources };
 }

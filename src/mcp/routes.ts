@@ -14,6 +14,8 @@ import {
   handleToolCall,
   toCallToolResult,
 } from "./tools.js";
+import { toolAnnotations, toolTitle } from "./annotations.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
@@ -69,7 +71,7 @@ function createMcpServerForNest(
   instructions?: string,
 ): McpServer {
   const server = new McpServer(
-    { name: `contextnest-${nestId}`, version: "1.0.0" },
+    { name: `contextnest-${nestId}`, title: "ContextNest", version: SERVICE_VERSION },
     { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
@@ -103,7 +105,8 @@ function createMcpServerForNest(
     // `client` is validated against the engine's own schema in handleToolCall.
     const shape = toolShape(tool.inputSchema);
 
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       const engine = await engineCache.get(nestId);
       // Caller attribution (§9.4.2), resolved HERE rather than when the server
       // was built: the `initialize` handshake completes inside the transport,

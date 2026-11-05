@@ -190,7 +190,7 @@ export function LicensePanel() {
                 label={
                   <Counted
                     label="Editors"
-                    help={`${countLine(lic.subscribers.used, "editors", lic.subscribers.licensed)} Editors are people whose highest role is editor: they can write but not approve. Someone who is also an admin or reviewer anywhere counts as a user instead. Viewers are free.${lic.subscribers.licensed === 0 ? " On this plan, adding an editor needs an upgrade." : ""}`}
+                    help={`${countLine(lic.subscribers.used, "editors", lic.subscribers.licensed)} Editors are people whose highest role is editor: they can write but not approve. Someone who is also an admin or reviewer anywhere counts as a user instead. Viewers are free.${lic.subscribers.licensed === 0 ? " On this plan, adding an editor needs an upgrade." : ""}${lic.plan === "self_hosted" ? " On Self-Hosted, each editor is counted and billed per person." : ""}`}
                   />
                 }
               >
