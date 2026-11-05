@@ -66,7 +66,8 @@ import {
   toolShape,
   type ToolResult,
 } from "./tools.js";
-import { toolAnnotations } from "./annotations.js";
+import { toolAnnotations, toolTitle } from "./annotations.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
@@ -346,7 +347,7 @@ export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
+      "List every nest these credentials can read, with name, id, permission and document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -647,7 +648,7 @@ function createServerMcp(
   instructions?: string,
 ): McpServer {
   const server = new McpServer(
-    { name: "contextnest-server", version: "1.0.0" },
+    { name: "contextnest-server", title: "ContextNest", version: SERVICE_VERSION },
     { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
@@ -660,7 +661,8 @@ function createServerMcp(
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     if (isMetacognitionTool(tool.name) && !offerMetacognition) continue;
     const shape = toolShape(tool.inputSchema);
-    server.tool(tool.name, tool.description, shape, toolAnnotations(tool.name), async (args) => {
+    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
       const granted = c.get("oauthScope");
