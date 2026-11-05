@@ -347,7 +347,7 @@ export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
+      "List every nest these credentials can read, with name, id, permission and document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {

@@ -74,6 +74,15 @@ afterAll(async () => {
 });
 
 describe("every listed tool", () => {
+  it("covers every classified tool, so the checks below can't skip a flag-gated set", async () => {
+    const { TOOL_CLASSIFICATION } = await import("../src/mcp/annotations.js");
+    const listed = new Set([
+      ...(await listTools(`/nests/${nestId}/mcp`, ownerKey)).map((t) => t.name),
+      ...(await listTools("/mcp", ownerKey)).map((t) => t.name),
+    ]);
+    expect([...listed].sort()).toEqual(Object.keys(TOOL_CLASSIFICATION).sort());
+  });
+
   it("has a plain 2-4 word title, at the top level and in annotations", async () => {
     for (const [label, path, key] of endpoints()) {
       const tools = await listTools(path, key);
@@ -99,7 +108,7 @@ describe("every listed tool", () => {
       for (const t of await listTools(path, key)) {
         expect((t.description ?? "").length, `${label}: ${t.name}`).toBeGreaterThanOrEqual(40);
         // Opens with a verb, not a label like "Nest owners/admins:" or "The audit...".
-        expect(t.description, `${label}: ${t.name}`).not.toMatch(/^(The|This|Your|Which|A|An|Full|Nest owners|Proposals|Surfaces status|Deterministic)\b/);
+        expect(t.description, `${label}: ${t.name}`).not.toMatch(/^(The|This|Your|Which|A|An|Full|History|Grounded|Nest owners|Proposals|Surfaces status|Deterministic)\b/);
       }
     }
   });

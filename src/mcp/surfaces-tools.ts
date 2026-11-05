@@ -266,7 +266,7 @@ export const SURFACES_TOOL_DEFINITIONS = [
     description:
       "Disconnect a workspace install: pending cards are marked Withdrawn first, the token is revoked, then secrets, bindings, buffers, drafts and identity links " +
       "for it are deleted. Approved nodes and the commit audit stay. Server administrators only.",
-    inputSchema: { type: "object", properties: { install_id: { type: "string", description: "The install to disconnect (context_surfaces_status lists them)." } }, required: ["install_id"] as string[] },
+    inputSchema: { type: "object", properties: { install_id: { type: "string", description: "The install to disconnect. Each binding from context_surfaces_bindings_list carries its install_id." } }, required: ["install_id"] as string[] },
   },
   {
     name: "context_surfaces_seed_apply",

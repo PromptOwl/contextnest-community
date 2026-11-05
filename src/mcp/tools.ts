@@ -613,7 +613,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_instructions_history",
     description:
-      "History of this nest's operating instructions (CONTEXT.md, what context_init returns): who changed them, when, and why, newest first. Pass `revision` for that revision's full text and the text it replaced.",
+      "List past revisions of this nest's operating instructions (CONTEXT.md, what context_init returns): who changed them, when, and why, newest first. Pass `revision` for that revision's full text and the text it replaced.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -778,7 +778,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve",
     description:
-      "Fetch the full text of every document a selector matches, up to a token budget. Use context_query when you only need the matches.",
+      "Fetch the full text of the documents a selector matches, plus documents linked to them up to `hops` away (hops 0 for matches only). Stops at the first document past the token budget. Use context_query when you don't need the text.",
     inputSchema: {
       type: "object" as const,
       properties: {
