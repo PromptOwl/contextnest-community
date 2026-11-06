@@ -113,7 +113,7 @@ import {
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
 import { AppError, BillingConfirmError } from "../shared/errors.js";
-import { billingConfirmed, confirmBillingToolField } from "../auth/seats.js";
+import { billingConfirmed, confirmBillingToolField, BILLING_CONFIRM_TOOLS } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -499,8 +499,9 @@ function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
 
 /** A tool's JSON schema as its MCP zod shape, shared by the per-nest
  *  (routes.ts) and server-level (server-routes.ts) surfaces. Caller attribution
- *  (spec §9.4) and billing confirm ride on every tool, declared once here. */
-export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
+ *  (spec §9.4) rides on every tool; billing confirm only on the tools that can
+ *  raise a bill (BILLING_CONFIRM_TOOLS). Both are declared once here. */
+export function toolShape(toolName: string, inputSchema: unknown): Record<string, z.ZodTypeAny> {
   const props = (inputSchema as any)?.properties || {};
   const required: string[] = (inputSchema as any)?.required || [];
   const shape: Record<string, z.ZodTypeAny> = {};
@@ -515,7 +516,7 @@ export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
     if (typeof def.description === "string") field = field.describe(def.description);
     shape[key] = field;
   }
-  return Object.assign(shape, clientToolField, confirmBillingToolField);
+  return Object.assign(shape, clientToolField, BILLING_CONFIRM_TOOLS.has(toolName) ? confirmBillingToolField : {});
 }
 
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
