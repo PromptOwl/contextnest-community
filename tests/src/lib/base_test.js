@@ -44,6 +44,7 @@ import NewFolderPage from '../page_factory/app/new_folder_page.js';
 import NestImportPage from '../page_factory/app/nest_import_page.js';
 import NestOverviewPage from '../page_factory/app/nest_overview_page.js';
 import NestDocumentsPage from '../page_factory/app/nest_documents_page.js';
+import ReviewQueuePage from '../page_factory/app/review_queue_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -83,6 +84,9 @@ import NestOverviewApi from './nest_overview_api.js';
 
 // REST helper used to arrange Nest Documents preconditions (tagged documents, shares, governance)
 import NestDocumentsApi from './nest_documents_api.js';
+
+// REST helper used to arrange Review Queue preconditions (stewards, submissions, comments)
+import ReviewQueueApi from './review_queue_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -438,6 +442,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get nestDocumentsApi() {
         if (!this._nestDocumentsApi) this._nestDocumentsApi = new NestDocumentsApi(this.page);
         return this._nestDocumentsApi;
+      },
+
+      // Nest page → Review Queue tab (queue, chips, review pane, bulk, deletions)
+      get reviewQueuePage() {
+        return new ReviewQueuePage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Review Queue suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get reviewQueueApi() {
+        if (!this._reviewQueueApi) this._reviewQueueApi = new ReviewQueueApi(this.page);
+        return this._reviewQueueApi;
       },
 
       /**
