@@ -1,7 +1,7 @@
 /**
  * Metacognition over MCP in open mode (CU-wdqcq05rqq): with no auth, the
- * anonymous caller is the owner everywhere, so the server-level /mcp offers
- * the metacognition tools and they work on a named nest.
+ * anonymous caller is the owner everywhere, yet the server-level /mcp still
+ * has no metacognition tools: they are per-nest only.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, jsonRequest } from "./helpers.js";
@@ -43,14 +43,13 @@ afterAll(async () => {
 });
 
 describe("open mode, server-level /mcp", () => {
-  it("offers the metacognition tools and serves them on a named nest", async () => {
+  it("doesn't offer the metacognition tools, and refuses a call", async () => {
     const names = ((await mcp("tools/list", {})).result?.tools ?? []).map((t: any) => t.name);
-    expect(names).toContain("context_metacognition_configure");
+    expect(names).not.toContain("context_metacognition_configure");
     const r = await mcp("tools/call", {
       name: "context_metacognition_configure",
-      arguments: { nest: nestId, agent: "nodes/archivist", persona: { name: "Archivist" }, dry_run: true },
+      arguments: { nest: nestId, agent: "nodes/archivist", persona: { name: "Archivist" } },
     });
-    expect(r.result?.isError).not.toBe(true);
-    expect(r.result.structuredContent.summary).toContain("Archivist will read the whole nest");
+    expect(r.error || r.result?.isError).toBeTruthy();
   });
 });
