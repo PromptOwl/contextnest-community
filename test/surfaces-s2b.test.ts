@@ -780,6 +780,27 @@ describe("commit", () => {
     expect(upd.blocks).toMatch(/won't propose this again for 7 days/);
   });
 
+  it("admin-only folder: a non-admin reviewer's Approve gets the admin refusal, and Reject still works", async () => {
+    const p = await makeProposal("C1");
+    const [a] = await itemsOf(p.id);
+    await db().run("INSERT INTO surface_seed_applications (nest_id, seed_id, seed_version, source, listener_json, applied_by) VALUES (?, 'admin-test', 1, 'bundled', ?, ?)", [N, JSON.stringify({ admin_folders: ["inbox/"] }), alice.email]);
+    try {
+      slack.responses = [];
+      slack.ephemerals = [];
+      await click("U_DANA", "nest_approve", p.id);
+      expect(notesText()).toMatch(/Only admins of this nest/);
+      expect(notesText()).not.toMatch(/Only reviewers of/);
+      expect((await one("SELECT state FROM surface_proposal_items WHERE id = ?", [a.id])).state).toBe("pending");
+      await click("U_DANA", "nest_reject", p.id);
+      const view = lastView();
+      expect(view.callback_id).toBe("nest_reject_modal");
+      await submitView("U_DANA", view, { reason: { v: { selected_option: { value: "details_wrong" } } } });
+      expect(await one("SELECT state, decided_by_user_id FROM surface_proposal_items WHERE id = ?", [a.id])).toMatchObject({ state: "rejected", decided_by_user_id: dana.userId });
+    } finally {
+      await db().run("DELETE FROM surface_seed_applications WHERE nest_id = ? AND seed_id = 'admin-test'", [N]);
+    }
+  });
+
   it("AC-CMT-10: merged card, item 3 unticked → items 1–2 approved as U, item 3 rejected not_selected (purged, held); card lists kept and not kept", async () => {
     const p = await makeProposal("C2", { n: 3 });
     const items = await itemsOf(p.id);

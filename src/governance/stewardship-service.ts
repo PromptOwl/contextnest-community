@@ -959,12 +959,13 @@ export async function canUserApprove(
   nodeId: string,
   userEmail: string,
   /** The latest pending review's requester, when the caller already loaded it. */
-  opts: { requestedBy?: string } = {},
+  opts: { requestedBy?: string; ignoreAdminFolders?: boolean } = {},
 ): Promise<PermissionResult> {
   const personal = await surfacesPersonalOwner(nestId);
   if (personal) return personalVerdict(personal, userEmail);
-  // A seed's admin-only folders: nest admins only (S7-R2 L4).
-  const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
+  // A seed's admin-only folders: nest admins only (S7-R2 L4). Rejecting
+  // publishes nothing, so reject passes ignoreAdminFolders: any reviewer may.
+  const adminOnly = opts.ignoreAdminFolders ? null : await adminFolderRefusal(nestId, nodeId, userEmail);
   if (adminOnly) return { allowed: false, reason: adminOnly, role: "viewer" };
   const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   const allowSelf = await nestAllowsSelfApprove(nestId);
