@@ -642,7 +642,7 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
-    const shape = toolShape(tool.inputSchema);
+    const shape = toolShape(tool.name, tool.inputSchema);
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       // Scope check. Present only for OAuth callers; undefined means a key or

@@ -3202,7 +3202,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 | 429 | Rate limit |
 | 503 | License missing |
 
-**Billing confirmation.** Every role-raising route (collaborators, stewards, grants, teams and team sharing, access-request approval, superadmins) answers `409 billing_confirm` for a raise sent without `X-Confirm-Billing: true`. The `402` plan-limit check runs first. Demotions, viewer access and creating your own nest never need it. On MCP, every tool takes an optional `confirm_billing` boolean: an unconfirmed raise returns a `BILLING_CONFIRMATION_REQUIRED` tool error with the same `changes`, and the agent calls again with `confirm_billing: true` once the user agrees. See `LICENSING.md`.
+**Billing confirmation.** Every role-raising route (collaborators, stewards, grants, teams and team sharing, access-request approval, superadmins) answers `409 billing_confirm` for a raise sent without `X-Confirm-Billing: true`. The `402` plan-limit check runs first. Demotions, viewer access and creating your own nest never need it. On MCP, the tools that can raise a bill (`context_share_nest`, `context_grant`, `context_assign_steward`, `context_resolve_access_request`) take an optional `confirm_billing` boolean, and no other tool lists it: an unconfirmed raise returns a `BILLING_CONFIRMATION_REQUIRED` tool error with the same `changes`, and the agent calls again with `confirm_billing: true` once the user agrees. See `LICENSING.md`.
 
 ---
 
