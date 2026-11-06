@@ -40,7 +40,7 @@ async function userEmail(userId: string): Promise<string | null> {
 }
 
 /** Does this Community user read the nest and pass canUserApprove on every item? */
-export async function canReviewAll(nestId: string, userId: string, items: Array<Pick<ItemRow, "node_id">>): Promise<boolean> {
+export async function canReviewAll(nestId: string, userId: string, items: Array<Pick<ItemRow, "node_id">>, opts: { ignoreAdminFolders?: boolean } = {}): Promise<boolean> {
   const email = await userEmail(userId);
   if (!email) return false;
   try {
@@ -50,7 +50,7 @@ export async function canReviewAll(nestId: string, userId: string, items: Array<
   }
   for (const it of items) {
     if (!it.node_id) return false;
-    const v = await canUserApprove(nestId, it.node_id, email).catch(() => ({ allowed: false }));
+    const v = await canUserApprove(nestId, it.node_id, email, opts).catch(() => ({ allowed: false }));
     if (!v.allowed) return false;
   }
   return true;
