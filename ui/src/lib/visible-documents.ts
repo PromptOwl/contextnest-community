@@ -118,3 +118,12 @@ export function documentsTabIsEmpty(input: {
   // A filter that matched nothing IS empty — the folder tree would be noise.
   return input.filtering || input.folderCount === 0;
 }
+
+/** Folders one level under `base` ("" is the nest root). */
+export function childFolders<T extends { path: string }>(known: T[], base: string): T[] {
+  const prefix = base ? `${base}/` : "";
+  return known.filter((f) => {
+    const rest = f.path.startsWith(prefix) ? f.path.slice(prefix.length) : "";
+    return rest !== "" && !rest.includes("/");
+  });
+}
