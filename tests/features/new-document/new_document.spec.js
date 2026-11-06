@@ -268,7 +268,7 @@ test.describe('New document', () => {
     await landed(api, nest, 'nodes/alpha/specs/deep-spec');
   });
 
-  test('CN-CREATE-010: Verify that the Type picker offers Document, Artifact, Table, Task, Agent, Skill and Tool, and the chosen type is saved', async ({
+  test('CN-CREATE-010: Verify that the Type picker offers Document, Artifact, Table, Task, View, Agent, Skill and Tool, and the chosen type is saved', async ({
     primary_user,
     commonFunction,
   }) => {
@@ -276,7 +276,7 @@ test.describe('New document', () => {
 
     await page.gotoNest(nest.id);
     await page.openNewDocument();
-    expect(await page.typeOptions()).toEqual(['Document', 'Artifact', 'Table', 'Task', 'Agent', 'Skill', 'Tool']);
+    expect(await page.typeOptions()).toEqual(['Document', 'Artifact', 'Table', 'Task', 'View', 'Agent', 'Skill', 'Tool']);
     expect(await page.selectedType()).toBe('Document');
 
     await page.fillDocument('Task Probe', 'Task body.');

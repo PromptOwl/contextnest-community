@@ -17,7 +17,7 @@ import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { documentLink } from "../lib/nest-url";
-import { useBreadcrumb } from "../lib/breadcrumb";
+import { documentCrumb, useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
   newTags,
@@ -960,11 +960,6 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
-  useBreadcrumb([
-    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
-  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
@@ -1149,6 +1144,8 @@ export function DocumentEditor({
   // The document couldn't be loaded (stale link, deleted doc, no access). The
   // editor must not fall through to a blank, saveable document in that case.
   const [loadFailed, setLoadFailed] = useState(false);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  useBreadcrumb([{ label: documentCrumb({ isNew, title, loading, loadFailed }) }]);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
@@ -1443,6 +1440,8 @@ export function DocumentEditor({
     if (!isDirty || isReviewerOnly) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (leavingRef.current) return;
+      // A reload with focus still in a field never blurs it, so park here too.
+      saveOnBlurRef.current();
       e.preventDefault();
     };
     window.addEventListener("beforeunload", onBeforeUnload);

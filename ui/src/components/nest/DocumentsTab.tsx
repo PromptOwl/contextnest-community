@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { reads } from "../../lib/queries";
 import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
-import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
+import { visibleDocuments, documentsTabIsEmpty, childFolders, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
 import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
@@ -1591,9 +1591,211 @@ export function DocumentsTab({
                   );
                 };
 
+                // Folder actions, shared by the tree rows and the folder cards.
+                // Each caller needs a `group/fh` ancestor for the hover reveal.
+                type FolderTarget = { path: string; label: string; total: number };
+                // Same split as a document: admins/owners delete the
+                // folder (and everything under it), editors raise a
+                // request. Hidden while one is already pending, and
+                // withheld from viewers — the server refuses a folder
+                // flag below editor, and a folder-scope editor row
+                // isn't enough for it either (canRequestDeletion
+                // wants nest scope).
+                const folderDeleteButton = (f: FolderTarget) =>
+                  (canManage || canEditDocs) &&
+                  (canManage || !folderFlagPending(f.path)) ? (
+                    <button
+                      type="button"
+                      // An empty folder's only useful action is
+                      // removing it, so it shows without a hover.
+                      className={`rounded p-0.5 ${f.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
+                        canManage
+                          ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                          : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                      }`}
+                      title={
+                        canManage
+                          ? `Delete ${prettyFolderPath(f.path)} and everything in it`
+                          : "Delete (needs admin approval)"
+                      }
+                      data-testid={`delete-folder-${f.path}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFolderTarget({
+                          path: f.path,
+                          label: prettyFolderPath(f.path),
+                          total: f.total,
+                        });
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null;
+                const folderActions = (f: FolderTarget) => (
+                  <>
+                    {canEditDocs && (
+                      <button
+                        type="button"
+                        className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                        title={`New document in ${prettyFolderPath(f.path)}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenDocument("new", { folder: f.path });
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {/* Share the folder with one person — they reach
+                        everything under it and nothing else in the
+                        nest. Owner/admin only, matching /grants. */}
+                    {canManage && (
+                      <button
+                        type="button"
+                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                        title={`Share ${prettyFolderPath(f.path)} with someone`}
+                        data-testid={`share-folder-${f.path}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShareFolder({
+                            // The row's own label, not the whole path:
+                            // an imported nest's paths can be long and
+                            // id-prefixed, which made the title
+                            // unreadable. The exact target is shown in
+                            // the dialog body instead.
+                            path: shareTargetForFolder(f.path),
+                            label: f.label,
+                          });
+                        }}
+                      >
+                        <Share2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {/* Admin activity log for everything under this
+                        folder — owner/admin only, like /activity-log. */}
+                    {canManage && (
+                      <button
+                        type="button"
+                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                        title={`Activity in ${prettyFolderPath(f.path)}`}
+                        aria-label={`Activity in ${prettyFolderPath(f.path)}`}
+                        data-testid={`folder-activity-${f.path}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActivityFor({
+                            scope: { kind: "folder", folder: f.path },
+                            label: `${prettyFolderPath(f.path)}/`,
+                          });
+                        }}
+                      >
+                        <Activity className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {canManage && (
+                      <button
+                        type="button"
+                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                        title={`Rename or move ${prettyFolderPath(f.path)}`}
+                        aria-label={`Rename or move ${prettyFolderPath(f.path)}`}
+                        data-testid={`move-folder-${f.path}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMoveFolderTarget({
+                            path: f.path,
+                            label: prettyFolderPath(f.path),
+                          });
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {/* This folder's rules — where things go, how
+                        files are named. Everyone can look; owners and
+                        admins edit on the Structure page. */}
+                    {onOpenStructure && (
+                      <button
+                        type="button"
+                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                        title={`Rules for ${prettyFolderPath(f.path)}`}
+                        aria-label={`Rules for ${prettyFolderPath(f.path)}`}
+                        data-testid={`folder-rules-${f.path}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenStructure(f.path);
+                        }}
+                      >
+                        <Ruler className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {f.total > 0 && folderDeleteButton(f)}
+                    {folderFlagPending(f.path) && (() => {
+                      const folderFlag = folderFlagByPath.get(f.path);
+                      const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
+                          title={
+                            isOwnFlag
+                              ? "Click to withdraw your deletion request"
+                              : "Someone asked for this folder to be deleted. A nest admin decides."
+                          }
+                          onClick={
+                            isOwnFlag && folderFlag
+                              ? (e) => {
+                                  e.stopPropagation();
+                                  onWithdrawDeletion(folderFlag);
+                                }
+                              : undefined
+                          }
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Deletion requested
+                          {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
+                        </span>
+                      );
+                    })()}
+                  </>
+                );
+
                 if (viewMode === "cards") {
+                  // The grid is flat, so folders sit in it as cards: one per
+                  // direct child of the scope, opened by scoping into it. A
+                  // filter answers about documents, so folders step aside.
+                  const folderCards = hasActiveFilters
+                    ? []
+                    : childFolders(knownFolders, baseFolder).sort((a, b) => byPathSegments(a.path, b.path));
                   return (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {folderCards.map((folder) => {
+                        const target = {
+                          ...folder,
+                          label: prettyFolder(folder.path.slice(folder.path.lastIndexOf("/") + 1)),
+                        };
+                        return (
+                          <div
+                            key={folder.path}
+                            className="group/fh flex flex-wrap items-center gap-1.5 rounded-md border px-3 py-2 hover:bg-muted/50"
+                            data-testid={`folder-card-${folder.path}`}
+                          >
+                            <button
+                              type="button"
+                              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                              title={`Open ${prettyFolderPath(folder.path)}`}
+                              onClick={() => setFolderFilter(folder.path)}
+                            >
+                              <FolderOpen className="h-4 w-4 shrink-0 text-blue-500" />
+                              <span className="truncate text-sm font-medium">{target.label}</span>
+                            </button>
+                            {folder.total === 0 && folderDeleteButton(target)}
+                            {folder.total > 0 && (
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5">
+                                {folder.total}
+                              </Badge>
+                            )}
+                            {folderActions(target)}
+                          </div>
+                        );
+                      })}
                       {sorted.map((n) => renderDocRow(n))}
                     </div>
                   );
@@ -1664,43 +1866,11 @@ export function DocumentsTab({
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
                         const folderDocs = selectableIn(node.path);
-                        // Same split as a document: admins/owners delete the
-                        // folder (and everything under it), editors raise a
-                        // request. Hidden while one is already pending, and
-                        // withheld from viewers — the server refuses a folder
-                        // flag below editor, and a folder-scope editor row
-                        // isn't enough for it either (canRequestDeletion
-                        // wants nest scope).
-                        const deleteButton =
-                          (canManage || canEditDocs) &&
-                          (canManage || !folderFlagPending(node.path)) ? (
-                            <button
-                              type="button"
-                              // An empty folder's only useful action is
-                              // removing it, so it shows without a hover.
-                              className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
-                                canManage
-                                  ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                                  : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                              }`}
-                              title={
-                                canManage
-                                  ? `Delete ${prettyFolderPath(node.path)} and everything in it`
-                                  : "Delete (needs admin approval)"
-                              }
-                              data-testid={`delete-folder-${node.path}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setFolderTarget({
-                                  path: node.path,
-                                  label: prettyFolderPath(node.path),
-                                  total: node.total,
-                                });
-                              }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          ) : null;
+                        const target = {
+                          path: node.path,
+                          label: node.label || prettyFolder(node.name),
+                          total: node.total,
+                        };
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -1791,7 +1961,7 @@ export function DocumentsTab({
                             {/* An empty folder shows delete without a hover,
                                 so it sits right after the name — behind the
                                 hidden hover icons it floated at a fixed gap. */}
-                            {node.total === 0 && deleteButton}
+                            {node.total === 0 && folderDeleteButton(target)}
                             {/* Recursive subtree total (this folder + all
                                   descendants), matching the Overview Contents
                                   card. Direct-count-only made a folder holding
@@ -1810,127 +1980,7 @@ export function DocumentsTab({
                                 {node.total}
                               </Badge>
                             )}
-                            {canEditDocs && (
-                              <button
-                                type="button"
-                                className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`New document in ${prettyFolderPath(node.path)}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onOpenDocument("new", { folder: node.path });
-                                }}
-                              >
-                                <Plus className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {/* Share the folder with one person — they reach
-                                everything under it and nothing else in the
-                                nest. Owner/admin only, matching /grants. */}
-                            {canManage && (
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`Share ${prettyFolderPath(node.path)} with someone`}
-                                data-testid={`share-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setShareFolder({
-                                    // The row's own label, not the whole path:
-                                    // an imported nest's paths can be long and
-                                    // id-prefixed, which made the title
-                                    // unreadable. The exact target is shown in
-                                    // the dialog body instead.
-                                    path: shareTargetForFolder(node.path),
-                                    label: node.label || prettyFolder(node.name),
-                                  });
-                                }}
-                              >
-                                <Share2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {/* Admin activity log for everything under this
-                                folder — owner/admin only, like /activity-log. */}
-                            {canManage && (
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`Activity in ${prettyFolderPath(node.path)}`}
-                                aria-label={`Activity in ${prettyFolderPath(node.path)}`}
-                                data-testid={`folder-activity-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActivityFor({
-                                    scope: { kind: "folder", folder: node.path },
-                                    label: `${prettyFolderPath(node.path)}/`,
-                                  });
-                                }}
-                              >
-                                <Activity className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {canManage && (
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`Rename or move ${prettyFolderPath(node.path)}`}
-                                aria-label={`Rename or move ${prettyFolderPath(node.path)}`}
-                                data-testid={`move-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setMoveFolderTarget({
-                                    path: node.path,
-                                    label: prettyFolderPath(node.path),
-                                  });
-                                }}
-                              >
-                                <Pencil className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {/* This folder's rules — where things go, how
-                                files are named. Everyone can look; owners and
-                                admins edit on the Structure page. */}
-                            {onOpenStructure && (
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`Rules for ${prettyFolderPath(node.path)}`}
-                                aria-label={`Rules for ${prettyFolderPath(node.path)}`}
-                                data-testid={`folder-rules-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onOpenStructure(node.path);
-                                }}
-                              >
-                                <Ruler className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {node.total > 0 && deleteButton}
-                            {folderFlagPending(node.path) && (() => {
-                              const folderFlag = folderFlagByPath.get(node.path);
-                              const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
-                              return (
-                                <span
-                                  className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
-                                  title={
-                                    isOwnFlag
-                                      ? "Click to withdraw your deletion request"
-                                      : "Someone asked for this folder to be deleted. A nest admin decides."
-                                  }
-                                  onClick={
-                                    isOwnFlag && folderFlag
-                                      ? (e) => {
-                                          e.stopPropagation();
-                                          onWithdrawDeletion(folderFlag);
-                                        }
-                                      : undefined
-                                  }
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                  Deletion requested
-                                  {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
-                                </span>
-                              );
-                            })()}
+                            {folderActions(target)}
                           </div>
                         );
                       }}

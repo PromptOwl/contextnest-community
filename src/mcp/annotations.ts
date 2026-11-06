@@ -11,6 +11,8 @@
  *    even when a version history keeps the earlier text.
  *  - openWorldHint: it can reach beyond the caller's authorised nests: arbitrary
  *    URLs or email addresses, the public internet, or a third-party workspace.
+ *    A tool that can change what a nest's public docs site serves counts: the
+ *    page is on the open web, and the rebuild can ping IndexNow.
  *    Notifying a nest's own members or its configured connectors doesn't count.
  *
  * A new tool needs a row here: test/mcp-annotations.test.ts fails without one,
@@ -65,13 +67,13 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
   // ─── Documents ──────────────────────────────────────────────────────────
-  context_create: add("Create document", "Creates a node; a title or path already in use is refused."),
+  context_create: addOutside("Create document", "Creates a node; a title or path already in use is refused. On a nest with a docs site, this can change a public page."),
   context_upload: overwriteOutside("Upload file", "Downloads from any public https URL; node_id replaces an Office document's file with a new version."),
-  context_update: overwrite("Update document", "Replaces content, tags and fields of an existing node."),
-  context_bulk_update: overwrite("Update many documents", "Changes tags, fields and columns on up to 100 existing nodes."),
-  context_delete: overwrite("Delete documents", "Deletes nodes with their history, irreversibly."),
-  context_move: add("Move document or folder", "Refiles a node or folder; an occupied destination is refused, history follows, and it can be moved back."),
-  context_table_rows: overwrite("Change table rows", "Updates and deletes rows of a table node."),
+  context_update: overwriteOutside("Update document", "Replaces content, tags and fields of an existing node. On a nest with a docs site, this can change a public page."),
+  context_bulk_update: overwriteOutside("Update many documents", "Changes tags, fields and columns on up to 100 existing nodes. On a nest with a docs site, this can change a public page."),
+  context_delete: overwriteOutside("Delete documents", "Deletes nodes with their history, irreversibly. On a nest with a docs site, this can change a public page."),
+  context_move: addOutside("Move document or folder", "Refiles a node or folder; an occupied destination is refused, history follows, and it can be moved back. On a nest with a docs site, this can change a public page."),
+  context_table_rows: overwriteOutside("Change table rows", "Updates and deletes rows of a table node. On a nest with a docs site, this can change a public page."),
   context_instructions_update: overwrite("Replace nest instructions", "Replaces the whole of CONTEXT.md."),
   context_task_log: add("Log task activity", "Appends to a task's log; claiming only takes an unassigned task."),
 
@@ -88,11 +90,11 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
 
   // ─── Governance ─────────────────────────────────────────────────────────
   context_request_deletion: add("Request deletion", "Files a request; nothing is deleted."),
-  context_resolve_deletion: overwrite("Decide deletion request", "Honouring a request deletes a document or folder, or deletes or archives the nest."),
+  context_resolve_deletion: overwriteOutside("Decide deletion request", "Honouring a request deletes a document or folder, or deletes or archives the nest. On a nest with a docs site, this can change a public page."),
   context_request_access: add("Request write access", "Files a request; the nest's admins are notified."),
   context_resolve_access_request: add("Decide access request", "Adds access or raises a role; nobody loses anything, unlike context_grant, which can lower one."),
   context_submit_review: add("Submit for review", "Opens a review request on an existing version; content is unchanged."),
-  context_approve: overwrite("Approve document", "Publishes the version, replacing the text served to AI."),
+  context_approve: overwriteOutside("Approve document", "Publishes the version, replacing the text served to AI. On a nest with a docs site, this can change a public page."),
   context_reject: add("Reject document", "Marks the version rejected; the published text and the draft stay."),
   context_assign_steward: addOutside("Assign steward", "Adds a steward and turns on governed mode; an unknown email address is emailed an invitation. An existing assignment is refused, not replaced."),
   context_share_nest: addOutside("Share nest", "Adds a collaborator; an unknown email address is emailed an invitation. An existing collaborator is refused, not changed."),

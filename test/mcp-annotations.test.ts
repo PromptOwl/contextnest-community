@@ -99,6 +99,15 @@ const DESTRUCTIVE = [
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
   "context_upload",
+  // Each can change what a nest's public docs site serves.
+  "context_create",
+  "context_update",
+  "context_bulk_update",
+  "context_delete",
+  "context_move",
+  "context_table_rows",
+  "context_approve",
+  "context_resolve_deletion",
   "context_share_nest",
   "context_grant",
   "context_assign_steward",
@@ -239,7 +248,8 @@ describe("tools/list on every endpoint, for every key", () => {
     const tools = await listTools("/mcp", ownerKey);
     const hints = (n: string) => tools.find((t) => t.name === n)!.annotations;
     expect(hints("context_search")).toMatchObject({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
-    expect(hints("context_delete")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    expect(hints("context_delete")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    expect(hints("context_update")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
   });
 
   it("offers a headless key only read-only, closed-world tools", async () => {
