@@ -84,6 +84,8 @@ import {
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
+import { pluginNestRoutes } from "./plugins/routes.js";
+import { loadedPlugins, invalidatePlugins } from "./plugins/loader.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
@@ -327,6 +329,9 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "schedules",
   "hooks",
   "env",
+  // Nest Plugins: configuring one provisions a system identity and stores
+  // credentials — a nest admin's act, never a sync key's.
+  "plugins",
   "connectors",
   "trace",
   "stewards",
@@ -763,6 +768,9 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Nest Plugins (default OFF). Off → /nests/:id/plugins 404s and the
+      // plugin MCP tools are not advertised.
+      plugins_enabled: config.FEATURE_PLUGINS,
       // Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
       // and the UI hides the PromptOwl Teams panel.
       promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
@@ -1014,6 +1022,9 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    // Nest Plugins (CU-wdqcq05raz): the flag and the allowlist of specs.
+    plugins_enabled: config.FEATURE_PLUGINS,
+    plugins_packages: config.PLUGINS.join(","),
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
@@ -1112,7 +1123,21 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    return c.json(currentServerSettings());
+    // Which plugins loaded (and which specs were refused), so the operator
+    // sees the allowlist's effect without reading server logs.
+    const loaded = config.FEATURE_PLUGINS ? await loadedPlugins() : null;
+    return c.json({
+      ...currentServerSettings(),
+      plugins_loaded: loaded
+        ? [...loaded.plugins.values()].map((p) => ({
+            name: p.manifest.name,
+            version: p.manifest.version,
+            displayName: p.manifest.displayName,
+            capabilities: p.manifest.capabilities,
+          }))
+        : [],
+      plugins_load_errors: loaded?.errors ?? [],
+    });
   });
 
   // Newer release on npm, and the command that updates this install.
@@ -1357,6 +1382,26 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    // Nest Plugins. Default OFF — enabling writes "true", disabling clears.
+    if ("plugins_enabled" in body) {
+      pending.push({ name: "FEATURE_PLUGINS", value: body.plugins_enabled ? "true" : null });
+    }
+    // The plugin allowlist: comma-separated package names or module paths.
+    // Shape-checked here; whether each LOADS is reported on GET
+    // (plugins_load_errors) after the reload below.
+    if ("plugins_packages" in body) {
+      const raw = body.plugins_packages;
+      if (raw !== null && typeof raw !== "string") {
+        addError("plugins_packages", "Plugins must be a comma-separated list of package names or module paths.");
+      } else {
+        const specs = (raw || "").split(",").map((x: string) => x.trim()).filter(Boolean);
+        const bad = specs.find(
+          (x: string) => !/^(@?[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)?|\/[^\0]+|\.{1,2}\/[^\0]+)$/i.test(x),
+        );
+        if (bad) addError("plugins_packages", `"${bad}" is not a package name or module path.`);
+        else pending.push({ name: "PLUGINS", value: specs.length ? specs.join(",") : null });
+      }
     }
     // Import teams from PromptOwl. Default OFF — enabling writes "true",
     // disabling clears the row (falls back to the default).
@@ -2102,6 +2147,8 @@ export function createApp(): Hono<AuthEnv> {
       if (value === null) delete process.env[name];
       else process.env[name] = value;
     }
+    // A changed allowlist reloads the plugin set on next use — no restart.
+    if (pending.some((p) => p.name === "PLUGINS" || p.name === "FEATURE_PLUGINS")) invalidatePlugins();
     // Round 9: queued once the save has committed (the outbox delivers and
     // retries in the background; the Slack DM doesn't depend on mail settings).
     if (authChanges.length) await alertSealedOwnersConfigChanged(authChanges.join(", "));
@@ -3933,6 +3980,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
+  nestsApp.route("/:nestId/plugins", pluginNestRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);

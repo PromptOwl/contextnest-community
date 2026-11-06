@@ -57,7 +57,9 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-const BASELINE = 98;
+//   98->101 Nest Plugins trio (CU-wdqcq05raz; nest_plugins registry — the engine's `sync`
+//   ops take settings per call, these act on stored per-nest config).
+const BASELINE = 101;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
