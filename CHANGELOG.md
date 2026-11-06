@@ -1,5 +1,22 @@
 # @promptowl/contextnest-community
 
+## 3.1.0
+
+### Minor Changes
+
+- v3.1.0 — MCP endpoints that stop reconnect loops, metacognition tools moved to the nest endpoint, and folders in card view.
+
+  **Upgrade note:** `context_metacognition_*` tools are no longer on the server-level `/mcp`. This only affects servers with `FEATURE_METACOGNITION` on. Any harness that calls them there must connect to `/nests/:id/mcp` instead, where the same tools work without the `nest` argument. MCP clients that used GET or DELETE on either endpoint now get `405`.
+
+- dd16298: Metacognition tools are now on `/nests/:id/mcp` only. The server-level `/mcp` no longer lists or accepts `context_metacognition_*`, so connect to the nest's endpoint to set up or run an agent. Tools that can change a public docs site now declare `openWorldHint: true`.
+
+### Patch Changes
+
+- 24e57ba: The Documents tab's card view now shows folders. Open one to scope into it, and use the same actions as list view, including delete, without switching views.
+- aa92486: A link to a document that doesn't exist now says "Not found" in the breadcrumb and browser tab, instead of "Untitled".
+- 5299fbe: MCP endpoints (`/mcp` and `/nests/:id/mcp`) now answer GET and DELETE with 405 instead of opening an SSE stream that closed at once. MCP clients stop reconnecting in a loop, which had pinned the server's CPU and made Cloud Run turn requests away with 429s.
+- ee08361: Reloading a document with the cursor still in a field no longer loses the edit. Unsaved changes, including View blocks, come back with the restored draft banner.
+
 ## 3.0.0
 
 ### Major Changes
