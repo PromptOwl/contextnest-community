@@ -62,6 +62,7 @@ class ReviewQueuePage {
 
     // ── Bulk bar ───────────────────────────────────────────────────────────
     this.selectAll = page.getByTestId('review-queue-select-all');
+    this.oneSelected = page.getByText('1 selected', { exact: true });
     this.bulkApprove = page.getByTestId('bulk-approve');
     this.bulkReject = page.getByTestId('bulk-reject');
     this.reasonDialog = page.getByRole('dialog');
@@ -116,6 +117,20 @@ class ReviewQueuePage {
   /** One comment row, by the comment's text. */
   commentRow(text) {
     return this.commentRows.filter({ hasText: text });
+  }
+
+  /** Tick one change row's checkbox. */
+  async selectRow(title) {
+    await this.row(title).getByTestId('review-queue-select').click();
+  }
+
+  /**
+   * Wait until the queue and deletion requests have loaded. They arrive
+   * together, and the stat card shows a skeleton until then, so a check that
+   * something is absent can't pass just because it hasn't loaded yet.
+   */
+  async waitForQueueLoaded() {
+    await this.statCount.filter({ hasText: /^\d+$/ }).waitFor({ state: 'visible' });
   }
 
   /** The Changes chip's number, and the Review Queue tab's badge. */

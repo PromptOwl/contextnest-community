@@ -159,7 +159,7 @@ test.describe('Review Queue', () => {
   test('RQ-006: Verify that the Changes chip sorts by priority', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-priority');
     const reviewer = await addNestReviewer(owner, secondary_user);
-    // Submitted lowest first, so newest-first order alone can't pass this.
+    // Submitted out of priority order, so newest-first order alone can't pass this.
     for (const [title, priority] of [
       ['Priority Urgent', 'urgent'],
       ['Priority Low', 'low'],
@@ -268,7 +268,10 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A);
 
     await viewer.page.gotoLink(owner.nest.id);
-    await expect(viewer.page.page.getByRole('tab', { name: 'Overview', exact: true })).toBeVisible();
+    // The link only falls back to Overview once the queue has loaded, so the
+    // tab can't be absent here just because it hasn't appeared yet.
+    await expect(viewer.page.page).not.toHaveURL(/tab=review/);
+    await expect(viewer.page.page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
     await expect(viewer.page.reviewTab).toHaveCount(0);
     await expect(viewer.page.rows).toHaveCount(0);
   });
@@ -498,8 +501,8 @@ test.describe('Review Queue', () => {
     await reviewer.page.reasonConfirm.click();
 
     await expect(reviewer.page.toasts.filter({ hasText: '2 documents approved' })).toBeVisible(WRITE);
-    expect((await owner.api.latestReview(owner.nest.id, first.doc.id)).status).toBe('approved');
-    expect((await owner.api.latestReview(owner.nest.id, second.doc.id)).status).toBe('approved');
+    expect(await owner.api.nodeStatus(owner.nest.id, first.doc.id)).toBe('published');
+    expect(await owner.api.nodeStatus(owner.nest.id, second.doc.id)).toBe('published');
   });
 
   test('RQ-031: Verify that Reject all stays disabled until a reason is entered', async ({ primary_user, secondary_user, commonFunction }) => {
@@ -522,15 +525,20 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const first = await submitted(owner, DOC_A);
     const second = await submitted(owner, DOC_B);
+    // Two more stay pending, so the bulk bar is still there after the batch.
+    await submitted(owner, 'Review Doc Gamma');
+    await submitted(owner, 'Review Doc Delta');
 
     await reviewer.page.goto(owner.nest.id);
-    await reviewer.page.selectAll.click();
+    await reviewer.page.selectRow(DOC_A);
+    await reviewer.page.selectRow(DOC_B);
     // The author withdraws one after the queue loaded, so that one must fail.
     await owner.api.cancelReview(owner.nest.id, second.doc.id);
     await reviewer.page.bulkApprove.click();
     await reviewer.page.reasonConfirm.click();
 
     await expect(reviewer.page.toasts.filter({ hasText: '1 approved, 1 could not be' })).toBeVisible(WRITE);
+    await expect(reviewer.page.oneSelected).toBeVisible(WRITE);
     expect((await owner.api.latestReview(owner.nest.id, first.doc.id)).status).toBe('approved');
     expect(await owner.api.nodeStatus(owner.nest.id, second.doc.id)).toBe('draft');
   });
@@ -552,6 +560,7 @@ test.describe('Review Queue', () => {
     await expect(owner.page.deletionRow(reason)).toBeVisible();
 
     await secondary_user.reviewQueuePage.goto(owner.nest.id);
+    await secondary_user.reviewQueuePage.waitForQueueLoaded();
     await expect(secondary_user.reviewQueuePage.deletionRows).toHaveCount(0);
   });
 
