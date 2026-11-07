@@ -103,7 +103,7 @@ function createMcpServerForNest(
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // `client` is validated against the engine's own schema in handleToolCall.
-    const shape = toolShape(tool.inputSchema);
+    const shape = toolShape(tool.name, tool.inputSchema);
 
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
