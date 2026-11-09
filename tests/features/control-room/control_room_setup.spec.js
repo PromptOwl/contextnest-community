@@ -12,6 +12,11 @@
  *   `/health` reports Surfaces on. Nests come from the real server.
  * - CN-CR-007 (the public member page) reads the real server and skips while
  *   Surfaces is off there.
+ * - CI runs e2e against the deployed server (nest-dev), not this branch's
+ *   build. Until that server ships the Control room (its /health carries
+ *   `surfaces_enabled`), the suite skips rather than fails;
+ *   CN_EXPECT_CONTROL_ROOM=1 turns that skip into a failure. Surfaces itself
+ *   need not be on there: the page's Surfaces calls are faked in the browser.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
@@ -20,6 +25,27 @@ import ControlRoomPage from '../../src/page_factory/app/control_room_page.js';
 import { stubSurfaces, stubSurfacesOn } from '../../src/lib/control_room_stubs.js';
 
 const primaryRole = samples.primary_user ?? null;
+
+/** Does the server under test ship the Control room? Its /health then carries `surfaces_enabled`. */
+let deployed = false;
+let surfacesOn = false;
+
+test.beforeAll(async ({ request }) => {
+  try {
+    const h = await (await request.get('/health')).json();
+    deployed = typeof h?.surfaces_enabled === 'boolean';
+    surfacesOn = h?.surfaces_enabled === true;
+  } catch {
+    deployed = false;
+  }
+});
+
+test.beforeEach(() => {
+  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+    expect(deployed, 'the server under test does not ship the Control room (/health has no surfaces_enabled)').toBe(true);
+  }
+  test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR3).');
+});
 
 async function firstNestId(page) {
   const r = await page.request.get('/nests');
@@ -200,8 +226,8 @@ test.describe('Control room: member page', () => {
   test('CN-CR-007 / AC-CR-16: /about/surfaces opens without signing in, with the never list and "@Nest skip me", and no nest, channel or user names', async ({ browser }) => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
+    test.skip(!surfacesOn, 'Surfaces is off on this server, so /about/surfaces 404s.');
     const res = await page.goto('/about/surfaces');
-    test.skip(res?.status() === 404, 'Surfaces is off on this server.');
     expect(res?.status()).toBe(200);
     await expect(page.getByRole('heading', { name: 'How Nest handles your messages' })).toBeVisible();
     await expect(page.locator('body')).toContainText('@Nest skip me');
