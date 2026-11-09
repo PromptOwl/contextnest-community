@@ -21,6 +21,15 @@ export interface NestPageContext {
   openFolder: (folder: string) => void;
   /** Structure: the folder whose rule to open (?folder=). */
   folder?: string;
+  /** Channels: the selected channel and the open thread (?channel=&thread=). */
+  channel?: string;
+  thread?: string;
+  /** Channels: select a channel and/or open a thread; App writes the URL.
+   *  `replace` keeps it off the Back stack (choosing the landing channel). */
+  setChannelLocation?: (
+    loc: { channel: string | null; thread?: string | null },
+    opts?: { replace?: boolean },
+  ) => void;
 }
 
 const Ctx = createContext<NestPageContext | null>(null);

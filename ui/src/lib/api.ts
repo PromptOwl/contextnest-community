@@ -1791,6 +1791,10 @@ export async function getNest(nestId: string) {
     roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
     // Caller's own steward rows (scoped). Full roster is admin-only.
     myStewards?: any[];
+    /** A person added to the nest (owner, admin, any collaborator, a steward,
+     *  a team-share member), as opposed to someone who reaches it only through
+     *  its visibility or a document share. Channels are for members (PO-1190). */
+    member?: boolean;
   }>(`/nests/${nestId}`);
 }
 
@@ -3006,6 +3010,13 @@ export async function listAnnotations(nestId: string, nodeId: string) {
   );
 }
 
+/** What became of one `@name` when the message was posted (PO-1190). Empty
+ *  for a caller who can't see the roster, so `[]` never means "no mentions". */
+export type PostedMention =
+  | { name: string; kind: "person"; display_name: string; notified: boolean }
+  | { name: string; kind: "agent"; wake: "sent" | "no_webhook" | "skipped" }
+  | { name: string; kind: "nobody" };
+
 export async function createAnnotation(
   nestId: string,
   nodeId: string,
@@ -3015,7 +3026,7 @@ export async function createAnnotation(
     snapshotVersion?: number | null;
   },
 ) {
-  return request<{ thread: AnnotationThread }>(
+  return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
   );
@@ -3027,7 +3038,7 @@ export async function replyAnnotation(
   threadId: string,
   body: string,
 ) {
-  return request<{ thread: AnnotationThread }>(
+  return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
     { method: "POST", body: JSON.stringify({ body }) },
   );
@@ -3074,18 +3085,52 @@ export interface ChannelSummary {
   type: "channel";
   purpose: string | null;
   archived: boolean;
+  /** Threads, not messages. */
   post_count: number;
   last_post_at: string | null;
+  /** Newest message, post or reply; null for an empty channel. */
+  last_activity_at: string | null;
+  /** Messages by other people since the caller last marked the channel read. */
+  unread: number;
+  can_post: boolean;
+  /** The one line to show in place of the composer when `can_post` is false. */
+  post_refusal: string | null;
 }
+
+/** One `@name` in a message body as the reader sees it (PO-1190). */
+export type ChannelMention =
+  | { name: string; kind: "person"; display_name: string }
+  | { name: string; kind: "agent"; wakeable: boolean }
+  | { name: string; kind: "nobody" };
 
 export interface ChannelMessage {
   id: string;
+  /** The login (an email). */
   author: string;
+  /** Display name; the email when the person has none. */
+  author_name?: string;
   actor: ChannelActor;
+  /** Raw markdown. */
   body: string;
   created_at: string;
   /** The artifacts the message links, resolved for the viewer (PO-1181). */
   cards?: ArtifactCard[];
+  /** Every `@name` in the body, in order (not in code spans). */
+  mentions?: ChannelMention[];
+}
+
+/** A message from the "what is new" read: which thread it belongs to. */
+export interface ChannelNewMessage extends ChannelMessage {
+  thread_id: string;
+  /** False for the message that opened its thread (a new post). */
+  reply: boolean;
+}
+
+/** An agent handle the composer can offer after `@`. */
+export interface AgentHandle {
+  handle: string;
+  /** False = no wake-up webhook; the agent sees the mention in its own queue. */
+  wakeable: boolean;
 }
 
 // ─── Agent team stream S3 (PO-1181) ───────────────────────────────────────
@@ -3120,6 +3165,19 @@ export interface PromoteThreadResult {
   node: { id: string; title: string; type: string; status: string; version: number; url: string };
   source_thread: { node_id: string; thread_id: string };
   reply: { thread_id: string; comment_id: string | null };
+  /** True when the thread already had a node of that kind: nothing was created. */
+  existing?: boolean;
+}
+
+/** The last signed POST sent to a wake-up target (a mention or a test). */
+export interface AgentWebhookDelivery {
+  /** ISO 8601. */
+  at: string;
+  status: "ok" | "failed" | "pending";
+  /** Why it failed: "HTTP 502", "timed out", "could not connect", … */
+  reason: string | null;
+  attempts: number;
+  event: "agent.mention" | "agent.test";
 }
 
 /** A wake-up target for an agent handle — host#hash only, never the URL. */
@@ -3129,17 +3187,34 @@ export interface AgentWebhook {
   created_by: string;
   created_at: string;
   updated_at: string;
+  last_delivery?: AgentWebhookDelivery | null;
 }
 
 export async function listAgentWebhooks(nestId: string) {
   return request<{ webhooks: AgentWebhook[] }>(`/nests/${nestId}/agent-webhooks`);
 }
 
-/** Save a target; `secret` comes back only when one is minted. */
-export async function setAgentWebhook(nestId: string, handle: string, url: string, rotate = false) {
+/** Save a target; `secret` comes back only when one is minted (the first save). */
+export async function setAgentWebhook(nestId: string, handle: string, url: string) {
   return request<{ webhook: AgentWebhook; secret?: string }>(
     `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
-    { method: "PUT", body: JSON.stringify({ url, ...(rotate ? { rotate: true } : {}) }) },
+    { method: "PUT", body: JSON.stringify({ url }) },
+  );
+}
+
+/** Mint a new signing secret for the stored target; the URL is not needed again. */
+export async function rotateAgentWebhookSecret(nestId: string, handle: string) {
+  return request<{ webhook: AgentWebhook; secret: string }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
+    { method: "PUT", body: JSON.stringify({ rotate: true }) },
+  );
+}
+
+/** Send one signed test POST. A failed delivery is still a 200 with `ok: false`. */
+export async function testAgentWebhook(nestId: string, handle: string) {
+  return request<{ ok: boolean; delivery: AgentWebhookDelivery; webhook: AgentWebhook }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}/test`,
+    { method: "POST", body: "{}" },
   );
 }
 
@@ -3149,11 +3224,12 @@ export async function deleteAgentWebhook(nestId: string, handle: string) {
   });
 }
 
-/** Promote a comment thread to a decision or task node. */
+/** Promote a comment thread to a decision or task node. `existing: true`
+ *  means this thread already had a node of that kind (link to it). */
 export async function promoteThread(
   nestId: string,
   threadId: string,
-  input: { kind: "decision" | "task"; title?: string },
+  input: { kind: "decision" | "task"; title?: string; summary?: string },
 ) {
   return request<PromoteThreadResult>(`/nests/${nestId}/threads/${encodeURIComponent(threadId)}/promote`, {
     method: "POST",
@@ -3161,14 +3237,54 @@ export async function promoteThread(
   });
 }
 
+/** A node a thread was promoted to, as far as the reader may open it. */
+export interface ChannelPromotion {
+  kind: "decision" | "task";
+  node_id: string;
+  title: string;
+}
+
+/** A top-level post. Its `id` is the THREAD id. */
 export interface ChannelPost extends ChannelMessage {
   status: "open" | "resolved";
   reply_count: number;
   last_reply_at: string | null;
+  /** Newest message in the thread. */
+  last_activity_at?: string;
+  promoted?: ChannelPromotion[];
 }
 
-export async function listChannels(nestId: string) {
-  return request<{ channels: ChannelSummary[] }>(`/nests/${nestId}/channels`);
+export interface ChannelList {
+  /** Sorted by name. */
+  channels: ChannelSummary[];
+  /** The not-archived channel with the newest message: where a visitor starts. */
+  most_recent?: string | null;
+  /** May create, archive and restore channels. */
+  can_manage?: boolean;
+}
+
+export interface ChannelPagination {
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface ChannelTimeline {
+  channel: ChannelSummary;
+  /** Latest activity first. */
+  posts: ChannelPost[];
+  pagination: ChannelPagination;
+  /** Opaque cursor for getChannelSince. */
+  next_since?: string;
+}
+
+const channelPath = (nestId: string, name: string) =>
+  `/nests/${nestId}/channels/${encodeURIComponent(name)}`;
+
+/** The refresh read: cheap enough to poll while the tab is visible. */
+export async function listChannels(nestId: string, opts: { archived?: boolean } = {}) {
+  return request<ChannelList>(`/nests/${nestId}/channels${opts.archived ? "?archived=1" : ""}`);
 }
 
 export async function createChannel(nestId: string, input: { name: string; purpose?: string }) {
@@ -3179,10 +3295,10 @@ export async function createChannel(nestId: string, input: { name: string; purpo
 }
 
 export async function archiveChannel(nestId: string, name: string, archived = true) {
-  return request<{ channel: ChannelSummary }>(
-    `/nests/${nestId}/channels/${encodeURIComponent(name)}/archive`,
-    { method: "POST", body: JSON.stringify({ archived }) },
-  );
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ archived }),
+  });
 }
 
 export async function getChannelTimeline(nestId: string, name: string, opts: { limit?: number; offset?: number } = {}) {
@@ -3190,17 +3306,33 @@ export async function getChannelTimeline(nestId: string, name: string, opts: { l
   if (opts.limit) qs.set("limit", String(opts.limit));
   if (opts.offset) qs.set("offset", String(opts.offset));
   const q = qs.toString();
-  return request<{
-    channel: ChannelSummary;
-    posts: ChannelPost[];
-    pagination: { total: number; limit: number; offset: number; has_more: boolean };
-  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}${q ? `?${q}` : ""}`);
+  return request<ChannelTimeline>(`${channelPath(nestId, name)}${q ? `?${q}` : ""}`);
 }
 
 export async function getChannelThread(nestId: string, name: string, threadId: string) {
   return request<{ channel: ChannelSummary; thread: { post: ChannelPost; replies: ChannelMessage[] } }>(
-    `/nests/${nestId}/channels/${encodeURIComponent(name)}?thread=${encodeURIComponent(threadId)}`,
+    `${channelPath(nestId, name)}?thread=${encodeURIComponent(threadId)}`,
   );
+}
+
+/** Only what was written after `since` (a `next_since` cursor), oldest first. */
+export async function getChannelSince(nestId: string, name: string, since: string) {
+  return request<{ channel: ChannelSummary; messages: ChannelNewMessage[]; has_more: boolean; next_since: string }>(
+    `${channelPath(nestId, name)}?since=${encodeURIComponent(since)}`,
+  );
+}
+
+/** Mark the channel read for the caller as of now (`unread` comes back 0). */
+export async function markChannelRead(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/read`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Agent handles the `@` picker offers next to the nest's people. */
+export async function listAgentHandles(nestId: string) {
+  return request<{ agents: AgentHandle[] }>(`/nests/${nestId}/agent-handles`);
 }
 
 // ─── Comments & activity (collaboration) ─────────────────────────────────
@@ -3890,12 +4022,24 @@ export interface MentionItem {
   comment_id: string;
   excerpt: string;
   author: string;
-  /** "<agent>, on behalf of <person>", or the person. */
+  /** The author's display name (their email when they have none). */
+  author_name?: string;
+  /** "<agent>, on behalf of <person>", or the person, by display name. */
   author_label: string;
   agent: string | null;
   /** Set when an agent you own was tagged rather than you. */
   for_agent: string | null;
   mentioned_at: string;
+}
+
+/** Clear the caller's own mention of a thread from My Work. The message and
+ *  the thread are untouched; the row returns only if a later message in that
+ *  thread mentions them again. */
+export async function markMentionDone(threadId: string) {
+  return request<{ done: true; thread_id: string; for_agent: string | null }>(
+    `/me/work/mentions/${encodeURIComponent(threadId)}/done`,
+    { method: "POST", body: "{}" },
+  );
 }
 
 export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {

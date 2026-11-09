@@ -16,6 +16,7 @@ import {
 } from "d3-force";
 import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, ListChecks } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
+import { asDocumentGraph } from "../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
 import { categoryCoverageEmpty } from "../lib/coverage-gaps";
 import { Button } from "./ui/button";
@@ -267,6 +268,8 @@ export function OntologyGraphView({
     let cancelled = false;
     setLoading(true);
     getNestGraph(nestId)
+      // Channels are conversations, not documents: not drawn here while on.
+      .then((g) => asDocumentGraph(nestId, g))
       .then((g) => {
         if (cancelled) return;
         // A different graph: no viewport worth keeping, so let it fit.

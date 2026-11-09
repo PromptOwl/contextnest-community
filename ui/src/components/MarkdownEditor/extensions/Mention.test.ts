@@ -42,4 +42,18 @@ describe("findMentions", () => {
     );
     expect(text.slice(matches[1].start, matches[1].end)).toBe("@(Bea)");
   });
+
+  it("does not take a sentence's full stop into the name (PO-1189, as the server reads it)", () => {
+    const text = "thanks @rita. And @hiren@promptowl.ai.";
+    const [a, b] = findMentions(text);
+    expect(a.name).toBe("rita");
+    expect(text.slice(a.start, a.end)).toBe("@rita");
+    expect(b.name).toBe("hiren@promptowl.ai");
+    expect(text.slice(b.start, b.localEnd)).toBe("@hiren");
+    expect(text.slice(b.localEnd, b.end)).toBe("@promptowl.ai");
+  });
+
+  it("drops a match that is only dots", () => {
+    expect(findMentions("wait @... what")).toEqual([]);
+  });
 });

@@ -65,6 +65,19 @@ export function matchMembers<T extends MentionMember>(
     .slice(0, limit);
 }
 
+/** An agent handle the picker can offer next to people (channels, PO-1189). */
+export interface MentionAgent {
+  handle: string;
+  /** False = a mention sends no wake-up; the agent finds it in its own queue. */
+  wakeable: boolean;
+}
+
+/** Agent handles matching the typed query. Empty query lists every agent. */
+export function matchAgents<T extends MentionAgent>(agents: T[], query: string, limit = 8): T[] {
+  const q = query.trim().toLowerCase();
+  return agents.filter((a) => !q || a.handle.toLowerCase().includes(q)).slice(0, limit);
+}
+
 /**
  * Does an `@name` written in the document resolve to ONE real member? Accepts
  * the full email, its local part, or the display name (`@(Name With Spaces)`).

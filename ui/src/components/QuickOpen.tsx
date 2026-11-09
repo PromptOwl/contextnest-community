@@ -15,7 +15,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Database, FileText, Loader2, Search } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { asDocumentListing, reads } from "../lib/queries";
 import { matchNests } from "../lib/nest-search";
 
 /**
@@ -186,7 +186,8 @@ export function QuickOpen({ nestId, nestName, nestOnly = false, onSelect, onClos
           ]);
           setResults([...nests.slice(0, 4), ...docs.slice(0, DOC_ROWS)]);
         } else {
-          const data = await api.searchNodes(nestId!, q);
+          // Channel nodes are not documents to open (see channel-docs.ts).
+          const data = await asDocumentListing(nestId!, await api.searchNodes(nestId!, q));
           setTotalDocs(data.nodes.length);
           setResults(
             (data.nodes as QuickOpenResult[]).slice(0, DOC_ROWS).map((n) => ({

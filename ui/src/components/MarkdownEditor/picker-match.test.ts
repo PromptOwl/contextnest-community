@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectTrigger, matchMembers, isMemberName } from "./picker-match";
+import { detectTrigger, matchAgents, matchMembers, isMemberName } from "./picker-match";
 
 const members = [
   { email: "ada@example.com" },
@@ -80,5 +80,27 @@ describe("ambiguous names", () => {
 
   it("still offers both in the picker, where the writer chooses", () => {
     expect(matchMembers(johns, "john")).toHaveLength(2);
+  });
+});
+
+describe("AC-UX-07 agent handles in the @ picker", () => {
+  const agents = [
+    { handle: "grok", wakeable: true },
+    { handle: "scout", wakeable: false },
+    { handle: "grok-v2", wakeable: false },
+  ];
+
+  it("lists every agent for a bare @, and narrows by what is typed", () => {
+    expect(matchAgents(agents, "").map((a) => a.handle)).toEqual(["grok", "scout", "grok-v2"]);
+    expect(matchAgents(agents, "GR").map((a) => a.handle)).toEqual(["grok", "grok-v2"]);
+    expect(matchAgents(agents, "nobody")).toEqual([]);
+  });
+
+  it("keeps whether a mention wakes the agent, so the list can say so", () => {
+    expect(matchAgents(agents, "scout")).toEqual([{ handle: "scout", wakeable: false }]);
+  });
+
+  it("caps the list", () => {
+    expect(matchAgents(agents, "", 2)).toHaveLength(2);
   });
 });

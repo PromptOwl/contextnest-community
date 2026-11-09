@@ -27,7 +27,8 @@ export function ArtifactCards({ cards }: { cards?: ArtifactCard[] }) {
           <li key={`${c.link}-${i}`}>
             <a
               href={safeAppPath(c.url) ?? undefined}
-              className="flex max-w-md items-center gap-2 rounded border bg-muted/30 px-2 py-1 text-xs hover:bg-muted"
+              // min-h-8: a finger-sized row on a phone; the compact one beside a pointer.
+              className="flex min-h-8 max-w-md items-center gap-2 rounded border bg-muted/30 px-2 py-1 text-xs hover:bg-muted sm:min-h-0"
             >
               {c.kind === "artifact" ? (
                 <LayoutTemplate className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

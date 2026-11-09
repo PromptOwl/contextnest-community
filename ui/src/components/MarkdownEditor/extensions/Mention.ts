@@ -1,6 +1,7 @@
 import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { trimSentenceDots } from "../../../lib/comment-mentions";
 
 export interface MentionOptions {
   onMentionClick?: (name: string) => void;
@@ -40,11 +41,16 @@ export function findMentions(text: string): MentionMatch[] {
   while ((match = mentionRegex.exec(text)) !== null) {
     const fullMatch = match[0];
     const isParenName = match[1] !== undefined;
-    const name = (match[1] ?? match[2] ?? "") as string;
+    // A sentence's full stop is not part of a bare name ("thanks @rita."
+    // names rita), the same reading as the server's (src/shared/mentions.ts).
+    const bare = (match[2] ?? "") as string;
+    const name = isParenName ? (match[1] as string) : trimSentenceDots(bare);
+    const dots = isParenName ? 0 : bare.length - name.length;
+    if (!name) continue;
     const leadingSpace =
       fullMatch.startsWith(" ") || fullMatch.startsWith("\n") ? 1 : 0;
     const start = match.index + leadingSpace;
-    const end = start + fullMatch.length - leadingSpace;
+    const end = start + fullMatch.length - leadingSpace - dots;
     const atIndex = isParenName ? -1 : name.indexOf("@");
     const localEnd = atIndex > 0 ? start + 1 + atIndex : end;
     matches.push({ start, end, localEnd, name });
