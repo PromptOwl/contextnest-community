@@ -24,6 +24,7 @@ import { getDb } from "../db/client.js";
 import { engineCache } from "../nodes/engine.js";
 import { hashContent } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
+import { isChannelDoc } from "../channels/channel-node.js";
 import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
 import { pickHomeNode } from "../shared/reader-home.js";
 import { describe, renderMarkdown, rewriteDocumentLinks, slugifyHeading, type Heading } from "./markdown.js";
@@ -331,7 +332,11 @@ async function inputsFor(nest: SiteNest): Promise<Inputs> {
   const { storage } = await engineCache.get(nest.id);
   // A deleted document can keep its approved_versions row; the live listing
   // is what says it still exists.
-  const live = new Set((await storage.discoverDocuments()).map((d: { id: string }) => d.id));
+  // A channel (agent team stream) is members-only: it is never a page of the
+  // public site, whatever its approval state (PO-1190, AC-AX-10).
+  const live = new Set(
+    (await storage.discoverDocuments()).filter((d) => !isChannelDoc(d)).map((d: { id: string }) => d.id),
+  );
   const row = await getSiteRow(nest.id);
   const paths = await sitePaths(nest.id);
   const definitions = (await db.all(

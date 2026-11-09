@@ -3,8 +3,10 @@
  * (PO-1181, agent team stream S3). Nest owner/admin only, on every method:
  * a target decides where this nest's mention events go.
  *
- *   GET    /agent-webhooks            → { webhooks: [{ handle, target, … }] }  (target = host#hash, never the URL)
- *   PUT    /agent-webhooks/:handle { url, rotate? } → { webhook, secret? }     (secret only when minted)
+ *   GET    /agent-webhooks            → { webhooks: [{ handle, target, …, last_delivery }] }  (target = host#hash, never the URL)
+ *   PUT    /agent-webhooks/:handle { url?, rotate? } → { webhook, secret? }    (secret only when minted;
+ *                                       url may be left out for a handle that has one — rotate from the row)
+ *   POST   /agent-webhooks/:handle/test → { ok, delivery, webhook }            (one signed agent.test POST; 429 past the limit)
  *   DELETE /agent-webhooks/:handle    → { deleted: true }
  *
  * The nest middleware (app.ts) already holds these at the admin tier and keeps
@@ -21,6 +23,7 @@ import {
   deleteAgentWebhook,
   listAgentWebhooks,
   putAgentWebhook,
+  testAgentWebhook,
 } from "./agent-webhooks.js";
 
 export const agentWebhookRoutes = new Hono<AuthEnv>();
@@ -46,10 +49,15 @@ agentWebhookRoutes.put("/:handle", async (c) => {
     body = null;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new ValidationError("request body must be a JSON object with a url");
+    throw new ValidationError("request body must be a JSON object: { url } to save a target, { rotate: true } for a new secret");
   }
   const b = body as Record<string, unknown>;
   return c.json(await putAgentWebhook(nestId, c.req.param("handle"), { url: b.url, rotate: b.rotate }, email));
+});
+
+agentWebhookRoutes.post("/:handle/test", async (c) => {
+  const { nestId, email } = await assertNestAdmin(c);
+  return c.json(await testAgentWebhook(nestId, c.req.param("handle"), email));
 });
 
 agentWebhookRoutes.delete("/:handle", async (c) => {

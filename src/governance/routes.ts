@@ -6,7 +6,10 @@
  * - governanceNodeRoutes: mounted at /nests/:nestId/nodes BEFORE nodeRoutes catch-all
  */
 
-import { channelPostRefusal } from "../channels/channel-service.js";
+import { isChannelId, isChannelNode } from "../channels/channel-node.js";
+
+const CHANNEL_USES_THREADS =
+  "A channel takes messages as threads: POST …/nodes/<channel id>/annotations (reply: …/annotations/<thread>/comments), or MCP context_comment.";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -53,6 +56,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
+  filterAccessible,
   resolveCallerEmail,
   canRequestDeletion,
 } from "./access-guard.js";
@@ -668,8 +672,22 @@ governanceRoutes.post("/external-edits/scan", async (c) => {
 governanceRoutes.get("/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const limit = parseLimit(c.req.query("limit"));
-  const activity = await comments.getActivity({ nestId, limit });
-  return c.json({ activity });
+  const all = await comments.getActivity({ nestId, limit });
+  // Only what the caller can read: an entry names a node, who touched it and
+  // an excerpt, so a visibility-only reader gets approved documents' entries
+  // and never a channel's, and a share grantee only their shared ones.
+  const userId = c.get("userId");
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        await resolveCallerEmail(userId),
+        [...new Set(all.map((e) => e.nodeId))].map((id) => ({ id })),
+      )
+    ).map((n) => n.id),
+  );
+  return c.json({ activity: all.filter((e) => readable.has(e.nodeId)) });
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -886,6 +904,12 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const status = c.req.query("status") as "open" | "resolved" | undefined;
+  // A node the caller can't read answers like one with no comments (which is
+  // also what a node that doesn't exist answers).
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ comments: [] });
+  }
   const list = await comments.listComments(nestId, nodeId, {
     status: status === "open" || status === "resolved" ? status : undefined,
   });
@@ -906,10 +930,14 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
   }
   const author = await getUserEmail(c);
-  // A channel (PO-1179) takes messages from its nest's writers only — in this
-  // standalone store as much as in the thread store its timeline reads.
-  const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), author);
-  if (refusal) return c.json({ error: refusal.error }, refusal.status);
+  // A channel's messages are its threads, under the channel's own access
+  // rule; this older flat store takes nothing for a channel, from anyone
+  // (PO-1190). Someone who can't read under nodes/channels/ gets one answer
+  // whether or not a channel is there, so this is no way to list them.
+  if (isChannelId(nodeId)) {
+    if (!(await canReadNode(nestId, nodeId, c.get("userId"), author))) return c.json({ error: "Not found" }, 404);
+    if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
+  }
   const body = await c.req.json<{
     body?: string;
     version?: number;
@@ -957,8 +985,10 @@ governanceNodeRoutes.post(
     const nodeId = c.req.param("nodeId")!;
     const commentId = c.req.param("commentId")!;
     const resolvedBy = await getUserEmail(c);
-    const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), resolvedBy);
-    if (refusal) return c.json({ error: refusal.error }, refusal.status);
+    if (isChannelId(nodeId)) {
+      if (!(await canReadNode(nestId, nodeId, c.get("userId"), resolvedBy))) return c.json({ error: "Not found" }, 404);
+      if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
+    }
     try {
       const comment = await comments.resolveComment({
         nestId,
@@ -985,6 +1015,10 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ activity: [] });
+  }
   const activity = await comments.getActivity({ nestId, nodeId, limit });
   return c.json({ activity });
 });

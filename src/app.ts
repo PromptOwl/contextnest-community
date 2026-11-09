@@ -12,11 +12,13 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
-import { channelRoutes } from "./channels/routes.js";
+import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
-import { buildMyWork, parseMyWorkPaging } from "./me/my-work.js";
+import { buildMyWork, parseMyWorkPaging, parseMyWorkSections } from "./me/my-work.js";
+import { actingAgentHandle, markMentionDone } from "./mentions/mention-index.js";
+import { readClient } from "./shared/client-metadata.js";
 import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
@@ -2370,13 +2372,46 @@ export function createApp(): Hono<AuthEnv> {
     // The whole inbox lives in me/my-work.ts so MCP context_my_work returns
     // exactly this (PO-1180). limit/offset page the reviews; mentions_limit /
     // mentions_offset page the Mentions section.
+    // `sections` (comma-separated) returns only those sections, and an
+    // explicit `limit` caps every section (PO-1190). A credential that names
+    // an agent (its key label, or a declared client.agent) also sees the
+    // threads that tag that agent — still only where the person can read.
     const paging = parseMyWorkPaging({
       limit: c.req.query("limit"),
       offset: c.req.query("offset"),
       mentions_limit: c.req.query("mentions_limit"),
       mentions_offset: c.req.query("mentions_offset"),
     });
-    return c.json(await buildMyWork({ userId: c.get("userId"), ...paging }));
+    return c.json(
+      await buildMyWork({
+        userId: c.get("userId"),
+        ...paging,
+        sections: parseMyWorkSections(c.req.query("sections")),
+        actingAs: actingAgentHandle(readClient(c)),
+      }),
+    );
+  });
+
+  // POST /me/work/mentions/:threadId/done { for_agent? } — "mark done"
+  // (PO-1189, AC-UX-09). The caller's own mark: it hides their mention of
+  // that thread from My Work until a later message there names them again.
+  // 404 unless they have an open mention in it. MCP twin:
+  // context_resolve_comment { thread, mention_done: true }.
+  app.post("/me/work/mentions/:threadId/done", async (c) => {
+    const userId = c.get("userId");
+    const body = (await c.req.json().catch(() => ({}))) as { for_agent?: unknown } | null;
+    const nestNames = new Map<string, string>();
+    for (const n of await listVisibleNests(userId)) nestNames.set(n.id, n.name ?? n.id);
+    return c.json(
+      await markMentionDone({
+        userId,
+        email: await resolveCallerEmail(userId),
+        nestNames,
+        threadId: c.req.param("threadId"),
+        forAgent: body && typeof body === "object" ? body.for_agent : undefined,
+        actingAs: actingAgentHandle(readClient(c)),
+      }),
+    );
   });
 
   // GET /me/drafts — the documents YOU left unsubmitted, across every nest you
@@ -2793,7 +2828,7 @@ export function createApp(): Hono<AuthEnv> {
     // Experimental agent team stream channels (PO-1179): same rule as pins —
     // while the switch is off the routes do not exist, for anyone. Exact
     // resource segment; channel NODES live under /nodes and stay ordinary.
-    if (parts[1] === "channels" && !config.EXPERIMENTAL_AGENT_STREAM) {
+    if ((parts[1] === "channels" || parts[1] === "agent-handles") && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
 
@@ -2941,7 +2976,8 @@ export function createApp(): Hono<AuthEnv> {
         parts[1] === "pins" ||
         // Channels (PO-1179) are a collaboration view over comment threads,
         // licensed like /comments and /feed even on GET. Exact segment.
-        parts[1] === "channels";
+        parts[1] === "channels" ||
+        parts[1] === "agent-handles";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -3205,6 +3241,12 @@ export function createApp(): Hono<AuthEnv> {
     const isAnnotationAction =
       /\/annotations$/.test(path) ||
       /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
+    // Marking a channel read (PO-1189) is the caller's own bookmark, like a
+    // pin: anyone who can read the channel may, a read-only member most of
+    // all. The handler checks channel access. Exact segments.
+    //   POST /nests/:id/channels/:name/read
+    const isChannelReadMark =
+      parts.length === 4 && parts[1] === "channels" && parts[3] === "read" && c.req.method === "POST";
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3348,6 +3390,7 @@ export function createApp(): Hono<AuthEnv> {
       // steward may hold only read collaborator access.
       !isDocPinsPath &&
       !isAnnotationAction &&
+      !isChannelReadMark &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3697,6 +3740,9 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
   nestsApp.route("/:nestId/channels", channelRoutes);
+  // The agent handles a composer can offer (PO-1189): members only, checked
+  // in the handler.
+  nestsApp.route("/:nestId/agent-handles", agentHandleRoutes);
   // Agent team stream S3 (PO-1181): artifact cards, agent wake-up targets,
   // promote a thread to a node. Not behind the channels switch — cards,
   // wake-up and promote work on document comment threads too.

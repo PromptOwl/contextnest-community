@@ -13,6 +13,10 @@
  *
  * Moved out of app.ts unchanged except for the mentions section, the
  * mention-notification dedupe, and the optional single-nest scope.
+ *
+ * PO-1190 (AC-AX-01/02): `sections` returns only the sections asked for (and
+ * skips the work behind the rest), an explicit `limit` caps every section,
+ * and `actingAs` adds the threads that tag the agent this call is acting as.
  */
 import { listVisibleNests, nestAllowsSelfApprove } from "../nests/service.js";
 import { getReviewQueue, listDeletionRequests } from "../governance/review-service.js";
@@ -22,6 +26,28 @@ import { listNotifications } from "../governance/notify-service.js";
 import { canDecideAccessRequests, listAccessRequests } from "../governance/access-request-service.js";
 import { listAssignedTo } from "../nodes/assigned-service.js";
 import { listOpenMentions, mentionedNodeKeys } from "../mentions/mention-index.js";
+import { ValidationError } from "../shared/errors.js";
+
+/** The sections of My Work, in the order an agent reads them. */
+export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications"] as const;
+export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
+
+/** `sections` from a query string ("mentions,items") or an MCP argument
+ *  (["mentions", "items"]); null when none was given. */
+export function parseMyWorkSections(raw: unknown): MyWorkSection[] | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const list = Array.isArray(raw) ? raw : String(raw).split(",");
+  const out: MyWorkSection[] = [];
+  for (const item of list) {
+    const s = String(item ?? "").trim().toLowerCase();
+    if (!s) continue;
+    if (!(MY_WORK_SECTIONS as readonly string[]).includes(s)) {
+      throw new ValidationError(`sections takes any of: ${MY_WORK_SECTIONS.join(", ")}.`);
+    }
+    if (!out.includes(s as MyWorkSection)) out.push(s as MyWorkSection);
+  }
+  return out.length ? out : null;
+}
 
 /** Default and largest page of mentions. */
 export const MENTIONS_PAGE_DEFAULT = 50;
@@ -78,7 +104,9 @@ export function parseMyWorkPaging(q: {
     MENTIONS_PAGE_MAX,
   );
   const mentionsOffset = Math.min(Math.max(Math.floor(Number(q.mentions_offset) || 0), 0), MAX_MENTIONS_OFFSET);
-  return { limit, offset, mentionsLimit, mentionsOffset };
+  // An explicit limit caps every section, not only the review page (AC-AX-02).
+  const sectionLimit = q.limit != null && q.limit !== "" && Number(q.limit) > 0 ? limit : null;
+  return { limit, offset, mentionsLimit, mentionsOffset, sectionLimit };
 }
 
 export async function buildMyWork(params: {
@@ -89,8 +117,18 @@ export async function buildMyWork(params: {
   mentionsOffset: number;
   /** Restrict every section to this one nest (a nest-scoped credential). */
   onlyNestId?: string | null;
+  /** Return only these sections (and skip the work behind the others). */
+  sections?: MyWorkSection[] | null;
+  /** Cap every section at this many rows (an explicit `limit`). */
+  sectionLimit?: number | null;
+  /** The agent handle this call is acting as (mention-index actingAgentHandle). */
+  actingAs?: string | null;
 }) {
   const { userId, limit, offset, mentionsLimit, mentionsOffset, onlyNestId } = params;
+  const sections = params.sections?.length ? params.sections : null;
+  const want = (s: MyWorkSection) => !sections || sections.includes(s);
+  // Reviews, deletion flags and access requests fill `items` and `waiting`.
+  const wantQueue = want("items") || want("waiting");
   const me = await resolveCallerEmail(userId);
   const nestName = new Map<string, string>();
   for (const n of await listVisibleNests(userId)) {
@@ -106,12 +144,14 @@ export async function buildMyWork(params: {
   // bounds. Scoping to the caller's visible nests up front also keeps
   // getReviewQueue from title-mapping (= filesystem-scanning) nests they
   // can't see.
-  const { requests, total } = await getReviewQueue({
-    status: "pending",
-    nestIds: [...nestName.keys()],
-    limit,
-    offset,
-  });
+  const { requests, total } = wantQueue
+    ? await getReviewQueue({
+        status: "pending",
+        nestIds: [...nestName.keys()],
+        limit,
+        offset,
+      })
+    : { requests: [], total: 0 };
   const toItem = (r: (typeof requests)[number]) => ({
     type: "review" as const,
     nest_id: r.nestId,
@@ -126,10 +166,12 @@ export async function buildMyWork(params: {
   });
   // Deletion flags ride the same inbox, as a second item type: `reason` and
   // `request_id` are the extra fields resolving one needs.
-  const deletions = await listDeletionRequests({
-    nestIds: [...nestName.keys()],
-    status: "pending",
-  });
+  const deletions = wantQueue
+    ? await listDeletionRequests({
+        nestIds: [...nestName.keys()],
+        status: "pending",
+      })
+    : [];
   const toDeletionItem = (r: (typeof deletions)[number]) => ({
     type: "deletion" as const,
     nest_id: r.nestId,
@@ -154,12 +196,12 @@ export async function buildMyWork(params: {
   // Decider nests first, so only rows this caller can act on (or filed) load.
   const deciderNestIds = (
     await Promise.all(
-      [...nestName.keys()].map(async (id) =>
+      (wantQueue ? [...nestName.keys()] : []).map(async (id) =>
         (await canDecideAccessRequests(id, userId)) ? id : null,
       ),
     )
   ).filter((id): id is string => id !== null);
-  const [decidable, myAccessAsks] = await Promise.all([
+  const [decidable, myAccessAsks] = !wantQueue ? [[], []] : await Promise.all([
     listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
     listAccessRequests({
       nestIds: [...nestName.keys()],
@@ -207,7 +249,7 @@ export async function buildMyWork(params: {
   const others = requests.filter((r) => r.requestedBy !== me);
   const nestApprove = new Map<string, boolean>(
     await Promise.all(
-      [...nestName.keys()].map(
+      (wantQueue ? [...nestName.keys()] : []).map(
         async (nestId): Promise<[string, boolean]> => [
           nestId,
           await canApproveInNest(nestId, me),
@@ -259,11 +301,13 @@ export async function buildMyWork(params: {
   // inbox keeps listing every unread row, as it always has. A comment
   // "mentioned you" row is dropped when the Mentions section below carries
   // that same mention (PO-1180) — one event, counted once in the badge.
-  const mentionedNodes = await mentionedNodeKeys(userId, [...nestName.keys()]).catch((err) => {
-    console.error("[me/work] mention keys failed", err);
-    return new Set<string>();
-  });
-  const notifications = (await listNotifications(me, { unreadOnly: true, limit: 50 })).filter(
+  const mentionedNodes = !want("notifications")
+    ? new Set<string>()
+    : await mentionedNodeKeys(userId, [...nestName.keys()]).catch((err) => {
+        console.error("[me/work] mention keys failed", err);
+        return new Set<string>();
+      });
+  const notifications = (want("notifications") ? await listNotifications(me, { unreadOnly: true, limit: 50 }) : []).filter(
     (n: { nest_id: string; kind: string; node_id?: string | null; subject_id?: string | null }) =>
       (!onlyNestId || n.nest_id === onlyNestId) &&
       !(n.kind === "mention" && mentionedNodes.has(`${n.nest_id}\u0000${n.node_id ?? n.subject_id ?? ""}`)),
@@ -291,7 +335,7 @@ export async function buildMyWork(params: {
     { total: approvableReviewTotal },
     { total: myReviewsElsewhereTotal },
     { total: myReviewsTotal },
-  ] = await Promise.all([
+  ] = !wantQueue ? [{ total: 0 }, { total: 0 }, { total: 0 }] : await Promise.all([
     getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
     getReviewQueue({
       status: "pending",
@@ -316,18 +360,22 @@ export async function buildMyWork(params: {
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
   // Board cards assigned to me (open ones), across every nest I can see.
   // Best-effort: a failure here must not take the reviews inbox down with it.
-  const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
-    console.error("[me/work] assigned list failed", err);
-    return [];
-  });
+  const assigned = !want("assigned")
+    ? []
+    : await listAssignedTo(me, userId, nestName).catch((err) => {
+        console.error("[me/work] assigned list failed", err);
+        return [];
+      });
   // Open threads that @mention the caller and wait on their answer
   // (PO-1180), across the same visible nests, access-checked per node. Paged
   // on their own cursor; the whole filtered list is counted, so the badge
   // and mentions_pagination.total are exactly what the pages can show.
-  const allMentions = await listOpenMentions({ userId, email: me, nestNames: nestName }).catch((err) => {
-    console.error("[me/work] mentions list failed", err);
-    return [];
-  });
+  const allMentions = !want("mentions")
+    ? []
+    : await listOpenMentions({ userId, email: me, nestNames: nestName, actingAs: params.actingAs ?? null }).catch((err) => {
+        console.error("[me/work] mentions list failed", err);
+        return [];
+      });
   const mentions = allMentions.slice(mentionsOffset, mentionsOffset + mentionsLimit);
   // The badge's share (CU-wdqcq0658p): the same total minus what waits on
   // others — the caller's own pending reviews and the requests they filed.
@@ -336,11 +384,12 @@ export async function buildMyWork(params: {
     reviewTotal + requestsShown - myReviewsTotal -
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
     allMentions.length;
-  return {
-    items,
-    waiting,
-    notifications,
-    assigned,
+  const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
+  const full = {
+    items: cap(items),
+    waiting: cap(waiting),
+    notifications: cap(notifications),
+    assigned: cap(assigned),
     mentions,
     waiting_on_me_total: waitingOnMeTotal,
     pagination: {
@@ -356,6 +405,14 @@ export async function buildMyWork(params: {
       has_more: mentionsOffset + mentions.length < allMentions.length,
     },
   };
+  if (!sections) return full as Partial<typeof full>;
+  // Only what was asked for. The totals span sections, so they ride only on
+  // the full response; each asked section keeps its own paging.
+  const out: Partial<typeof full> = {};
+  for (const s of sections) (out as Record<string, unknown>)[s] = full[s];
+  if (wantQueue) out.pagination = full.pagination;
+  if (want("mentions")) out.mentions_pagination = full.mentions_pagination;
+  return out;
 }
 
 export type MyWork = Awaited<ReturnType<typeof buildMyWork>>;

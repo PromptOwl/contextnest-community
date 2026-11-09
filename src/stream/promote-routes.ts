@@ -1,6 +1,7 @@
 /**
- * POST /nests/:nestId/threads/:threadId/promote { kind?: "decision" | "task", title?, folder? }
- *   → 201 { node, source_thread, reply }
+ * POST /nests/:nestId/threads/:threadId/promote { kind?: "decision" | "task", title?, summary?, folder? }
+ *   → 201 { node, source_thread, reply, existing: false }
+ *   → 200 { node, source_thread, reply, existing: true }   (this thread already has a node of that kind)
  *
  * Promote a comment thread — a channel post or a document comment thread — to
  * a decision or task node (PO-1181; stream/promote.ts has the rules). The
@@ -15,6 +16,7 @@ import { resolveCallerEmail } from "../governance/access-guard.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { ValidationError } from "../shared/errors.js";
 import { promoteThread } from "./promote.js";
+import { messageClient } from "../channels/message-meta.js";
 
 export const promoteRoutes = new Hono<AuthEnv>();
 
@@ -30,14 +32,16 @@ promoteRoutes.post("/:threadId/promote", async (c) => {
   }
   const b = body as Record<string, unknown>;
   const userId = c.get("userId") as string;
+  const client = attributeRequest(c, b.client);
   const result = await promoteThread(
     {
       nestId: c.req.param("nestId") as string,
       userId,
       userEmail: await resolveCallerEmail(userId),
-      client: attributeRequest(c, b.client),
+      client,
+      replyClient: messageClient(client, b.client, c.get("apiKeyLabel")),
     },
-    { thread: c.req.param("threadId"), kind: b.kind, title: b.title, folder: b.folder },
+    { thread: c.req.param("threadId"), kind: b.kind, title: b.title, summary: b.summary, folder: b.folder },
   );
-  return c.json(result, 201);
+  return c.json(result, result.existing ? 200 : 201);
 });

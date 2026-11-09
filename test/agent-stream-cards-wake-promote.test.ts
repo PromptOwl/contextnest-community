@@ -107,6 +107,9 @@ beforeAll(async () => {
   app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
   wake = await import("../src/stream/agent-wake.js");
   mentions = await import("../src/mentions/agent-mentions.js");
+  // Retries (S4b, AC-AX-08) are pinned in agent-stream-s4b-agents.test.ts.
+  // Off here, so a wake-up no test captured isn't retried into a later one.
+  wake.setAgentWakeBackoff([]);
   owner = await registerUser(app, OWNER_EMAIL, "Owner");
   alice = await registerUser(app, "alice@stream.test", "Alice Example");
   bob = await registerUser(app, "bob@stream.test", "Bob Builder");
@@ -286,8 +289,12 @@ describe("AC-ST-02: an @mention of an agent with a webhook sends exactly one sig
       message_id: t.comments[0].id,
       mentioned: "grok",
     });
-    // The message text is NOT sent: the agent reads it with its own key.
-    expect(s.body).not.toContain("release notes");
+    // Since S4b (AC-AX-07) the payload also names the author, says how to
+    // read the thread, and carries an excerpt — to this nest's own target only
+    // (SEC-AX-07 in agent-stream-s4b-agents.test.ts pins the other case).
+    expect(payload.author).toBe("Alice Example");
+    expect(payload.read).toEqual({ tool: "context_channel_read", arguments: { channel: "ops", thread: t.id } });
+    expect(payload.excerpt).toBe("@grok can you draft the release notes?");
     const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(s.headers["x-contextnest-signature"]);
     expect(m, s.headers["x-contextnest-signature"]).not.toBeNull();
     expect(m![2]).toBe(sign(secret, m![1], s.body));

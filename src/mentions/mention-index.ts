@@ -32,9 +32,11 @@ import { listNestPeople, findDirectoryPerson } from "../nests/people-service.js"
 import { MAX_MENTION_RECIPIENTS, extractMentions, resolveMention } from "../shared/mentions.js";
 import { canOpenNode } from "../governance/mention-notify.js";
 import { deserializeClient } from "../shared/client-metadata.js";
-import { isChannelId, CHANNEL_TAG } from "../channels/channel-service.js";
-import { resolveActorLabel } from "../channels/actor-label.js";
+import { isChannelId, CHANNEL_TAG } from "../channels/channel-node.js";
+import { displayNames, namedActor, normHandle, writerHandlesOf } from "../channels/message-meta.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { nowMsExpr } from "../db/sql.js";
+import { NotFoundError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { agentHandlesOwnedBy } from "./agent-mentions.js";
 
@@ -166,14 +168,16 @@ export interface MentionItem {
   /** The message that carries the (latest unanswered) mention. */
   comment_id: string;
   excerpt: string;
-  /** The person the message is attributed to. */
+  /** The person the message is attributed to (their email). */
   author: string;
-  /** "<agent>, on behalf of <person>" or the person (resolveActorLabel). */
+  /** That person's display name (their email when they have none). */
+  author_name: string;
+  /** "<agent>, on behalf of <person>" or the person, by display name. */
   author_label: string;
   /** The agent that wrote it on the author's behalf, when one did. */
   agent: string | null;
-  /** Null when the caller was named; the agent's handle when one of the
-   *  caller's agents was (agent-mentions.ts). */
+  /** Null when the caller was named; the agent's handle when an agent the
+   *  caller owns (agent-mentions.ts) or is acting as (`actingAs`) was. */
   for_agent: string | null;
   mentioned_at: string;
 }
@@ -213,27 +217,58 @@ function isChannelRow(r: Row): boolean {
   }
 }
 
+/** A handle as an agent may be tagged; anything else is not an agent label. */
+const AGENT_LABEL_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
 /**
- * Every open thread that @mentions the caller (or an agent the caller owns)
- * and that the caller hasn't answered since, newest mention first, one item
- * per thread — in the given nests only, and only on nodes the caller can open
- * now. Returns the whole filtered list; the caller pages it, so `total` and
- * the badge count exactly what can be shown (AC-MW-03/04).
+ * The agent handle a call is acting as: the caller-declared `client.agent`,
+ * else the API key's label (what shared/client-metadata.ts derives), when it
+ * has the shape of a handle. Null for a person in the browser.
+ *
+ * A LABEL, never an identity (AC-AX-01): it only widens which handle rows
+ * match, and every row is still limited to nests the caller can see and nodes
+ * the caller can open. Claiming "grok" shows you the @grok threads you could
+ * already read, nothing else.
+ */
+export function actingAgentHandle(client: { agent?: unknown } | null | undefined): string | null {
+  const h = normHandle(client?.agent);
+  return AGENT_LABEL_RE.test(h) ? h : null;
+}
+
+const key = (nestId: string, nodeId: string) => `${nestId}\u0000${nodeId}`;
+
+/**
+ * Every open thread that @mentions the caller (or an agent the caller owns,
+ * or the agent this call is acting as) and that hasn't been answered or
+ * marked done since, newest mention first, one item per thread and subject —
+ * in the given nests only, and only on nodes the caller can open now. Returns
+ * the whole filtered list; the caller pages it, so `total` and the badge
+ * count exactly what can be shown (AC-MW-03/04).
+ *
+ * "Answered" for the person (and for an owned agent): a later message in the
+ * thread under their login. For the agent the call acts as (AC-AX-01): a
+ * later message under this login written AS that agent — so the person
+ * behind the key tagging their own agent still lands in the agent's queue,
+ * and someone else claiming the label can't clear it.
  */
 export async function listOpenMentions(params: {
   userId: string;
   email: string;
   /** Nest id → display name: the nests the caller may see items from. */
   nestNames: Map<string, string>;
+  /** The agent handle this call is acting as (actingAgentHandle), if any. */
+  actingAs?: string | null;
 }): Promise<MentionItem[]> {
   const { userId, email, nestNames } = params;
   const nestIds = [...nestNames.keys()];
   if (nestIds.length === 0 || !userId) return [];
   const me = email.toLowerCase();
-  const handles = await agentHandlesOwnedBy({ userId, email });
-  const handleClause = handles.length
-    ? ` OR (m.mentioned_user_id IS NULL AND m.handle IN (${handles.map(() => "?").join(", ")}))`
+  const acting = params.actingAs ? normHandle(params.actingAs) : "";
+  const owned = (await agentHandlesOwnedBy({ userId, email })).filter((h) => h !== acting);
+  const ownedClause = owned.length
+    ? ` OR (m.mentioned_user_id IS NULL AND m.handle IN (${owned.map(() => "?").join(", ")}))`
     : "";
+  // `acting` is matched even when empty: no handle is the empty string.
   const rows = (await getDb().all(
     `SELECT m.nest_id, m.node_id, m.thread_id, m.comment_id, m.mentioned_user_id, m.handle,
             c.author, m.created_at, c.body, c.client_json, ni.title, ni.frontmatter_json
@@ -241,40 +276,76 @@ export async function listOpenMentions(params: {
        JOIN annotation_threads t ON t.id = m.thread_id
        JOIN annotation_comments c ON c.id = m.comment_id
        LEFT JOIN node_index ni ON ni.nest_id = m.nest_id AND ni.node_id = m.node_id
+       LEFT JOIN stream_marks d
+         ON d.user_id = ? AND d.nest_id = m.nest_id AND d.kind = 'mention' AND d.ref = m.thread_id
+        AND d.subject = (CASE WHEN m.mentioned_user_id IS NULL THEN m.handle ELSE '' END)
       WHERE m.nest_id IN (${nestIds.map(() => "?").join(", ")})
         AND t.status = 'open'
         AND t.nest_id = m.nest_id
-        AND (m.mentioned_user_id = ?${handleClause})
-        AND LOWER(m.author) <> ?
-        AND NOT EXISTS (
-          SELECT 1 FROM annotation_comments r
-           WHERE r.thread_id = m.thread_id
-             AND LOWER(r.author) = ?
-             AND r.id <> m.comment_id
-             AND r.created_at >= c.created_at)
+        AND (d.at IS NULL OR d.at < m.created_at)
+        AND (
+          (m.mentioned_user_id IS NULL AND m.handle = ?)
+          OR ((m.mentioned_user_id = ?${ownedClause})
+              AND LOWER(m.author) <> ?
+              AND NOT EXISTS (
+                SELECT 1 FROM annotation_comments r
+                 WHERE r.thread_id = m.thread_id
+                   AND LOWER(r.author) = ?
+                   AND r.id <> m.comment_id
+                   AND r.created_at >= c.created_at))
+        )
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT ${MAX_SCAN}`,
-    [...nestIds, userId, ...handles, me, me],
+    [userId, ...nestIds, acting, userId, ...owned, me, me],
   )) as Row[];
 
-  // One item per thread: the newest unanswered mention in it.
+  // The acting agent's rows: drop what this agent wrote itself, and what it
+  // has answered since (a later message under this login, as that agent).
+  const actingRows = rows.filter((r) => !r.mentioned_user_id && r.handle === acting);
+  const answeredAt = new Map<string, string>();
+  if (actingRows.length) {
+    const threadIds = [...new Set(actingRows.map((r) => r.thread_id))];
+    for (let i = 0; i < threadIds.length; i += 200) {
+      const chunk = threadIds.slice(i, i + 200);
+      const mine = (await getDb().all(
+        `SELECT thread_id, created_at, client_json FROM annotation_comments
+          WHERE thread_id IN (${chunk.map(() => "?").join(", ")}) AND LOWER(author) = ? AND client_json IS NOT NULL
+          ORDER BY created_at ASC`,
+        [...chunk, me],
+      )) as Array<{ thread_id: string; created_at: string; client_json: string | null }>;
+      // Keep the LATEST message written as the agent, per thread.
+      for (const c of mine) if (writerHandlesOf(c.client_json).includes(acting)) answeredAt.set(c.thread_id, c.created_at);
+    }
+  }
+  const open = rows.filter((r) => {
+    if (r.mentioned_user_id || r.handle !== acting) return true;
+    if (r.author.toLowerCase() === me && writerHandlesOf(r.client_json).includes(acting)) return false;
+    const answered = answeredAt.get(r.thread_id);
+    return !answered || answered < r.created_at;
+  });
+
+  // One item per thread and subject: the newest unanswered mention in it.
   const perThread = new Map<string, Row>();
-  for (const r of rows) if (!perThread.has(r.thread_id)) perThread.set(r.thread_id, r);
+  for (const r of open) {
+    const k = `${r.thread_id}\u0000${r.mentioned_user_id ? "" : r.handle}`;
+    if (!perThread.has(k)) perThread.set(k, r);
+  }
 
   // Access, per distinct node, at read time — losing read on a nest or a
   // document takes its mentions (and their count) away at once.
   const allowed = new Map<string, boolean>();
   await Promise.all(
-    [...new Set([...perThread.values()].map((r) => `${r.nest_id}\u0000${r.node_id}`))].map(async (key) => {
-      const [nestId, nodeId] = key.split("\u0000");
-      allowed.set(key, await canOpenNode(nestId, nodeId, userId, email).catch(() => false));
+    [...new Set([...perThread.values()].map((r) => key(r.nest_id, r.node_id)))].map(async (k) => {
+      const [nestId, nodeId] = k.split("\u0000");
+      allowed.set(k, await canOpenNode(nestId, nodeId, userId, email).catch(() => false));
     }),
   );
 
+  const shown = [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)));
+  const names = await displayNames(shown.map((r) => r.author));
   const out: MentionItem[] = [];
-  for (const r of perThread.values()) {
-    if (!allowed.get(`${r.nest_id}\u0000${r.node_id}`)) continue;
-    const actor = await resolveActorLabel({ email: r.author, client: deserializeClient(r.client_json) });
+  for (const r of shown) {
+    const { actor, name } = await namedActor(r.author, deserializeClient(r.client_json), names);
     const channel = config.EXPERIMENTAL_AGENT_STREAM && isChannelRow(r) ? r.node_id.split("/").pop()! : null;
     out.push({
       type: "mention",
@@ -288,6 +359,7 @@ export async function listOpenMentions(params: {
       comment_id: r.comment_id,
       excerpt: excerptOf(r.body),
       author: r.author,
+      author_name: name,
       author_label: actor.label,
       agent: actor.agent,
       for_agent: r.mentioned_user_id ? null : r.handle,
@@ -295,6 +367,43 @@ export async function listOpenMentions(params: {
     });
   }
   return out;
+}
+
+/**
+ * "Mark done" (PO-1189, AC-UX-09): the caller is finished with their mention
+ * in this thread. It leaves their My Work and badge until a LATER message in
+ * the thread names them again; the message, the thread and everyone else's
+ * view are untouched.
+ *
+ * The mark is the caller's own row, so it can only ever hide the caller's own
+ * mention. It is still refused (NotFound, the same answer for every reason)
+ * unless the caller has an open mention in that thread right now — so a
+ * thread id is no existence oracle, and nobody stores marks for threads they
+ * were never tagged in or for an agent they don't act for.
+ */
+export async function markMentionDone(params: {
+  userId: string;
+  email: string;
+  nestNames: Map<string, string>;
+  threadId: unknown;
+  /** Clear the mention of this agent handle instead of the caller's own. */
+  forAgent?: unknown;
+  actingAs?: string | null;
+}): Promise<{ done: true; thread_id: string; for_agent: string | null }> {
+  const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+  const forAgent = params.forAgent === undefined || params.forAgent === null || params.forAgent === "" ? null : normHandle(params.forAgent);
+  const mine = threadId
+    ? (await listOpenMentions(params)).find((m) => m.thread_id === threadId && m.for_agent === forAgent)
+    : undefined;
+  if (!mine) throw new NotFoundError("No open mention of yours in that thread");
+  const db = getDb();
+  await db.run(
+    `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at)
+     VALUES (?, ?, 'mention', ?, ?, ${nowMsExpr(db)})
+     ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
+    [params.userId, mine.nest_id, threadId, forAgent ?? ""],
+  );
+  return { done: true, thread_id: threadId, for_agent: forAgent };
 }
 
 /**
