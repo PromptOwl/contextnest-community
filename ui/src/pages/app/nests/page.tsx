@@ -64,6 +64,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { selectionState, toggleMany } from "../../../lib/bulk-select";
 import { RenameNestDialog } from "../../../components/RenameNestDialog";
 import { ImportFolderModal } from "../../../components/ImportFolderModal";
+import { WelcomeScreen, ONBOARDING_QUERY_KEY } from "../../../components/WelcomeScreen";
+import hootieIcon from "../../../assets/hootie.svg";
+import { Compass } from "lucide-react";
 
 /** How many nest cards render before "Show more" — a 50-nest account should
  *  not mount 50 cards on load. */
@@ -75,7 +78,27 @@ const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
 
 export default function NestsPage() {
   const { openNest: onSelectNest, manageKeys: onManageKeys } = useAppNav();
-  const { adminStatus, authMode, isAdmin } = useAuth();
+  const { adminStatus, authMode, isAdmin, logoUrl } = useAuth();
+  const queryClient = useQueryClient();
+  // First-run onboarding (PO-1185): the server decides whether the welcome
+  // screen shows (no nest of your own and not skipped, or reopened from here).
+  const { data: onboarding } = useQuery({
+    queryKey: ONBOARDING_QUERY_KEY,
+    queryFn: () => api.getOnboarding(),
+    enabled: authMode !== "open",
+    staleTime: 60_000,
+  });
+  const [reopening, setReopening] = useState(false);
+  const reopenOnboarding = async () => {
+    setReopening(true);
+    try {
+      queryClient.setQueryData(ONBOARDING_QUERY_KEY, await api.reopenOnboarding());
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not open Getting started.");
+    } finally {
+      setReopening(false);
+    }
+  };
   const currentUserEmail = adminStatus?.me?.email ?? null;
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
@@ -423,6 +446,19 @@ export default function NestsPage() {
     setNestRemovalTarget({ id: nestId, name: nestName });
   };
 
+  if (onboarding?.show) {
+    return (
+      <WelcomeScreen
+        state={onboarding}
+        logoUrl={logoUrl ?? hootieIcon}
+        userName={adminStatus?.me?.name}
+        onOpenNest={(n) => onSelectNest(n.id, n.name, true, false)}
+        onManageKeys={onManageKeys}
+        onClosed={() => void refetchNests()}
+      />
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Server info banner */}
@@ -486,7 +522,14 @@ export default function NestsPage() {
             description="Shared knowledge vaults for your team"
             className="mb-0"
             actions={
-              canCreate && (
+              <>
+                {onboarding?.enabled && (
+                  <Button variant="ghost" onClick={() => void reopenOnboarding()} disabled={reopening} data-testid="getting-started">
+                    <Compass className="h-4 w-4 mr-2" />
+                    Getting started
+                  </Button>
+                )}
+                {canCreate && (
                 <>
                   {/* Search lives in the header on every page — one entry point,
                       not a second one styled differently here (CU-wdqcq012uv). */}
@@ -499,7 +542,8 @@ export default function NestsPage() {
                     New Nest
                   </Button>
                 </>
-              )
+                )}
+              </>
             }
           />
 

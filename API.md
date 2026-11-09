@@ -291,6 +291,31 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 
 ---
 
+## 1a. First-run onboarding (PO-1185)
+
+The Getting started screen. Every route acts on the caller; nest routes check access to the nest. A nest-scoped key gets `403`. MCP twins on the server-level `/mcp`: `context_onboarding`, `context_onboarding_update`, `context_distill`, `context_distill_status`.
+
+### GET `/onboarding`
+The welcome screen's state: `show`, `first_run` (owns no nest), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
+
+### POST `/onboarding/dismiss` · POST `/onboarding/reopen`
+Skip / Done, and Getting started on Home. Return the new state.
+
+### POST `/onboarding/nest`
+Body `{ name? }`. Creates the caller's nest ("<Name>'s nest" by default) through the normal nest-create path. Idempotent: `201` the first time, `200` with the same nest after that.
+
+### GET `/onboarding/connection?nest_id=&since=`
+The connect proof: `{ connected, at, via: "mcp" | "api" | "hootie", client, tool }`. True only when the activity trace holds a read of that nest by the caller at or after `since`: an MCP read tool, a REST read with an agent's key, or a Hootie answer. A write does not count.
+
+### POST `/onboarding/distill`
+Body `{ nest_id, url }`. `https` only, port 443, public hosts only (checked again at connect time and on every redirect). `202 { mode: "server", job }` starts a job; `200 { mode: "agent", reason, prompt }` when server distill is off or there is no model key. `429` past 3 runs an hour, or while one of yours runs. Needs edit access to the nest.
+
+### GET `/onboarding/distill/:jobId`
+`{ job: { status, phase, done_steps, total_steps, nodes, error } }`. Your own jobs only.
+
+### GET `/onboarding/slack/start?nest_id=`
+Browser only. Redirects to `/surfaces/slack/hosted/oauth/self-serve`, which starts the hosted Slack OAuth for a nest you own (needs `SURFACES_SLACK_SELF_SERVE`, or a server admin) and returns to `/?onboarding=slack&slack=connected`.
+
 ## 2. Nests
 
 A nest = a context vault (folder of markdown documents + governance state).
