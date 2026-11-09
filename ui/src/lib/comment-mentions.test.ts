@@ -101,3 +101,53 @@ describe("mentionSegments", () => {
     ]);
   });
 });
+
+describe("a full stop ending a sentence is not part of the name (PO-1189, as the server reads it)", () => {
+  const members = [{ email: "rita@acme.com", name: "Rita Reader" }];
+
+  it("resolves @rita. as rita and leaves the dot as text", () => {
+    const body = "thanks @rita. See you";
+    const segs = mentionSegments(body, members);
+    expect(segs.map((s) => s.text).join("")).toBe(body);
+    expect(segs).toEqual([
+      { kind: "text", text: "thanks " },
+      { kind: "mention", text: "@rita", name: "rita", resolved: true },
+      { kind: "text", text: ". See you" },
+    ]);
+  });
+
+  it("keeps the dots inside an address and trims only the trailing ones", () => {
+    const segs = mentionSegments("ping @rita@acme.com... now", members);
+    expect(segs[1]).toEqual({ kind: "mention", text: "@rita@acme.com", name: "rita@acme.com", resolved: true });
+    expect(segs[2]).toEqual({ kind: "text", text: "... now" });
+  });
+
+  it("leaves a parenthesized name alone", () => {
+    const segs = mentionSegments("@(Rita Reader). ok", members);
+    expect(segs[0]).toEqual({ kind: "mention", text: "@(Rita Reader)", name: "Rita Reader", resolved: true });
+  });
+});
+
+describe("AC-UX-08 mentions styled from the message's own list", () => {
+  it("uses the server's verdict for each name instead of the roster", () => {
+    const body = "@rita@acme.com and @grok and @nosuch.";
+    const segs = mentionSegments(body, [], [
+      { name: "rita@acme.com", kind: "person", display_name: "Rita Reader" },
+      { name: "grok", kind: "agent", wakeable: false },
+      { name: "nosuch", kind: "nobody" },
+    ]);
+    expect(segs.map((s) => s.text).join("")).toBe(body);
+    const mentions = segs.filter((s) => s.kind === "mention");
+    expect(mentions).toEqual([
+      { kind: "mention", text: "@rita@acme.com", name: "rita@acme.com", resolved: true, ref: { name: "rita@acme.com", kind: "person", display_name: "Rita Reader" } },
+      { kind: "mention", text: "@grok", name: "grok", resolved: true, ref: { name: "grok", kind: "agent", wakeable: false } },
+      { kind: "mention", text: "@nosuch", name: "nosuch", resolved: false, ref: { name: "nosuch", kind: "nobody" } },
+    ]);
+  });
+
+  it("matches names whatever their case, and reads a name the list lacks as resolved", () => {
+    const segs = mentionSegments("@Grok hi @other", [], [{ name: "grok", kind: "nobody" }]);
+    const mentions = segs.filter((s) => s.kind === "mention");
+    expect(mentions.map((m) => m.kind === "mention" && m.resolved)).toEqual([false, true]);
+  });
+});

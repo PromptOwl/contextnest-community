@@ -186,10 +186,17 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
 
   it("AC-CH-01 adds Channels under Views only with the agent-stream switch on, never in reader mode", () => {
     expect(ids(nestSidebarViews(full, governed))).not.toContain("channels");
-    expect(ids(nestSidebarViews(full, { ...governed, agentStreamEnabled: true }))).toContain("channels");
+    expect(ids(nestSidebarViews(full, { ...governed, agentStreamEnabled: true, isMember: true }))).toContain("channels");
     expect(
-      ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { ...governed, agentStreamEnabled: true })),
+      ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { ...governed, agentStreamEnabled: true, isMember: true })),
     ).toEqual(["overview"]);
+  });
+
+  it("AC-UX-15 leaves Channels out of the sidebar for someone who is not a member of the nest", () => {
+    const reader = { isReadOnly: true, isReaderView: false, canEditDocs: false };
+    expect(ids(nestSidebarViews(reader, { ...governed, agentStreamEnabled: true, isMember: true }))).toContain("channels");
+    expect(ids(nestSidebarViews(reader, { ...governed, agentStreamEnabled: true, isMember: false }))).not.toContain("channels");
+    expect(ids(nestSidebarViews(reader, { ...governed, agentStreamEnabled: true }))).not.toContain("channels");
   });
 
   it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
