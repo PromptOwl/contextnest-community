@@ -198,3 +198,30 @@ async function filterAccessibleBase<T extends { id: string }>(
     (n) => coverage.nodeIds.has(n.id) || grantCoversNode(grants, n.id),
   );
 }
+
+/**
+ * The deletion requests this caller may see. A request names what it targets
+ * and carries who asked and why, so it follows its target: a document's
+ * request is for callers who can read that document (`filterAccessible`), and
+ * a folder's or the nest's own is for callers who read the whole nest.
+ *
+ * Lives here so the REST queue and MCP `context_deletion_queue` share one rule.
+ */
+export async function readableDeletionRequests<
+  T extends { nodeId: string; targetType: string },
+>(nestId: string, userId: string, userEmail: string, requests: T[]): Promise<T[]> {
+  if (requests.length === 0) return requests;
+  const documents = [
+    ...new Set(requests.filter((r) => r.targetType === "document").map((r) => r.nodeId)),
+  ].map((id) => ({ id }));
+  const readable = new Set(
+    (await filterAccessible(nestId, userId, userEmail, documents)).map((n) => n.id),
+  );
+  const whole =
+    documents.length < requests.length &&
+    requests.some((r) => r.targetType !== "document") &&
+    (await readsWholeNest(nestId, userId, userEmail));
+  return requests.filter((r) =>
+    r.targetType === "document" ? readable.has(r.nodeId) : whole,
+  );
+}
