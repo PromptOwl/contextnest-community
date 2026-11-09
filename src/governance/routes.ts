@@ -52,6 +52,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
+  filterAccessible,
   resolveCallerEmail,
   canRequestDeletion,
 } from "./access-guard.js";
@@ -667,8 +668,22 @@ governanceRoutes.post("/external-edits/scan", async (c) => {
 governanceRoutes.get("/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const limit = parseLimit(c.req.query("limit"));
-  const activity = await comments.getActivity({ nestId, limit });
-  return c.json({ activity });
+  const all = await comments.getActivity({ nestId, limit });
+  // Only what the caller can read: an entry names a node, who touched it and
+  // an excerpt, so a visibility-only reader gets approved documents' entries
+  // only, and a pending chat draft stays unseen below write (PO-1191).
+  const userId = c.get("userId");
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        await resolveCallerEmail(userId),
+        [...new Set(all.map((e) => e.nodeId))].map((id) => ({ id })),
+      )
+    ).map((n) => n.id),
+  );
+  return c.json({ activity: all.filter((e) => readable.has(e.nodeId)) });
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -885,6 +900,12 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const status = c.req.query("status") as "open" | "resolved" | undefined;
+  // A node the caller can't read answers like one with no comments (which is
+  // also what a node that doesn't exist answers).
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ comments: [] });
+  }
   const list = await comments.listComments(nestId, nodeId, {
     status: status === "open" || status === "resolved" ? status : undefined,
   });
@@ -978,6 +999,10 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ activity: [] });
+  }
   const activity = await comments.getActivity({ nestId, nodeId, limit });
   return c.json({ activity });
 });
@@ -1016,6 +1041,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/task-log", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
+  // A slice of the node's activity, so the same rule as …/activity above.
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ entries: [] });
+  }
   return c.json({ entries: await listTaskActivity({ nestId, nodeId, limit }) });
 });
 
