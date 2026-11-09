@@ -28,6 +28,7 @@ import {
   connectionClient,
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
+import { CHANNEL_TOOL_DEFINITIONS } from "./channel-tools.js";
 import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -81,14 +82,19 @@ function createMcpServerForNest(
   // takes effect immediately.
   // Metacognition tools need FEATURE_METACOGNITION as well (the REST
   // requireMetacognition gate), and are admin tools on top.
-  const allDefs = config.FEATURE_WORKFLOW_PLANE
-    ? [
-        ...TOOL_DEFINITIONS,
-        ...WORKFLOW_TOOL_DEFINITIONS,
-        ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
-        ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
-      ]
-    : TOOL_DEFINITIONS;
+  const allDefs = [
+    ...(config.FEATURE_WORKFLOW_PLANE
+      ? [
+          ...TOOL_DEFINITIONS,
+          ...WORKFLOW_TOOL_DEFINITIONS,
+          ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
+          ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
+        ]
+      : TOOL_DEFINITIONS),
+    // Channels (PO-1179): their own experimental switch, independent of the
+    // workflow plane. Read per request, so flipping it takes effect at once.
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+  ];
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
   const toolDefs = headless

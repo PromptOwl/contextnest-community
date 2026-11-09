@@ -189,6 +189,8 @@ export const READER_HIDDEN_VIEWS = [
   "ontology-graph",
   "definitions",
   "structure",
+  // Channels (PO-1179) are a team surface, not docs.
+  "channels",
 ] as const;
 
 /** Whether a nest-view page is hidden when reader mode is active for a reader. */

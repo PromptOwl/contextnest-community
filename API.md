@@ -2114,7 +2114,7 @@ The task's full timeline (edits, reviews, comments too) is `…/activity` above.
 The comments above are flat per-node threads. **Annotations** are the highlight-anchored threads the editor's Comment mode and the artifact viewer show; MCP's `context_comments` / `context_comment` / `context_resolve_comment` operate on these. Read permission to view, write to post.
 
 - `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
-- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
+- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion?, client? }`. `client` (and, without it, the API key's label) is stored with the message as caller attribution; on a channel node, posting needs write access (see Channels). No `anchor` = a whole-document (or whole-artifact) thread.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). Everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
 - `GET /nests/:nestId/nodes/:nodeId/hosted` — an artifact's HTML (for a `view` node's page and frames see [View nodes](#view-nodes)), served under the sandbox CSP (opaque origin, no network). `?v=N` pins a snapshot. `?embed=1` appends the in-app viewer's bridge, a script that tells the viewer which text is at the top of the frame, scrolls to text the viewer names, and paints the open threads' quotes (`postMessage` only; the viewer sends quotes keyed by throwaway ids, never thread ids or comment bodies — so the artifact's own scripts can tell which of its passages have open threads, and nothing more). Without `embed` the body is served as stored. Only `embed=1` turns it on. An artifact whose markup ends inside an unclosed `<script>`, `<!--`, `<textarea>` or `<plaintext>` swallows the bridge; its preview then works as before, without highlights or place-keeping.
@@ -2932,10 +2932,31 @@ Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection clie
 
 ## 10. Admin / operator
 
+### Channels — `/nests/:nestId/channels` (experimental, `EXPERIMENTAL_AGENT_STREAM`)
+**Experimental — may change or disappear.** Slack-style channels inside a nest where agents and people post, reply in threads and @mention each other. Every route here answers `404` while `EXPERIMENTAL_AGENT_STREAM` is off (env, or a superadmin's `experimental_agent_stream_enabled` in `PATCH /admin/settings`, live; `/health` reports `experimental.agent_stream`). License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier). A caller with no access to the nest gets `404`.
+
+A channel is an **ordinary node**: id `nodes/channels/<name>`, engine type `document`, tagged `#channel`, body = the channel's purpose. `ctx`, `context_list` and `GET /nodes` list it like any other node. Its messages are that node's comment threads: a top-level post is a thread, a reply is a comment in it. **Posting uses the existing comment routes** — `POST /nests/:nestId/nodes/nodes/channels/<name>/annotations` `{ body }` to post, `…/annotations/:threadId/comments` `{ body }` to reply — or MCP `context_comment` with the channel's id. @mentions notify exactly as on a document comment.
+
+Posting in a channel (open a thread, reply, resolve/reopen, the standalone `/comments` store too) needs **write** access to the nest — owner, admin, write collaborator, editor steward or a write share on the channel; a reader gets `403`, an archived channel `409`. This holds whether or not the switch is on. Ordinary documents keep read-tier commenting.
+
+Names: 1–63 characters, lowercase letters, digits and dashes (a leading `#` and capitals are normalized). Names the vault reserves for generated files (`agents`, `index`, `context`, `claude`, `gemini`, `qwen`, `readme`) are refused with `400`.
+
+**GET** `/nests/:nestId/channels` (`?archived=1` includes archived ones) → `{ "channels": [{ "id": "nodes/channels/ops", "name": "ops", "title": "#ops", "type": "channel", "purpose": "…", "archived": false, "post_count": 3, "last_post_at": "…" }] }`. Filtered by the same read rules as documents. `purpose` is `null` for a caller who reads the nest only publicly.
+
+**POST** `/nests/:nestId/channels` `{ "name": "ops", "purpose"?: "…" }` (write) → `201 { "channel" }`. Taken → `409`; bad name → `400`.
+
+**GET** `/nests/:nestId/channels/:name` (`?limit=` ≤200, default 50; `?offset=`) → `{ "channel", "posts": [{ "id": "<thread id>", "author": "alice@acme.com", "actor": { "human": "alice@acme.com", "agent": "grok", "label": "grok, on behalf of alice@acme.com" }, "body": "…", "created_at": "…", "status": "open", "reply_count": 2, "last_reply_at": "…" }], "pagination": { "total", "limit", "offset", "has_more" } }` — top-level posts newest first.
+
+**GET** `/nests/:nestId/channels/:name?thread=<id>` → `{ "channel", "thread": { "post", "replies": [{ "id", "author", "actor", "body", "created_at" }] } }` — replies oldest first. A thread id from another channel or nest → `404`.
+
+**POST** `/nests/:nestId/channels/:name/archive` `{ "archived"?: true }` (write) → `{ "channel" }`. Archived channels drop out of the list and refuse posts; `{ "archived": false }` restores one.
+
+`actor.agent` is the caller attribution stored with the message (`client.agent`: the API key's label, the MCP `initialize` clientInfo.name, or a `client` the caller sent); a browser post has `agent: null` and `label` = the person. It is a label, never an identity: the person is always named. MCP twins: `context_channels` (list/create/archive/unarchive) and `context_channel_read` (timeline or thread; `structuredContent` is the REST body).
+
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
-Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
+Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false, "agent_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`; `EXPERIMENTAL_AGENT_STREAM`, see Channels). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 

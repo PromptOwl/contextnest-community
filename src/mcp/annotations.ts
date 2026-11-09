@@ -54,6 +54,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_resolve: read("Fetch matching documents", "Resolves a selector to documents and their bodies."),
   context_export: read("Export whole nest", "Returns the readable documents as one text; it sends nothing anywhere."),
   context_comments: read("Read comments", "Returns a document's comment threads."),
+  context_channel_read: read("Read channel", "Returns a channel's posts or one thread."),
   context_relations: read("List task relations", "Returns a task's relations."),
   context_boards: read("List boards", "Lists saved boards."),
   context_board_items: read("List board items", "Returns a board's items."),
@@ -78,6 +79,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_task_log: add("Log task activity", "Appends to a task's log; claiming only takes an unassigned task."),
 
   // ─── Comments and relations ─────────────────────────────────────────────
+  context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),
   context_add_relation: add("Add task relation", "Adds a relation; duplicates are refused."),

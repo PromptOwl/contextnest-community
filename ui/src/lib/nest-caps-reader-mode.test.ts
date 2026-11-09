@@ -90,7 +90,7 @@ describe("deriveNestCaps — reader mode", () => {
 describe("reader mode hides the board/graph/definitions/structure shell tabs", () => {
   it("READER_HIDDEN_VIEWS names exactly board, ontology-graph, definitions, structure", () => {
     expect([...READER_HIDDEN_VIEWS].sort()).toEqual(
-      ["board", "definitions", "ontology-graph", "structure"].sort(),
+      ["board", "definitions", "ontology-graph", "structure", "channels"].sort(),
     );
   });
 

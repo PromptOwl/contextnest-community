@@ -29,6 +29,7 @@
  * agent can turn one into an access request (`request_access`) that an admin
  * decides from their inbox, like anyone else's.
  */
+import { isChannelNode } from "../channels/channel-service.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { resolveContext } from "../nodes/context-service.js";
 import {
@@ -729,6 +730,11 @@ async function comment(ctx: ToolContext, input: Record<string, unknown>): Promis
   }
   const denied = await mayRead(ctx, id);
   if (denied) return accessNeeded(ctx, "comment", id, "read", denied);
+  // Channels (PO-1179) take posts from the nest's writers, through the comment
+  // routes and context_comment — not from a scheduled agent's read-tier tool.
+  if (await isChannelNode(ctx.nestId, id)) {
+    return { isError: true, content: "That is a channel; this tool comments on documents only. Put it in your summary." };
+  }
   const persona = ctx.agent.persona.email;
   // No mention fan-out: a name the model wrote — echoed from a feed or a
   // document — must not page a colleague. Same rule as Hootie's comments.

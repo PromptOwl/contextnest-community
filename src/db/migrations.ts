@@ -2475,6 +2475,21 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("083_view_summaries");
   }
+
+  // 084: caller attribution on comment-thread messages (PO-1179, agent team
+  //   stream channels). Same nullable `client_json` column the version rows
+  //   and the activity trace carry (044): the agent label a channel timeline
+  //   shows as "<agent>, on behalf of <human>". NULL is "not attributed", so
+  //   every existing row is already correct. A label, never an identity.
+  if (!hasMigration("084_annotation_comment_client")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
+    }
+    recordMigration("084_annotation_comment_client");
+  }
 }
 
 /**

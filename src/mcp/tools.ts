@@ -138,6 +138,8 @@ import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
+import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { channelPostRefusal } from "../channels/channel-service.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -217,7 +219,7 @@ function describeRevision(r: InstructionsRevision): string {
   return `r${r.seq} · ${r.createdAt} · ${who} (${r.source})${r.note ? ` — ${r.note}` : ""}`;
 }
 
-function toolError(
+export function toolError(
   text: string,
   code:
     | "DOCUMENT_NOT_FOUND"
@@ -469,6 +471,8 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_resolve",
   "context_export",
   "context_comments",
+  // Channels (PO-1179, experimental): reading a timeline or thread.
+  "context_channel_read",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -830,7 +834,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_comment",
     description:
-      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person.",
+      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person. Also how you post in a channel (when the server has channels on): pass the channel's id, e.g. `nodes/channels/ops` (from context_channels); posting in a channel needs write access to the nest.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3412,6 +3416,16 @@ async function runTool(
       }
       const label = node.frontmatter.title || node.id;
 
+      // A channel (PO-1179) takes posts — and resolves — from its nest's
+      // writers only; the same rule the REST comment routes apply.
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
+      if (channelRefusal) {
+        return toolError(
+          channelRefusal.error,
+          channelRefusal.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+        );
+      }
+
       // A thread id has to belong to THIS node: the services scope their own
       // lookups, but saying so here turns an opaque failure into an
       // instruction the agent can act on.
@@ -3442,9 +3456,11 @@ async function runTool(
 
       // addComment reopens a resolved thread. Not echoed in the confirmation,
       // for the reason below: it would report the thread's state.
+      // ctx.client: the agent label (key label, clientInfo.name or the call's
+      // own `client`) a channel timeline shows beside the person.
       const thread = threadId
-        ? await addComment(nestId, node.id, threadId, userEmail, body)
-        : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
+        ? await addComment(nestId, node.id, threadId, userEmail, body, ctx.client)
+        : await createThread(nestId, node.id, { body, anchor: null }, userEmail, ctx.client);
       // The confirmation deliberately doesn't report the thread's comment
       // count: writing is admitted on a node whose threads the caller may not
       // be allowed to READ (the approval gate applies to context_comments, not
@@ -4910,6 +4926,11 @@ async function runTool(
       }
       if (isSurfacesTool(toolName)) {
         return runSurfacesTool(toolName, args, ctx);
+      }
+      // Channels (PO-1179): only registered while EXPERIMENTAL_AGENT_STREAM is
+      // on (mcp/routes.ts); runChannelTool re-checks the switch.
+      if (isChannelTool(toolName)) {
+        return runChannelTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

@@ -12,6 +12,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
+import { channelRoutes } from "./channels/routes.js";
 import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
@@ -790,6 +791,7 @@ export function createApp(): Hono<AuthEnv> {
       experimental: {
         doc_pins: config.EXPERIMENTAL_DOC_PINS,
         doc_stream: config.EXPERIMENTAL_DOC_STREAM,
+        agent_stream: config.EXPERIMENTAL_AGENT_STREAM,
       },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
@@ -1055,6 +1057,7 @@ export function createApp(): Hono<AuthEnv> {
     surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
     experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
+    experimental_agent_stream_enabled: config.EXPERIMENTAL_AGENT_STREAM,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1561,6 +1564,15 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "EXPERIMENTAL_DOC_STREAM",
         value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
+    }
+
+    // Experimental: agent team stream channels (PO-1179). Same tombstone rule
+    // as the doc stream: off writes null, so it stays off across a restart.
+    if ("experimental_agent_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_AGENT_STREAM",
+        value: body.experimental_agent_stream_enabled ? "true" : null,
       });
     }
 
@@ -3035,6 +3047,13 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: "Not found" }, 404);
     }
 
+    // Experimental agent team stream channels (PO-1179): same rule as pins —
+    // while the switch is off the routes do not exist, for anyone. Exact
+    // resource segment; channel NODES live under /nodes and stay ordinary.
+    if (parts[1] === "channels" && !config.EXPERIMENTAL_AGENT_STREAM) {
+      return c.json({ error: "Not found" }, 404);
+    }
+
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
     // permission resolver 404s every call with "Nest not found". Its own
@@ -3176,7 +3195,10 @@ export function createApp(): Hono<AuthEnv> {
         isAgentActivityPath ||
         // Document pins (CU-wdqcq02crw) are a curation surface, licensed like
         // the governance views even on GET. Exact segment (parts[1]).
-        parts[1] === "pins";
+        parts[1] === "pins" ||
+        // Channels (PO-1179) are a collaboration view over comment threads,
+        // licensed like /comments and /feed even on GET. Exact segment.
+        parts[1] === "channels";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -3925,6 +3947,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
+  nestsApp.route("/:nestId/channels", channelRoutes);
   nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);

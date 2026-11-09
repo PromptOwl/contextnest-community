@@ -31,6 +31,7 @@
  * resolveModelCredential (own key with the byok feature, else PromptOwl's
  * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
+import { isChannelNode } from "../channels/channel-service.js";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -695,6 +696,9 @@ async function deliverMentions(params: {
 }): Promise<MentionOutcome> {
   const { nestId, userEmail, baseUrl, message, answer, anchor } = params;
   if (!anchor) return { status: "undeliverable", reason: "no_anchor" };
+  // Never into a channel (PO-1179): a channel takes posts from the nest's
+  // writers, and this one is written for the asker, who may only read.
+  if (await isChannelNode(nestId, anchor.id)) return { status: "undeliverable", reason: "no_anchor" };
   const name = effectiveHootieBrand().name;
   const body = [
     `**Asked ${name}:** ${message}`,

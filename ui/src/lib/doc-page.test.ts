@@ -184,6 +184,14 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
     expect(ids(nestSidebarViews(full, { ...governed, workflowPlaneEnabled: false }))).not.toContain("workflows");
   });
 
+  it("AC-CH-01 adds Channels under Views only with the agent-stream switch on, never in reader mode", () => {
+    expect(ids(nestSidebarViews(full, governed))).not.toContain("channels");
+    expect(ids(nestSidebarViews(full, { ...governed, agentStreamEnabled: true }))).toContain("channels");
+    expect(
+      ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { ...governed, agentStreamEnabled: true })),
+    ).toEqual(["overview"]);
+  });
+
   it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
     // Same rule as NestView's showReviewTab — an editor on an ungoverned nest
     // with nothing waiting would otherwise get a row that lands on the overview.

@@ -13,6 +13,7 @@ import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
+import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { clampAnchor, projectThreadsToMarkdown } from "./projection.js";
 import type {
   AnnotationAnchor,
@@ -128,6 +129,9 @@ export async function createThread(
   nodeId: string,
   input: CreateThreadInput,
   authorEmail: string,
+  /** Caller attribution for the opening message (§9.4) — the agent label a
+   *  channel timeline shows. A label, never an identity. */
+  client?: ClientMetadata,
 ): Promise<AnnotationThread> {
   const body = (input.body ?? "").trim();
   if (!body) {
@@ -157,9 +161,9 @@ export async function createThread(
       ],
     );
     await tx.run(
-      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
-       VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
-      [uuid(), id, authorEmail, body],
+      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at, client_json)
+       VALUES (?, ?, ?, ?, ${nowMsExpr(db)}, ?)`,
+      [uuid(), id, authorEmail, body, serializeClient(client)],
     );
   });
 
@@ -191,6 +195,8 @@ export async function addComment(
   threadId: string,
   authorEmail: string,
   body: string,
+  /** See createThread. */
+  client?: ClientMetadata,
 ): Promise<AnnotationThread> {
   const trimmed = (body ?? "").trim();
   if (!trimmed) {
@@ -201,9 +207,9 @@ export async function addComment(
   const db = getDb();
   await db.transaction(async (tx) => {
     await tx.run(
-      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
-       VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
-      [uuid(), threadId, authorEmail, trimmed],
+      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at, client_json)
+       VALUES (?, ?, ?, ?, ${nowMsExpr(db)}, ?)`,
+      [uuid(), threadId, authorEmail, trimmed, serializeClient(client)],
     );
     // A reply on a resolved thread reopens it (the Google Docs / GitHub rule):
     // someone still has something to say, so it belongs back in the open list

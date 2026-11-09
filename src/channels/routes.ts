@@ -1,0 +1,84 @@
+/**
+ * /nests/:nestId/channels — agent team stream channels (PO-1179), experimental.
+ *
+ *   GET  /channels                     → { channels }            (?archived=1 adds archived ones)
+ *   POST /channels        { name, purpose? } → 201 { channel }
+ *   GET  /channels/:name               → { channel, posts, pagination }  (?limit=&offset=)
+ *   GET  /channels/:name?thread=<id>   → { channel, thread: { post, replies } }
+ *   POST /channels/:name/archive { archived? = true } → { channel }
+ *
+ * Posting and replying are NOT here: they are the node's comment routes
+ * (POST /nodes/<channel id>/annotations, …/annotations/:threadId/comments) and
+ * MCP context_comment, which already carry the @mention fan-out. Those
+ * handlers refuse a non-writer on a channel (channel-service
+ * channelPostRefusal).
+ *
+ * The nest middleware (app.ts) 404s every route here while
+ * EXPERIMENTAL_AGENT_STREAM is off, license-gates them like the governance
+ * views (GET included), 404s a caller with no access to the nest, and bumps
+ * the POSTs to the write tier. Each handler still checks its own rule through
+ * the service, so MCP and REST share one gate.
+ */
+import { Hono } from "hono";
+import type { AuthEnv } from "../auth/middleware.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
+import { attributeRequest } from "../shared/client-metadata.js";
+import { ValidationError } from "../shared/errors.js";
+import { createChannel, listChannels, readChannel, setChannelArchived } from "./channel-service.js";
+
+export const channelRoutes = new Hono<AuthEnv>();
+
+async function caller(c: any) {
+  const userId = c.get("userId") as string;
+  return { nestId: c.req.param("nestId") as string, userId, userEmail: await resolveCallerEmail(userId) };
+}
+
+async function jsonObject(c: any): Promise<Record<string, unknown>> {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  return body as Record<string, unknown>;
+}
+
+channelRoutes.get("/", async (c) => {
+  const archived = c.req.query("archived");
+  return c.json(await listChannels(await caller(c), { includeArchived: archived === "1" || archived === "true" }));
+});
+
+channelRoutes.post("/", async (c) => {
+  const body = await jsonObject(c);
+  const who = await caller(c);
+  const result = await createChannel(
+    { ...who, client: attributeRequest(c, body.client) },
+    { name: body.name, purpose: body.purpose },
+  );
+  return c.json(result, 201);
+});
+
+channelRoutes.get("/:name", async (c) => {
+  return c.json(
+    await readChannel(await caller(c), {
+      channel: c.req.param("name"),
+      thread: c.req.query("thread"),
+      limit: c.req.query("limit"),
+      offset: c.req.query("offset"),
+    }),
+  );
+});
+
+channelRoutes.post("/:name/archive", async (c) => {
+  const body = await jsonObject(c);
+  if (body.archived !== undefined && typeof body.archived !== "boolean") {
+    throw new ValidationError("archived must be a boolean");
+  }
+  const who = await caller(c);
+  return c.json(
+    await setChannelArchived({ ...who, client: attributeRequest(c, body.client) }, c.req.param("name"), body.archived !== false),
+  );
+});
