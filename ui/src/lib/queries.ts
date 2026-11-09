@@ -13,6 +13,7 @@
 
 import { QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 import * as api from "./api";
+import { channelPollInterval } from "./channels";
 
 /**
  * Query keys, shaped as a hierarchy so invalidation can name either one entry
@@ -67,6 +68,18 @@ export const keys = {
   // precisely for the callers who don't have it.
   mentionable: (nestId: string) =>
     [...keys.nest(nestId), "mentionable"] as const,
+  // Channels (PO-1189). The list is the polled "anything new?" read; each
+  // channel's timeline and each open thread are their own entries, which the
+  // page updates in place from the "what is new" read rather than refetching.
+  channels: (nestId: string) => [...keys.nest(nestId), "channels"] as const,
+  channelList: (nestId: string) => [...keys.channels(nestId), "list"] as const,
+  channelTimeline: (nestId: string, name: string) =>
+    [...keys.channels(nestId), "timeline", name] as const,
+  channelThread: (nestId: string, name: string, threadId: string) =>
+    [...keys.channels(nestId), "thread", name, threadId] as const,
+  // Agent handles the @ picker offers, and their wake-up targets (owner/admin).
+  agentHandles: (nestId: string) => [...keys.nest(nestId), "agent-handles"] as const,
+  agentWebhooks: (nestId: string) => [...keys.nest(nestId), "agent-webhooks"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
   structure: (nestId: string) => [...keys.nest(nestId), "structure"] as const,
   // Custom field definitions — what a document's `fields` values mean.
@@ -147,8 +160,9 @@ export const keys = {
 
   me: ["me"] as const,
   unreadNotifications: () => [...keys.me, "notifications", "unread"] as const,
+  myWorkAll: () => [...keys.me, "work"] as const,
   myWork: (limit?: number, offset?: number, mentionsOffset?: number) =>
-    [...keys.me, "work", limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
+    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
     [...keys.me, "drafts", limit ?? null, offset ?? null, q ?? null, sort ?? null] as const,
 
@@ -226,6 +240,44 @@ const NEST_WRITE_SCOPES: Array<{
     m: RegExpMatchArray,
   ) => Array<readonly unknown[]>;
 }> = [
+  // A post, reply, resolve or reopen in a channel (PO-1189): an annotation
+  // write on the channel's node, so it sits ABOVE the discussion rule. It
+  // changes the list's unread/activity and can clear a My Work mention. The
+  // open timeline is deliberately not dropped: the page folds in what is new
+  // itself, and a refetch would throw away the pages "Load more" loaded.
+  {
+    match: /^\/nodes\/nodes\/channels\/[^/]+\/annotations(?:\/|$)/,
+    affects: (n) => [
+      keys.channelList(n),
+      keys.myWorkAll(),
+      keys.commentCounts(n),
+      [...keys.nest(n), "feed"],
+    ],
+  },
+  // Mark read is the caller's own mark; the page writes the returned row into
+  // the cached list, so nothing needs refetching.
+  { match: /^\/channels\/[^/]+\/read$/, affects: () => [] },
+  // Create, archive, restore: a channel is a node, so the document listing
+  // (the sidebar's Channels folder) changes with the channel list.
+  {
+    match: /^\/channels(?:\/|$)/,
+    affects: (n) => [keys.channelList(n), keys.nodes(n), keys.nestListAll()],
+  },
+  // Promote creates a decision or task node from a thread.
+  {
+    match: /^\/threads\/[^/]+\/promote$/,
+    affects: (n) => [
+      keys.nodes(n),
+      keys.nestListAll(),
+      keys.search,
+      [...keys.nest(n), "feed"],
+    ],
+  },
+  // Wake-up targets; a handle with a target is offered by the @ picker.
+  {
+    match: /^\/agent-webhooks(?:\/|$)/,
+    affects: (n) => [keys.agentWebhooks(n), keys.agentHandles(n)],
+  },
   // Discussion. Comment counts drive the document list's sort, and both show
   // up in the activity feed.
   {
@@ -582,6 +634,34 @@ export const reads = {
       queryKey: keys.mentionable(nestId),
       queryFn: () => api.listMentionablePeople(nestId),
       staleTime: STALE.reference,
+    }),
+  // The channel list, archived ones included (the page splits them). This is
+  // the refresh read (PO-1189): re-read on an interval while the tab is
+  // visible and at once when it comes back, never in a hidden tab. Everything
+  // else on the Channels page hangs off a change in this answer.
+  channelList: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.channelList(nestId),
+      queryFn: () => api.listChannels(nestId, { archived: true }),
+      staleTime: STALE.content,
+      // A 403/404 is an answer (removed from the nest, channels switched off):
+      // asking again every few seconds cannot change it. Retry asks once more.
+      refetchInterval: (query: { state: { error: unknown } }) =>
+        channelPollInterval((query.state.error as api.ApiError | null)?.status),
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always",
+    }),
+  agentHandles: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.agentHandles(nestId),
+      queryFn: () => api.listAgentHandles(nestId),
+      staleTime: STALE.reference,
+    }),
+  agentWebhooks: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.agentWebhooks(nestId),
+      queryFn: () => api.listAgentWebhooks(nestId),
+      staleTime: STALE.listing,
     }),
   peopleSuggest: (q: string) =>
     queryOptions({

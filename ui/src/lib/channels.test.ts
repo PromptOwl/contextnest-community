@@ -7,6 +7,7 @@ import {
   appendReplies,
   applyNewMessages,
   authorOf,
+  channelPollInterval,
   hasNewActivity,
   initialChannel,
   mentionNotice,
@@ -68,7 +69,12 @@ describe("AC-UX-03 live refresh", () => {
     const q = reads.channelList("nest-1");
     expect(CHANNEL_POLL_MS).toBeGreaterThanOrEqual(10_000);
     expect(CHANNEL_POLL_MS).toBeLessThanOrEqual(15_000);
-    expect(q.refetchInterval).toBe(CHANNEL_POLL_MS);
+    const interval = q.refetchInterval as (query: { state: { error: unknown } }) => number | false;
+    expect(interval({ state: { error: null } })).toBe(CHANNEL_POLL_MS);
+    // A transient failure keeps the pace; "you have no channels here" stops it.
+    expect(interval({ state: { error: { status: 500 } } })).toBe(CHANNEL_POLL_MS);
+    expect(interval({ state: { error: { status: 404 } } })).toBe(false);
+    expect(channelPollInterval(403)).toBe(false);
     expect(q.refetchIntervalInBackground).toBe(false);
     // Coming back to the tab re-reads at once.
     expect(q.refetchOnWindowFocus).toBe("always");

@@ -33,6 +33,11 @@ describe("AC-UX-02 the URL carries the channel and the open thread", () => {
     expect(write("channel=ops&thread=t-1&tab=x", {})).toBe("tab=x");
   });
 
+  it("reads #ops and OPS as ops", () => {
+    expect(readChannelDeepLink("?channel=%23ops&thread=t-1")).toEqual({ channel: "ops", thread: "t-1" });
+    expect(readChannelDeepLink("?channel=OPS")).toEqual({ channel: "ops", thread: null });
+  });
+
   it("gives every channel and thread its own Back stop", () => {
     const a = channelHistoryKey("n1", "ops", null);
     expect(channelHistoryKey("n1", "ops", null)).toBe(a);

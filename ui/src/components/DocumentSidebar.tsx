@@ -491,17 +491,21 @@ function NestViews({
     [viewNodes.data],
   );
   const stewardshipEnabled = !!(meta.data as any)?.nest?.stewardship_enabled;
+  // Channels are for people added to the nest; a share-only grantee or a
+  // public reader gets no entry (GET /nests/:id `member`).
+  const isMember = meta.data?.member === true;
   const views = useMemo(
     () =>
       caps
         ? nestSidebarViews(caps, {
           workflowPlaneEnabled,
           agentStreamEnabled,
+          isMember,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, agentStreamEnabled, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
   );
 
   // The "Views" group folds by default (remembered per browser) and opens

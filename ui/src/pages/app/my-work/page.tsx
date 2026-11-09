@@ -15,7 +15,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  ArrowLeft, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle, MessageSquare,
+  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
@@ -28,10 +28,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
 import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
-import { channelThreadLink } from "../../../lib/channel-deep-link";
+import { MentionRows } from "../../../components/my-work/MentionRows";
 
 export default function MyWorkPage() {
-  const { openNest: onSelectNest, openReview: onOpenReview, goBack } = useAppNav();
+  const { openNest: onSelectNest, openReview: onOpenReview, openChannel, goBack } = useAppNav();
   const { adminStatus } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -114,10 +114,40 @@ export default function MyWorkPage() {
   // thread open; a document comment opens the document with it focused.
   const openMention = (m: api.MentionItem) => {
     if (m.kind === "channel" && m.channel) {
-      window.location.assign(channelThreadLink(m.nest_id, m.channel, m.thread_id));
+      // In-app, like every other row: no full page load (PO-1189).
+      openChannel(m.nest_id, m.nest_name, m.channel, m.thread_id);
       return;
     }
     onOpenReview(m.nest_id, m.nest_name, m.node_id, { thread: m.thread_id });
+  };
+
+  // "Mark done": the row leaves the list at once; the sidebar badge follows
+  // from the same write (it drops the cached /me/work reads). The message and
+  // the thread are untouched, and the row returns only on a new mention.
+  const [doneThread, setDoneThread] = useState<string | null>(null);
+  const markMentionDone = async (m: api.MentionItem) => {
+    setDoneThread(m.thread_id);
+    try {
+      await api.markMentionDone(m.thread_id);
+      setWork((prev) => {
+        const mentions = (prev.mentions ?? []).filter((x) => x.thread_id !== m.thread_id);
+        const page = prev.mentions_pagination;
+        return {
+          ...prev,
+          mentions,
+          mentions_pagination: page ? { ...page, total: Math.max(0, page.total - 1) } : page,
+        };
+      });
+      // The page just emptied but more remain: show them rather than nothing.
+      const page = work.mentions_pagination;
+      if (page && (work.mentions?.length ?? 0) === 1 && page.total > 1) {
+        void goToMentionsPage(Math.max(0, page.offset - (page.has_more ? 0 : page.limit)));
+      }
+    } catch (e: any) {
+      toast.error(e?.message || "Could not mark the mention done");
+    } finally {
+      setDoneThread(null);
+    }
   };
 
   // First page on mount, and again whenever the signed-in user changes (in
@@ -398,81 +428,22 @@ export default function MyWorkPage() {
               </div>
             )}
             {/* Open threads that @mention you, in channels and on documents,
-                waiting on your reply (PO-1180). Reply or resolve and the row
-                goes. Newest first; click jumps to the thread. */}
-            {(work.mentions?.length ?? 0) > 0 && (
-              <div className="rounded-lg border" data-testid="my-work-mentions">
-                <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
-                  Mentions
-                  <span className="text-xs text-muted-foreground">
-                    ({work.mentions_pagination?.total ?? work.mentions!.length})
-                  </span>
-                </div>
-                <div className="divide-y border-t">
-                  {work.mentions!.map((m) => (
-                    <button
-                      key={`${m.nest_id}:${m.thread_id}`}
-                      type="button"
-                      onClick={() => openMention(m)}
-                      className="flex w-full items-start gap-2 px-4 py-2 text-left text-sm hover:bg-muted/50"
-                    >
-                      <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">
-                          <span className="font-medium">{m.author_label}</span>
-                          <span className="text-muted-foreground">
-                            {" in "}
-                            {m.channel ? `#${m.channel}` : m.title}
-                            {m.for_agent ? ` · for @${m.for_agent}` : ""}
-                          </span>
-                        </span>
-                        <span className="block truncate text-muted-foreground">{m.excerpt}</span>
-                      </span>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {m.nest_name} · {relTime(m.mentioned_at)}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                {work.mentions_pagination && work.mentions_pagination.total > work.mentions_pagination.limit && (
-                  <div className="flex items-center justify-end gap-2 border-t px-4 py-1.5 text-xs text-muted-foreground">
-                    <span>
-                      {work.mentions_pagination.offset + 1}–
-                      {work.mentions_pagination.offset + work.mentions!.length} of {work.mentions_pagination.total}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-1.5"
-                      disabled={loadingMentions || work.mentions_pagination.offset === 0}
-                      onClick={() =>
-                        goToMentionsPage(Math.max(0, work.mentions_pagination!.offset - work.mentions_pagination!.limit))
-                      }
-                      aria-label="Previous mentions"
-                    >
-                      <ChevronLeft className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-1.5"
-                      disabled={loadingMentions || !work.mentions_pagination.has_more}
-                      onClick={() =>
-                        goToMentionsPage(work.mentions_pagination!.offset + work.mentions_pagination!.limit)
-                      }
-                      aria-label="More mentions"
-                    >
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
+                waiting on your reply (PO-1180). Reply, resolve or mark done
+                and the row goes. Newest first; click jumps to the thread. */}
+            <MentionRows
+              mentions={work.mentions ?? []}
+              pagination={work.mentions_pagination}
+              loading={loadingMentions}
+              busyThread={doneThread}
+              onOpen={openMention}
+              onDone={markMentionDone}
+              onPage={goToMentionsPage}
+            />
             <div>
               {(work.notifications?.length ?? 0) > 0 && (
                 <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
                   <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
-                    🔔 Notifications
+                    <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
                     <span className="text-xs text-muted-foreground">
                       ({work.notifications!.length})
                     </span>

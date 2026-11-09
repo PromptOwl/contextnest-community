@@ -14,14 +14,16 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import {
   detectTrigger,
+  matchAgents,
   matchMembers,
+  type MentionAgent,
   type MentionMember,
 } from "./MarkdownEditor/picker-match";
-import { applyMentionPick, mentionSegments } from "../lib/comment-mentions";
+import { applyMentionPick, mentionSegments, type MentionRef } from "../lib/comment-mentions";
 import { applyFormat, mentionsToLinks, type CommentFormat } from "../lib/comment-format";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bold, Heading, List, ListOrdered } from "lucide-react";
+import { Bold, Bot, Heading, List, ListOrdered } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../auth/AuthContext";
 
@@ -35,8 +37,21 @@ export interface MentionTextareaProps
   /** The nest's people. Empty (or still loading) → the box is a plain
    *  textarea, never a popup with nothing in it. */
   members: MentionMember[];
+  /** Agent handles to offer after the people (channels). Each is marked as an
+   *  agent; one a mention can't wake says so quietly. */
+  agents?: MentionAgent[];
   /** Comment boxes: a markdown toolbar, and formatted paste kept as markdown. */
   formatting?: boolean;
+}
+
+/** One row of the `@` list: a person (inserted by address) or an agent
+ *  (inserted by handle). */
+interface PickerItem {
+  key: string;
+  insert: string;
+  title: string;
+  detail: string;
+  agent: boolean;
 }
 
 const FORMATS: Array<{ kind: CommentFormat; label: string; Icon: typeof Bold }> = [
@@ -50,7 +65,7 @@ export const MentionTextarea = forwardRef<
   HTMLTextAreaElement,
   MentionTextareaProps
 >(function MentionTextarea(
-  { value, onValueChange, members, className, onKeyDown, formatting, ...rest },
+  { value, onValueChange, members, agents, className, onKeyDown, formatting, ...rest },
   forwardedRef,
 ) {
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -76,22 +91,33 @@ export const MentionTextarea = forwardRef<
   // so picking it would only look delivered. `members` stays whole: someone
   // else's mention of the author still has to render as resolved.
   const me = useAuth().adminStatus?.me?.email?.toLowerCase();
-  const results = useMemo(
-    () =>
-      trigger
-        ? matchMembers(
-            members.filter((m) => m.email.toLowerCase() !== me),
-            trigger.query,
-          )
-        : [],
-    [trigger, members, me],
-  );
+  const results = useMemo<PickerItem[]>(() => {
+    if (!trigger) return [];
+    const people = matchMembers(
+      members.filter((m) => m.email.toLowerCase() !== me),
+      trigger.query,
+    ).map((m) => ({
+      key: m.email,
+      insert: m.email,
+      title: m.name || m.email.split("@")[0],
+      detail: m.email,
+      agent: false,
+    }));
+    const handles = matchAgents(agents ?? [], trigger.query, 6).map((a) => ({
+      key: `agent:${a.handle}`,
+      insert: a.handle,
+      title: a.handle,
+      detail: a.wakeable ? "Agent" : "Agent · not woken by a mention, sees it on its next check",
+      agent: true,
+    }));
+    return [...people, ...handles];
+  }, [trigger, members, agents, me]);
 
   useEffect(() => setHighlight(0), [trigger?.query, results.length]);
 
-  const pick = (email: string) => {
+  const pick = (name: string) => {
     const el = innerRef.current;
-    const next = applyMentionPick(value, caret, email);
+    const next = applyMentionPick(value, caret, name);
     if (!next) return;
     onValueChange(next.value);
     setOpen(false);
@@ -140,7 +166,8 @@ export const MentionTextarea = forwardRef<
                 e.preventDefault();
                 format(kind);
               }}
-              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              // A finger-sized target on a phone, the compact one beside a pointer.
+              className="rounded p-[9px] text-muted-foreground hover:bg-muted hover:text-foreground sm:p-1"
             >
               <Icon className="h-3.5 w-3.5" />
             </button>
@@ -208,7 +235,7 @@ export const MentionTextarea = forwardRef<
               // the end.
               e.preventDefault();
               const chosen = results[highlight] ?? results[0];
-              if (chosen) pick(chosen.email);
+              if (chosen) pick(chosen.insert);
               return;
             }
             if (e.key === "Escape") {
@@ -229,7 +256,7 @@ export const MentionTextarea = forwardRef<
           data-testid="mention-picker"
         >
           {results.map((m, i) => (
-            <li key={m.email}>
+            <li key={m.key}>
               <button
                 type="button"
                 role="option"
@@ -237,7 +264,7 @@ export const MentionTextarea = forwardRef<
                 // Mouse-down: the textarea's blur would close the list first.
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  pick(m.email);
+                  pick(m.insert);
                 }}
                 onMouseEnter={() => setHighlight(i)}
                 className={cn(
@@ -245,11 +272,12 @@ export const MentionTextarea = forwardRef<
                   i === highlight ? "bg-accent text-accent-foreground" : "",
                 )}
               >
-                <span className="truncate font-medium">
-                  {m.name || m.email.split("@")[0]}
+                <span className="flex max-w-full items-center gap-1.5 truncate font-medium">
+                  {m.agent && <Bot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+                  <span className="truncate">{m.title}</span>
                 </span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {m.email}
+                <span className="max-w-full truncate text-xs text-muted-foreground">
+                  {m.detail}
                 </span>
               </button>
             </li>
@@ -268,15 +296,20 @@ export const MentionTextarea = forwardRef<
 export function CommentBody({
   body,
   members,
+  mentions,
   className,
 }: {
   body: string;
   members: MentionMember[];
+  /** A channel message's own mention list: each name takes the server's
+   *  verdict (a person by display name, an agent, or nobody) instead of the
+   *  roster's. */
+  mentions?: MentionRef[];
   className?: string;
 }) {
   const segments = useMemo(
-    () => mentionSegments(body, members),
-    [body, members],
+    () => mentionSegments(body, members, mentions),
+    [body, members, mentions],
   );
   const markdown = useMemo(() => mentionsToLinks(segments), [segments]);
   return (
@@ -302,6 +335,7 @@ export function CommentBody({
                 </a>
               );
             }
+            const ref = seg.ref;
             return (
               <span
                 className={
@@ -309,9 +343,19 @@ export function CommentBody({
                     ? "rounded bg-primary/10 px-0.5 font-medium text-primary"
                     : "rounded bg-muted px-0.5 text-muted-foreground line-through decoration-dotted"
                 }
-                title={seg.resolved ? seg.name : `No member named "${seg.name}" in this nest`}
+                data-mention={ref?.kind ?? (seg.resolved ? "resolved" : "nobody")}
+                title={
+                  !seg.resolved
+                    ? `No member named "${seg.name}" in this nest`
+                    : ref?.kind === "agent"
+                      ? ref.wakeable
+                        ? "Agent"
+                        : "Agent. A mention does not wake it; it sees this on its next check."
+                      : seg.name
+                }
               >
-                {seg.text}
+                {/* A person reads by display name, never by address. */}
+                {ref?.kind === "person" ? `@${ref.display_name}` : seg.text}
               </span>
             );
           },
