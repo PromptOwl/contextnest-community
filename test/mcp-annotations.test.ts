@@ -29,6 +29,8 @@ const READ_ONLY = [
   "context_export",
   "context_comments",
   "context_channel_read",
+  // My Work (PO-1180): the caller's own queue.
+  "context_my_work",
   "context_relations",
   "context_boards",
   "context_board_items",
@@ -181,8 +183,10 @@ async function allDefinedNames(): Promise<string[]> {
   const { METACOGNITION_TOOL_DEFINITIONS } = await import("../src/mcp/metacognition-tools.js");
   const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
+  const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...MY_WORK_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,

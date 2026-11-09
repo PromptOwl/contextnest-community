@@ -2490,6 +2490,36 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("084_annotation_comment_client");
   }
+
+  // 085: the @mention index My Work reads (PO-1180, agent team stream S2).
+  //   One row per person (or unresolved @handle) a comment-thread message
+  //   names, written where the message is posted, so `/me/work` answers "which
+  //   open threads tag me" from an index instead of scanning every thread's
+  //   text. `mentioned_user_id` is set when the name resolved to an account
+  //   (resolveMention, the same rule mention-notify uses); NULL means the
+  //   handle named no person — an agent's handle, until agent principals exist
+  //   (src/mentions/agent-mentions.ts). Rows go with their message, thread or
+  //   nest (ON DELETE CASCADE). Nothing to backfill: My Work starts from the
+  //   mentions made after the upgrade.
+  if (!hasMigration("085_comment_mentions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS comment_mentions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        mentioned_user_id TEXT,
+        handle TEXT NOT NULL,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+    `);
+    recordMigration("085_comment_mentions");
+  }
 }
 
 /**

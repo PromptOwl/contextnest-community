@@ -3413,6 +3413,9 @@ export const NODE_KEYED_TABLES = [
   ["deletion_requests", "node_id"],
   ["approved_versions", "node_id"],
   ["annotation_threads", "node_id"],
+  // Who a thread message @mentions (PO-1180): moves with its thread, goes
+  // with it on delete (the thread's own cascade would too).
+  ["comment_mentions", "node_id"],
   ["comments", "node_id"],
   ["node_tag_index", "node_id"],
   ["node_index", "node_id"],

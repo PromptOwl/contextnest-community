@@ -113,6 +113,7 @@ export const HISTORICAL_MIGRATIONS = [
   "082_surfaces_seeds",
   "083_view_summaries",
   "084_annotation_comment_client",
+  "085_comment_mentions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1350,6 +1351,24 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         created_at TEXT NOT NULL,
         PRIMARY KEY (nest_id, cache_key)
       )
+  `);
+
+  // Migration 085 parity: the @mention index My Work reads (PO-1180).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS comment_mentions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      mentioned_user_id TEXT,
+      handle TEXT NOT NULL,
+      author TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

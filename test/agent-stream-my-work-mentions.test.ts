@@ -14,7 +14,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
-import { setAgentMentionResolver } from "../src/mentions/agent-mentions.js";
+
+// The seam, from the SAME module instance the app loaded (createTestApp
+// resets the module registry), bound in beforeAll.
+let setAgentMentionResolver: typeof import("../src/mentions/agent-mentions.js").setAgentMentionResolver;
 
 const OWNER_EMAIL = "owner@team.test";
 const MCP_HEADERS = {
@@ -99,6 +102,7 @@ beforeAll(async () => {
   env = setupTestEnv();
   process.env.EXPERIMENTAL_AGENT_STREAM = "true";
   app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+  ({ setAgentMentionResolver } = await import("../src/mentions/agent-mentions.js"));
   owner = await registerUser(app, OWNER_EMAIL, "Owner");
   bob = await registerUser(app, "bob@team.test", "Bob Builder");
   alice = await registerUser(app, "alice@team.test", "Alice Example");
@@ -377,14 +381,17 @@ describe("SEC: mentions never reveal what the caller can't read", () => {
 
   it("SEC-3 a nest-scoped key sees only that nest's mentions over MCP", async () => {
     const other = (await jsonRequest(app, "POST", "/nests", { name: "Third" }, owner.apiKey)).data.nest.id;
-    await jsonRequest(app, "POST", `/nests/${other}/collaborators`, { email: alice.email, permission: "write" }, owner.apiKey);
+    for (const u of [alice, bob]) {
+      await jsonRequest(app, "POST", `/nests/${other}/collaborators`, { email: u.email, permission: "write" }, owner.apiKey);
+    }
     const od = await jsonRequest(app, "POST", `/nests/${other}/nodes`, { title: "Other", content: "x" }, owner.apiKey);
     const elsewhere = await open(bob, od.data.node.id, "@alice over here", other);
+    const here = await open(bob, OPS, "@alice in the scoped nest");
     const minted = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nestId }, alice.apiKey);
     expect(minted.status, JSON.stringify(minted.data)).toBeLessThan(300);
     const r = await callTool(minted.data.api_key, "context_my_work", {});
     expect(r.isError, r.text).toBe(false);
-    expect(r.data.mentions.length).toBeGreaterThan(0);
+    expect(mentionThreads(r.data)).toContain(here);
     expect(r.data.mentions.every((m: any) => m.nest_id === nestId)).toBe(true);
     expect(mentionThreads(r.data)).not.toContain(elsewhere);
     expect([...r.data.items, ...r.data.waiting, ...r.data.notifications].every((i: any) => i.nest_id === nestId)).toBe(true);

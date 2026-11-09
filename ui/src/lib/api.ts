@@ -3796,19 +3796,52 @@ export interface AssignedItem {
   open_blockers?: number;
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number }) {
+/**
+ * An open comment thread that @mentions the caller (or an agent they own) and
+ * waits on their answer (PO-1180). Gone once they reply in it after the
+ * mention, or it is resolved.
+ */
+export interface MentionItem {
+  type: "mention";
+  /** "channel" opens the channel timeline at the thread; "document" opens
+   *  the document with the comment thread focused. */
+  kind: "channel" | "document";
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  channel: string | null;
+  thread_id: string;
+  comment_id: string;
+  excerpt: string;
+  author: string;
+  /** "<agent>, on behalf of <person>", or the person. */
+  author_label: string;
+  agent: string | null;
+  /** Set when an agent you own was tagged rather than you. */
+  for_agent: string | null;
+  mentioned_at: string;
+}
+
+export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));
   const qs = q.toString();
   return request<{
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
-    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    /** Open threads that @mention the caller, one page (PO-1180). */
+    mentions?: MentionItem[];
+    /** Reviews + requests + open mentions waiting on the caller, all pages;
+     *  excludes `waiting`. */
     waiting_on_me_total?: number;
     pagination?: WorkPagination;
+    /** The mentions' own paging; `total` is every open mention. */
+    mentions_pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 

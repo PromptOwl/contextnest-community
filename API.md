@@ -1863,6 +1863,27 @@ Open board tasks and cards whose `assignee` is the caller, across every nest the
 
 `assigned` is not paged with the reviews: `limit` / `offset` and `pagination` cover the review queue only, and the full `assigned` list comes back on every call. The My Work badge counts `pagination.total` plus `assigned.length`, so tasks assigned to you count as waiting on you.
 
+### Mention rows (`GET /me/work` → `mentions`)
+
+Open comment threads — channel posts and document comments, the annotation threads `context_comment` writes — that @mention the caller and wait on their answer, across every nest they can see. A thread leaves the list once the caller replies in it **after** the mention, or it is resolved; a later mention brings it back. One row per thread (the newest unanswered mention in it), newest first:
+
+```json
+{ "type": "mention", "kind": "channel", "nest_id": "…", "nest_name": "Team", "node_id": "nodes/channels/ops", "title": "#ops",
+  "channel": "ops", "thread_id": "…", "comment_id": "…", "excerpt": "@alice can you take the deploy tonight?",
+  "author": "bob@acme.com", "author_label": "grok, on behalf of bob@acme.com", "agent": "grok", "for_agent": null,
+  "mentioned_at": "2026-11-08T10:00:00.123Z" }
+```
+
+`kind` is `channel` (open `/nest/<id>/channels?channel=<channel>&thread=<thread_id>`) or `document` (open the document with `?doc=<node_id>&thread=<thread_id>`); `channel` is `null` for a document, and every row is `document` while `EXPERIMENTAL_AGENT_STREAM` is off. `excerpt` is the message as plain text, whitespace collapsed, capped at 280 characters.
+
+Who counts as mentioned is decided when the message is posted, by the rule mention notifications use: `@full@email`, a unique email local part, or a unique display name (`@(Display Name)`), looked up in the nest's people first, then the directory when `PEOPLE_SUGGEST_ALL_USERS` is on; never the author; at most 25 per message; nothing inside a code span or fence. Mentions are recorded for messages a person posts (`POST …/annotations`, `…/annotations/:threadId/comments`, MCP `context_comment`), not for text a model wrote (Hootie, metacognition agents) or an anonymous docs-site comment. Access is decided when My Work is read: a nest or document the caller can no longer read takes its rows out of the list and out of every count.
+
+An `@handle` that names no person (an agent's handle, today) is recorded too and reaches the agents' owner once agent principals land (`for_agent` then names the agent); until then nobody owns one.
+
+Paging: `?mentions_limit=` (1–100; defaults to `limit`, else 50) and `?mentions_offset=` page this list on its own; `mentions_pagination` is `{ total, limit, offset, has_more }` with `total` = every open mention. `waiting_on_me_total` includes that total, and the `kind: "mention"` notification rows for documents the caller has mention rows on are left out of `notifications`, so the badge counts a mention once.
+
+MCP twin: `context_my_work` (read tier; `limit`, `offset`, `mentions_limit`, `mentions_offset`) returns this whole `/me/work` body as `structuredContent`. On a nest-scoped key — which may not call `/me/work` — it returns that nest's share only.
+
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions, `comment_reply` thread replies, `comment` notes to a document's watchers and reviewers); nest-level rows have `node_id: null`.
