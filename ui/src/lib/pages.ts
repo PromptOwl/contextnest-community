@@ -42,6 +42,9 @@ export interface PageCaps {
   docStreamEnabled?: boolean;
   /** Surfaces (Slack → nest) is on for this server (/health surfaces_enabled). */
   surfacesEnabled?: boolean;
+  /** The signed-in person owns or administers at least one nest (po-1186 CR2:
+   *  the Control room shows them their nests). See useAdministersNest. */
+  administersNest?: boolean;
 }
 
 export interface PageMeta {

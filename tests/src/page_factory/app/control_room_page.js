@@ -6,6 +6,8 @@
  *
  * Tabs: Overview, Decision ledger, Agents, Setup, How it works. Setup is a
  * five-step wizard; each step pane carries data-testid="setup-step-<n>".
+ * Overview tiles carry data-testid="tile-<name>" and "tile-<name>-value"
+ * (reviewed, cards, saved, spend) — po-1186 CR2.
  */
 
 class ControlRoomPage {
@@ -21,6 +23,8 @@ class ControlRoomPage {
     this.willNever = page.getByTestId('setup-will-never');
     this.stepPane = (n) => page.getByTestId(`setup-step-${n}`);
     this.button = (name) => page.locator('main').getByRole('button', { name, exact: true });
+    this.tile = (name) => page.getByTestId(`tile-${name}`);
+    this.tileValue = (name) => page.getByTestId(`tile-${name}-value`);
   }
 
   async goto(tab = 'setup') {

@@ -257,6 +257,8 @@ export function ledgerWhere(
 
 export interface AggRow {
   at: string;
+  /** The verdict's reason code (rollups by=reason). */
+  reason_code?: string | null;
   nest_id: string;
   agent_node: string | null;
   binding_id: string | null;
@@ -378,7 +380,7 @@ export async function aggregateRows(scope: LedgerScope, f: LedgerFilters): Promi
   const redacted = new Set(scope.nestIds.filter((id) => n1Redacts(owners, id, scope.viewerUserId)));
   const { sql, args } = ledgerWhere(scope, f, range, redacted);
   const rows = (await getDb().all(
-    `SELECT l.at, l.nest_id, l.agent_node, l.binding_id, l.source, l.verdict, l.run_status, l.run_trace, l.cost_micros,
+    `SELECT l.at, l.nest_id, l.agent_node, l.binding_id, l.source, l.verdict, l.reason_code, l.run_status, l.run_trace, l.cost_micros,
             l.n_prop, l.n_app, l.n_edit, l.n_rej, l.n_exp, l.n_pend, l.n_wd
        FROM ${LEDGER_UNION} ${sql}`,
     args as any,

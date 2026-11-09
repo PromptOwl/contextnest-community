@@ -256,6 +256,16 @@ const testRun = [
     enabled: true,
     independent: true, // Fakes Slack in the browser; creates and deletes at most one nest
   },
+  {
+    // Workspace → Control room → Overview / Decision ledger / Agents
+    // (CN-CR-008 … CN-CR-014, po-1186 CR2). Serial: one account. CN-CR-008
+    // reads the real server (skips with no listener activity); the rest answer
+    // the page's reads in the browser.
+    file: 'control-room/control_room_dashboard.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads only; writes nothing to the server
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {

@@ -153,6 +153,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_budget_get: read("View Surfaces budget", "Returns the nest's spend budget."),
   context_surfaces_seed_list: read("List available seeds", "Lists available seeds."),
   context_surfaces_seed_status: read("View applied seeds", "Lists applied seeds."),
+  context_surfaces_cold_start: read("View cold start", "Counts approved documents per seed folder from the server's own tables."),
   context_surfaces_slack_channels_list: readOutside("List Slack channels", "Saves nothing, but asks the third-party workspace which channels the bot is in."),
 
   // ─── Surfaces: writes ───────────────────────────────────────────────────

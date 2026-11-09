@@ -2,61 +2,132 @@
  * Control room (po-1186): one page for what the agents are doing, how the
  * nest is filling up, the Slack setup and how it all works.
  *
- * CR3 ships the shell, Setup and How it works. Overview, Decision ledger and
- * Agents read the ledger CR1 adds and land with CR2; until then each says so
- * and points to Setup, instead of drawing empty charts.
+ * CR3 shipped the shell, Setup and How it works; CR2 fills Overview,
+ * Decision ledger and Agents from the CR1 ledger and rollups. Who sees what
+ * (decision 3, 2026-11-09): a server admin sees every nest and runs Setup;
+ * a nest owner or admin sees the nests they administer (the org ledger and
+ * rollups narrow themselves server-side) and gets no Setup tab.
  */
-import { useEffect, useState } from "react";
-import { BookOpenText, Gauge, ListChecks, Bot } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Gauge, RefreshCw } from "lucide-react";
 import { PageTitle } from "@/components/ui/page-title";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { SetupWizard, useSetupState, type SetupState } from "./SetupWizard";
+import { useAuth } from "@/auth/AuthContext";
+import { useAppNav } from "../../../lib/app-nav";
+import { listNests } from "../../../lib/api";
+import { RANGES, rangeFor, type RangeDays } from "../../../lib/control-room-overview";
+import { SetupWizard, useSetupState } from "./SetupWizard";
 import { HowItWorks } from "./HowItWorks";
-import { SETUP_STEPS } from "../../../lib/control-room-setup";
+import { Overview } from "./Overview";
+import { Ledger } from "./Ledger";
+import { Agents } from "./Agents";
+import type { ControlRoomScope, NestRef } from "./scope";
 
 const TABS = ["overview", "ledger", "agents", "setup", "how"] as const;
 /** `?section=` (App owns `?tab=` and strips it on every navigation). */
 const SECTION_PARAM = "section";
+/** `?entry=<ledger entry id>` opens the trace drawer (Copy link). */
+const ENTRY_PARAM = "entry";
 type Tab = (typeof TABS)[number];
 
-function tabFromUrl(): Tab | null {
+function param(name: string): string | null {
   try {
-    const t = new URLSearchParams(window.location.search).get(SECTION_PARAM);
-    return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : null;
+    return new URLSearchParams(window.location.search).get(name);
   } catch {
     return null;
   }
 }
 
+function tabFromUrl(): Tab | null {
+  const t = param(SECTION_PARAM);
+  return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : null;
+}
+
+function setParams(p: Record<string, string | null>) {
+  try {
+    const u = new URL(window.location.href);
+    for (const [k, v] of Object.entries(p)) {
+      if (v === null) u.searchParams.delete(k);
+      else u.searchParams.set(k, v);
+    }
+    window.history.replaceState(window.history.state, "", u.toString());
+  } catch {
+    /* no URL sync; the view still changes */
+  }
+}
+
 export default function ControlRoomPage() {
+  const { isAdmin } = useAuth();
+  const nav = useAppNav();
   const setup = useSetupState();
   const [tab, setTabNow] = useState<Tab | null>(tabFromUrl);
-  // Until the reader picks a tab: Setup while setup is unfinished, else
-  // Overview — decided once, when the facts load, so finishing setup on this
-  // visit doesn't move the reader off the Setup tab.
+  const [entry, setEntryNow] = useState<string | null>(() => param(ENTRY_PARAM));
+  // Until the reader picks a tab: a server admin with setup unfinished lands
+  // on Setup; everyone else on Overview — decided once, when the facts load.
   useEffect(() => {
-    if (setup.loaded && tab === null) setTabNow(setup.progress.count === 5 ? "overview" : "setup");
-  }, [setup.loaded, tab, setup.progress.count]);
-  const shown: Tab = tab ?? "setup";
+    if (tab !== null) return;
+    if (!isAdmin) setTabNow(entry ? "ledger" : "overview");
+    else if (setup.loaded) setTabNow(entry ? "ledger" : setup.progress.count === 5 ? "overview" : "setup");
+  }, [setup.loaded, tab, setup.progress.count, isAdmin, entry]);
+  const shown: Tab = tab === "setup" && !isAdmin ? "overview" : tab ?? (isAdmin ? "setup" : "overview");
 
-  const setTab = (t: string) => {
+  const setTab = useCallback((t: string) => {
     setTabNow(t as Tab);
-    try {
-      const u = new URL(window.location.href);
-      u.searchParams.set(SECTION_PARAM, t);
-      window.history.replaceState(window.history.state, "", u.toString());
-    } catch {
-      /* no URL sync; the tab still changes */
-    }
-  };
+    setParams({ [SECTION_PARAM]: t, ...(t !== "ledger" ? { [ENTRY_PARAM]: null } : {}) });
+  }, []);
+  const setEntry = useCallback((id: string | null) => {
+    setEntryNow(id);
+    setParams({ [ENTRY_PARAM]: id });
+  }, []);
   useEffect(() => {
-    const onPop = () => setTabNow(tabFromUrl());
+    const onPop = () => {
+      setTabNow(tabFromUrl());
+      setEntryNow(param(ENTRY_PARAM));
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const unfinished = setup.loaded && setup.progress.count < 5;
+  // Scope: nest picker, range, refresh.
+  const [nestId, setNestId] = useState<string | null>(null);
+  const [days, setDays] = useState<RangeDays>(14);
+  const [tick, setTick] = useState(0);
+  const [nests, setNests] = useState<NestRef[]>([]);
+  useEffect(() => {
+    listNests()
+      .then((r) =>
+        setNests(
+          (r.nests ?? [])
+            .filter((n: any) => n && typeof n.id === "string" && (isAdmin || n.is_owner || n.permission === "owner" || n.permission === "admin"))
+            .map((n: any) => ({ id: n.id, name: String(n.name ?? n.id) })),
+        ),
+      )
+      .catch(() => setNests([]));
+  }, [isAdmin]);
+  // A refresh when the reader comes back to the browser tab — a new report is
+  // then the only thing that moves (Agents). No polling.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") setTick((t) => t + 1);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const range = useMemo(() => rangeFor(days), [days, tick]);
+  const nestName = useCallback(
+    (id: string) => nests.find((n) => n.id === id)?.name ?? setup.nests.find((n) => n.id === id)?.name ?? "a nest",
+    [nests, setup.nests],
+  );
+  const scope: ControlRoomScope = { nestId, days, range, nests, isServerAdmin: isAdmin, nestName, tick };
+
+  const onSetup = isAdmin ? () => setTab("setup") : null;
+  const unfinished = isAdmin && setup.loaded && setup.progress.count < 5;
+  const dataTab = shown === "overview" || shown === "ledger" || shown === "agents";
+
+  const openDoc = (nid: string, nodeId: string) => nav.openReview(nid, nestName(nid), nodeId);
+  const openNest = (nid: string) => nav.openNest(nid, nestName(nid), false, false);
 
   return (
     <div data-testid="control-room-page" className="min-w-0">
@@ -64,6 +135,42 @@ export default function ControlRoomPage() {
         icon={Gauge}
         title="Control room"
         description="See what your agents are doing, how the nest is filling up, and trace any decision back to where it came from."
+        actions={
+          dataTab ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Nest"
+                className="h-9 max-w-[12rem] rounded-md border bg-background px-2 text-sm"
+                value={nestId ?? ""}
+                onChange={(e) => setNestId(e.target.value || null)}
+                data-testid="cr-nest-select"
+              >
+                <option value="">{isAdmin ? "All nests" : "All my nests"}</option>
+                {nests.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Range"
+                className="h-9 rounded-md border bg-background px-2 text-sm"
+                value={days}
+                onChange={(e) => setDays(Number(e.target.value) as RangeDays)}
+                data-testid="cr-range-select"
+              >
+                {RANGES.map((d) => (
+                  <option key={d} value={d}>
+                    Last {d} days
+                  </option>
+                ))}
+              </select>
+              <Button variant="ghost" size="icon" aria-label="Refresh" onClick={() => setTick((t) => t + 1)}>
+                <RefreshCw className="h-4 w-4" aria-hidden />
+              </Button>
+            </div>
+          ) : undefined
+        }
       />
       <Tabs value={shown} onValueChange={setTab}>
         <div className="relative -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
@@ -71,102 +178,39 @@ export default function ControlRoomPage() {
             <TabsTrigger value="overview" className="px-3 py-1.5">Overview</TabsTrigger>
             <TabsTrigger value="ledger" className="px-3 py-1.5">Decision ledger</TabsTrigger>
             <TabsTrigger value="agents" className="px-3 py-1.5">Agents</TabsTrigger>
-            <TabsTrigger value="setup" className="gap-1.5 px-3 py-1.5">
-              Setup
-              {unfinished && (
-                <>
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
-                  <span className="sr-only">, not finished</span>
-                </>
-              )}
-            </TabsTrigger>
+            {isAdmin && (
+              <TabsTrigger value="setup" className="gap-1.5 px-3 py-1.5">
+                Setup
+                {unfinished && (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
+                    <span className="sr-only">, not finished</span>
+                  </>
+                )}
+              </TabsTrigger>
+            )}
             <TabsTrigger value="how" className="px-3 py-1.5">How it works</TabsTrigger>
           </TabsList>
         </div>
 
         <TabsContent value="overview" className="mt-5">
-          <NextRelease
-            icon={Gauge}
-            title={setup.progress.count === 5 ? "Listening. The overview comes next" : "Nothing is listening yet"}
-            body="This tab will show what the listeners reviewed, what people saved, and what it cost. It arrives in the next release."
-            setup={setup}
-            onSetup={() => setTab("setup")}
-          />
+          {shown === "overview" && <Overview scope={scope} onSetup={onSetup} onLedger={() => setTab("ledger")} onAgents={() => setTab("agents")} onOpenNest={openNest} />}
         </TabsContent>
         <TabsContent value="ledger" className="mt-5">
-          <NextRelease
-            icon={ListChecks}
-            title="The decision ledger comes next"
-            body="Every run, its verdict and what happened to it, including the times an agent decided to do nothing. It arrives in the next release."
-            setup={setup}
-            onSetup={() => setTab("setup")}
-          />
+          {shown === "ledger" && <Ledger scope={scope} openEntry={entry} onOpenEntry={setEntry} onSetup={onSetup} onAgents={() => setTab("agents")} onOpenDoc={openDoc} />}
         </TabsContent>
         <TabsContent value="agents" className="mt-5">
-          <NextRelease
-            icon={Bot}
-            title="Agents come next"
-            body="The listeners and any agent you run yourself, such as Claude Code or a scheduled script, with when each last reported. It arrives in the next release."
-            setup={setup}
-            onSetup={() => setTab("setup")}
-          />
+          {shown === "agents" && <Agents scope={scope} onManageKeys={nav.manageKeys} />}
         </TabsContent>
-        <TabsContent value="setup" className="mt-5">
-          <SetupWizard state={setup} onDone={() => setTab("overview")} onHow={() => setTab("how")} />
-        </TabsContent>
+        {isAdmin && (
+          <TabsContent value="setup" className="mt-5">
+            <SetupWizard state={setup} onDone={() => setTab("overview")} onHow={() => setTab("how")} />
+          </TabsContent>
+        )}
         <TabsContent value="how" className="mt-5">
           <HowItWorks settings={setup.settings} orgName={setup.status?.org_name ?? null} onAgents={() => setTab("agents")} />
         </TabsContent>
       </Tabs>
-    </div>
-  );
-}
-
-/** A tab whose data arrives with the next release: say so, and route to Setup. */
-function NextRelease({
-  icon: Icon,
-  title,
-  body,
-  setup,
-  onSetup,
-}: {
-  icon: typeof BookOpenText;
-  title: string;
-  body: string;
-  setup: SetupState;
-  onSetup: () => void;
-}) {
-  const p = setup.progress;
-  return (
-    <div className="rounded-lg border border-dashed px-5 py-8 text-center" data-testid="control-room-next-release">
-      <Icon className="mx-auto mb-2 h-6 w-6 text-muted-foreground" aria-hidden />
-      <h2 className="text-base font-semibold">{title}</h2>
-      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">{body}</p>
-      {p.count < 5 && (
-        <>
-          <ol className="mx-auto mt-5 max-w-sm text-left">
-            {SETUP_STEPS.map((s, i) => (
-              <li key={s.title} className="flex items-center gap-2.5 border-b py-1.5 text-sm last:border-b-0">
-                <span
-                  className={
-                    p.done[i]
-                      ? "grid h-5 w-5 shrink-0 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground"
-                      : "grid h-5 w-5 shrink-0 place-items-center rounded-full border text-sm text-muted-foreground"
-                  }
-                  aria-hidden
-                >
-                  {i + 1}
-                </span>
-                <span>{s.title}</span>
-                {p.done[i] && <span className="sr-only">(done)</span>}
-              </li>
-            ))}
-          </ol>
-          <Button className="mt-5" onClick={onSetup}>
-            {p.count === 0 ? "Start setup" : "Continue setup"}
-          </Button>
-        </>
-      )}
     </div>
   );
 }

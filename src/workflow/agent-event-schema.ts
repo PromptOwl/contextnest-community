@@ -165,7 +165,10 @@ export const LedgerTraceInput = z.object({
 export const RollupsQuery = z.object({
   ...LedgerFilters,
   grain: z.enum(["day", "week"]).optional().describe("day | week (ISO weeks, UTC; bucket = the Monday). Default day."),
-  by: z.enum(["agent", "nest", "binding", "none"]).optional().describe("agent | nest | binding | none. Default agent."),
+  by: z
+    .enum(["agent", "nest", "binding", "reason", "none"])
+    .optional()
+    .describe("agent | nest | binding | reason (the verdict's reason_code) | none. Default agent."),
 });
 
 // ─── MCP inputs (REST body + the path/header parts) ────────────────────────

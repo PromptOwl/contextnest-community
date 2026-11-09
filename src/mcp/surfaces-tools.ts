@@ -57,6 +57,9 @@ import { budgetView, getBudget, setCap } from "../surfaces/services/spend-servic
 import { disconnectInstall } from "../surfaces/services/lifecycle-service.js";
 import { SettingsError } from "../surfaces/core/settings.js";
 import { listWindows } from "../surfaces/services/report-service.js";
+import { coldStart } from "../surfaces/services/cold-start-service.js";
+import { ColdStartMcpInput } from "../surfaces/cold-start-schema.js";
+import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 
 const BINDING_ID = { type: "string", description: "Binding id (context_surfaces_bindings_list shows them)." } as const;
 const BIND_FIELDS = {
@@ -307,6 +310,14 @@ export const SURFACES_TOOL_DEFINITIONS = [
     name: "context_surfaces_seed_status",
     description: "List the seeds this nest has applied (id, version, source). no_seed = true means its conversations propose nowhere yet. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
+  },
+  {
+    // po-1186 CR2: twin of GET /surfaces/cold-start?nest_id=. Schema generated
+    // from the zod object the REST route shares (src/surfaces/cold-start-schema.ts).
+    name: "context_surfaces_cold_start",
+    description:
+      "How fast this seeded nest is filling up: the seed's folders and how many approved documents each holds (the seed's own CONTEXT and thesis excluded), folder coverage, the time from the seed to the first approved document, the org mirror's people and areas proposed vs accepted, and a cumulative count per day. no_seed = true when no seed is applied. Owner/admin only.",
+    inputSchema: mcpInputSchema(ColdStartMcpInput),
   },
 ];
 
@@ -590,6 +601,15 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         const { seedStatus } = await import("../surfaces/services/seed-service.js");
         const status = await seedStatus(ctx.nestId, ctx.userId);
         return { text: status.no_seed ? "No seed applied: conversations bound here propose nowhere yet." : status.applied.map((a) => `${a.seed_id}@${a.version}`).join(", "), data: status };
+      }
+      case "context_surfaces_cold_start": {
+        const cs = await coldStart(ctx.nestId, ctx.userId);
+        if (cs.no_seed) return { text: "No seed applied to this nest yet, so there is no cold start to show. Apply a starter in Control room → Setup.", data: cs };
+        const first = cs.first_approved ? `${Math.round(cs.first_approved.after_seed_ms / 60_000)} min after the seed` : "none yet";
+        return {
+          text: `${cs.seed!.id} v${cs.seed!.version}: ${cs.coverage.covered} of ${cs.coverage.total} folders have an approved document; first approved ${first}.\n${cs.folders.map((f) => `- ${f.path} ${f.approved}`).join("\n")}`,
+          data: cs,
+        };
       }
       default:
         return { text: `Unknown surfaces tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown surfaces tool: ${toolName}` } };

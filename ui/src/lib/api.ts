@@ -4911,3 +4911,110 @@ export const getSurfacesSeedStatus = (nestId: string) =>
 export const applySurfacesSeed = (b: { nest_id: string; seed_id: string; library_nest_id?: string | null; dry_run?: boolean }) =>
   request<SurfacesSeedResult>("/surfaces/seeds/apply", surfacesJson(b));
 // ═══ end Control room (po-1186 CR3) ═══════════════════════════════════════
+
+// ═══ Control room: dashboard, decision ledger, agents (po-1186 CR2) ════════
+// Kept in one block on purpose (CR3's setup block sits above). Reads over the
+// CR1 ledger/rollups routes and the CR2 cold-start route; one write: register
+// an agent. Shapes live in lib/control-room-overview.ts.
+
+import type {
+  LedgerEntry as CrLedgerEntry,
+  LedgerTotals as CrLedgerTotals,
+  RollupRow as CrRollupRow,
+  BudgetLite as CrBudget,
+} from "./control-room-overview";
+
+export interface CrLedgerQuery {
+  from: string;
+  to: string;
+  agent?: string;
+  verdict?: string;
+  state?: string;
+  source?: string;
+  binding?: string;
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface CrLedgerPage {
+  api_version: string;
+  range: { from: string; to: string };
+  entries: CrLedgerEntry[];
+  next_cursor: string | null;
+  totals: CrLedgerTotals;
+}
+
+export interface CrRollups {
+  api_version: string;
+  grain: "day" | "week";
+  by: "agent" | "nest" | "binding" | "reason" | "none";
+  range: { from: string; to: string };
+  rows: CrRollupRow[];
+  totals: CrLedgerTotals;
+  reconciles_with: string;
+}
+
+export interface CrTrace {
+  api_version: string;
+  entry: CrLedgerEntry;
+  chain: {
+    run: { id: string; agent_node: string | null; status: string; outcome: string | null; started_at: string; finished_at: string | null; cost_usd: number; external_ref?: string | null; triggered_by?: string } | null;
+    verdict: (CrLedgerEntry["verdict"] & { decision?: CrLedgerEntry["decision"]; model?: string | null; prompt_version?: string | null }) | null;
+    proposal: Record<string, any> | null;
+    review: { state: string; by?: string | null; reason?: string | null; at: string } | null;
+    version: { node_id?: string; version: number | null; edited?: boolean; at: string; saved_by?: string | null; author?: string | null } | null;
+    source: { kind: string; label: string | null; url?: string | null; triggered_by?: string | null } | null;
+  };
+  steps: Array<{ seq: number; action: string; node_id: string | null; edge_id: string | null; detail: Record<string, any> | null; at: string }>;
+  gaps: string[];
+}
+
+export interface CrColdStart {
+  nest_id: string;
+  nest_label: string;
+  redacted: "n1" | null;
+  no_seed: boolean;
+  seed: { id: string; version: number; applied_at: string } | null;
+  folders: Array<{ path: string; approved: number; first_approved_at: string | null }>;
+  coverage: { covered: number; total: number };
+  first_approved: { node_id: string | null; at: string; after_seed_ms: number } | null;
+  mirror: { people: { proposed: number; accepted: number }; areas: { proposed: number; accepted: number } };
+  cumulative: Array<{ day: string; approved: number }>;
+}
+
+const crQs = (o: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== "") p.set(k, String(v));
+  return p.toString();
+};
+const crBase = (nestId: string | null, what: "ledger" | "rollups") => (nestId ? `/nests/${encodeURIComponent(nestId)}/${what}` : `/${what}`);
+
+/** One page of the decision ledger, for one nest or every nest the caller administers. */
+export const getLedger = (nestId: string | null, q: CrLedgerQuery) =>
+  request<CrLedgerPage>(`${crBase(nestId, "ledger")}?${crQs({ ...q })}`);
+
+export const getRollups = (
+  nestId: string | null,
+  q: Omit<CrLedgerQuery, "cursor" | "limit" | "q"> & { grain: "day" | "week"; by: CrRollups["by"] },
+) => request<CrRollups>(`${crBase(nestId, "rollups")}?${crQs({ ...q })}`);
+
+export const getLedgerTrace = (entryId: string) => request<CrTrace>(`/ledger/${encodeURIComponent(entryId)}`);
+
+export const getColdStart = (nestId: string | null) =>
+  request<{ api_version: string; nests: CrColdStart[] }>(`/surfaces/cold-start${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`).then((r) => r.nests);
+
+export const getSurfacesBudget = (nestId: string) =>
+  request<{ budget: CrBudget }>(`/surfaces/nests/${encodeURIComponent(nestId)}/budget`).then((r) => r.budget);
+
+/** The ledger export URL (CSV); the browser downloads it with the session cookie. Each export is logged in the nest's activity. */
+export const ledgerExportUrl = (nestId: string, q: Pick<CrLedgerQuery, "from" | "to" | "agent" | "verdict" | "q">, format: "csv" | "ndjson" = "csv") =>
+  `/nests/${encodeURIComponent(nestId)}/ledger/export?${crQs({ ...q, format })}`;
+
+/** Register (upsert) an outside agent as an agent document in the nest. Owner/admin. */
+export const registerAgent = (nestId: string, body: { name: string; runtime?: string; description?: string }) =>
+  request<{ node_id: string; created: boolean; api_version: string }>(`/nests/${encodeURIComponent(nestId)}/agents`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+// ═══ end Control room (po-1186 CR2) ═══════════════════════════════════════
