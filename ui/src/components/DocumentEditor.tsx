@@ -149,6 +149,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { versionAuthorShort, clientTitle, lastEditParts, type LastEdit } from "../lib/version-author";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -387,6 +388,11 @@ export function DocumentEditor({
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  // Who sealed the latest version — human and agent (node detail `last_edit`).
+  const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
+  // updated_at as loadNode saw it. A save moves updatedAt past it; the byline
+  // then re-reads last_edit, since a write response does not carry it.
+  const loadedUpdatedAtRef = useRef<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -440,6 +446,7 @@ export function DocumentEditor({
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
   const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -1204,6 +1211,8 @@ export function DocumentEditor({
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
+      setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
+      loadedUpdatedAtRef.current = node?.updated_at ?? null;
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1266,6 +1275,23 @@ export function DocumentEditor({
     if (isNew) return;
     loadNode();
   }, [isNew, loadNode]);
+
+  useEffect(() => {
+    if (isNew || !updatedAt || updatedAt === loadedUpdatedAtRef.current) return;
+    loadedUpdatedAtRef.current = updatedAt;
+    let cancelled = false;
+    api
+      .getNode(nestId, nodeId)
+      .then((r) => {
+        if (!cancelled) setLastEdit((r?.node?.last_edit ?? null) as LastEdit | null);
+      })
+      .catch(() => {
+        // The byline keeps its last value; the save itself already succeeded.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, updatedAt]);
 
   const openVersions = useCallback(async () => {
     setShowVersions(true);
@@ -2725,7 +2751,9 @@ export function DocumentEditor({
                   <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+              {/* Fits "human via agent · time" on one line; a long agent name
+                  truncates, and the hover title carries the full detail. */}
+              <DropdownMenuContent align="end" className="min-w-[14rem] max-w-[22rem] max-h-80 overflow-y-auto">
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
@@ -2761,10 +2789,18 @@ export function DocumentEditor({
                             to tell which past version you are reaching for.
                             Same editedAt Version History already renders. */}
                         <span
-                          className="ml-auto text-xs text-muted-foreground"
-                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                          className="ml-auto pl-3 min-w-0 truncate whitespace-nowrap text-xs text-muted-foreground"
+                          title={
+                            [
+                              v.editedAt ? formatServerDate(v.editedAt) : null,
+                              v.editedBy,
+                              clientTitle(v.client),
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || undefined
+                          }
                         >
-                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[versionAuthorShort(v), relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -3452,11 +3488,40 @@ export function DocumentEditor({
                 {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
-                {!isNew && (author || collaborators.length > 0) && (
+                {!isNew && (author || lastEditBy || collaborators.length > 0) && (
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
                         Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                      </span>
+                    )}
+                    {/* Last edited by: the human, then the agent the write
+                        named — never the agent alone. Same type as Created by. */}
+                    {lastEditBy && (
+                      <span
+                        className="inline-flex flex-wrap items-center gap-x-1"
+                        data-testid="document-last-edited-by"
+                      >
+                        Last edited by{" "}
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                          {lastEditBy.human}
+                        </span>
+                        {lastEditBy.agent && (
+                          <>
+                            {" "}via{" "}
+                            <span
+                              className="font-medium text-foreground/80"
+                              title={clientTitle(lastEdit?.client)}
+                            >
+                              {lastEditBy.agent}
+                            </span>
+                          </>
+                        )}
+                        {lastEdit?.edited_at && (
+                          <span title={formatServerDate(lastEdit.edited_at)}>
+                            {" "}· {relTime(lastEdit.edited_at)}
+                          </span>
+                        )}
                       </span>
                     )}
                     {collaborators.length > 0 && (

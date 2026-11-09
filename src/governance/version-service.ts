@@ -170,6 +170,32 @@ export async function getVersion(
   return row ? rowToVersion(row) : null;
 }
 
+/**
+ * Who sealed one version — the human (`editedBy`, with the system account's
+ * name when it is one) and the call's `client` block — without its body.
+ * `version` omitted means the latest row. Backs the "last edited by" line on
+ * the node detail and on context_get, so both name the same two writers the
+ * version list does.
+ */
+export async function getVersionAttribution(
+  nestId: string,
+  nodeId: string,
+  version?: number,
+): Promise<DocumentVersion | null> {
+  const row = (await getDb().get(
+    `SELECT nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
+            nv.client_json, sa.name AS system_name
+       FROM node_versions nv
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? "" : " AND nv.version = ?"}
+      ORDER BY nv.version DESC
+      LIMIT 1`,
+    version === undefined ? [nestId, nodeId] : [nestId, nodeId, version],
+  )) as any;
+  return row ? rowToVersion(row) : null;
+}
+
 /** getCurrentVersion for many nodes of one nest, in one query. Missing → 0. */
 export async function getCurrentVersions(
   nestId: string,

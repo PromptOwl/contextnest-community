@@ -496,6 +496,16 @@ export interface NodeResponse extends TaskFields {
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
+  /** Who sealed the latest version: the human and, when the write named one,
+   *  the agent (`client`, spec §9.4). Node detail only, never to a public
+   *  reader — like `collaborators`, it names the nest's people. */
+  last_edit?: {
+    version: number;
+    edited_by: string;
+    edited_by_system?: string;
+    edited_at: string;
+    client?: ClientMetadata;
+  };
   description?: string;
   created_at?: string;
   updated_at?: string;
