@@ -65,6 +65,7 @@ const READ_ONLY = [
   "context_agent_rollups",
   "context_agent_ledger_org",
   "context_agent_rollups_org",
+  "context_surfaces_slack_channels_list",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -123,6 +124,7 @@ const OPEN_WORLD = [
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_surfaces_binding_preview",
+  "context_surfaces_slack_channels_list",
   "context_surfaces_binding_create",
   "context_surfaces_binding_update",
   "context_surfaces_binding_delete",

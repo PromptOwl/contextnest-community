@@ -40,6 +40,8 @@ const PUBLIC_PATHS = new Set([
   "/license/status",
   "/llms.txt",
   "/auth/admin-status",
+  // Surfaces member explainer: static copy, no nest data (po-1186 CR3).
+  "/about/surfaces",
 ]);
 
 function segmentMatches(seg: string, nestId: string): boolean {
