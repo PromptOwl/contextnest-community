@@ -9,31 +9,26 @@
  *
  * The nest middleware (app.ts) already holds these at the admin tier and keeps
  * named system keys out; the handler checks again so the rule lives next to
- * the data. Not on MCP on purpose: wiring where a nest's events go is an
- * admin setting, like /connectors, not an agent's working tool.
+ * the data (assertCanManageAgentWebhooks, shared with MCP). MCP twin:
+ * context_agent_webhooks (list / set / delete), same service, same objects.
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { config } from "../config.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
-import { resolveNestAccess } from "../shared/access.js";
-import { ForbiddenError, ValidationError } from "../shared/errors.js";
-import { deleteAgentWebhook, listAgentWebhooks, putAgentWebhook } from "./agent-webhooks.js";
+import { ValidationError } from "../shared/errors.js";
+import {
+  assertCanManageAgentWebhooks,
+  deleteAgentWebhook,
+  listAgentWebhooks,
+  putAgentWebhook,
+} from "./agent-webhooks.js";
 
 export const agentWebhookRoutes = new Hono<AuthEnv>();
 
 async function assertNestAdmin(c: any): Promise<{ nestId: string; email: string }> {
   const nestId = c.req.param("nestId") as string;
   const userId = c.get("userId") as string;
-  if (config.AUTH_MODE !== "open") {
-    const access = await resolveNestAccess(nestId, userId);
-    if (access.rawPermission !== "owner" && access.rawPermission !== "admin") {
-      throw new ForbiddenError("Only a nest owner or admin can manage agent webhooks.");
-    }
-    if (access.archived && c.req.method !== "GET") {
-      throw new ForbiddenError("This nest is archived, so it is read-only.");
-    }
-  }
+  await assertCanManageAgentWebhooks(nestId, userId, { write: c.req.method !== "GET" });
   return { nestId, email: await resolveCallerEmail(userId) };
 }
 

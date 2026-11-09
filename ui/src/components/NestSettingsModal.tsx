@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import * as api from "../lib/api";
 import { SystemsPanel } from "./nest/SystemsPanel";
+import { AgentWebhooksPanel } from "./nest/AgentWebhooksPanel";
 
 interface NestSettingsModalProps {
   nestId: string;
@@ -713,6 +714,7 @@ export function NestSettingsModal({
 
           {/* Acts on its own (each change saves immediately), not via Save. */}
           {canManageStewardship && <SystemsPanel nestId={nestId} />}
+          {canManageStewardship && <AgentWebhooksPanel nestId={nestId} />}
         </div>
 
         <DialogFooter>

@@ -3012,7 +3012,7 @@ Delivery is fire-and-forget (3 s timeout, no automatic retry) and recorded in th
 - **PUT** `/nests/:nestId/agent-webhooks/:handle` `{ "url": "https://…", "rotate"?: true }` → `{ "webhook", "secret"? }`. `secret` (`whsec_…`) is returned only when one is minted — on the first save or with `rotate: true` — and never again; re-saving just the URL keeps the secret. `url` must be a public `https` URL: loopback, private, link-local, carrier-grade NAT, metadata and `.local`/`.internal`/`localhost` hosts are refused with `400` (the connector fence), checked again at dispatch, and the POST goes through the connect-time guard, so a public name that resolves to a private address is refused there. Handle: 1–63 characters, lowercase letters, digits, `.`, `-`, `_`.
 - **DELETE** `/nests/:nestId/agent-webhooks/:handle` → `{ "deleted": true }` (`404` if none).
 
-Every method needs the nest owner or an admin (`403` otherwise); named system keys are refused. URL and secret are stored encrypted. The map is the stand-in until agent principals exist; they will carry their own target.
+Every method needs the nest owner or an admin (`403` otherwise); named system keys are refused. URL and secret are stored encrypted. The map is the stand-in until agent principals exist; they will carry their own target. MCP twin: `context_agent_webhooks` — `action: "list"` (default) returns the GET body, `"set"` (`handle`, `url`, `rotate?`) the PUT body (the secret only when minted), `"delete"` (`handle`) the DELETE body; same gate and URL validation, and a read-only key can't call it. In the UI: nest settings → **Agent webhooks** (owner/admin).
 
 #### Promote a thread — `POST /nests/:nestId/threads/:threadId/promote`
 

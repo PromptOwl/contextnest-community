@@ -635,3 +635,66 @@ describe("SEC: promote write-authz", () => {
     expect(th.data.thread.post.status).toBe("resolved");
   });
 });
+
+// ─── MCP parity for agent webhooks (follow-up, PO-1181) ─────────────────
+
+describe("AC-ST-07: MCP context_agent_webhooks matches REST /agent-webhooks", () => {
+  it("set returns the secret once, list matches REST and never shows URL or secret, delete removes it", async () => {
+    expect(await listToolNames(owner.apiKey)).toContain("context_agent_webhooks");
+    const set = await callTool(owner.apiKey, "context_agent_webhooks", { action: "set", handle: "duet", url: "https://duet.example.com/hook" });
+    expect(set.isError, set.text).toBe(false);
+    expect(set.data.webhook).toMatchObject({ handle: "duet", target: expect.stringMatching(/^duet\.example\.com#[0-9a-f]{12}$/) });
+    expect(set.data.secret).toMatch(/^whsec_/);
+    // Same shape as the REST PUT.
+    const restSet = await setWebhook(owner, "duet-rest", "https://duet.example.com/hook2");
+    const keys = (o: any) => Object.keys(o).sort();
+    expect(keys(set.data)).toEqual(keys(restSet.data));
+    expect(keys(set.data.webhook)).toEqual(keys(restSet.data.webhook));
+
+    // Re-set without rotate keeps the secret (not returned again); rotate mints one.
+    const again = await callTool(owner.apiKey, "context_agent_webhooks", { action: "set", handle: "duet", url: "https://duet.example.com/hook" });
+    expect(again.data.secret).toBeUndefined();
+    const rotated = await callTool(owner.apiKey, "context_agent_webhooks", { action: "set", handle: "duet", url: "https://duet.example.com/hook", rotate: true });
+    expect(rotated.data.secret).toMatch(/^whsec_/);
+    expect(rotated.data.secret).not.toBe(set.data.secret);
+
+    const list = await callTool(owner.apiKey, "context_agent_webhooks", { action: "list" });
+    expect(list.isError, list.text).toBe(false);
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/agent-webhooks`, undefined, owner.apiKey);
+    expect(list.data).toEqual(rest.data);
+    expect(JSON.stringify(list.data) + list.text).not.toMatch(/whsec_|\/hook/);
+
+    const del = await callTool(owner.apiKey, "context_agent_webhooks", { action: "delete", handle: "duet" });
+    expect(del.isError, del.text).toBe(false);
+    expect(del.data).toEqual({ deleted: true });
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/agent-webhooks`, undefined, owner.apiKey);
+    expect(after.data.webhooks.map((w: any) => w.handle)).not.toContain("duet");
+    const missing = await callTool(owner.apiKey, "context_agent_webhooks", { action: "delete", handle: "duet" });
+    expect(missing.isError).toBe(true);
+  });
+
+  it("refuses private targets with the same SSRF fence as REST", async () => {
+    for (const url of ["https://127.0.0.1/x", "https://169.254.169.254/latest", "https://100.64.0.1/x", "http://duet.example.com/x"]) {
+      const r = await callTool(owner.apiKey, "context_agent_webhooks", { action: "set", handle: "duet-ssrf", url });
+      expect(r.isError, `${url}: ${r.text}`).toBe(true);
+    }
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/agent-webhooks`, undefined, owner.apiKey);
+    expect(rest.data.webhooks.map((w: any) => w.handle)).not.toContain("duet-ssrf");
+  });
+
+  it("is owner/admin only on every action, and a read-only key can't call it", async () => {
+    for (const u of [alice, reader]) {
+      for (const args of [{ action: "list" }, { action: "set", handle: "x1", url: "https://x.example.com/h" }, { action: "delete", handle: "grok" }]) {
+        const r = await callTool(u.apiKey, "context_agent_webhooks", args);
+        expect(r.isError || !!r.rpcError, `${u.email} ${args.action}`).toBe(true);
+        expect(r.text).not.toMatch(/whsec_|runner\.example\.com/);
+      }
+    }
+    const ro = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-hooks", nest_id: nestId, capability: "read" }, owner.apiKey);
+    const r = await callTool(ro.data.api_key, "context_agent_webhooks", { action: "list" });
+    expect(r.isError || !!r.rpcError).toBe(true);
+    // grok's target survives all of the above.
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/agent-webhooks`, undefined, owner.apiKey);
+    expect(rest.data.webhooks.map((w: any) => w.handle)).toContain("grok");
+  });
+});

@@ -25,7 +25,10 @@ import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import { getDb } from "../db/client.js";
 import { decryptSecret, encryptSecret } from "../shared/secret-box.js";
-import { NotFoundError, ValidationError } from "../shared/errors.js";
+import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { config } from "../config.js";
+import { resolveNestAccess } from "../shared/access.js";
+import { isSystemUser } from "../auth/systems.js";
 import { isSafeConnectorUrl } from "../notify/dispatch.js";
 import { webhookTarget } from "../notify/outbound-log.js";
 import { isPrivateAddress } from "../metacognition/net.js";
@@ -64,6 +67,28 @@ export function parseAgentWebhookUrl(raw: unknown): string {
     );
   }
   return url;
+}
+
+/**
+ * The one gate for managing targets, shared by REST (/agent-webhooks) and MCP
+ * (context_agent_webhooks): no named system key, then the nest owner or an
+ * admin (uncapped standing, like the steward roster); an archived nest reads
+ * but doesn't change. Open mode is the owner, as everywhere else.
+ */
+export async function assertCanManageAgentWebhooks(
+  nestId: string,
+  userId: string,
+  opts: { write: boolean },
+): Promise<void> {
+  if (await isSystemUser(userId)) {
+    throw new ForbiddenError("A system key can't manage this nest's people, settings, publishing, keys or automation.");
+  }
+  if (config.AUTH_MODE === "open") return;
+  const access = await resolveNestAccess(nestId, userId);
+  if (access.rawPermission !== "owner" && access.rawPermission !== "admin") {
+    throw new ForbiddenError("Only a nest owner or admin can manage agent webhooks.");
+  }
+  if (opts.write && access.archived) throw new ForbiddenError("This nest is archived, so it is read-only.");
 }
 
 export interface AgentWebhookView {

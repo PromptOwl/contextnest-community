@@ -98,6 +98,8 @@ const DESTRUCTIVE = [
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
   "context_channels",
+  // Agent webhooks (PO-1181): set replaces a target, delete removes one.
+  "context_agent_webhooks",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -132,6 +134,8 @@ const OPEN_WORLD = [
   "context_channels",
   // Promote a thread (PO-1181): creates a node, which a docs site may serve.
   "context_promote_thread",
+  // Points a nest's mention events at an outside URL.
+  "context_agent_webhooks",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
