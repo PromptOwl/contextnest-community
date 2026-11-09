@@ -6,7 +6,10 @@
  * - governanceNodeRoutes: mounted at /nests/:nestId/nodes BEFORE nodeRoutes catch-all
  */
 
-import { channelPostRefusal } from "../channels/channel-service.js";
+import { isChannelNode } from "../channels/channel-node.js";
+
+const CHANNEL_USES_THREADS =
+  "A channel takes messages as threads: POST …/nodes/<channel id>/annotations (reply: …/annotations/<thread>/comments), or MCP context_comment.";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -906,10 +909,10 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
   }
   const author = await getUserEmail(c);
-  // A channel takes messages from people added to the nest only — in this
-  // standalone store as much as in the thread store its timeline reads.
-  const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), author);
-  if (refusal) return c.json({ error: refusal.error }, refusal.status);
+  // A channel's messages are its threads, under the channel's own access
+  // rule. This older flat store has no read check of its own, so it takes
+  // nothing for a channel, from anyone (PO-1190).
+  if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
   const body = await c.req.json<{
     body?: string;
     version?: number;
@@ -957,8 +960,7 @@ governanceNodeRoutes.post(
     const nodeId = c.req.param("nodeId")!;
     const commentId = c.req.param("commentId")!;
     const resolvedBy = await getUserEmail(c);
-    const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), resolvedBy);
-    if (refusal) return c.json({ error: refusal.error }, refusal.status);
+    if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
     try {
       const comment = await comments.resolveComment({
         nestId,

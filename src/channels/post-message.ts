@@ -16,6 +16,12 @@
  * (and whether they were notified), a known agent (and whether a wake-up went
  * out), or nobody. A first name that matches no one used to miss silently.
  *
+ * Those outcomes are told only to a caller who may see the nest's roster
+ * (`canSeeRoster`: someone on it, or a writer). Commenting is read-tier, so a
+ * visitor to a public nest can comment on a published page; answering them
+ * "@john reached John Smith" would let anyone enumerate who is on the nest.
+ * They get an empty list.
+ *
  * Never called for text a model wrote (Hootie, a metacognition agent) or for
  * a server-composed reply (promote): those must not page anyone.
  */
@@ -24,6 +30,7 @@ import { syncAnnotationsNode } from "../annotations/service.js";
 import { canOpenNode, notifyComment } from "../governance/mention-notify.js";
 import { indexPostedMessage, justWritten } from "../mentions/mention-index.js";
 import { wakeForPostedMessage, type WakeOutcome } from "../stream/agent-wake.js";
+import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { isChannelNode } from "./channel-node.js";
 import { normHandle, resolveBodyMentions } from "./message-meta.js";
 
@@ -49,6 +56,8 @@ export async function fanOutPostedMessage(params: {
   isReply: boolean;
   body: string;
   authorEmail: string;
+  /** The poster's user id: decides whether they may be told who was reached. */
+  authorUserId: string;
   baseUrl?: string;
 }): Promise<PostedMessage> {
   const { nestId, nodeId, thread, isReply, body, authorEmail, baseUrl } = params;
@@ -59,8 +68,12 @@ export async function fanOutPostedMessage(params: {
   const wakes = await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail });
   await syncAnnotationsNode(nestId, nodeId, authorEmail);
 
+  const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions: [] };
+  const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
+  if (!mayKnow) return posted;
+
   const author = authorEmail.toLowerCase();
-  const mentions: MentionOutcome[] = [];
+  const mentions = posted.mentions;
   for (const m of (await resolveBodyMentions(nestId, [body]).catch(() => [[]]))[0] ?? []) {
     if (m.person) {
       const p = m.person;
@@ -76,7 +89,7 @@ export async function fanOutPostedMessage(params: {
       mentions.push({ name: m.name, kind: "nobody" });
     }
   }
-  return { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions };
+  return posted;
 }
 
 /** The outcomes in one line, for a tool's text result; "" when none. */

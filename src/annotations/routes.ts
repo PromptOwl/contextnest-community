@@ -104,6 +104,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     isReply: false,
     body: input.body,
     authorEmail: userEmail,
+    authorUserId: userId,
     baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ thread, comment_id: posted.comment_id, mentions: posted.mentions }, 201);
@@ -153,6 +154,7 @@ export async function handleAnnotationReply(
     isReply: true,
     body: input.body,
     authorEmail: userEmail,
+    authorUserId: userId,
     baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ thread, comment_id: posted.comment_id, mentions: posted.mentions });

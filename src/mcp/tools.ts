@@ -3570,6 +3570,7 @@ async function runTool(
         isReply: !!threadId,
         body,
         authorEmail: userEmail,
+        authorUserId: ctx.userId,
         baseUrl: ctx.baseUrl,
       });
       const said = threadId

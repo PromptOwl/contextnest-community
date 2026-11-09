@@ -729,6 +729,15 @@ describe("AC-AX-10: channels and their messages are members-only, even in a publ
     expect(tl.data.channel.purpose).toBe("Purpose of general");
   });
 
+  it("AC-AX-10 GET /nests/:id says whether the caller is a person added to the nest", async () => {
+    // What a client gates the Channels entry on: no request to /channels needed.
+    const member = async (key: string, nest: string) => (await jsonRequest(app, "GET", `/nests/${nest}`, undefined, key)).data.member;
+    expect(await member(owner.apiKey, pubNestId)).toBe(true);
+    expect(await member(rita.apiKey, nestId)).toBe(true);
+    expect(await member(stranger.apiKey, pubNestId)).toBe(false);
+    expect(await member(bob.apiKey, nestId)).toBe(false);
+  });
+
   it("AC-AX-10 a document-share grantee does not reach channels", async () => {
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels`, undefined, bob.apiKey)).status).toBe(404);
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels/general`, undefined, bob.apiKey)).status).toBe(404);

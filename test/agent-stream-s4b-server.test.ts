@@ -227,9 +227,9 @@ describe("AC-CH-04 (2026-11-09 rule): people added to the nest post; nobody else
     const base = `/nests/${nestId}/nodes/${GENERAL}/annotations/${threadId}`;
     expect((await jsonRequest(app, "POST", `${base}/resolve`, {}, carl.apiKey)).status).toBe(403);
     expect((await jsonRequest(app, "POST", `${base}/reopen`, {}, carl.apiKey)).status).toBe(403);
-    // The older flat comment store is closed to them on a channel as well.
-    expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${GENERAL}/comments`, { body: "flat store" }, carl.apiKey)).status).toBe(403);
-    expect([403, 404]).toContain((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${GENERAL}/comments`, { body: "flat store" }, bob.apiKey)).status);
+    // The older flat comment store takes nothing on a channel, from anyone.
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${GENERAL}/comments`, { body: "flat store" }, carl.apiKey)).status).toBeGreaterThanOrEqual(400);
+    expect([403, 404, 409]).toContain((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${GENERAL}/comments`, { body: "flat store" }, bob.apiKey)).status);
     // MCP is closed to both (the nest endpoint is not theirs to open).
     for (const u of [bob, carl]) {
       const r = await callTool(u.apiKey, "context_comment", { channel: "general", body: "share-only mcp post" });
@@ -259,6 +259,21 @@ describe("AC-CH-04 (2026-11-09 rule): people added to the nest post; nobody else
     expect(mcp.isError || !!mcp.rpcError).toBe(true);
     const tl = await jsonRequest(app, "GET", `/nests/${pubNestId}/channels/general`, undefined, owner.apiKey);
     expect(tl.data.posts.map((p: any) => p.body)).toEqual(["hello members"]);
+  });
+
+  it("SEC-CH-04 the older flat comment store holds no channel messages, so it can leak none", async () => {
+    // A channel's messages are its threads. The flat /comments store has no
+    // read check of its own, so nothing is ever written to it for a channel.
+    const flat = await jsonRequest(app, "POST", `/nests/${pubNestId}/nodes/${GENERAL}/comments`, { body: "members' flat-store note" }, owner.apiKey);
+    expect(flat.status).toBe(409);
+    expect(String(flat.data.error)).toContain("annotations");
+    for (const path of [`/nests/${pubNestId}/nodes/${GENERAL}/comments`, `/nests/${pubNestId}/nodes/${GENERAL}/activity`]) {
+      const seen = await jsonRequest(app, "GET", path, undefined, stranger.apiKey);
+      expect(JSON.stringify(seen.data), path).not.toContain("flat-store note");
+    }
+    // Documents keep the flat store.
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Flat Doc", content: "x" }, owner.apiKey);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/nodes/flat-doc/comments`, { body: "fine here" }, rita.apiKey)).status).toBe(201);
   });
 
   it("SEC-CH-04 a member's read-only API key still can't post", async () => {
@@ -444,6 +459,29 @@ describe("AC-UX-08: display names, and which @names resolved", () => {
     const t = await open(alice, "@reader named in My Work", "nodes/channels/names");
     const item = (await work(rita)).mentions.find((m: any) => m.thread_id === t.id);
     expect(item).toMatchObject({ author: alice.email, author_name: "Alice Example", author_label: "Alice Example" });
+  });
+});
+
+describe("SEC-UX-08: what a post reached is not a way to enumerate the nest's people", () => {
+  it("SEC-UX-08 someone who can't see the roster gets no per-name outcomes", async () => {
+    // A world-readable nest: a signed-in visitor may comment on a published
+    // document, and must not learn from the answer who is on the nest.
+    const doc = await jsonRequest(app, "POST", `/nests/${pubNestId}/nodes`, { title: "Open Page", content: "# Open" }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const r = await post(stranger, "@olivia and @(Olivia Owner) and @alice are you there?", doc.data.node.id, {}, pubNestId);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.mentions).toEqual([]);
+    // (The body they typed is echoed back; nothing the server resolved is.)
+    expect(JSON.stringify(r.data)).not.toContain("display_name");
+    expect(JSON.stringify(r.data)).not.toContain(owner.email);
+    const mcp = await callTool(stranger.apiKey, "context_comment", { id: doc.data.node.id, body: "@olivia hello" }, pubNestId);
+    expect(mcp.isError, mcp.text).toBe(false);
+    expect(mcp.data.mentions).toEqual([]);
+    expect(mcp.text).not.toContain("Olivia");
+    expect(mcp.text).not.toContain("reached");
+    // Someone on the nest gets them.
+    const mine = await post(owner, "@olivia note to self and @nobody", doc.data.node.id, {}, pubNestId);
+    expect(mine.data.mentions.map((m: any) => m.kind)).toEqual(["person", "nobody"]);
   });
 });
 

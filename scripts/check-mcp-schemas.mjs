@@ -72,6 +72,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   102->103 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
 //   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
 //   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
+//   103 (unchanged) agent team stream S4b (PO-1190 / PO-1189): no new tool. `channel`, `since`, `sections`,
+//   `summary`, `mention_done` and the "agents" / "mark_read" / "test" actions extend the existing
+//   context_comment, context_resolve_comment, context_comments, context_channel_read, context_channels,
+//   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
+//   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
+//   that tool's schema, not a new one.
 const BASELINE = 103;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;

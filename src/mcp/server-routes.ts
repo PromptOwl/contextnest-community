@@ -879,7 +879,7 @@ Streamable HTTP, stateless. Two endpoints:
   - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
-  - comments: \`context_comment\`, \`context_resolve_comment\`, \`context_promote_thread\` (turn a thread into a decision or task node)
+  - comments: \`context_comment\` (a document, or \`channel\` to post in a channel), \`context_resolve_comment\`, \`context_promote_thread\` (turn a thread into a decision or task node)
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on

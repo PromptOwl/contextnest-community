@@ -659,6 +659,11 @@ nestRoutes.get("/:nestId", async (c) => {
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
     grant_only,
+    // A person added to the nest — owner, admin, a collaborator at any level,
+    // a steward, a team-share member — as opposed to someone who reaches it
+    // only through its visibility or a document share. Channels (agent team
+    // stream) are for members: a client shows them when this is true.
+    member: !grant_only && !access.isPublicReader && (access.permission !== "none" || permission === "owner"),
     // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
     // drafts for review — their permission stays 'read'.
     org_contributor:

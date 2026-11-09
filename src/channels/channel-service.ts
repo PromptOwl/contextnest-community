@@ -612,7 +612,8 @@ async function sinceCursor(nestId: string, nodeId: string, raw: string): Promise
  *   thread    one post and its replies oldest first (`thread`);
  *   since     only the posts and replies written after `since` (a message id
  *             or a timestamp), oldest first, with `next_since` to pass next
- *             time — one indexed query when nothing is new.
+ *             time. When nothing is new it is the access check and one range
+ *             query; no timeline, cards, names or mentions are built.
  */
 export async function readChannel(
   caller: Caller,
