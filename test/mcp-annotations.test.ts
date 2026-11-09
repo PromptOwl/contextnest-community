@@ -17,6 +17,8 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
   "nest_index",
+  "context_onboarding",
+  "context_distill_status",
   "context_init",
   "context_instructions_history",
   "context_overview",
@@ -99,6 +101,8 @@ const DESTRUCTIVE = [
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
   "context_upload",
+  // Fetches a public URL (PO-1185).
+  "context_distill",
   // Each can change what a nest's public docs site serves.
   "context_create",
   "context_update",

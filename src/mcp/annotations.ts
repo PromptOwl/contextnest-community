@@ -40,6 +40,11 @@ const overwriteOutside = (title: string, why: string): ToolClassification => ({ 
 export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Server level ───────────────────────────────────────────────────────
   nest_index: read("List nests", "Lists the nests these credentials can read."),
+  // First-run onboarding (PO-1185).
+  context_onboarding: read("Onboarding status", "Reads the caller's welcome-screen state and the activity trace; changes nothing."),
+  context_onboarding_update: add("Update onboarding", "Flips the caller's own welcome-screen flag, or adds the caller's nest; never removes anything."),
+  context_distill: addOutside("Distill a source", "Fetches a public URL from the open internet and adds documents (and the ontology document) to a nest; never overwrites."),
+  context_distill_status: read("Distill job status", "Reads a distill job row the caller owns."),
   nest_create: add("Create nest", "Creates a new, empty nest; a taken name gets a suffix, never an overwrite."),
 
   // ─── Reading a nest ─────────────────────────────────────────────────────

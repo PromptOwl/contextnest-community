@@ -57,7 +57,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-const BASELINE = 98;
+//   98->102 (2026-11-08, PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts): context_onboarding,
+//   context_onboarding_update, context_distill, context_distill_status — twins of GET /onboarding,
+//   POST /onboarding/{dismiss,reopen,nest}, POST /onboarding/distill and GET /onboarding/distill/:id. Community-only
+//   tables (user_onboarding, distill_jobs) the engine does not model, so no engine op exists.
+const BASELINE = 102;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
