@@ -140,8 +140,10 @@ import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
+import { isStreamTool, runStreamTool } from "./stream-tools.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
 import { indexPostedMessage } from "../mentions/mention-index.js";
+import { wakeForPostedMessage } from "../stream/agent-wake.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -3494,6 +3496,8 @@ async function runTool(
       });
       // Who it tags, for My Work's Mentions (PO-1180) — same as the REST routes.
       await indexPostedMessage({ nestId, nodeId: node.id, thread, body, authorEmail: userEmail });
+      // …and wake the tagged agents that have a webhook target (PO-1181).
+      await wakeForPostedMessage({ nestId, nodeId: node.id, thread, authorEmail: userEmail });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -4947,6 +4951,10 @@ async function runTool(
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {
         return runMyWorkTool(toolName, args, ctx);
+      }
+      // Promote a thread (PO-1181): always registered (mcp/routes.ts).
+      if (isStreamTool(toolName)) {
+        return runStreamTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

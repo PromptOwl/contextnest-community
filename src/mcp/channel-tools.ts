@@ -52,7 +52,8 @@ export const CHANNEL_TOOL_DEFINITIONS = [
     description:
       "Read a channel: its top-level posts newest first, each with its reply count and thread id, paged with limit/offset. " +
       "Pass `thread` (a post's id) to read that post and its replies oldest first. Each message names who wrote it, as " +
-      '"<agent>, on behalf of <person>" when an agent did.',
+      '"<agent>, on behalf of <person>" when an agent did, and carries `cards`: the nest artifacts it links ([[wikilinks]], document and hosted-artifact URLs), ' +
+      "each with title, type, stage and version when you can read it, or marked unresolved when you can't.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -97,7 +98,7 @@ export async function runChannelTool(
       "DOCUMENT_NOT_FOUND",
     );
   }
-  const caller = { nestId: ctx.nestId, userId: ctx.userId, userEmail: ctx.userEmail };
+  const caller = { nestId: ctx.nestId, userId: ctx.userId, userEmail: ctx.userEmail, crossNest: ctx.crossNest === true };
   try {
     if (toolName === "context_channel_read") {
       const t = await readChannel(caller, {

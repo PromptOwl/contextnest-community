@@ -35,6 +35,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { config } from "../config.js";
 import { isMetaFile } from "../nodes/meta-files.js";
 import { resolveActorLabel, type ActorLabel } from "./actor-label.js";
+import { cardsText, resolveMessageCards, type ArtifactCard } from "../stream/artifact-cards.js";
 
 export const CHANNEL_FOLDER = "channels";
 export const CHANNEL_TAG = "channel";
@@ -146,6 +147,9 @@ interface Caller {
   nestId: string;
   userId: string;
   userEmail: string;
+  /** May artifact cards resolve links into other nests? (S3: false for a
+   *  nest-scoped key, true for a session or an unscoped key.) */
+  crossNest?: boolean;
 }
 
 async function readDoc(nestId: string, nodeId: string): Promise<ContextNode | null> {
@@ -309,6 +313,9 @@ export interface ChannelMessage {
   actor: ActorLabel;
   body: string;
   created_at: string;
+  /** The artifacts the message links, resolved for THIS reader (PO-1181):
+   *  a card for what they can read, `{ link, resolved: false }` for the rest. */
+  cards: ArtifactCard[];
 }
 
 export interface ChannelPost extends ChannelMessage {
@@ -371,7 +378,15 @@ async function toMessage(row: CommentRow): Promise<ChannelMessage> {
     actor: await resolveActorLabel({ email: row.author, client: deserializeClient(row.client_json) }),
     body: row.body,
     created_at: row.created_at,
+    cards: [],
   };
+}
+
+/** Fill `cards` on every message, in one batch, for this reader. */
+async function attachCards(caller: Caller, messages: ChannelMessage[]): Promise<void> {
+  if (messages.length === 0) return;
+  const per = await resolveMessageCards(caller, messages.map((m) => m.body));
+  messages.forEach((m, i) => (m.cards = per[i]));
 }
 
 async function toPost(thread: ThreadRow, comments: CommentRow[]): Promise<ChannelPost> {
@@ -384,6 +399,7 @@ async function toPost(thread: ThreadRow, comments: CommentRow[]): Promise<Channe
         actor: await resolveActorLabel({ email: thread.created_by }),
         body: "",
         created_at: thread.created_at,
+        cards: [],
       };
   return {
     ...opening,
@@ -430,6 +446,7 @@ export async function readChannel(
     const comments = (await commentsFor([row.id])).get(row.id) ?? [];
     const post = await toPost(row, comments);
     const replies = await Promise.all(comments.slice(1).map(toMessage));
+    await attachCards(caller, [post, ...replies]);
     return { channel: view, thread: { post, replies } };
   }
 
@@ -449,6 +466,7 @@ export async function readChannel(
   )) as ThreadRow[];
   const byThread = await commentsFor(threads.map((t) => t.id));
   const posts = await Promise.all(threads.map((t) => toPost(t, byThread.get(t.id) ?? [])));
+  await attachCards(caller, posts);
   return {
     channel: view,
     posts,
@@ -465,8 +483,8 @@ export function timelineText(t: ChannelTimeline): string {
     const { post, replies } = t.thread;
     const lines = [
       `## Thread ${post.id} (${post.status})`,
-      `- **${post.actor.label}** (${post.created_at}): ${post.body}`,
-      ...replies.map((r) => `  - **${r.actor.label}** (${r.created_at}): ${r.body}`),
+      `- **${post.actor.label}** (${post.created_at}): ${post.body}${cardsText(post.cards)}`,
+      ...replies.map((r) => `  - **${r.actor.label}** (${r.created_at}): ${r.body}${cardsText(r.cards, "    ")}`),
     ];
     return `${head}\n\n${lines.join("\n")}\n\nReply with context_comment { id: "${t.channel.id}", thread: "${post.id}", body }.`;
   }
@@ -477,7 +495,7 @@ export function timelineText(t: ChannelTimeline): string {
     (p) =>
       `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${p.body}${
         p.reply_count ? ` — ${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}` : ""
-      }`,
+      }${cardsText(p.cards)}`,
   );
   const { total, offset, has_more } = t.pagination;
   return `${head}\n\n${t.posts.length} of ${total} post(s), newest first${offset ? `, from ${offset}` : ""}:\n${lines.join(

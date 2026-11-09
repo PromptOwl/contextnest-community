@@ -13,6 +13,9 @@ import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
 import { channelRoutes } from "./channels/routes.js";
+import { cardRoutes } from "./stream/card-routes.js";
+import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
+import { promoteRoutes } from "./stream/promote-routes.js";
 import { buildMyWork, parseMyWorkPaging } from "./me/my-work.js";
 import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
@@ -322,6 +325,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "hooks",
   "env",
   "connectors",
+  // Where a nest's agent @mentions are POSTed (PO-1181): automation wiring.
+  "agent-webhooks",
   "trace",
   "stewards",
   "archive",
@@ -3006,9 +3011,12 @@ export function createApp(): Hono<AuthEnv> {
     // result to their granted docs via filterAccessible, exactly like the node
     // list. Deliberately NOT graph/publish (nest-write) or changes/overview
     // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
+    // Artifact cards (PO-1181) are a read the same way: POST /cards carries
+    // links to resolve, and every card is checked against the caller's own
+    // node access, so a doc grantee only ever resolves what they can read.
     const isReadQuery =
       parts.length === 2 &&
-      ["context", "query", "search", "export", "chat"].includes(parts[1]);
+      ["context", "query", "search", "export", "chat", "cards"].includes(parts[1]);
     // Checking a title or folder against the structure rules reads, never
     // writes: viewers check names in the new-document form. The handler asks
     // for owner/admin itself when the body carries draft rules.
@@ -3290,6 +3298,9 @@ export function createApp(): Hono<AuthEnv> {
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
       resource === "headless" ||
+      // agent-webhooks (PO-1181): where this nest's agent @mentions are
+      // POSTed, with the secret that signs them — every method, GET included.
+      resource === "agent-webhooks" ||
       // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
       // first, so changing it is owner/admin. Reading stays at read tier.
       (resource === "instructions" && c.req.method !== "GET")
@@ -3686,6 +3697,12 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
   nestsApp.route("/:nestId/channels", channelRoutes);
+  // Agent team stream S3 (PO-1181): artifact cards, agent wake-up targets,
+  // promote a thread to a node. Not behind the channels switch — cards,
+  // wake-up and promote work on document comment threads too.
+  nestsApp.route("/:nestId/cards", cardRoutes);
+  nestsApp.route("/:nestId/agent-webhooks", agentWebhookRoutes);
+  nestsApp.route("/:nestId/threads", promoteRoutes);
   nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);

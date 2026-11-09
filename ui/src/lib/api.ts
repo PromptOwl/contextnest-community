@@ -3084,6 +3084,81 @@ export interface ChannelMessage {
   actor: ChannelActor;
   body: string;
   created_at: string;
+  /** The artifacts the message links, resolved for the viewer (PO-1181). */
+  cards?: ArtifactCard[];
+}
+
+// ─── Agent team stream S3 (PO-1181) ───────────────────────────────────────
+
+/** A linked artifact as the viewer may see it: a card for a node they can
+ *  read, an unresolved marker (the link text only) for anything else. */
+export type ArtifactCard =
+  | {
+      link: string;
+      resolved: true;
+      kind: "node" | "artifact";
+      nest_id: string;
+      node_id: string;
+      title: string;
+      type: string;
+      stage: string | null;
+      status: string;
+      version: number | null;
+      url: string;
+    }
+  | { link: string; resolved: false };
+
+/** Cards for several message bodies at once (comment threads). */
+export async function resolveMessageCards(nestId: string, texts: string[]) {
+  return request<{ messages: Array<{ cards: ArtifactCard[] }> }>(`/nests/${nestId}/cards`, {
+    method: "POST",
+    body: JSON.stringify({ texts }),
+  });
+}
+
+export interface PromoteThreadResult {
+  node: { id: string; title: string; type: string; status: string; version: number; url: string };
+  source_thread: { node_id: string; thread_id: string };
+  reply: { thread_id: string; comment_id: string | null };
+}
+
+/** A wake-up target for an agent handle — host#hash only, never the URL. */
+export interface AgentWebhook {
+  handle: string;
+  target: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listAgentWebhooks(nestId: string) {
+  return request<{ webhooks: AgentWebhook[] }>(`/nests/${nestId}/agent-webhooks`);
+}
+
+/** Save a target; `secret` comes back only when one is minted. */
+export async function setAgentWebhook(nestId: string, handle: string, url: string, rotate = false) {
+  return request<{ webhook: AgentWebhook; secret?: string }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
+    { method: "PUT", body: JSON.stringify({ url, ...(rotate ? { rotate: true } : {}) }) },
+  );
+}
+
+export async function deleteAgentWebhook(nestId: string, handle: string) {
+  return request<{ deleted: true }>(`/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Promote a comment thread to a decision or task node. */
+export async function promoteThread(
+  nestId: string,
+  threadId: string,
+  input: { kind: "decision" | "task"; title?: string },
+) {
+  return request<PromoteThreadResult>(`/nests/${nestId}/threads/${encodeURIComponent(threadId)}/promote`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export interface ChannelPost extends ChannelMessage {

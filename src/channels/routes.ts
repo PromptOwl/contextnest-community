@@ -30,7 +30,14 @@ export const channelRoutes = new Hono<AuthEnv>();
 
 async function caller(c: any) {
   const userId = c.get("userId") as string;
-  return { nestId: c.req.param("nestId") as string, userId, userEmail: await resolveCallerEmail(userId) };
+  return {
+    nestId: c.req.param("nestId") as string,
+    userId,
+    userEmail: await resolveCallerEmail(userId),
+    // Artifact cards (PO-1181) may resolve links into other nests only for a
+    // credential that isn't fenced to this one.
+    crossNest: !c.get("nestScope"),
+  };
 }
 
 async function jsonObject(c: any): Promise<Record<string, unknown>> {

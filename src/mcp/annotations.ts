@@ -81,6 +81,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
 
   // ─── Comments and relations ─────────────────────────────────────────────
   context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
+  context_agent_webhooks: overwriteOutside("Manage agent webhooks", "Lists, sets or removes where an agent's @mentions are POSTed; set replaces a target and the server then sends events to that outside URL."),
+  context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),
   context_add_relation: add("Add task relation", "Adds a relation; duplicates are refused."),
