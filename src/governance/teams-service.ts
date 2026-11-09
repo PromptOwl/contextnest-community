@@ -15,7 +15,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { normalizeEmail } from "../shared/email.js";
-import { isEmailish } from "../config.js";
+import { config, isEmailish } from "../config.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { nestName, docLink } from "./title-resolver.js";
 import { notifyNestInvite } from "./notify-service.js";
@@ -240,6 +240,30 @@ export async function listTeamsForUser(userId: string): Promise<Team[]> {
       parseMembers(r.members).some((m) => m.userId === userId),
   );
   return Promise.all(mine.map((r) => enrichTeam(rowToTeam(r))));
+}
+
+/**
+ * Whether every team on this server is visible to every signed-in user. True
+ * on a single-organization server (SHARED_DEPLOYMENT off: self-hosted, where
+ * the server IS the company). False on a shared deployment (the
+ * PromptOwl-hosted server), where teams belong to many organizations and a
+ * user sees only the teams they own or are on. Read per call: the setting is
+ * a runtime superadmin toggle.
+ */
+export function teamsAreServerWide(): boolean {
+  return !config.SHARED_DEPLOYMENT;
+}
+
+/**
+ * The teams a user can see and share: every team on a single-organization
+ * server, or only the teams they own or are a member of on a shared one.
+ * Seeing a team never grants managing it — rename, members and roles stay
+ * rank-gated (managementRank) everywhere.
+ */
+export async function listVisibleTeams(userId: string): Promise<Team[]> {
+  if (!teamsAreServerWide()) return listTeamsForUser(userId);
+  const rows = (await getDb().all("SELECT * FROM teams ORDER BY created_at")) as TeamRow[];
+  return Promise.all(rows.map((r) => enrichTeam(rowToTeam(r))));
 }
 
 export async function getTeam(teamId: string): Promise<Team> {
@@ -579,9 +603,15 @@ export async function shareTeamWithNest(params: {
     // it look like an official internal share, and leave the team owner unable
     // to reverse it. This mirrors the escalation cap on addMember (you can't
     // project a reach you don't yourself hold on the team).
+    // On a single-organization server every team is visible to everyone, and
+    // the nest admin's say is enough (Misha, 2026-11-08): sharing only adds
+    // readers to the caller's own nest, inside one company. The team gate
+    // stays on a shared deployment, where the team may belong to another
+    // organization.
     if (
+      !teamsAreServerWide() &&
       managementRank(team, params.callerUserId, !!params.allowAdmin) <
-      ROLE_RANK.editor
+        ROLE_RANK.editor
     ) {
       throw new ForbiddenError(
         "You need to be an editor, admin, or owner of a team to share it. View-only members can't.",

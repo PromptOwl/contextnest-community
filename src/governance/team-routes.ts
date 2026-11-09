@@ -25,7 +25,8 @@ import {
 } from "./promptowl-teams.js";
 import {
   createTeam,
-  listTeamsForUser,
+  listVisibleTeams,
+  teamsAreServerWide,
   getTeam,
   renameTeam,
   deleteTeam,
@@ -147,18 +148,21 @@ teamRoutes.post("/", async (c) => {
   return c.json({ team }, 201);
 });
 
-// GET /teams — teams the caller owns or is a member of
+// GET /teams — the teams the caller can see: owned or member on a shared
+// deployment, every team on a single-organization server (listVisibleTeams).
 teamRoutes.get("/", async (c) => {
-  const teams = await listTeamsForUser(c.get("userId"));
+  const teams = await listVisibleTeams(c.get("userId"));
   return c.json({ teams });
 });
 
-// GET /teams/:teamId — owner, a member, or a server admin may view
+// GET /teams/:teamId — owner, a member, or a server admin may view; on a
+// single-organization server, any signed-in user (every team is listed there).
 teamRoutes.get("/:teamId", async (c) => {
   const userId = c.get("userId");
   const team = await getTeam(c.req.param("teamId")!);
   const isMember = team.members.some((m) => m.userId === userId);
   if (
+    !teamsAreServerWide() &&
     team.owner_id !== userId &&
     !isMember &&
     !(await isLicenseAdminUserId(userId))
