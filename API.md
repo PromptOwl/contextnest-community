@@ -2712,7 +2712,7 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
 - It stays paused until an admin resumes it.
 - A member can remove Nest from a non-general conversation (`paused_by_member`). It comes back only through an admin resume, and only once that member has agreed or has left.
 
-- `GET /surfaces/status`: installs (server admin only), binding counts by state, the disclosure.
+- `GET /surfaces/status`: installs (server admin only), binding counts by state, `org_name` (the server's `SURFACES_ORG_NAME`, or `null`), `slack_hosted` (whether the hosted one-click install is on), the disclosure.
 - `GET /surfaces/bindings?nest_id=`: server admins see every binding; others see bindings on nests they own or administer.
 - `POST /surfaces/bindings/preview` `{ install_id, conversation_id, nest_id, explicit_public_bind?, ext_capture_enabled? }` (nest owner/admin): dry-run guard, `{ would_bind, guard, disclosure }`.
   - For a private channel or DM, the caller must also be a current member (or a server admin). Otherwise the answer is a uniform `404` with no counts. The same applies to create.
@@ -2740,10 +2740,11 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
 The workspace installs a customer-owned Slack app made from our manifest (`docs/surfaces/slack-app-manifest.json`; scopes are justified in `docs/surfaces`). Nest listens to events only and never pulls channel history during normal listening. Messages that pass a deterministic gate are held in an encrypted buffer (`SURFACES_BUFFER_KEY`; with no key, nothing is stored). The window is judged after `quiet_minutes` without new messages, or when it hits its size or age cap. Proposals become review-queue drafts that readers can't see until a person approves them. Approving in the web review queue unhides the draft immediately. Within 5 minutes the purge sweep marks the item approved, or discards a rejected or cancelled draft.
 
 - `POST /surfaces/slack/installs` `{ home_nest_id }` (server admin, own credential): `201 { install_id, manifest, disclosure }`. `422` if the nest doesn't exist.
-- `GET /surfaces/slack/installs/:id` (server admin): install state plus `credentials` as booleans. Values are never returned.
+- `GET /surfaces/slack/installs/:id` (server admin): install state plus `credentials` as booleans. Values are never returned. A manifest install also returns its `manifest` again (no secrets in it), so setup can be resumed.
 - `PUT /surfaces/slack/installs/:id/credentials` `{ client_id?, client_secret?, signing_secret? }` (server admin): stored encrypted. Returns `{ stored, credentials }`, again as booleans.
 - `GET /surfaces/slack/installs/:id/oauth/start` (server admin, **signed-in browser session**; a bearer key gets `403`): `302` to Slack. The state is single use, bound to the session, and expires in 10 minutes.
-- `GET /surfaces/slack/oauth/callback`: completes the install. It refuses a reused or foreign state, and a different Slack workspace than the install's. On refusal the new token is revoked. It returns a small HTML page, or JSON for `Accept: application/json`.
+- `GET /surfaces/slack/installs/:id/channels` (server admin, own credential; MCP `context_surfaces_slack_channels_list`): the channels the setup wizard offers. Only the public and private channels the Nest bot was added to (Slack `users.conversations`), never DMs, archived channels or message text. `{ channels: [{ id, name, is_private, is_ext_shared, num_members, binding: { id, nest_id, status } | null }], truncated }` (at most 2,000 channels). `409` until the install is active; `502` when Slack refuses.
+- `GET /surfaces/slack/oauth/callback`: completes the install. In a browser, a successful install links back to the setup wizard (`/control-room?section=setup`). It refuses a reused or foreign state, and a different Slack workspace than the install's. On refusal the new token is revoked. It returns a small HTML page, or JSON for `Accept: application/json`.
 - `GET /surfaces/slack/hosted/oauth/start?home_nest_id=`: hosted one-click install. It exists only while `FEATURE_SURFACES_SLACK_HOSTED` is on.
 - `POST /surfaces/slack/:installId/events`, `POST /surfaces/slack/:installId/interactions` (and `/surfaces/slack/hosted/*` for hosted): Slack calls these.
   - Unauthenticated, but the Slack signature on the raw body is required. A bad or missing signature, a timestamp outside 300 s, or no signing secret gives `401`.
@@ -2766,9 +2767,14 @@ The workspace installs a customer-owned Slack app made from our manifest (`docs/
 MCP twins (per-nest endpoint, advertised to nest owners/admins while the flags are on):
 - bindings: `context_surfaces_status`, `context_surfaces_bindings_list`, `context_surfaces_binding_preview`, `_binding_create`, `_binding_update`, `_binding_delete`, `_binding_recheck`, `_binding_resume`;
 - identity links (server admin): `context_surfaces_links_list`, `_link_revoke`, `_link_unblock`, `_link_reviews_list`, `_link_review_decide`.
-- Slack install, settings, verdict log (S2a): `context_surfaces_slack_install_create`, `context_surfaces_settings_get`, `context_surfaces_settings_update`, `context_surfaces_windows_list`;
+- Slack install, settings, verdict log (S2a): `context_surfaces_slack_install_create`, `context_surfaces_slack_channels_list` (po-1186 CR3), `context_surfaces_settings_get`, `context_surfaces_settings_update`, `context_surfaces_windows_list`;
 - Seeds (S3): `context_surfaces_seed_apply`, `context_surfaces_seed_list`, `context_surfaces_seed_status`;
 - cards, audit, budget, disconnect (S2b): `context_surfaces_proposals_list`, `context_surfaces_my_pending` (any reviewer; not admin-gated), `context_surfaces_commits_list`, `context_surfaces_budget_get`, `context_surfaces_budget_update`, `context_surfaces_disconnect`. MCP never commits a proposal for a surface user: approve through `context_approve` / `context_reject` as the token's own user.
+
+#### Member explainer and the Control room setup (po-1186 CR3)
+- `GET /about/surfaces` (public, no auth; `404` while Surfaces is off): "How Nest handles your messages", a plain HTML page for anyone in a channel where Nest listens. It states what Nest reads, how long it waits (`quiet_minutes`), what it keeps, how long message text is held (`buffer_ttl_hours`), what it never saves, and `@Nest skip me`. It mentions DMs only while `dm_capture` is on. It shows the optional `SURFACES_ORG_NAME` and `LOGO_URL`, and nothing else from the server: no nest, channel or user names. The one enable notice the bot posts in a channel links to it when `PUBLIC_BASE_URL` is set.
+- `GET /health` carries `surfaces_enabled`, so the app can hide the Control room page while Surfaces is off.
+- The Control room page (`/control-room`, server admins) runs setup over the routes above: install and credentials, OAuth start, the channel list, binding preview, seed dry run and apply, then binding create (which posts the notice). Its progress is worked out from installs, bindings and applied seeds, so nothing extra is stored.
 
 #### Cards, commit and My pending (S2b)
 - S2b and S3 settings on `GET/PATCH /surfaces/settings` (server admin; the S2a ones are above): `reviewer_daily_cards` (the one daily card limit shown everywhere, default 2), `conversation_daily_cards`, `timezone`, `default_seed` and `seed_library_nests` (see Seeds below), and `dm_capture` (default `false`), and `signin_alerts` (default `true`: sign-in and configuration-change alerts to sealed-nest owners; turning it off notifies every sealed-nest owner). Turning `dm_capture` off deletes every DM buffer in the same save, withdraws pending DM proposals (no 7-day hold) and records an audit notice with the admin. Out-of-range values are `422`.

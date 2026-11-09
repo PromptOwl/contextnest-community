@@ -283,6 +283,9 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
+    /** Surfaces (Slack → nest; never in open mode). Off → /surfaces/* 404s
+     *  and the Control room page hides. */
+    surfaces_enabled?: boolean;
     /** Experimental features, one key each (default off; superadmin switches
      *  under Settings → Features). Off → the routes 404 and the UI hides it. */
     experimental?: {
@@ -4779,3 +4782,132 @@ export async function backfillTickets(nestId: string, body: { limit?: number; dr
     results: { id: string; ticket?: string; outcome: string; reason?: string }[];
   }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }
+
+// ═══ Control room: Surfaces setup (po-1186 CR3) ═══════════════════════════
+// Kept in one block on purpose: the setup wizard's reads and writes over the
+// existing /surfaces routes, plus the channel list CR3 adds. Credential values
+// only ever go out (PUT); the server answers with set/unset booleans.
+
+export interface SurfacesInstallRef {
+  id: string;
+  surface: string;
+  mode: "manifest" | "hosted" | "selfhosted";
+  status: "pending" | "active" | "revoked" | "disconnected";
+  home_nest_id: string | null;
+}
+
+export interface SurfacesStatus {
+  enabled: true;
+  installs: SurfacesInstallRef[];
+  bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
+  org_name: string | null;
+  slack_hosted: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesBinding {
+  id: string;
+  install_id: string;
+  nest_id: string;
+  conversation_id: string;
+  conversation_name?: string | null;
+  status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  [k: string]: unknown;
+}
+
+export interface SurfacesGuardDetail {
+  readers_total: number;
+  readers_absent: number;
+  members_total: number;
+  members_not_readers: number;
+  guests: number;
+  externals: number;
+  non_user_principals: string[];
+  universe: boolean;
+  org_wide: boolean;
+  ext_shared: boolean;
+}
+
+export interface SurfacesBindingPreview {
+  no_seed: boolean;
+  would_bind: boolean;
+  guard: { capture_ok: boolean; surface_ok: boolean; members_known: boolean; detail: SurfacesGuardDetail };
+  conversation_kind: string | null;
+  is_ext_shared: boolean | null;
+  ext_capture_enabled: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesChannel {
+  id: string;
+  name: string | null;
+  is_private: boolean;
+  is_ext_shared: boolean;
+  num_members: number | null;
+  binding: { id: string; nest_id: string; status: string } | null;
+}
+
+export interface SurfacesSeedRef {
+  id: string;
+  version: number;
+  title: string;
+  source: "bundled" | "library";
+  library_nest_id: string | null;
+}
+
+export interface SurfacesSeedItem {
+  kind: "folder" | "node" | "context" | "definition";
+  target: string;
+  action: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface SurfacesSeedResult {
+  status: string;
+  nest_id: string;
+  seed: { id: string; version: number };
+  items: SurfacesSeedItem[];
+  listener: { propose_folders: string[] };
+}
+
+export interface SurfacesSettingsView {
+  quiet_minutes: number;
+  buffer_ttl_hours: number;
+  reviewer_daily_cards: number;
+  conversation_daily_cards: number;
+  dm_capture: boolean;
+  [k: string]: unknown;
+}
+
+const surfacesJson = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
+
+export const getSurfacesStatus = () => request<SurfacesStatus>("/surfaces/status");
+export const getSurfacesSettings = () => request<{ settings: SurfacesSettingsView }>("/surfaces/settings").then((r) => r.settings);
+export const listSurfacesBindings = () => request<{ bindings: SurfacesBinding[] }>("/surfaces/bindings").then((r) => r.bindings);
+export const createSlackInstall = (homeNestId: string) =>
+  request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
+export const getSlackInstall = (id: string) =>
+  request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** Write-only: values go to the server and never come back. */
+export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
+  request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
+    method: "PUT",
+    body: JSON.stringify(creds),
+  });
+/** Browser navigations (the server answers with a redirect to Slack). */
+export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
+export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
+export const listSlackChannels = (installId: string) =>
+  request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
+export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<{ binding: SurfacesBinding }>("/surfaces/bindings", surfacesJson(b));
+export const listSurfacesSeeds = (nestId: string) =>
+  request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);
+export const getSurfacesSeedStatus = (nestId: string) =>
+  request<{ nest_id: string; no_seed: boolean; applied: Array<{ seed_id: string; version: number }> }>(`/surfaces/seeds/status?nest_id=${encodeURIComponent(nestId)}`);
+export const applySurfacesSeed = (b: { nest_id: string; seed_id: string; library_nest_id?: string | null; dry_run?: boolean }) =>
+  request<SurfacesSeedResult>("/surfaces/seeds/apply", surfacesJson(b));
+// ═══ end Control room (po-1186 CR3) ═══════════════════════════════════════

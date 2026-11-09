@@ -321,8 +321,8 @@ function AppPagesNav({
   isSuperadmin: boolean;
   onOpen?: (id: string) => void;
 }) {
-  const { mcpOauthEnabled, docStreamEnabled } = useAuth();
-  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled });
+  const { mcpOauthEnabled, docStreamEnabled, surfacesEnabled } = useAuth();
+  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled, surfacesEnabled });
   const [closed, setClosedState] = useState<string[]>(
     () => readDocPagePrefs(localStorage).closedGroups,
   );
