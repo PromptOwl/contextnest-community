@@ -9,6 +9,8 @@ import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import * as teams from "../governance/teams-service.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
@@ -528,6 +530,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
   "context_set_visibility",
+  // Team sharing — the REST /nests/:id/teams twin, same service.
+  "context_nest_teams",
   "context_systems",
   "context_instructions_update",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
@@ -1705,6 +1709,23 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_nest_teams",
+    description:
+      "Share this nest with whole teams. Nest owners/admins only. action: list (the teams shared with this nest, with their members, plus the teams you can share) | share (team_id) | unshare (team_id). Each member gets the role they hold on the team. On a server that hosts several organizations, you can share only a team you are an editor, admin or owner of; on a single-organization server, any team. Prefer this to visibility 'org' when the nest is for one group of people. Mirrors GET/POST/DELETE /nests/:id/teams.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "share", "unshare"],
+          description: "What to do.",
+        },
+        team_id: { type: "string", description: "Team id (share, unshare), from list." },
+      },
+      required: ["action"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Manage named systems (machine identities such as "GitHub sync"). Nest owners/admins only. Systems are non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -2291,6 +2312,73 @@ async function nestAdminRefusal(ctx: McpToolContext): Promise<ToolResult | null>
   return null;
 }
 
+/** context_nest_teams — list / share / unshare a nest's teams, the MCP twin
+ *  of /nests/:id/teams (nest-team-routes.ts), on the same service. */
+async function runNestTeamsTool(
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  const refused = await nestAdminRefusal(ctx);
+  if (refused) return refused;
+  const action = String(args.action || "");
+  const teamId = typeof args.team_id === "string" ? args.team_id.trim() : "";
+  try {
+    if (action === "list") {
+      const refs = await teams.listNestTeams(ctx.nestId);
+      const shared = [];
+      for (const ref of refs) {
+        const team = await teams.getTeam(ref.teamId).catch(() => null);
+        shared.push({
+          team_id: ref.teamId,
+          name: team?.name ?? ref.teamName,
+          members: (team?.members ?? []).map((m) => ({ email: m.email, role: m.role })),
+        });
+      }
+      const sharedIds = new Set(shared.map((t) => t.team_id));
+      const available = (await teams.listVisibleTeams(ctx.userId))
+        .filter((t) => !sharedIds.has(t.id))
+        .map((t) => ({ team_id: t.id, name: t.name, member_count: t.members.length }));
+      const lines = [
+        shared.length
+          ? `Shared with: ${shared.map((t) => `${t.name} (${t.members.length})`).join(", ")}.`
+          : "No teams are shared with this nest.",
+        available.length
+          ? `Can share: ${available.map((t) => `${t.name} [${t.team_id}]`).join(", ")}.`
+          : "No other teams to share.",
+      ];
+      return { text: lines.join("\n"), data: { shared, available } };
+    }
+    if (action !== "share" && action !== "unshare") {
+      return toolError("action must be list, share or unshare.", "VALIDATION_FAILED");
+    }
+    if (!teamId) return toolError("team_id is required.", "VALIDATION_FAILED");
+    if (action === "share") {
+      // Same refusal as REST (re-review R3-L1): a sealed personal nest stays private.
+      const { sealedNest } = await import("../surfaces/sealed.js");
+      if (await sealedNest(ctx.nestId)) {
+        return toolError("Private nests can't be shared with a team.", "UNAUTHORIZED_ACTION");
+      }
+      const refs = await teams.shareTeamWithNest({
+        nestId: ctx.nestId,
+        teamId,
+        callerUserId: ctx.userId,
+        allowAdmin: await isLicenseAdminUserId(ctx.userId),
+        baseUrl: ctx.baseUrl,
+      });
+      const name = refs.find((r) => r.teamId === teamId)?.teamName ?? teamId;
+      return { text: `Shared this nest with the team "${name}".`, data: { teams: refs } };
+    }
+    const refs = await teams.unshareTeamFromNest({ nestId: ctx.nestId, teamId });
+    return { text: "Unshared the team from this nest.", data: { teams: refs } };
+  } catch (err: any) {
+    if (err instanceof BillingConfirmError) throw err;
+    const status = err instanceof AppError ? err.statusCode : undefined;
+    const code =
+      status === 404 ? "DOCUMENT_NOT_FOUND" : status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED";
+    return toolError(err?.message || "Team sharing failed.", code);
+  }
+}
+
 async function runHeadlessTool(
   args: Record<string, any>,
   ctx: McpToolContext,
@@ -2572,6 +2660,8 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_nest_teams":
+      return runNestTeamsTool(args, ctx);
     case "context_set_visibility": {
       const refused = await nestAdminRefusal(ctx);
       if (refused) return refused;

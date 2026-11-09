@@ -165,3 +165,40 @@ export async function settleVisibilityChange(
     return { visibility: prev, error: err?.message || "Failed to change visibility" };
   }
 }
+
+/** A choice in the visibility picker: one of the three tiers, or "team", which
+ *  opens team sharing instead of changing the tier. */
+export type VisibilityPickerValue = NestVisibility | "team";
+
+export interface VisibilityPickerOption extends Omit<VisibilityMenuOption, "value"> {
+  value: VisibilityPickerValue;
+}
+
+/**
+ * What the visibility picker offers. On a single-organization server this is
+ * visibilityMenuOptions unchanged. On a shared deployment 'Organization'
+ * reaches every organization on the server, so it is left out (unless the
+ * nest is already org, so the current value still shows) and "Share with a
+ * team…" takes its place when the host can open team sharing.
+ */
+export function visibilityPickerOptions(
+  current: NestVisibility,
+  ctx: VisibilityContext,
+  policy: VisibilityPolicy,
+  opts: { canShareWithTeam: boolean },
+): VisibilityPickerOption[] {
+  const tiers: VisibilityPickerOption[] = visibilityMenuOptions(current, ctx, policy);
+  if (!ctx.sharedDeployment) return tiers;
+  const out = tiers.filter((o) => o.value !== "org" || current === "org");
+  if (opts.canShareWithTeam) {
+    const at = out.findIndex((o) => o.value === "public");
+    out.splice(at, 0, {
+      value: "team",
+      label: "Share with a team…",
+      hint: "Only the members of a team you choose",
+      disabled: false,
+      current: false,
+    });
+  }
+  return out;
+}

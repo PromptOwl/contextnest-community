@@ -104,6 +104,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Nest administration ────────────────────────────────────────────────
   context_headless: overwrite("Manage headless publishing", "Dispatches status, enable, disable, create_key and revoke_key; disabling pauses and revoking removes keys. The token goes only to the caller."),
   context_set_visibility: overwriteOutside("Set nest visibility", "Replaces who can read the nest, up to anyone on the internet."),
+  context_nest_teams: overwrite("Share nest with teams", "Dispatches list, share and unshare; sharing gives every team member their team role on the nest, and unsharing removes it."),
   context_systems: overwrite("Manage system identities", "Dispatches list, create, rotate, revoke, add_nest and remove_nest; rotating and revoking kill keys. The token goes only to the caller."),
 
   // ─── Metacognition agents ───────────────────────────────────────────────

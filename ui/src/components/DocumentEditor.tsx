@@ -290,6 +290,8 @@ export function DocumentEditor({
   // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  // Set when the visibility picker's "Share with a team…" opens the dialog.
+  const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
   const [showPublish, setShowPublish] = useState(false);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
@@ -2207,6 +2209,10 @@ export function DocumentEditor({
           <NestVisibilityControl
             nestId={nestId}
             variant="compact"
+            onShareWithTeam={() => {
+              setShareTab("teams");
+              setShowShare(true);
+            }}
             onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
             onError={(m) => {
               if (m) toast.error(m);
@@ -2375,7 +2381,11 @@ export function DocumentEditor({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           documentUrl={documentLink(window.location.origin, nestId, nodeId)}
-          onClose={() => setShowShare(false)}
+          initialTab={shareTab}
+          onClose={() => {
+            setShowShare(false);
+            setShareTab(undefined);
+          }}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */

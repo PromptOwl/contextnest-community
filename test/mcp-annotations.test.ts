@@ -77,6 +77,7 @@ const DESTRUCTIVE = [
   "context_sync_folder",
   "context_headless",
   "context_set_visibility",
+  "context_nest_teams",
   "context_systems",
   "context_metacognition_configure",
   "context_metacognition_run",
