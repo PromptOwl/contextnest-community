@@ -1,10 +1,19 @@
 /**
- * My Work over MCP (PO-1180, agent team stream S2) — `context_my_work`, the
- * twin of GET /me/work. It calls the same `buildMyWork` the REST route calls
- * and returns that object as structuredContent, so the sections and items
- * cannot drift (AC-MW-05): reviews and requests waiting on you, what you
- * handed off, unread notifications, assigned cards, and the open threads that
- * @mention you (or, once agent principals land, an agent you own).
+ * My Work over MCP (PO-1180; S4b PO-1190) — `context_my_work`, the twin of
+ * GET /me/work. It calls the same `buildMyWork` the REST route calls and
+ * returns that object as structuredContent, so the sections and items cannot
+ * drift (AC-MW-05): the open threads that @mention you, reviews and requests
+ * waiting on you, what you handed off, assigned cards, unread notifications.
+ *
+ * For an agent (AC-AX-01): a call made with a key whose label is an agent's
+ * handle, or that declares `client.agent`, also lists the threads that tag
+ * THAT handle (`for_agent`), so an agent with no webhook still finds what is
+ * waiting on it. The label only widens which handles match; every row is
+ * still limited to what the person behind the key can open.
+ *
+ * Small by default (AC-AX-02): mentions first, and the unread-notification
+ * list only when asked for (`sections`), because it is the person's inbox,
+ * not the agent's queue. `sections` and `limit` trim it further.
  *
  * Scope: a credential that is not fenced to one nest (a session, a personal
  * key, an OAuth grant) gets the same cross-nest inbox as REST. A nest-scoped
@@ -20,21 +29,34 @@
  * a descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 101,
  * documented there).
  */
-import { buildMyWork, parseMyWorkPaging, type MyWork } from "../me/my-work.js";
-import type { McpToolContext, ToolResult } from "./tools.js";
+import { MY_WORK_SECTIONS, buildMyWork, parseMyWorkPaging, parseMyWorkSections, type MyWork, type MyWorkSection } from "../me/my-work.js";
+import { actingAgentHandle } from "../mentions/mention-index.js";
+import { ValidationError } from "../shared/errors.js";
+import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
+
+/** What a call gets when it names no sections: everything but the person's
+ *  unread-notification list. */
+const DEFAULT_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting"];
 
 export const MY_WORK_TOOL_DEFINITIONS = [
   {
     name: "context_my_work",
     description:
-      "Lists what is waiting on you (or on you as an agent's owner) across the nests you can read — your work queue: " +
-      "`mentions` (open comment threads, in channels and on documents, that @mention you and that you haven't answered — reply in the thread with context_comment, or resolve it, and it leaves the list), " +
-      "`items` (reviews, deletion and access requests you can decide), `waiting` (what you handed off), `assigned` (open cards assigned to you) and `notifications` (unread). " +
-      "Same sections as GET /me/work. A nest-scoped key sees only this nest. Page mentions with mentions_limit / mentions_offset.",
+      "Lists what is waiting on you across the nests you can read — your work queue, mentions first: " +
+      "`mentions` (open threads, in channels and on documents, that @mention you — or the agent this key or `client.agent` names, marked `for_agent` — and that haven't been answered: " +
+      "reply in the thread with context_comment { thread, body }, resolve it, or clear it with context_resolve_comment { thread, mention_done: true }), " +
+      "`items` (reviews, deletion and access requests you can decide), `assigned` (open cards assigned to you) and `waiting` (what you handed off). " +
+      "`notifications` (the person's unread inbox) is returned only when asked for in `sections`. " +
+      "`sections` picks what comes back; `limit` caps every section. A nest-scoped key sees only this nest.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        limit: { type: "number", description: "Reviews per page (default 50, max 100); also the mentions page size unless mentions_limit is given." },
+        sections: {
+          type: "array",
+          items: { type: "string" },
+          description: `Which sections to return: any of ${MY_WORK_SECTIONS.join(", ")}. Default: all but notifications.`,
+        },
+        limit: { type: "number", description: "Rows per section (max 100). Default: 50 reviews and 50 mentions, the other sections whole." },
         offset: { type: "number", description: "Reviews to skip (default 0)." },
         mentions_limit: { type: "number", description: "Mentions per page (default 50, max 100)." },
         mentions_offset: { type: "number", description: "Mentions to skip (default 0)." },
@@ -53,29 +75,44 @@ function line(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-export function myWorkText(w: MyWork): string {
-  const out: string[] = ["# My Work"];
-  const mp = w.mentions_pagination;
-  out.push(
-    `\n## Mentions (${mp.total} open${mp.total > w.mentions.length ? `, showing ${mp.offset + 1}–${mp.offset + w.mentions.length}` : ""})`,
-  );
-  if (w.mentions.length === 0) out.push("Nothing is waiting on your reply.");
-  for (const m of w.mentions) {
-    const where = m.channel ? `#${m.channel}` : `"${m.title}"`;
-    const who = m.for_agent ? ` (for your agent @${m.for_agent})` : "";
+export function myWorkText(w: MyWork, actingAs: string | null = null): string {
+  const out: string[] = [actingAs ? `# My Work (yours, and @${actingAs}'s mentions)` : "# My Work"];
+  if (w.mentions && w.mentions_pagination) {
+    const mp = w.mentions_pagination;
     out.push(
-      `- ${m.author_label} in ${where} · ${m.nest_name}${who} — ${line(m.excerpt)}\n  node: ${m.node_id} · thread: ${m.thread_id} · ${m.mentioned_at}`,
+      `\n## Mentions (${mp.total} open${mp.total > w.mentions.length ? `, showing ${mp.offset + 1}–${mp.offset + w.mentions.length}` : ""})`,
     );
+    if (w.mentions.length === 0) out.push("Nothing is waiting on your reply.");
+    for (const m of w.mentions) {
+      const where = m.channel ? `#${m.channel}` : `"${m.title}"`;
+      const who = m.for_agent ? ` (for @${m.for_agent})` : "";
+      out.push(
+        `- ${m.author_label} in ${where} · ${m.nest_name}${who} — ${line(m.excerpt)}\n  thread: ${m.thread_id} · node: ${m.node_id} · ${m.mentioned_at}`,
+      );
+    }
+    if (w.mentions.length) {
+      out.push("Reply with context_comment { thread, body }; clear one without replying with context_resolve_comment { thread, mention_done: true }.");
+    }
   }
-  out.push(`\n## Waiting on you (${w.items.length})`);
-  for (const i of w.items) out.push(`- ${i.type}: "${i.title}" · ${i.nest_name} — from ${i.requested_by}`);
-  out.push(`\n## Assigned to you (${w.assigned.length})`);
-  for (const a of w.assigned) out.push(`- "${a.title}" · ${a.nest_name}${a.due ? ` · due ${a.due}` : ""}`);
-  out.push(`\n## You're waiting on (${w.waiting.length})`);
-  for (const i of w.waiting) out.push(`- ${i.type}: "${i.title}" · ${i.nest_name}`);
-  out.push(`\n## Unread notifications (${w.notifications.length})`);
-  for (const n of w.notifications) out.push(`- ${line(String(n.message ?? ""))}`);
-  out.push(`\n**Waiting on you in total:** ${w.waiting_on_me_total} (plus ${w.assigned.length} assigned).`);
+  if (w.items) {
+    out.push(`\n## Waiting on you (${w.items.length})`);
+    for (const i of w.items) out.push(`- ${i.type}: "${i.title}" · ${i.nest_name} — from ${i.requested_by}`);
+  }
+  if (w.assigned) {
+    out.push(`\n## Assigned to you (${w.assigned.length})`);
+    for (const a of w.assigned) out.push(`- "${a.title}" · ${a.nest_name}${a.due ? ` · due ${a.due}` : ""}`);
+  }
+  if (w.waiting) {
+    out.push(`\n## You're waiting on (${w.waiting.length})`);
+    for (const i of w.waiting) out.push(`- ${i.type}: "${i.title}" · ${i.nest_name}`);
+  }
+  if (w.notifications) {
+    out.push(`\n## Unread notifications (${w.notifications.length})`);
+    for (const n of w.notifications) out.push(`- ${line(String(n.message ?? ""))}`);
+  }
+  if (w.waiting_on_me_total !== undefined) {
+    out.push(`\n**Waiting on you in total:** ${w.waiting_on_me_total}${w.assigned ? ` (plus ${w.assigned.length} assigned)` : ""}.`);
+  }
   return out.join("\n");
 }
 
@@ -84,11 +121,24 @@ export async function runMyWorkTool(
   args: Record<string, any>,
   ctx: McpToolContext,
 ): Promise<ToolResult> {
+  let sections: MyWorkSection[];
+  try {
+    sections = parseMyWorkSections(args?.sections) ?? DEFAULT_SECTIONS;
+  } catch (err) {
+    if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+    throw err;
+  }
   const paging = parseMyWorkPaging(args ?? {});
+  const actingAs = actingAgentHandle(ctx.client);
+  // Every section asked for (the REST default set) → the full object, totals
+  // included, exactly as GET /me/work returns it.
+  const all = MY_WORK_SECTIONS.every((s) => sections.includes(s));
   const data = await buildMyWork({
     userId: ctx.userId,
     ...paging,
     onlyNestId: ctx.crossNest === true ? null : ctx.nestId,
+    sections: all ? null : sections,
+    actingAs,
   });
-  return { text: myWorkText(data), data };
+  return { text: myWorkText(data, actingAs), data };
 }

@@ -115,6 +115,7 @@ export const HISTORICAL_MIGRATIONS = [
   "084_annotation_comment_client",
   "085_comment_mentions",
   "086_agent_webhooks",
+  "087_stream_marks",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1397,6 +1398,23 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
     CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+  `);
+
+  // Migration 087 parity: per-person stream marks (channel read state, mention
+  // marked done) and the final state of a wake-up delivery (PO-1190/PO-1189).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stream_marks (
+      user_id TEXT NOT NULL,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      at TEXT NOT NULL,
+      PRIMARY KEY (user_id, kind, ref, subject)
+    );
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

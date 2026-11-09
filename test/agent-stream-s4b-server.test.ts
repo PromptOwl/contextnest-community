@@ -232,11 +232,11 @@ describe("AC-CH-04 (2026-11-09 rule): people added to the nest post; nobody else
     expect([403, 404]).toContain((await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${GENERAL}/comments`, { body: "flat store" }, bob.apiKey)).status);
     // MCP is closed to both (the nest endpoint is not theirs to open).
     for (const u of [bob, carl]) {
-      const r = await callTool(u.apiKey, "context_comment", { channel: "general", body: "via mcp" });
+      const r = await callTool(u.apiKey, "context_comment", { channel: "general", body: "share-only mcp post" });
       expect(r.isError || !!r.rpcError || r.status >= 400, u.email).toBe(true);
     }
     const all = JSON.stringify((await timeline(alice, "general", "?limit=200")).data);
-    for (const s of ["bob sneaks in", "bob replies", "carl sneaks in", "carl replies", "via mcp"]) expect(all).not.toContain(s);
+    for (const s of ["bob sneaks in", "bob replies", "carl sneaks in", "carl replies", "share-only mcp post"]) expect(all).not.toContain(s);
     // Carl's share still lets him comment on an ordinary document he was given.
     const g = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "document", target: "nodes/launch-plan", email: carl.email, role: "read" }, owner.apiKey);
     expect(g.status, JSON.stringify(g.data)).toBe(201);
@@ -420,6 +420,24 @@ describe("AC-UX-08: display names, and which @names resolved", () => {
     const plain = await open(alice, "no names here", "nodes/channels/names");
     const p2 = (await timeline(owner, "names")).data.posts.find((x: any) => x.id === plain.id);
     expect(p2.mentions).toEqual([]);
+  });
+
+  it("AC-UX-08 a name that ends a sentence still resolves, and still reaches its owner", async () => {
+    captureWakes();
+    const before = (await inbox(rita)).filter((n) => n.kind === "mention").length;
+    const t = await open(alice, "Thanks @reader. And over to @scout.", "nodes/channels/names");
+    const p = (await timeline(owner, "names")).data.posts.find((x: any) => x.id === t.id);
+    expect(p.mentions).toEqual([
+      { name: "reader", kind: "person", display_name: "Rita Reader" },
+      { name: "scout", kind: "agent", wakeable: true },
+    ]);
+    expect((await inbox(rita)).filter((n) => n.kind === "mention").length).toBe(before + 1);
+    await waitForSent(1);
+    expect(JSON.parse(sent[0].body).mentioned).toBe("scout");
+    // An email address keeps its dots.
+    const e = await open(alice, `cc @${rita.email}`, "nodes/channels/names");
+    const pe = (await timeline(owner, "names")).data.posts.find((x: any) => x.id === e.id);
+    expect(pe.mentions).toEqual([{ name: rita.email, kind: "person", display_name: "Rita Reader" }]);
   });
 
   it("AC-UX-08 My Work mention items carry the author's display name", async () => {

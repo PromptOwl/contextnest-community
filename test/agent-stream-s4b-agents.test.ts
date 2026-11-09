@@ -215,8 +215,10 @@ describe("AC-AX-01: context_my_work lists threads that @mention the key's agent 
     const all = mentionThreads((await callTool(grokKey, "context_my_work", {})).data);
     expect(all).toContain(doc.id);
     expect(all).toContain(side.id);
-    const scoped = await mintKey(owner, "grok", { nest_id: nestId });
-    const mine = mentionThreads((await callTool(scoped, "context_my_work", {})).data);
+    // (One person can't hold two keys with the same label, so this one
+    // declares the agent instead.)
+    const scoped = await mintKey(owner, "grok-team-only", { nest_id: nestId });
+    const mine = mentionThreads((await callTool(scoped, "context_my_work", { client: { agent: "grok" } })).data);
     expect(mine).toContain(doc.id);
     expect(mine).not.toContain(side.id);
   });

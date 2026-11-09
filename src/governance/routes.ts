@@ -906,7 +906,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
   }
   const author = await getUserEmail(c);
-  // A channel (PO-1179) takes messages from its nest's writers only — in this
+  // A channel takes messages from people added to the nest only — in this
   // standalone store as much as in the thread store its timeline reads.
   const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), author);
   if (refusal) return c.json({ error: refusal.error }, refusal.status);

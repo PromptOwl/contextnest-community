@@ -32,6 +32,9 @@ import { isSystemUser } from "../auth/systems.js";
 import { isSafeConnectorUrl } from "../notify/dispatch.js";
 import { webhookTarget } from "../notify/outbound-log.js";
 import { isPrivateAddress } from "../metacognition/net.js";
+import { tryConsume } from "../shared/rate-limit.js";
+import { AppError } from "../shared/errors.js";
+import { lastDeliveries, sendAgentTestEvent, type DeliveryView } from "./agent-wake.js";
 
 /** An agent handle as typed after "@": lowercase letters, digits, dot, dash,
  *  underscore. No "@" inside, so an email-shaped name (a person) never
@@ -63,7 +66,8 @@ export function parseAgentWebhookUrl(raw: unknown): string {
   }
   if (!url || url.length > 2048 || !isSafeConnectorUrl(url) || literalPrivate) {
     throw new ValidationError(
-      "url must be a public https:// URL — loopback, private, link-local and metadata addresses are refused.",
+      "url must be a public https:// URL — loopback, private, link-local and metadata addresses are refused. " +
+        "To test a runner on your own machine, expose it through a public tunnel (for example cloudflared or ngrok) and save the tunnel's https:// URL.",
     );
   }
   return url;
@@ -98,6 +102,9 @@ export interface AgentWebhookView {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** How the most recent wake-up or test POST to this handle ended; null
+   *  when nothing has been sent yet (PO-1189, AC-UX-16). */
+  last_delivery: DeliveryView | null;
 }
 
 interface Row {
@@ -110,14 +117,21 @@ interface Row {
   updated_at: string;
 }
 
-async function toView(r: Row): Promise<AgentWebhookView> {
+async function toView(r: Row, deliveries: Map<string, DeliveryView>): Promise<AgentWebhookView> {
   let target = "webhook";
   try {
     target = webhookTarget(await decryptSecret(r.url_enc));
   } catch {
     /* unreadable row — show the placeholder */
   }
-  return { handle: r.handle, target, created_by: r.created_by, created_at: r.created_at, updated_at: r.updated_at };
+  return {
+    handle: r.handle,
+    target,
+    created_by: r.created_by,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    last_delivery: deliveries.get(r.handle) ?? null,
+  };
 }
 
 export async function listAgentWebhooks(nestId: string): Promise<AgentWebhookView[]> {
@@ -125,7 +139,14 @@ export async function listAgentWebhooks(nestId: string): Promise<AgentWebhookVie
     "SELECT * FROM agent_webhooks WHERE nest_id = ? ORDER BY handle",
     [nestId],
   )) as Row[];
-  return Promise.all(rows.map(toView));
+  const deliveries = await lastDeliveries(nestId);
+  return Promise.all(rows.map((r) => toView(r, deliveries)));
+}
+
+/** One handle's row as the panel shows it, or null. */
+export async function getAgentWebhook(nestId: string, rawHandle: unknown): Promise<AgentWebhookView | null> {
+  const handle = parseAgentHandle(rawHandle);
+  return (await listAgentWebhooks(nestId)).find((w) => w.handle === handle) ?? null;
 }
 
 function mintSecret(): string {
@@ -136,6 +157,8 @@ function mintSecret(): string {
  * Save (create or replace) the target for a handle. A new target, or
  * `rotate: true`, mints a fresh signing secret and returns it — the only time
  * it is ever shown. Replacing just the URL keeps the secret the runner has.
+ * `url` may be left out for a handle that already has one (rotate from the
+ * row, PO-1189): the stored URL is kept, never sent back to be retyped.
  */
 export async function putAgentWebhook(
   nestId: string,
@@ -144,29 +167,35 @@ export async function putAgentWebhook(
   actorEmail: string,
 ): Promise<{ webhook: AgentWebhookView; secret?: string }> {
   const handle = parseAgentHandle(rawHandle);
-  const url = parseAgentWebhookUrl(input.url);
   const db = getDb();
   const now = new Date().toISOString();
   const existing = (await db.get("SELECT * FROM agent_webhooks WHERE nest_id = ? AND handle = ?", [nestId, handle])) as
     | Row
     | undefined;
+  const keepUrl = !!existing && (input.url === undefined || input.url === null || input.url === "");
+  const url = keepUrl ? null : parseAgentWebhookUrl(input.url);
   let secret: string | undefined;
   if (!existing) {
     secret = mintSecret();
     await db.run(
       `INSERT INTO agent_webhooks (nest_id, handle, url_enc, secret_enc, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [nestId, handle, await encryptSecret(url), await encryptSecret(secret), actorEmail, now, now],
+      [nestId, handle, await encryptSecret(url!), await encryptSecret(secret), actorEmail, now, now],
     );
   } else {
     if (input.rotate === true) secret = mintSecret();
     await db.run(
       "UPDATE agent_webhooks SET url_enc = ?, secret_enc = ?, updated_at = ? WHERE nest_id = ? AND handle = ?",
-      [await encryptSecret(url), secret ? await encryptSecret(secret) : existing.secret_enc, now, nestId, handle],
+      [
+        url ? await encryptSecret(url) : existing.url_enc,
+        secret ? await encryptSecret(secret) : existing.secret_enc,
+        now,
+        nestId,
+        handle,
+      ],
     );
   }
-  const row = (await db.get("SELECT * FROM agent_webhooks WHERE nest_id = ? AND handle = ?", [nestId, handle])) as Row;
-  return { webhook: await toView(row), ...(secret ? { secret } : {}) };
+  return { webhook: (await getAgentWebhook(nestId, handle))!, ...(secret ? { secret } : {}) };
 }
 
 export async function deleteAgentWebhook(nestId: string, rawHandle: unknown): Promise<void> {
@@ -190,4 +219,34 @@ export async function storedAgentWebhook(
     console.error("[agent-wake] unreadable webhook row", nestId, handle, err);
     return null;
   }
+}
+
+/** Test events one handle, and one nest, may send per minute. */
+export const TEST_EVENTS_PER_HANDLE = 5;
+export const TEST_EVENTS_PER_NEST = 20;
+
+/**
+ * "Send test event" (PO-1189, AC-UX-16): one signed `agent.test` POST to the
+ * handle's saved target, and how it went. NotFound when the handle has no
+ * target. Rate limited per handle and per nest, so the button can't be used
+ * to hammer whatever URL was saved; the target is never taken from the
+ * request, and nothing the target answers is returned.
+ */
+export async function testAgentWebhook(
+  nestId: string,
+  rawHandle: unknown,
+  actorEmail: string,
+): Promise<{ ok: boolean; delivery: DeliveryView; webhook: AgentWebhookView | null }> {
+  const handle = parseAgentHandle(rawHandle);
+  const exists = await getDb().get("SELECT 1 AS ok FROM agent_webhooks WHERE nest_id = ? AND handle = ?", [nestId, handle]);
+  if (!exists) throw new NotFoundError("No webhook for that agent");
+  if (
+    !tryConsume(`agent-webhook-test:${nestId}:${handle}`, { max: TEST_EVENTS_PER_HANDLE, windowMs: 60_000 }) ||
+    !tryConsume(`agent-webhook-test:${nestId}`, { max: TEST_EVENTS_PER_NEST, windowMs: 60_000 })
+  ) {
+    throw new AppError(429, "Too many test events. Wait a minute and try again.");
+  }
+  const delivery = await sendAgentTestEvent(nestId, handle, actorEmail);
+  if (!delivery) throw new NotFoundError("No webhook for that agent");
+  return { ok: delivery.status === "ok", delivery, webhook: await getAgentWebhook(nestId, handle) };
 }

@@ -74,10 +74,10 @@ async function listToolNames(apiKey: string): Promise<string[]> {
   return (body?.result?.tools ?? []).map((t: { name: string }) => t.name);
 }
 
-const post = (u: { apiKey: string }, body: string, channel = OPS) =>
-  jsonRequest(app, "POST", `/nests/${nestId}/nodes/${channel}/annotations`, { body }, u.apiKey);
-const reply = (u: { apiKey: string }, threadId: string, body: string, channel = OPS) =>
-  jsonRequest(app, "POST", `/nests/${nestId}/nodes/${channel}/annotations/${threadId}/comments`, { body }, u.apiKey);
+const post = (u: { apiKey: string }, body: string, channel = OPS, extra: Record<string, unknown> = {}) =>
+  jsonRequest(app, "POST", `/nests/${nestId}/nodes/${channel}/annotations`, { body, ...extra }, u.apiKey);
+const reply = (u: { apiKey: string }, threadId: string, body: string, channel = OPS, extra: Record<string, unknown> = {}) =>
+  jsonRequest(app, "POST", `/nests/${nestId}/nodes/${channel}/annotations/${threadId}/comments`, { body, ...extra }, u.apiKey);
 const timeline = (u: { apiKey: string }, qs = "", name = "ops") =>
   jsonRequest(app, "GET", `/nests/${nestId}/channels/${name}${qs}`, undefined, u.apiKey);
 const tick = () => new Promise((r) => setTimeout(r, 15));
@@ -252,7 +252,9 @@ describe("AC-CH-02: a writer creates a channel and the list shows it", () => {
 // AC-CH-03 — timeline + thread
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("AC-CH-03: timeline newest-first with reply counts; ?thread= gives parent + replies", () => {
+// Ordering changed in S4 (PO-1189, AC-UX-04): latest ACTIVITY first, so the
+// post with the newest reply leads. The reply counts and paging are as before.
+describe("AC-CH-03: timeline by latest activity with reply counts; ?thread= gives parent + replies", () => {
   const ids: string[] = [];
 
   beforeAll(async () => {
@@ -269,13 +271,14 @@ describe("AC-CH-03: timeline newest-first with reply counts; ?thread= gives pare
     expect((await reply(writer, ids[1], "reply two", "nodes/channels/timeline")).status).toBe(200);
   });
 
-  it("AC-CH-03 returns the 3 posts newest-first, each with reply_count", async () => {
+  it("AC-CH-03 returns the 3 posts, latest activity first, each with reply_count", async () => {
     const r = await timeline(reader, "", "timeline");
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     expect(r.data.channel).toMatchObject({ id: "nodes/channels/timeline", name: "timeline" });
-    expect(r.data.posts.map((p: any) => p.body)).toEqual(["third post", "second post", "first post"]);
-    expect(r.data.posts.map((p: any) => p.reply_count)).toEqual([0, 2, 0]);
-    expect(r.data.posts[1].id).toBe(ids[1]);
+    // "second post" got the newest replies, so it leads.
+    expect(r.data.posts.map((p: any) => p.body)).toEqual(["second post", "third post", "first post"]);
+    expect(r.data.posts.map((p: any) => p.reply_count)).toEqual([2, 0, 0]);
+    expect(r.data.posts[0].id).toBe(ids[1]);
     expect(r.data.pagination).toMatchObject({ total: 3, has_more: false });
   });
 
@@ -289,7 +292,7 @@ describe("AC-CH-03: timeline newest-first with reply counts; ?thread= gives pare
 
   it("AC-CH-03 pages with limit/offset", async () => {
     const r = await timeline(reader, "?limit=2&offset=1", "timeline");
-    expect(r.data.posts.map((p: any) => p.body)).toEqual(["second post", "first post"]);
+    expect(r.data.posts.map((p: any) => p.body)).toEqual(["third post", "first post"]);
     expect(r.data.pagination).toMatchObject({ total: 3, limit: 2, offset: 1, has_more: false });
   });
 
@@ -305,7 +308,12 @@ describe("AC-CH-03: timeline newest-first with reply counts; ?thread= gives pare
 // AC-CH-04 — write tier on posts, invisibility without read
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("AC-CH-04: readers can't post (403); non-members can't see (404)", () => {
+// THE RULE CHANGED on 2026-11-09 (owner decision, PO-1190): posting is for
+// people added to the nest, a read-only collaborator included. These tests
+// used to pin "readers can't post (403)"; they now pin the new rule, and what
+// stays writers-only (create, archive, promote). The public and share-only
+// side of it is in agent-stream-s4b-server.test.ts (SEC-CH-04).
+describe("AC-CH-04: people added to the nest post, a reader included; non-members can't see (404)", () => {
   let threadId: string;
 
   beforeAll(async () => {
@@ -315,32 +323,36 @@ describe("AC-CH-04: readers can't post (403); non-members can't see (404)", () =
     threadId = r.data.thread.id;
   });
 
-  it("AC-CH-04 a reader can read the timeline but not post, reply or resolve (REST)", async () => {
+  it("AC-CH-04 a reader can read the timeline AND post, reply and resolve (REST)", async () => {
     expect((await timeline(reader)).status).toBe(200);
-    expect((await post(reader, "can I talk?")).status).toBe(403);
-    expect((await reply(reader, threadId, "me too")).status).toBe(403);
+    const p = await post(reader, "can I talk?");
+    expect(p.status, JSON.stringify(p.data)).toBe(201);
+    expect((await reply(reader, threadId, "me too")).status).toBe(200);
     expect(
-      (await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${OPS}/annotations/${threadId}/resolve`, {}, reader.apiKey)).status,
-    ).toBe(403);
-    // The standalone comment store is closed to readers on a channel as well.
-    expect(
-      (await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${OPS}/comments`, { body: "sneaky" }, reader.apiKey)).status,
-    ).toBe(403);
+      (await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${OPS}/annotations/${p.data.thread.id}/resolve`, {}, reader.apiKey)).status,
+    ).toBe(200);
+    // Creating and archiving a channel stay with the nest's writers.
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "by-reader" }, reader.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/ops/archive`, {}, reader.apiKey)).status).toBe(403);
     // Ordinary documents keep read-tier commenting.
     await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Plain Doc", content: "x" }, writer.apiKey);
     expect((await post(reader, "fine on a doc", "nodes/plain-doc")).status).toBe(201);
   });
 
-  it("AC-CH-04 a reader can't post through MCP context_comment either", async () => {
+  it("AC-CH-04 a reader posts through MCP context_comment too", async () => {
     const r = await callTool(reader.apiKey, "context_comment", { id: OPS, body: "via mcp" });
-    expect(r.isError, r.text).toBe(true);
-    expect(r.text.toLowerCase()).toContain("write");
-    const r2 = await callTool(reader.apiKey, "context_comment", { id: OPS, body: "via mcp", thread: threadId });
-    expect(r2.isError).toBe(true);
-    const r3 = await callTool(reader.apiKey, "context_resolve_comment", { id: OPS, thread: threadId });
-    expect(r3.isError).toBe(true);
+    expect(r.isError, r.text).toBe(false);
+    const r2 = await callTool(reader.apiKey, "context_comment", { id: OPS, body: "via mcp reply", thread: threadId });
+    expect(r2.isError, r2.text).toBe(false);
+    const made = await callTool(reader.apiKey, "context_comment", { id: OPS, body: "a thread to resolve" });
+    const r3 = await callTool(reader.apiKey, "context_resolve_comment", { id: OPS, thread: made.data.thread_id });
+    expect(r3.isError, r3.text).toBe(false);
     const tl = await timeline(writer);
-    expect(JSON.stringify(tl.data)).not.toContain("via mcp");
+    expect(JSON.stringify(tl.data)).toContain("via mcp");
+    // …but not create a channel.
+    const create = await callTool(reader.apiKey, "context_channels", { action: "create", name: "by-reader-mcp" });
+    expect(create.isError).toBe(true);
+    expect(create.text.toLowerCase()).toContain("write");
   });
 
   it("AC-CH-04 a writer can post through MCP context_comment", async () => {
@@ -348,6 +360,7 @@ describe("AC-CH-04: readers can't post (403); non-members can't see (404)", () =
     expect(r.isError, r.text).toBe(false);
     const tl = await timeline(writer);
     expect(tl.data.posts[0].body).toBe("posted by mcp");
+    expect(tl.data.posts[0].actor.human).toBe("Writer");
   });
 
   it("AC-CH-04 a non-member gets 404 from the list, the timeline and the thread", async () => {
@@ -454,8 +467,13 @@ describe("AC-CH-05: @stacey in a channel post notifies exactly like a doc commen
 // AC-CH-06 — "grok, on behalf of <human>"
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Changed in S4b (PO-1190, AC-AX-12): an API key's LABEL alone no longer shows
+// as an agent — every personal key read as "<label>, on behalf of <person>".
+// The agent shows only when the caller declares it (`client.agent`), and the
+// person is shown by display name (PO-1189); the email stays in `author`.
 describe("AC-CH-06: an agent's message shows '<agent>, on behalf of <human>'", () => {
   let grokKey: string;
+  const GROK = { client: { agent: "grok" } };
 
   beforeAll(async () => {
     process.env.EXPERIMENTAL_AGENT_STREAM = "true";
@@ -465,20 +483,28 @@ describe("AC-CH-06: an agent's message shows '<agent>, on behalf of <human>'", (
 
   const latest = async () => (await timeline(writer, "", "agent-room")).data.posts[0];
 
-  it("AC-CH-06 REST with an API key labelled grok", async () => {
-    expect((await post({ apiKey: grokKey }, "grok reporting in", "nodes/channels/agent-room")).status).toBe(201);
+  it("AC-CH-06 REST with a key labelled grok that declares client.agent", async () => {
+    expect((await post({ apiKey: grokKey }, "grok reporting in", "nodes/channels/agent-room", GROK)).status).toBe(201);
     const p = await latest();
     expect(p.body).toBe("grok reporting in");
     expect(p.author).toBe(writer.email);
-    expect(p.actor).toEqual({ human: writer.email, agent: "grok", label: `grok, on behalf of ${writer.email}` });
+    expect(p.actor).toEqual({ human: "Writer", agent: "grok", label: "grok, on behalf of Writer" });
   });
 
-  it("AC-CH-06 MCP context_comment with the grok key", async () => {
-    const r = await callTool(grokKey, "context_comment", { id: "nodes/channels/agent-room", body: "grok via mcp" });
+  it("AC-CH-06 MCP context_comment with the grok key, declared", async () => {
+    await tick();
+    const r = await callTool(grokKey, "context_comment", { id: "nodes/channels/agent-room", body: "grok via mcp", ...GROK });
     expect(r.isError, r.text).toBe(false);
     const p = await latest();
     expect(p.body).toBe("grok via mcp");
-    expect(p.actor.label).toBe(`grok, on behalf of ${writer.email}`);
+    expect(p.actor.label).toBe("grok, on behalf of Writer");
+  });
+
+  it("AC-CH-06 the key's label alone is not an agent", async () => {
+    await tick();
+    const r = await callTool(grokKey, "context_comment", { id: "nodes/channels/agent-room", body: "label only" });
+    expect(r.isError, r.text).toBe(false);
+    expect((await latest()).actor).toEqual({ human: "Writer", agent: null, label: "Writer" });
   });
 
   it("AC-CH-06 MCP client.agent (what clientInfo.name feeds) names the agent", async () => {
@@ -490,15 +516,15 @@ describe("AC-CH-06: an agent's message shows '<agent>, on behalf of <human>'", (
       client: { agent: "grok" },
     });
     expect(r.isError, r.text).toBe(false);
-    expect((await latest()).actor).toMatchObject({ agent: "grok", human: writer.email });
+    expect((await latest()).actor).toMatchObject({ agent: "grok", human: "Writer" });
   });
 
   it("AC-CH-06 a reply carries its own attribution", async () => {
     const p = await latest();
     await tick();
-    expect((await reply({ apiKey: grokKey }, p.id, "grok replying", "nodes/channels/agent-room")).status).toBe(200);
+    expect((await reply({ apiKey: grokKey }, p.id, "grok replying", "nodes/channels/agent-room", GROK)).status).toBe(200);
     const t = await timeline(writer, `?thread=${p.id}`, "agent-room");
-    expect(t.data.thread.replies.at(-1).actor.label).toBe(`grok, on behalf of ${writer.email}`);
+    expect(t.data.thread.replies.at(-1).actor.label).toBe("grok, on behalf of Writer");
   });
 
   it("AC-CH-06 a person in the browser shows as themselves only", async () => {
@@ -511,7 +537,8 @@ describe("AC-CH-06: an agent's message shows '<agent>, on behalf of <human>'", (
     expect(res.status).toBe(201);
     const p = await latest();
     expect(p.body).toBe("typed by a human");
-    expect(p.actor).toEqual({ human: writer.email, agent: null, label: writer.email });
+    expect(p.actor).toEqual({ human: "Writer", agent: null, label: "Writer" });
+    expect(p.author).toBe(writer.email);
   });
 
   it("AC-CH-06 resolveActorLabel is the one seam (identity work swaps it)", async () => {
@@ -639,13 +666,19 @@ describe("AC-CH-04 security: no side door posts into a channel", () => {
     expect(JSON.stringify(tl.data)).not.toContain("hi from the web");
   });
 
-  it("AC-CH-04 the shared guard refuses a persona/agent identity with no write access", async () => {
+  // The guard's rule since 2026-11-09: a person added to the nest passes (a
+  // reader too); an identity that is not on the nest — which is what an agent
+  // persona or a stranger is — does not.
+  it("AC-CH-04 the shared guard refuses an identity that is not on the nest", async () => {
     const { channelPostRefusal, isChannelNode } = await import("../src/channels/channel-service.js");
     expect(await isChannelNode(nestId, OPS)).toBe(true);
     expect(await isChannelNode(nestId, "nodes/plain-doc")).toBe(false);
-    const r = await channelPostRefusal(nestId, OPS, reader.userId, reader.email);
+    const r = await channelPostRefusal(nestId, OPS, stranger.userId, stranger.email);
     expect(r?.status).toBe(403);
+    expect(await channelPostRefusal(nestId, OPS, reader.userId, reader.email)).toBeNull();
     expect(await channelPostRefusal(nestId, OPS, writer.userId, writer.email)).toBeNull();
+    // Not a channel: no opinion.
+    expect(await channelPostRefusal(nestId, "nodes/plain-doc", stranger.userId, stranger.email)).toBeNull();
   });
 });
 

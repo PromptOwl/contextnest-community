@@ -97,7 +97,7 @@ import {
   isDerivedAnnotationsNode,
   fieldsOfRaw,
 } from "../nodes/service.js";
-import { deleteNest, archiveNest } from "../nests/service.js";
+import { deleteNest, archiveNest, listVisibleNests } from "../nests/service.js";
 import { agentSummaryProse } from "../views/deps.js";
 import {
   addComputedFields,
@@ -141,9 +141,11 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
-import { channelPostRefusal } from "../channels/channel-service.js";
-import { indexPostedMessage } from "../mentions/mention-index.js";
-import { wakeForPostedMessage } from "../stream/agent-wake.js";
+import { channelsHint } from "./channel-tools.js";
+import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
+import { messageClient } from "../channels/message-meta.js";
+import { fanOutPostedMessage, mentionsLine } from "../channels/post-message.js";
+import { actingAgentHandle, markMentionDone } from "../mentions/mention-index.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -483,6 +485,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_comments",
   // Channels (PO-1179, experimental): reading a timeline or thread.
   "context_channel_read",
+  // …and listing them (PO-1190, AC-AX-06). The tool also creates and
+  // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
+  // readKeyToolView) and runChannelTool refuses every other action.
+  "context_channels",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -834,29 +840,31 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_comments",
     description:
-      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context.",
+      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context. Pass `thread` to get that one thread (with or without the document's id): what a wake-up's `read` call asks for.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        thread: { type: "string", description: "A thread id: return only that thread. The node is found from the thread when no title or id is given." },
       },
     },
   },
   {
     name: "context_comment",
     description:
-      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person. Also how you post in a channel (when the server has channels on): pass the channel's id, e.g. `nodes/channels/ops` (from context_channels); posting in a channel needs write access to the nest.",
+      "Leave a comment on a document, or post in a channel — the same threads the web UI shows. Omit `thread` to open a new one; pass a thread id to reply (the document or channel is then found from the thread, so `thread` and `body` are enough). Anyone who can read a document may comment on it. In a channel (when the server has channels on) pass `channel`: its name, `#name` or node id; people added to the nest may post there. `@name` in the body notifies that person, or wakes that agent. The result carries `thread_id`, `comment_id` and `mentions`: for each @name, whether it reached a person, is a known agent (and whether a wake-up was sent), or matched nobody. To show as an agent rather than as the person behind the key, pass `client: { agent: \"<your name>\" }`.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        channel: { type: "string", description: 'A channel to post in: its name ("ops"), "#ops" or its node id. From context_channels.' },
         body: { type: "string", description: "The comment text" },
         thread: {
           type: "string",
           description:
-            "Thread id to reply to (from context_comments). Omit to open a new thread on the document.",
+            "Thread id to reply to (from context_comments or context_channel_read). Omit to open a new thread.",
         },
       },
       required: ["body"],
@@ -865,19 +873,24 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve_comment",
     description:
-      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on.",
+      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on. The thread id alone is enough. With `mention_done: true` the thread is left as it is and only YOUR mention of it is cleared from context_my_work (it comes back if you are mentioned there again).",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        channel: { type: "string", description: "The channel the thread is in (optional; the thread id is enough)." },
         thread: {
           type: "string",
-          description: "Thread id, from context_comments",
+          description: "Thread id, from context_comments, context_channel_read or context_my_work",
         },
         reopen: {
           type: "boolean",
           description: "Reopen the thread instead of resolving it",
+        },
+        mention_done: {
+          type: "boolean",
+          description: "Clear your own mention of this thread from My Work without resolving the thread.",
         },
       },
       required: ["thread"],
@@ -3342,14 +3355,32 @@ async function runTool(
       } else if (args.id) {
         node = docs.find((n) => n.id === args.id);
       }
-      if (!node) return `Node not found: ${args.title || args.id}`;
+      // One thread by id (PO-1190, AC-AX-07): the node comes from the thread
+      // when neither title nor id was given. The access gate below is the
+      // same either way, so a thread id is no way around it.
+      const oneThread = args.thread ? String(args.thread) : "";
+      if (!node && oneThread && !args.title && !args.id) {
+        const t = await getThread(oneThread);
+        if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
+      }
+      if (!node) return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       // Gate by per-node read access. Collaborators/stewards who can read the
       // node in the UI may also read its comment threads over MCP even when the
       // document is not yet approved. Public readers remain blocked by
       // canReadNode until approval. This preserves privacy while letting
       // collaborators address feedback and resubmit.
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
-        return `Node not found: ${args.title || args.id}`;
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
+      if (oneThread) {
+        const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
+        if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
+        const lines = t.comments.map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`).join("\n");
+        const quote = t.anchor?.quote ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n` : "";
+        return {
+          text: `# Thread ${t.id} on "${node.frontmatter.title}" [${t.status}]\n\n${quote}${lines}\n\nReply with context_comment { thread: "${t.id}", body }.`,
+          data: { node_id: node.id, title: node.frontmatter.title, thread: t },
+        };
       }
       const threads = await listThreads(nestId, node.id);
       if (!threads.length)
@@ -3401,35 +3432,83 @@ async function runTool(
         return "thread is required — the id from context_comments.";
       }
 
+      // "Mark done" (PO-1189, AC-UX-09): clear the caller's own mention of
+      // this thread from My Work and touch nothing else. Their own mention
+      // first; failing that, the mention of the agent this call acts as.
+      if (isResolve && args.mention_done === true) {
+        const nestNames = new Map<string, string>();
+        for (const n of await listVisibleNests(ctx.userId)) {
+          if (ctx.crossNest === true || n.id === nestId) nestNames.set(n.id, n.name ?? n.id);
+        }
+        const actingAs = actingAgentHandle(ctx.client);
+        const mark = (forAgent: string | null) =>
+          markMentionDone({ userId: ctx.userId, email: userEmail, nestNames, threadId, forAgent, actingAs });
+        try {
+          const done = await mark(null).catch((err) => {
+            if (err instanceof NotFoundError && actingAs) return mark(actingAs);
+            throw err;
+          });
+          return {
+            text: `Cleared ${done.for_agent ? `@${done.for_agent}'s` : "your"} mention in thread ${threadId} from My Work. The thread itself is unchanged; a later mention there brings it back.`,
+            data: done,
+          };
+        } catch (err) {
+          if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+          throw err;
+        }
+      }
+
+      // Which node. One of: `channel` (a name, #name or node id), `title`,
+      // `id` — which also takes a channel's name, since that is what agents
+      // try first — or nothing but `thread`, when the node is the thread's own
+      // (AC-AX-03). Whatever names it, the access checks below are the same.
       const docs = await storage.discoverDocuments();
+      const streamOn = config.EXPERIMENTAL_AGENT_STREAM;
+      const channelDoc = (raw: unknown): ContextNode | undefined => {
+        try {
+          const id = channelIdFor(parseChannelName(raw));
+          const hit = docs.find((n) => n.id === id);
+          return hit && isChannelDoc(hit) ? hit : undefined;
+        } catch {
+          return undefined;
+        }
+      };
       let node: ContextNode | undefined;
-      if (args.title) {
+      if (args.channel !== undefined && args.channel !== null && args.channel !== "") {
+        node = streamOn ? channelDoc(args.channel) : undefined;
+      } else if (args.title) {
         node = docs.find(
           (n) =>
             n.frontmatter.title.toLowerCase() ===
             String(args.title).toLowerCase(),
         );
       } else if (args.id) {
-        node = docs.find((n) => n.id === String(args.id));
+        node = docs.find((n) => n.id === String(args.id)) ?? (streamOn ? channelDoc(args.id) : undefined);
+      } else if (threadId) {
+        const t = await getThread(threadId);
+        if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
       }
-      if (!node) {
-        return toolError(
-          `Node not found: ${args.title || args.id || "(no title or id given)"}`,
+      const named = args.channel || args.title || args.id;
+      const notFound = async () =>
+        toolError(
+          (named
+            ? `${args.channel ? "Channel" : "Node"} not found: ${named}.`
+            : threadId
+              ? `Thread not found: ${threadId}.`
+              : "Say where: pass `channel` (a channel's name), `id` or `title` (a document), or `thread` to reply.") +
+            (streamOn && !args.title ? await channelsHint(ctx) : ""),
           "DOCUMENT_NOT_FOUND",
         );
-      }
+      if (!node) return notFound();
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         // Same shape as the not-found above, and it never repeats the resolved
         // title — otherwise the refusal confirms what the caller guessed.
-        return toolError(
-          `Node not found: ${args.title || args.id}`,
-          "DOCUMENT_NOT_FOUND",
-        );
+        return notFound();
       }
       const label = node.frontmatter.title || node.id;
 
-      // A channel (PO-1179) takes posts — and resolves — from its nest's
-      // writers only; the same rule the REST comment routes apply.
+      // A channel takes posts — and resolves — from people added to the nest
+      // only; the same rule the REST comment routes apply.
       const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
       if (channelRefusal) {
         return toolError(
@@ -3468,40 +3547,36 @@ async function runTool(
 
       // addComment reopens a resolved thread. Not echoed in the confirmation,
       // for the reason below: it would report the thread's state.
-      // ctx.client: the agent label (key label, clientInfo.name or the call's
-      // own `client`) a channel timeline shows beside the person.
+      // The stored attribution names an agent only when the caller declared
+      // one; a bare key label is kept beside it (channels/message-meta.ts).
+      const written = messageClient(ctx.client, args.client, ctx.apiKeyLabel);
       const thread = threadId
-        ? await addComment(nestId, node.id, threadId, userEmail, body, ctx.client)
-        : await createThread(nestId, node.id, { body, anchor: null }, userEmail, ctx.client);
+        ? await addComment(nestId, node.id, threadId, userEmail, body, written)
+        : await createThread(nestId, node.id, { body, anchor: null }, userEmail, written);
       // The confirmation deliberately doesn't report the thread's comment
       // count: writing is admitted on a node whose threads the caller may not
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // The @mentions, then (for a reply) the thread's earlier participants —
-      // the same fan-out the REST reply route uses — then the document's
-      // watchers and reviewer stewards. One notification per person.
-      //
-      // baseUrl: without it the notification still reaches the person, but
-      // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
-      // empty when that isn't configured — every other notifying tool in
-      // this file passes it, and the REST route passes requestBaseUrl.
-      await notifyComment({
+      // The fan-out is the REST routes' own (channels/post-message.ts): the
+      // @mentions, on a document the thread's earlier participants and its
+      // followers, the mention index, agent wake-ups, the annotations
+      // projection. baseUrl: without it a notification's "Open document" link
+      // falls back to PUBLIC_BASE_URL and comes out empty when that isn't set.
+      const posted = await fanOutPostedMessage({
         nestId,
         nodeId: node.id,
+        thread,
+        isReply: !!threadId,
         body,
-        actorEmail: userEmail,
+        authorEmail: userEmail,
         baseUrl: ctx.baseUrl,
-        ...(threadId ? { thread } : {}),
       });
-      // Who it tags, for My Work's Mentions (PO-1180) — same as the REST routes.
-      await indexPostedMessage({ nestId, nodeId: node.id, thread, body, authorEmail: userEmail });
-      // …and wake the tagged agents that have a webhook target (PO-1181).
-      await wakeForPostedMessage({ nestId, nodeId: node.id, thread, authorEmail: userEmail });
-      await syncAnnotationsNode(nestId, node.id, userEmail);
-      return threadId
+      const said = threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
         : `Commented on "${label}" — opened thread ${thread.id}. Reply to it by passing that id as \`thread\`.`;
+      const reached = mentionsLine(posted.mentions);
+      return { text: reached ? `${said}\n${reached}` : said, data: posted };
     }
 
     case "context_create": {

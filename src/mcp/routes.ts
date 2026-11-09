@@ -28,10 +28,10 @@ import {
   connectionClient,
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
-import { CHANNEL_TOOL_DEFINITIONS } from "./channel-tools.js";
+import { CHANNEL_TOOL_DEFINITIONS, READ_KEY_TOOL_VIEWS, READ_ONLY_KEY_REFUSAL } from "./channel-tools.js";
 import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
-import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
+import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
 
@@ -56,6 +56,56 @@ async function getCaller(
   };
 }
 
+/**
+ * Every tool this endpoint defines right now, before any per-caller filter.
+ * Read per request, so flipping a flag takes effect at once.
+ */
+function nestToolDefinitions() {
+  // Advertise the workflow-plane tools only when the flag is on — the same
+  // gate the REST requireWorkflowPlane middleware applies. Metacognition
+  // tools need FEATURE_METACOGNITION as well (the REST requireMetacognition
+  // gate), and are admin tools on top.
+  return [
+    ...(config.FEATURE_WORKFLOW_PLANE
+      ? [
+          ...TOOL_DEFINITIONS,
+          ...WORKFLOW_TOOL_DEFINITIONS,
+          ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
+          ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
+        ]
+      : TOOL_DEFINITIONS),
+    // Channels (PO-1179): their own experimental switch, independent of the
+    // workflow plane.
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+    // My Work (PO-1180): the caller's queue, mentions included. Not behind the
+    // channels switch — document-comment mentions work without channels.
+    ...MY_WORK_TOOL_DEFINITIONS,
+    // Promote a thread to a node (PO-1181): document threads too, so not
+    // behind the channels switch.
+    ...STREAM_TOOL_DEFINITIONS,
+  ];
+}
+
+/**
+ * A read-only key calling a tool it is not offered (PO-1190, AC-AX-06). The
+ * SDK answers an unregistered name "Tool … not found", which sends an agent
+ * looking for a tool that exists; say what is actually wrong. Only for a
+ * single tools/call naming a tool this endpoint really defines — an unknown
+ * name stays unknown — and nothing is executed.
+ */
+async function readOnlyKeyRefusal(req: Request): Promise<Response | null> {
+  const msg = await peekJsonRpc(req);
+  if (!msg || msg.method !== "tools/call") return null;
+  const name = (msg.params as { name?: unknown } | undefined)?.name;
+  if (typeof name !== "string" || MCP_READ_TOOLS.has(name)) return null;
+  if (!nestToolDefinitions().some((t) => t.name === name)) return null;
+  return Response.json({
+    jsonrpc: "2.0",
+    id: msg.id ?? null,
+    result: { content: [{ type: "text", text: `${READ_ONLY_KEY_REFUSAL} ("${name}" writes.)` }], isError: true },
+  });
+}
+
 function createMcpServerForNest(
   nestId: string,
   userId: string,
@@ -78,31 +128,7 @@ function createMcpServerForNest(
     { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
-  // Advertise the workflow-plane tools only when the flag is on — the same
-  // gate the REST requireWorkflowPlane middleware applies. config is read per
-  // request (the server is rebuilt per call), so toggling the flag at runtime
-  // takes effect immediately.
-  // Metacognition tools need FEATURE_METACOGNITION as well (the REST
-  // requireMetacognition gate), and are admin tools on top.
-  const allDefs = [
-    ...(config.FEATURE_WORKFLOW_PLANE
-      ? [
-          ...TOOL_DEFINITIONS,
-          ...WORKFLOW_TOOL_DEFINITIONS,
-          ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
-          ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
-        ]
-      : TOOL_DEFINITIONS),
-    // Channels (PO-1179): their own experimental switch, independent of the
-    // workflow plane. Read per request, so flipping it takes effect at once.
-    ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
-    // My Work (PO-1180): the caller's queue, mentions included. Not behind the
-    // channels switch — document-comment mentions work without channels.
-    ...MY_WORK_TOOL_DEFINITIONS,
-    // Promote a thread to a node (PO-1181): document threads too, so not
-    // behind the channels switch.
-    ...STREAM_TOOL_DEFINITIONS,
-  ];
+  const allDefs = nestToolDefinitions();
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
   const toolDefs = headless
@@ -116,10 +142,15 @@ function createMcpServerForNest(
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
+    // A tool that also writes is offered to a read-only key as what that key
+    // can do with it: a narrower schema and read-only hints (AC-AX-06).
+    const view = capability === "read" ? READ_KEY_TOOL_VIEWS[tool.name] : undefined;
     // `client` is validated against the engine's own schema in handleToolCall.
-    const shape = toolShape(tool.name, tool.inputSchema);
+    const shape = toolShape(tool.name, view?.schema ?? tool.inputSchema);
 
-    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    const meta = view
+      ? { title: view.annotations.title, description: view.description, inputSchema: shape, annotations: view.annotations }
+      : { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       const engine = await engineCache.get(nestId);
       // Caller attribution (§9.4.2), resolved HERE rather than when the server
@@ -175,6 +206,10 @@ export const mcpNoStream = (c: Context) =>
 mcpRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
+  if (c.get("keyCapability") === "read") {
+    const refused = await readOnlyKeyRefusal(c.req.raw);
+    if (refused) return refused;
+  }
   const caller = await getCaller(userId);
   // The connect message carries the nest's rules (CU-wdqcq05rn0). Resolved
   // only for the initialize request — every tool call rebuilds this server.

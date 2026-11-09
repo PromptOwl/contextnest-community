@@ -2558,6 +2558,45 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("086_agent_webhooks");
   }
+
+  // 087: per-person marks for the agent team stream, and what a wake-up
+  //   delivery ended as (PO-1190 / PO-1189, agent team stream S4).
+  //   `stream_marks` is ONE small table for the two things a person marks:
+  //     kind 'channel' — "I have read this channel up to `at`" (ref = the
+  //       channel's node id). Unread counts are messages by other people
+  //       after it; no row means nothing read yet.
+  //     kind 'mention' — "I am done with my mention in this thread" (ref =
+  //       the thread id). The mention leaves My Work until a later message in
+  //       that thread names them again. `subject` is '' for the person, or
+  //       the agent handle when they cleared it acting as that agent.
+  //   Rows are the caller's own state: nothing here is shared or shown to
+  //   anyone else. They go with the nest.
+  //   `agent_wake_deliveries` gains `attempts` (a failed POST is retried),
+  //   `finished_at` (when it reached its final status) and `event`
+  //   ('agent.mention', or 'agent.test' for the panel's test button), so the
+  //   webhooks panel can show each handle's last delivery.
+  if (!hasMigration("087_stream_marks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS stream_marks (
+        user_id TEXT NOT NULL,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        at TEXT NOT NULL,
+        PRIMARY KEY (user_id, kind, ref, subject)
+      );
+    `);
+    const cols = (
+      db.prepare("PRAGMA table_info(agent_wake_deliveries)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length) {
+      if (!cols.includes("attempts")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1");
+      if (!cols.includes("finished_at")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN finished_at TEXT");
+      if (!cols.includes("event")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN event TEXT NOT NULL DEFAULT 'agent.mention'");
+    }
+    recordMigration("087_stream_marks");
+  }
 }
 
 /**
