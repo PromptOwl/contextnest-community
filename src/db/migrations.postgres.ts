@@ -1410,7 +1410,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ref TEXT NOT NULL,
       subject TEXT NOT NULL DEFAULT '',
       at TEXT NOT NULL,
-      PRIMARY KEY (user_id, kind, ref, subject)
+      PRIMARY KEY (user_id, nest_id, kind, ref, subject)
     );
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;

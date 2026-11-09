@@ -169,7 +169,10 @@ export function deriveTitle(firstBody: string, kind: PromoteKind = "decision"): 
       .split("\n")
       .map((l) => l.trim())
       .find(Boolean) ?? "";
+  // Bounded before any pattern runs: the result is at most 80 characters, and
+  // a first line of a megabyte of "[" must not be this function's problem.
   const flat = line
+    .slice(0, 400)
     .replace(/^#+\s*/, "")
     .replace(/^(@(\([^)]*\)|[\w.@-]+)[\s,:]*)+/, "")
     .replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2")
@@ -177,7 +180,8 @@ export function deriveTitle(firstBody: string, kind: PromoteKind = "decision"): 
     .replace(/[*_`~]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!flat) return kind === "task" ? "Task from a thread" : "Decision from a thread";
+  // Nothing to read as a title (empty, or only punctuation): a plain one.
+  if (!/[\p{L}\p{N}]/u.test(flat)) return kind === "task" ? "Task from a thread" : "Decision from a thread";
   return flat.length > MAX_DERIVED_TITLE ? `${flat.slice(0, MAX_DERIVED_TITLE - 1).trimEnd()}…` : flat;
 }
 
@@ -242,6 +246,9 @@ export async function promoteThread(
   // nothing. The caller can read the thread, whose reply already names it.
   const sourceThread: SourceThread = { node_id: row.node_id, thread_id: threadId };
   const earlier = (await promotedRows(nestId, [threadId])).find((p) => p.kind === kind);
+  if (earlier && !(await canOpenNode(nestId, earlier.node_id, userId, userEmail))) {
+    throw new ConflictError(`This thread was already promoted to a ${kind}.`);
+  }
   if (earlier) {
     const head = (await db.get(
       "SELECT MAX(version) AS v FROM node_versions WHERE nest_id = ? AND node_id = ?",

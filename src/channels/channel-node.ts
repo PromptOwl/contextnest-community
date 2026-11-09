@@ -9,6 +9,7 @@
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { getDb } from "../db/client.js";
 
 export const CHANNEL_FOLDER = "channels";
 export const CHANNEL_TAG = "channel";
@@ -50,9 +51,24 @@ export async function readChannelDoc(nestId: string, nodeId: string): Promise<Co
   }
 }
 
-/** Is this node a channel? Cheap for every other id (regex first). */
+/**
+ * Is this node a channel? Cheap for every other id (regex first).
+ *
+ * Fails CLOSED. A document that can't be read or parsed (a bad push, a hand
+ * edit, a storage hiccup) must not stop being a channel for the access rules
+ * that depend on this answer: it is still one if the tag index says so, or if
+ * the node under nodes/channels/ already holds conversation threads.
+ */
 export async function isChannelNode(nestId: string, nodeId: string): Promise<boolean> {
   if (!isChannelId(nodeId)) return false;
   const node = await readChannelDoc(nestId, nodeId);
-  return !!node && isChannelDoc(node);
+  if (node) return isChannelDoc(node);
+  const row = await getDb()
+    .get(
+      `SELECT 1 AS hit WHERE EXISTS (SELECT 1 FROM node_tag_index WHERE nest_id = ? AND node_id = ? AND tag_name = ?)
+          OR EXISTS (SELECT 1 FROM annotation_threads WHERE nest_id = ? AND node_id = ?)`,
+      [nestId, nodeId, CHANNEL_TAG, nestId, nodeId],
+    )
+    .catch(() => ({ hit: 1 }));
+  return !!row;
 }

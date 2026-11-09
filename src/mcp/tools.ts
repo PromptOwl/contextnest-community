@@ -77,7 +77,6 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,

@@ -277,7 +277,7 @@ export async function listOpenMentions(params: {
        JOIN annotation_comments c ON c.id = m.comment_id
        LEFT JOIN node_index ni ON ni.nest_id = m.nest_id AND ni.node_id = m.node_id
        LEFT JOIN stream_marks d
-         ON d.user_id = ? AND d.kind = 'mention' AND d.ref = m.thread_id
+         ON d.user_id = ? AND d.nest_id = m.nest_id AND d.kind = 'mention' AND d.ref = m.thread_id
         AND d.subject = (CASE WHEN m.mentioned_user_id IS NULL THEN m.handle ELSE '' END)
       WHERE m.nest_id IN (${nestIds.map(() => "?").join(", ")})
         AND t.status = 'open'
@@ -400,7 +400,7 @@ export async function markMentionDone(params: {
   await db.run(
     `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at)
      VALUES (?, ?, 'mention', ?, ?, ${nowMsExpr(db)})
-     ON CONFLICT (user_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
+     ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
     [params.userId, mine.nest_id, threadId, forAgent ?? ""],
   );
   return { done: true, thread_id: threadId, for_agent: forAgent };

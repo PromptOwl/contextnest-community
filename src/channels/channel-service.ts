@@ -64,6 +64,7 @@ import {
   hasTag,
   isChannelDoc,
   isChannelId,
+  isChannelNode,
   readChannelDoc,
   tagsOf,
 } from "./channel-node.js";
@@ -128,24 +129,26 @@ const NOT_A_MEMBER =
 const CHANNEL_ARCHIVED: PostRefusal = { status: 409, error: "This channel is archived. Restore it to post again." };
 
 /**
- * Why this caller may not post in ANY channel of the nest, or null: the nest
- * is archived, or they are not a person added to it — owner, admin, a
- * collaborator at any level, a steward, or a member through a team share.
- * Someone who reaches the nest only through its visibility (public, org) or
- * only through a document share is not.
+ * A person added to the nest — owner, admin, a collaborator at any level, a
+ * steward, or a member through a team share. Someone who reaches the nest
+ * only through its visibility (public, org) or only through a document share
+ * is not.
  */
+const isMember = (access: { permission: string; isPublicReader: boolean }) =>
+  access.permission !== "none" && !access.isPublicReader;
+
+/** Is this caller a person added to the nest? (Open mode: everyone is.) */
+export async function isNestMember(nestId: string, userId: string): Promise<boolean> {
+  return config.AUTH_MODE === "open" || isMember(await resolveNestAccess(nestId, userId));
+}
+
+/** Why this caller may not post in ANY channel of the nest, or null: the nest
+ *  is archived, or they are not a person added to it. */
 async function nestPostRefusal(nestId: string, userId: string): Promise<PostRefusal | null> {
   if (config.AUTH_MODE === "open") return null;
   const access = await resolveNestAccess(nestId, userId);
   if (access.archived) return { status: 403, error: "This nest is archived, so it is read-only." };
-  return access.permission !== "none" && !access.isPublicReader ? null : { status: 403, error: NOT_A_MEMBER };
-}
-
-/** Is this caller a person added to the nest (see nestPostRefusal)? */
-export async function isNestMember(nestId: string, userId: string): Promise<boolean> {
-  if (config.AUTH_MODE === "open") return true;
-  const access = await resolveNestAccess(nestId, userId);
-  return access.permission !== "none" && !access.isPublicReader;
+  return isMember(access) ? null : { status: 403, error: NOT_A_MEMBER };
 }
 
 /**
@@ -178,7 +181,11 @@ export async function channelPostRefusal(
 ): Promise<PostRefusal | null> {
   if (!isChannelId(nodeId)) return null;
   const node = await readChannelDoc(nestId, nodeId);
-  if (!node || !isChannelDoc(node)) return null;
+  if (!node) {
+    // Unreadable, but known to be a channel: closed, not open (channel-node.ts).
+    return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
+  }
+  if (!isChannelDoc(node)) return null;
   return (await channelAccess({ nestId, userId, userEmail }, node)).post;
 }
 
@@ -228,7 +235,7 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
        FROM annotation_threads t
        JOIN annotation_comments c ON c.thread_id = t.id
        LEFT JOIN stream_marks r
-         ON r.user_id = ? AND r.kind = 'channel' AND r.ref = t.node_id AND r.subject = '' AND r.nest_id = t.nest_id
+         ON r.user_id = ? AND r.nest_id = t.nest_id AND r.kind = 'channel' AND r.ref = t.node_id AND r.subject = ''
       WHERE t.nest_id = ? AND t.node_id IN (${nodeIds.map(() => "?").join(", ")})
       GROUP BY t.node_id`,
     [caller.userEmail.toLowerCase(), caller.userId, caller.nestId, ...nodeIds],
@@ -392,7 +399,7 @@ export async function markChannelRead(caller: Caller, rawName: unknown): Promise
   await db.run(
     `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at)
      VALUES (?, ?, 'channel', ?, '', ${nowMsExpr(db)})
-     ON CONFLICT (user_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
+     ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
     [caller.userId, caller.nestId, node.id],
   );
   return { channel: (await getReadableChannel(caller, view.name)).view };

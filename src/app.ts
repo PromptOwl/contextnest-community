@@ -2828,7 +2828,7 @@ export function createApp(): Hono<AuthEnv> {
     // Experimental agent team stream channels (PO-1179): same rule as pins —
     // while the switch is off the routes do not exist, for anyone. Exact
     // resource segment; channel NODES live under /nodes and stay ordinary.
-    if (parts[1] === "channels" && !config.EXPERIMENTAL_AGENT_STREAM) {
+    if ((parts[1] === "channels" || parts[1] === "agent-handles") && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
 
@@ -2976,7 +2976,8 @@ export function createApp(): Hono<AuthEnv> {
         parts[1] === "pins" ||
         // Channels (PO-1179) are a collaboration view over comment threads,
         // licensed like /comments and /feed even on GET. Exact segment.
-        parts[1] === "channels";
+        parts[1] === "channels" ||
+        parts[1] === "agent-handles";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and

@@ -106,6 +106,10 @@ beforeAll(async () => {
   app = await createTestApp("key", { ownerEmail: "olivia@s4b.test" });
   wake = await import("../src/stream/agent-wake.js");
   mentions = await import("../src/mentions/agent-mentions.js");
+  // No retries unless a test asks for them (AC-AX-08): a wake-up that fails
+  // because a test captured nothing would otherwise be retried seconds
+  // later, into another test's capture.
+  wake.setAgentWakeBackoff([]);
   owner = await registerUser(app, "olivia@s4b.test", "Olivia Owner");
   alice = await registerUser(app, "alice@s4b.test", "Alice Example");
   rita = await registerUser(app, "reader@s4b.test", "Rita Reader");
@@ -155,7 +159,7 @@ beforeAll(async () => {
 afterEach(() => {
   wake.setAgentWakeFetch(null);
   wake.setAgentWebhookResolver(null);
-  (wake as any).setAgentWakeBackoff?.(null);
+  wake.setAgentWakeBackoff([]);
   mentions.setAgentMentionResolver(null);
   sent = [];
 });
@@ -620,7 +624,7 @@ describe("AC-AX-08: a failed wake-up is retried with the same idempotency key, a
   };
 
   it("AC-AX-08 two failures then success: three POSTs, one key, stored as ok", async () => {
-    (wake as any).setAgentWakeBackoff([5, 5, 5]);
+    wake.setAgentWakeBackoff([5, 5, 5]);
     captureWakes([500, 503, 200]);
     await open(alice, GENERAL, "@flaky wake up");
     await waitForSent(3);
@@ -633,7 +637,7 @@ describe("AC-AX-08: a failed wake-up is retried with the same idempotency key, a
   });
 
   it("AC-AX-08 it gives up after three retries and stores the failure and why", async () => {
-    (wake as any).setAgentWakeBackoff([5, 5, 5]);
+    wake.setAgentWakeBackoff([5, 5, 5]);
     captureWakes([500]);
     await open(alice, GENERAL, "@flaky wake up again");
     await waitForSent(4);

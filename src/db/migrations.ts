@@ -2570,7 +2570,8 @@ export function runMigrations(db: Database.Database): void {
   //       that thread names them again. `subject` is '' for the person, or
   //       the agent handle when they cleared it acting as that agent.
   //   Rows are the caller's own state: nothing here is shared or shown to
-  //   anyone else. They go with the nest.
+  //   anyone else. They go with the nest, and the nest is part of the key: a
+  //   channel's node id (nodes/channels/general) repeats from nest to nest.
   //   `agent_wake_deliveries` gains `attempts` (a failed POST is retried),
   //   `finished_at` (when it reached its final status) and `event`
   //   ('agent.mention', or 'agent.test' for the panel's test button), so the
@@ -2584,7 +2585,7 @@ export function runMigrations(db: Database.Database): void {
         ref TEXT NOT NULL,
         subject TEXT NOT NULL DEFAULT '',
         at TEXT NOT NULL,
-        PRIMARY KEY (user_id, kind, ref, subject)
+        PRIMARY KEY (user_id, nest_id, kind, ref, subject)
       );
     `);
     const cols = (

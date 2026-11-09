@@ -192,13 +192,15 @@ function privateLiteral(url: string): boolean {
 async function overLimit(nestId: string, threadId: string, handle: string): Promise<boolean> {
   const db = getDb();
   const now = Date.now();
+  // Wake-ups only: the panel's test events have their own limit and must not
+  // use up an agent's allowance.
   const perThread = (await db.get(
-    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE thread_id = ? AND handle = ? AND created_at >= ?",
+    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE thread_id = ? AND handle = ? AND created_at >= ? AND event = 'agent.mention'",
     [threadId, handle, new Date(now - WAKE_THREAD_WINDOW_MS).toISOString()],
   )) as { n: number | string } | undefined;
   if (Number(perThread?.n ?? 0) >= WAKE_PER_THREAD_LIMIT) return true;
   const perHandle = (await db.get(
-    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE nest_id = ? AND handle = ? AND created_at >= ?",
+    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE nest_id = ? AND handle = ? AND created_at >= ? AND event = 'agent.mention'",
     [nestId, handle, new Date(now - WAKE_HANDLE_WINDOW_MS).toISOString()],
   )) as { n: number | string } | undefined;
   return Number(perHandle?.n ?? 0) >= WAKE_PER_HANDLE_LIMIT;
@@ -207,6 +209,7 @@ async function overLimit(nestId: string, threadId: string, handle: string): Prom
 // ─── Delivery ───────────────────────────────────────────────────────────
 
 const SEALED_REASON = "this nest sends nothing outside";
+const NOT_PUBLIC_REASON = "not a public address";
 
 /** What a delivery ended as, in the words the webhooks panel shows. */
 export interface DeliveryView {
@@ -229,8 +232,11 @@ export function deliveryReason(error: string | null | undefined): string | null 
   if (!error) return null;
   const http = /responded (\d{3})/.exec(error);
   if (http) return `HTTP ${http[1]}`;
-  if (error === SEALED_REASON) return SEALED_REASON;
-  if (/private address|not allowed|not a public/i.test(error)) return "not a public address";
+  // The two reasons this module sets itself, from the URL as saved and before
+  // any lookup. What a NAME resolves to is never reported: "resolves to a
+  // private address" and "did not resolve" both read "could not connect", or
+  // the test button would map the network behind this server.
+  if (error === SEALED_REASON || error === NOT_PUBLIC_REASON) return error;
   if (/timed out|abort/i.test(error)) return "timed out";
   return "could not connect";
 }
@@ -368,6 +374,12 @@ export async function wakeMentionedAgents(params: {
     // A sealed personal nest sends nothing anywhere (dispatch.ts, R3-H1b).
     const { sealedNest } = await import("../surfaces/sealed.js");
     const sealed = await sealedNest(nestId);
+    // Only a person added to the nest wakes an agent. Commenting is read-tier,
+    // so a visitor to a public nest can write "@grok do this" on a published
+    // page; that must not put instructions in front of the nest's runner.
+    const writer = (await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [msg.author])) as { id: string } | undefined;
+    const { isNestMember } = await import("../channels/channel-service.js");
+    const trusted = !!writer && (await isNestMember(nestId, writer.id));
 
     // Loop guard: the agent that wrote the message is not woken by it —
     // whether it declared itself (resolveActorLabel) or only its key's label
@@ -382,7 +394,7 @@ export async function wakeMentionedAgents(params: {
     for (const { handle: raw } of rows) {
       const handle = normHandle(raw);
       if (!handle) continue;
-      if (sealed || self.has(handle)) {
+      if (sealed || !trusted || self.has(handle)) {
         outcomes.set(handle, "skipped");
         continue;
       }
@@ -429,7 +441,10 @@ export async function wakeMentionedAgents(params: {
         mentioned: handle,
         at: new Date().toISOString(),
         author,
-        ...(sameNest ? { excerpt: excerptOf(msg.body) } : {}),
+        // The label is a display name plus a self-declared agent; the login
+        // behind it is what a runner can rely on. With the excerpt, to this
+        // nest's own target only.
+        ...(sameNest ? { author_email: msg.author, excerpt: excerptOf(msg.body) } : {}),
         read: channel
           ? { tool: "context_channel_read", arguments: { channel, thread: threadId } }
           : { tool: "context_comments", arguments: { id: nodeId, thread: threadId } },
@@ -481,7 +496,7 @@ export async function sendAgentTestEvent(nestId: string, handle: string, actorEm
   const refused = (await sealedNest(nestId))
     ? SEALED_REASON
     : !isSafeConnectorUrl(raw.url) || privateLiteral(raw.url)
-      ? "not a public address"
+      ? NOT_PUBLIC_REASON
       : null;
   if (refused) {
     await record("failed", refused);

@@ -57,7 +57,8 @@ export async function namedActor(
   // Only when the seam answered with the email: an identity layer that already
   // names the person keeps its own answer.
   if (name === email || actor.human !== email) return { actor, name };
-  return { actor: { ...actor, human: name, label: actor.label.replace(email, name) }, name };
+  // A function, so "$&" in a display name is text and not a pattern.
+  return { actor: { ...actor, human: name, label: actor.label.replace(email, () => name) }, name };
 }
 
 // ─── Who wrote it ───────────────────────────────────────────────────────
@@ -134,17 +135,23 @@ export async function knownAgents(nestId: string): Promise<KnownAgent[]> {
       [nestId],
     ) as Promise<Array<{ client_json: string | null }>>,
   ]);
+  // Handles with a target first, then declared labels newest first, so a
+  // burst of made-up labels (anyone who can post can declare one) can't push
+  // a real handle out of the list.
   const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
   for (const r of seen) {
     const h = normHandle(deserializeClient(r.client_json)?.agent);
     if (AGENT_HANDLE_RE.test(h)) handles.add(h);
   }
   const { agentWakeTarget } = await import("../stream/agent-wake.js");
-  const list = [...handles].filter(Boolean).sort().slice(0, MAX_KNOWN_AGENTS);
+  const list = [...handles].filter(Boolean).slice(0, MAX_KNOWN_AGENTS).sort();
   return Promise.all(list.map(async (handle) => ({ handle, wakeable: (await agentWakeTarget(nestId, handle)) !== null })));
 }
 
 // ─── Mentions in a body ─────────────────────────────────────────────────
+
+/** Most @names resolved per message (the rest are simply not classified). */
+const MAX_NAMES_PER_BODY = 50;
 
 export type MentionRef =
   | { name: string; kind: "person"; display_name: string }
@@ -163,7 +170,8 @@ export interface ResolvedMention {
  * bodies with no mention cost nothing.
  */
 export async function resolveBodyMentions(nestId: string, bodies: string[]): Promise<ResolvedMention[][]> {
-  const names = bodies.map((b) => extractMentions(b || ""));
+  // Each name costs a lookup; nobody tags this many people in one message.
+  const names = bodies.map((b) => extractMentions(b || "").slice(0, MAX_NAMES_PER_BODY));
   if (names.every((n) => n.length === 0)) return names.map(() => []);
   const roster = await listNestPeople(nestId);
   const people = new Map<string, NestPerson | undefined>();

@@ -107,6 +107,9 @@ beforeAll(async () => {
   app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
   wake = await import("../src/stream/agent-wake.js");
   mentions = await import("../src/mentions/agent-mentions.js");
+  // Retries (S4b, AC-AX-08) are pinned in agent-stream-s4b-agents.test.ts.
+  // Off here, so a wake-up no test captured isn't retried into a later one.
+  wake.setAgentWakeBackoff([]);
   owner = await registerUser(app, OWNER_EMAIL, "Owner");
   alice = await registerUser(app, "alice@stream.test", "Alice Example");
   bob = await registerUser(app, "bob@stream.test", "Bob Builder");
