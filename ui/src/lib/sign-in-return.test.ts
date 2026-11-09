@@ -29,7 +29,20 @@ describe("AC-UX-01 a channel link opened signed out is kept for after sign-in", 
   it("follows only this app's own nest paths", () => {
     expect(safeNestReturn(link)).toBe(link);
     expect(safeNestReturn("/nest/n-1?doc=nodes%2Fplan")).toBe("/nest/n-1?doc=nodes%2Fplan");
-    for (const bad of ["//evil.example/nest/x", "https://evil.example/nest/x", "/\\evil.example", "/nest/\\evil", "/my-work", "/nest/", "", null]) {
+    for (const bad of [
+      "//evil.example/nest/x",
+      "https://evil.example/nest/x",
+      "/\\evil.example",
+      "/nest/\\evil",
+      "/nest/x/\\evil",
+      "/nest/../admin",
+      "/nest/x/../../admin",
+      "/nest/./x",
+      "/my-work",
+      "/nest/",
+      "",
+      null,
+    ]) {
       expect(safeNestReturn(bad)).toBeNull();
     }
     const s = store();

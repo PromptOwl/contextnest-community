@@ -21,7 +21,10 @@ type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 export function safeNestReturn(value: string | null | undefined): string | null {
   if (!value) return null;
   // The fixed prefix rules out `//host` and `/\host`; no scheme can precede it.
-  return /^\/nest\/[^/?#\\]+(?:[/?#][^\\]*)?$/.test(value) ? value : null;
+  if (!/^\/nest\/[^/?#\\]+(?:[/?#][^\\]*)?$/.test(value)) return null;
+  // No `.` or `..` path segment: the address must stay under /nest/<id>.
+  const path = value.split(/[?#]/)[0];
+  return path.split("/").some((seg) => seg === "." || seg === "..") ? null : value;
 }
 
 /** Park the link a signed-out visitor landed on (path + query). */

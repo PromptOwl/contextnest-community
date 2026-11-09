@@ -1989,11 +1989,16 @@ export default function App() {
             // Not a guarded navigation (the page holds no unsaved document),
             // and functional so it never writes over a newer view.
             setChannelLocation: (loc: { channel: string | null; thread?: string | null }, opts?: { replace?: boolean }) => {
+              const channel = loc.channel ?? undefined;
+              const thread = (loc.channel && loc.thread) || undefined;
+              const shown = viewRef.current;
+              // Nothing to change: leave the "no Back stop" mark unset, or it
+              // would apply to whatever navigation came next.
+              if (shown.page !== "channels" || shown.nestId !== v.nestId) return;
+              if (shown.channel === channel && shown.thread === thread) return;
               if (opts?.replace) replaceNextRef.current = true;
               setViewNow((cur) =>
-                cur.page === "channels" && cur.nestId === v.nestId
-                  ? { ...cur, channel: loc.channel ?? undefined, thread: (loc.channel && loc.thread) || undefined }
-                  : cur,
+                cur.page === "channels" && cur.nestId === v.nestId ? { ...cur, channel, thread } : cur,
               );
             },
           };
