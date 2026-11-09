@@ -14,7 +14,7 @@
  * post cannot inject markup; @mentions are highlighted as text spans.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Archive, Hash, Loader2, MessageSquare, Plus, Send } from "lucide-react";
+import { Archive, Hash, Lightbulb, ListChecks, Loader2, MessageSquare, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ import { reads } from "../lib/queries";
 import * as api from "../lib/api";
 import type { ChannelMessage, ChannelPost, ChannelSummary } from "../lib/api";
 import { readChannelDeepLink } from "../lib/channel-deep-link";
+import { ArtifactCards } from "./ArtifactCards";
 
 interface Props {
   nestId: string;
@@ -63,6 +64,7 @@ function Message({ m, children }: { m: ChannelMessage; children?: ReactNode }) {
         <span className="text-xs text-muted-foreground">{when(m.created_at)}</span>
       </div>
       <p className="mt-1 whitespace-pre-wrap break-words text-sm">{renderMentions(m.body)}</p>
+      <ArtifactCards cards={m.cards} />
       {children}
     </div>
   );
@@ -206,6 +208,18 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
     }
   };
 
+  // Promote a thread to a decision or task node (PO-1181). Writers only —
+  // the server refuses anyone else; the reply it posts shows in the thread.
+  const promote = async (threadId: string, kind: "decision" | "task") => {
+    try {
+      const r = await api.promoteThread(nestId, threadId, { kind });
+      toast.success(`Promoted to a ${kind}: ${r.node.title}`);
+      await Promise.all([openThread === threadId ? loadThread(threadId) : Promise.resolve(), loadTimeline()]);
+    } catch (e: any) {
+      toast.error(e?.message || "Could not promote the thread");
+    }
+  };
+
   const archive = async () => {
     if (!current) return;
     try {
@@ -330,6 +344,26 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                             <MessageSquare className="h-3.5 w-3.5" />
                             {p.reply_count ? `${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}` : "Reply"}
                           </button>
+                          {canWrite && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => promote(p.id, "decision")}
+                                className="ml-3 mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                title="Turn this thread into a decision node that links back here"
+                              >
+                                <Lightbulb className="h-3.5 w-3.5" /> Decision
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => promote(p.id, "task")}
+                                className="ml-3 mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                title="Turn this thread into a task node that links back here"
+                              >
+                                <ListChecks className="h-3.5 w-3.5" /> Task
+                              </button>
+                            </>
+                          )}
                           {openThread === p.id && (
                             <div className="mt-2 border-l-2 pl-3">
                               {replies.map((r) => (

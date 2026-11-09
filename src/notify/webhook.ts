@@ -29,20 +29,37 @@ export async function resolveNestName(nestId: string): Promise<string> {
   return nestId;
 }
 
+/** A fetch-shaped function — the global one, or the SSRF-guarded one
+ *  (metacognition/net.ts guardedFetch) for targets a nest admin typed. */
+export type WebhookFetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** Extras for a POST that must go out byte-exact and signed (agent wake-up,
+ *  PO-1181). Absent, a POST is exactly what it always was. */
+export interface WebhookPostOptions {
+  /** Extra request headers (a signature, an idempotency key). */
+  headers?: Record<string, string>;
+  /** The already-serialized JSON body — sent as-is, so a signature computed
+   *  over these bytes matches what the receiver reads. */
+  rawBody?: string;
+  /** Send through this instead of the global fetch. */
+  fetchImpl?: WebhookFetch;
+}
+
 /** One POST, one abort timeout. Rejects on network error / timeout; an HTTP
  *  error status resolves (the caller decides whether a 4xx/5xx matters). */
 async function rawPost(
   url: string,
   body: unknown,
   timeoutMs: number,
+  opts: WebhookPostOptions = {},
 ): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    return await (opts.fetchImpl ?? fetch)(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", ...(opts.headers ?? {}) },
+      body: opts.rawBody ?? JSON.stringify(body),
       signal: ctrl.signal,
     });
   } finally {
@@ -71,7 +88,8 @@ export async function postWebhook(
   body: unknown,
   who: string,
   ctx: OutboundContext & { channel?: OutboundChannel } = {},
-): Promise<void> {
+  opts: WebhookPostOptions = {},
+): Promise<{ ok: boolean; error?: string }> {
   const log = (status: "sent" | "failed", error?: string) =>
     recordOutbound({
       channel: ctx.channel ?? channelFor(who),
@@ -79,16 +97,19 @@ export async function postWebhook(
       // The URL is the credential: log host + hash, never the path.
       recipients: [webhookTarget(url)],
       subject: who,
-      body: typeof body === "string" ? body : JSON.stringify(body),
+      body: opts.rawBody ?? (typeof body === "string" ? body : JSON.stringify(body)),
       status,
       error,
       viaProxy: viaProxy(url),
     });
   try {
-    const res = await rawPost(url, body, 3000);
-    await log(res.ok ? "sent" : "failed", res.ok ? undefined : `Webhook responded ${res.status} ${res.statusText}`.trim());
+    const res = await rawPost(url, body, 3000, opts);
+    const error = res.ok ? undefined : `Webhook responded ${res.status} ${res.statusText}`.trim();
+    await log(res.ok ? "sent" : "failed", error);
+    return res.ok ? { ok: true } : { ok: false, error };
   } catch (err) {
-    await log("failed", err instanceof Error ? err.message : String(err));
+    const error = err instanceof Error ? err.message : String(err);
+    await log("failed", error);
     if (!warned.has(who)) {
       warned.add(who);
       console.warn(
@@ -96,6 +117,7 @@ export async function postWebhook(
         err instanceof Error ? err.message : err,
       );
     }
+    return { ok: false, error };
   }
 }
 

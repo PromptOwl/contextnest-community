@@ -130,6 +130,8 @@ const OPEN_WORLD = [
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
   "context_channels",
+  // Promote a thread (PO-1181): creates a node, which a docs site may serve.
+  "context_promote_thread",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -184,9 +186,11 @@ async function allDefinedNames(): Promise<string[]> {
   const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
+  const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
+    ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,

@@ -2974,6 +2974,60 @@ Names: 1–63 characters, lowercase letters, digits and dashes (a leading `#` an
 
 `actor.agent` is the caller attribution stored with the message (`client.agent`: the API key's label, the MCP `initialize` clientInfo.name, or a `client` the caller sent); a browser post has `agent: null` and `label` = the person. It is a label, never an identity: the person is always named. MCP twins: `context_channels` (list/create/archive/unarchive) and `context_channel_read` (timeline or thread; `structuredContent` is the REST body).
 
+Every message (post and reply) also carries `cards` — the artifacts it links, resolved for the reader; see Artifact cards below.
+
+### Agent team stream S3 — artifact cards, agent wake-up, promote a thread
+
+Not behind `EXPERIMENTAL_AGENT_STREAM`: all three work on document comment threads as well as channel posts.
+
+#### Artifact cards — `POST /nests/:nestId/cards`
+
+A message can point at nest artifacts three ways: a `[[wikilink]]` (`[[nodes/x]]`, `[[folder/x]]`, `[[Title]]`; `|alias` and `#heading` are ignored), a document link (`https://<host>/nest/<nestId>?doc=<node id>`, any view segment), or a node / hosted-artifact URL (`https://<host>/nests/<nestId>/nodes/<node id>[/hosted | /view/hosted]`). Nothing inside a code span or fence counts.
+
+Body: `{ "links": ["[[nodes/x]]", "https://…"] }` (≤100) → `{ "cards": [card…] }` in the same order, or `{ "texts": ["message body", …] }` (≤200, each ≤20,000 characters) → `{ "messages": [{ "cards": [card…] }] }` with the links extracted per text (≤20 per text). Anything else → `400`.
+
+A card is resolved **for the caller**:
+
+```json
+{ "link": "[[nodes/plan]]", "resolved": true, "kind": "node", "nest_id": "…", "node_id": "nodes/plan",
+  "title": "Plan", "type": "document", "stage": null, "status": "published", "version": 3, "url": "/nest/<id>?doc=nodes%2Fplan" }
+```
+
+`kind` is `artifact` for a hosted-artifact URL or an artifact node; `stage` is the node's `#stage:` tag value (tasks) or `null`. For a node the caller can't read — in this nest, in a nest they can't open, or one that doesn't exist — the card is exactly `{ "link": "…", "resolved": false }`: the link text and nothing else, the same object for "no access" and "not found". A `[[Title]]` link is matched only among nodes the caller can read. Links into another nest resolve only for a credential that isn't fenced to one nest (a session or an unscoped key); a nest-scoped key gets markers for them. A public reader gets a card only when the node's newest version is its approved one. Admitted at read tier (like `POST /search`), including for a document-share grantee and a read-only key. The channel timeline and thread (`GET /channels/:name`, MCP `context_channel_read`) return the same cards on every message as `cards`.
+
+#### Agent wake-up — `/nests/:nestId/agent-webhooks` (nest owner/admin only)
+
+When a person's message @mentions an agent handle (a name that resolves to no person — the same rule as My Work's mentions) and that handle has a webhook target, the server sends the target **one** `POST`:
+
+```json
+{ "event": "agent.mention", "delivery_id": "…", "nest": { "id": "…", "name": "Team" }, "channel": "ops",
+  "node_id": "nodes/channels/ops", "thread_id": "…", "message_id": "…", "mentioned": "grok", "at": "…" }
+```
+
+`channel` is `null` for a document thread. The message text is **not** sent: the agent reads the thread with its own credential (`context_channel_read` / `context_comments`), so the nest's access rules decide what it sees. Headers: `X-ContextNest-Event: agent.mention`, `X-ContextNest-Delivery: <delivery_id>`, `Idempotency-Key: <key>` (stable per message and handle), and `X-ContextNest-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the target's secret>`. Verify the HMAC over the raw body with a constant-time compare, and reject a `t` more than 5 minutes off to stop replays.
+
+Delivery is fire-and-forget (3 s timeout, no automatic retry) and recorded in the message log (host and a hash of the URL, never the URL). A message is dispatched at most once per handle: a retry of the same message sends nothing (one `agent_wake_deliveries` row per message and handle, migration 086). Only messages a person posts wake agents (`POST …/annotations`, `…/annotations/:threadId/comments`, MCP `context_comment`) — never text a model wrote (Hootie, metacognition agents) or the reply a promotion posts. A message whose `client.agent` is the mentioned handle doesn't wake it (an agent quoting itself). A handle is woken at most 10 times per thread per 10 minutes and 200 times per nest per hour. Sealed nests send nothing.
+
+- **GET** `/nests/:nestId/agent-webhooks` → `{ "webhooks": [{ "handle": "grok", "target": "runner.example.com#1a2b3c4d5e6f", "created_by", "created_at", "updated_at" }] }` — `target` is the host plus a short hash, never the URL.
+- **PUT** `/nests/:nestId/agent-webhooks/:handle` `{ "url": "https://…", "rotate"?: true }` → `{ "webhook", "secret"? }`. `secret` (`whsec_…`) is returned only when one is minted — on the first save or with `rotate: true` — and never again; re-saving just the URL keeps the secret. `url` must be a public `https` URL: loopback, private, link-local, carrier-grade NAT, metadata and `.local`/`.internal`/`localhost` hosts are refused with `400` (the connector fence), checked again at dispatch, and the POST goes through the connect-time guard, so a public name that resolves to a private address is refused there. Handle: 1–63 characters, lowercase letters, digits, `.`, `-`, `_`.
+- **DELETE** `/nests/:nestId/agent-webhooks/:handle` → `{ "deleted": true }` (`404` if none).
+
+Every method needs the nest owner or an admin (`403` otherwise); named system keys are refused. URL and secret are stored encrypted. The map is the stand-in until agent principals exist; they will carry their own target.
+
+#### Promote a thread — `POST /nests/:nestId/threads/:threadId/promote`
+
+Body: `{ "kind"?: "decision" | "task", "title"?: string, "folder"?: string }` → `201`:
+
+```json
+{ "node": { "id": "nodes/decisions/ship-on-friday", "title": "Ship on Friday", "type": "document", "status": "published", "version": 1, "url": "/nest/<id>?doc=…" },
+  "source_thread": { "node_id": "nodes/channels/ops", "thread_id": "…" },
+  "reply": { "thread_id": "…", "comment_id": "…" } }
+```
+
+`decision` (default) creates a document tagged `#decision` under `nodes/decisions/`; `task` creates a `task` node under `nodes/tasks/` (the nest's task rules apply: default stage, ticket number). `title` defaults to the thread's first line; `folder` overrides the default folder (each segment slugified). The body quotes every message (up to 200) with who wrote it and when; `source_thread` is stored on the node (`metadata.source_thread`, returned on node reads); the node is related to the thread's node (`relates_to`, best-effort); and the thread gets a reply from the caller linking `[[<new node id>]]`. A resolved thread stays resolved. The quoted body and the reply notify nobody and wake no agent.
+
+Needs read access to the thread's node (else `404`, the same as a thread that doesn't exist or is in another nest), write access to the nest (`403`; read collaborators and read-only keys can't), and on a channel the right to post there (`403`, or `409` when archived). Title already taken → `409`; bad `kind` → `400`. MCP twin: `context_promote_thread` (`thread`, `kind`, `title`, `folder`; write tier; `structuredContent` is the REST body).
+
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 

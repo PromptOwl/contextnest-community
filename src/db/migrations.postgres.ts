@@ -114,6 +114,7 @@ export const HISTORICAL_MIGRATIONS = [
   "083_view_summaries",
   "084_annotation_comment_client",
   "085_comment_mentions",
+  "086_agent_webhooks",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1369,6 +1370,33 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
     CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+  `);
+
+  // Migration 086 parity: agent wake-up targets + delivery ledger (PO-1181).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_webhooks (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      url_enc TEXT NOT NULL,
+      secret_enc TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, handle)
+    );
+    CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+      idempotency_key TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      comment_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

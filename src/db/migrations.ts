@@ -2520,6 +2520,44 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("085_comment_mentions");
   }
+
+  // 086: agent wake-up targets and their delivery ledger (PO-1181, agent team
+  //   stream S3). `agent_webhooks` is the nest-level, admin-only map from an
+  //   agent @handle to the runner URL an @mention of it is POSTed to, with the
+  //   HMAC secret that signs each POST; both are stored encrypted
+  //   (shared/secret-box). It is the stand-in until agent principals carry
+  //   their own target (src/stream/agent-wake.ts setAgentWebhookResolver).
+  //   `agent_wake_deliveries` holds one row per (message, handle) delivery,
+  //   keyed by its idempotency key, so a retry never sends twice; it is also
+  //   what the per-thread / per-handle rate fence counts.
+  if (!hasMigration("086_agent_webhooks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_webhooks (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        url_enc TEXT NOT NULL,
+        secret_enc TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, handle)
+      );
+      CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+        idempotency_key TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        comment_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+    `);
+    recordMigration("086_agent_webhooks");
+  }
 }
 
 /**

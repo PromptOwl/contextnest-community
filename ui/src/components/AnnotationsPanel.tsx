@@ -27,6 +27,7 @@ import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { MentionTextarea, CommentBody } from "./MentionTextarea";
+import { ArtifactCards, useCommentCards } from "./ArtifactCards";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import { formatServerDate } from "../lib/dates";
 import { splitThreads } from "../lib/comment-threads";
@@ -104,6 +105,10 @@ export function AnnotationsPanel({
     [roster],
   );
   const itemRefs = useRef<Record<string, HTMLLIElement | null>>({});
+  // Artifact cards for every comment that links one (PO-1181), resolved for
+  // this viewer in one request.
+  const allComments = useMemo(() => (threads ?? []).flatMap((t) => t.comments), [threads]);
+  const cardsByComment = useCommentCards(nestId, allComments);
 
   // `fresh` after a write: fetchQuery would otherwise hand back the cached
   // list for up to STALE.governance, hiding the comment just posted.
@@ -278,6 +283,7 @@ export function AnnotationsPanel({
             )}
           </div>
           <CommentBody body={t.comments[0].body} members={members} />
+          <ArtifactCards cards={cardsByComment.get(t.comments[0].id)} />
         </div>
       )}
       {t.comments.length > 1 && (
@@ -297,6 +303,7 @@ export function AnnotationsPanel({
                 )}
               </div>
               <CommentBody body={c.body} members={members} />
+              <ArtifactCards cards={cardsByComment.get(c.id)} />
             </li>
           ))}
         </ul>

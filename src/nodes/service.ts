@@ -532,6 +532,8 @@ export interface NodeResponse extends TaskFields {
   /** When the node entered its current board column — `moved_at`, else
    *  `created_at`. What time-in-status counts from. Tasks only. */
   status_since?: string;
+  /** The comment thread the node was promoted from (PO-1181). */
+  source_thread?: SourceThread;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -741,6 +743,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     ...(isOriginalFile((fm.metadata as any)?.original)
       ? { original: (fm.metadata as any).original as OriginalFile }
       : {}),
+    ...(readSourceThread(fm.metadata) ? { source_thread: readSourceThread(fm.metadata) } : {}),
     ...taskFields,
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
@@ -1669,6 +1672,19 @@ export async function listNodesForCallerByEmail(
   });
 }
 
+/** Where a promoted node came from: a thread on a node in the same nest. */
+export interface SourceThread {
+  node_id: string;
+  thread_id: string;
+}
+
+function readSourceThread(meta: unknown): SourceThread | undefined {
+  const st = (meta as any)?.source_thread;
+  return st && typeof st.node_id === "string" && typeof st.thread_id === "string"
+    ? { node_id: st.node_id, thread_id: st.thread_id }
+    : undefined;
+}
+
 export interface CreateNodeInput extends TaskFieldsPatch {
   title: string;
   content: string;
@@ -1710,6 +1726,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** The comment thread this node was promoted from (PO-1181,
+   *  stream/promote.ts). Server-set only: no route copies it from a request
+   *  body. Stored as `metadata.source_thread`, so it is part of v1's hash. */
+  sourceThread?: SourceThread;
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
@@ -2214,6 +2234,9 @@ async function createNodeOnce(
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
+      ...(input.sourceThread
+        ? { source_thread: { node_id: input.sourceThread.node_id, thread_id: input.sourceThread.thread_id } }
+        : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
@@ -3416,6 +3439,9 @@ export const NODE_KEYED_TABLES = [
   // Who a thread message @mentions (PO-1180): moves with its thread, goes
   // with it on delete (the thread's own cascade would too).
   ["comment_mentions", "node_id"],
+  // Agent wake-up deliveries (PO-1181): keyed by message; move with their
+  // thread, go with it on delete.
+  ["agent_wake_deliveries", "node_id"],
   ["comments", "node_id"],
   ["node_tag_index", "node_id"],
   ["node_index", "node_id"],

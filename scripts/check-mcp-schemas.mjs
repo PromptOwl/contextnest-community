@@ -65,7 +65,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
 //   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
 //   operation to import a descriptor from.
-const BASELINE = 101;
+//   101->102 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
+//   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
+//   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
+const BASELINE = 102;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
