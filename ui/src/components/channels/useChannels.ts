@@ -83,6 +83,15 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
   });
 
   const { live, archived } = useMemo(() => splitChannels(list.data?.channels ?? []), [list.data]);
+  // People on the nest only: with the wider directory on, the roster also
+  // carries suggestions (`member: false`) who are not here to be mentioned.
+  const roster = useMemo(
+    () => ({
+      people: (people.data?.people ?? EMPTY_PEOPLE).filter((p) => p.member !== false),
+      agents: agents.data?.agents ?? EMPTY_AGENTS,
+    }),
+    [people.data, agents.data],
+  );
   const row = list.data?.channels.find((c) => c.name === selected) ?? null;
   const held = timeline.data ?? null;
   // The timeline's copy reads archived and unlisted channels too; the polled
@@ -244,15 +253,12 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
       error: thread.isError && !thread.data ? message(thread.error) : null,
       retry: () => void thread.refetch(),
     },
-    roster: {
-      people: people.data?.people ?? EMPTY_PEOPLE,
-      agents: agents.data?.agents ?? EMPTY_AGENTS,
-    },
+    roster,
     actions,
   };
 }
 
-const EMPTY_PEOPLE: Array<{ email: string; name: string | null }> = [];
+const EMPTY_PEOPLE: Array<{ email: string; name: string | null; member?: boolean }> = [];
 const EMPTY_AGENTS: api.AgentHandle[] = [];
 
 export type ChannelsData = ReturnType<typeof useChannels>;
