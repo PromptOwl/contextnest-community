@@ -505,6 +505,18 @@ nodeRoutes.post("/:nodeId{.+}/move", async (c) => {
 nodeRoutes.get("/:nodeId{.+}/watchers", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+  // A watcher row is a person's address, so the list is for people on the
+  // nest who can read the node. Anyone else gets the answer a node with no
+  // watchers gives (PO-1192): a node the caller can't read, and every node for
+  // someone who reaches the nest only through its visibility (the same line
+  // GET …/stewards draws around addresses).
+  const userId = c.get("userId");
+  if (
+    (await isPublicReader(nestId, userId)) ||
+    !(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))
+  ) {
+    return c.json({ watchers: [] });
+  }
   return c.json({ watchers: await listWatchers(nestId, nodeId) });
 });
 

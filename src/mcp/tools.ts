@@ -17,6 +17,7 @@ import {
   canReadNode,
   canRequestDeletion,
   filterAccessible,
+  readableDeletionRequests,
 } from "../governance/access-guard.js";
 import {
   matchDocuments,
@@ -4213,7 +4214,13 @@ async function runTool(
 
     case "context_deletion_queue": {
       const status = args.status === "declined" ? "declined" : "pending";
-      const requests = await reviews.listDeletionRequests({ nestId, status });
+      // Same narrowing as GET /nests/:id/deletion-requests (PO-1192).
+      const requests = await readableDeletionRequests(
+        nestId,
+        userId,
+        userEmail,
+        await reviews.listDeletionRequests({ nestId, status }),
+      );
       if (requests.length === 0) {
         return status === "pending"
           ? "No deletion requests waiting. All caught up!"

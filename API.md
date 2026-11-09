@@ -1415,7 +1415,7 @@ SVG is deliberately not accepted (stored-XSS surface). An unsupported type or a 
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
 
 ### Watchers — GET/POST/DELETE `/nests/:nestId/nodes/:nodeId/watchers`
-"Tag a person to this node." Watchers of a document are notified when it changes or lands for review; watchers of an agent hear when its output does. `POST` body `{ email }` (write); `DELETE …/watchers?email=` (write). All three return `{ "watchers": [ … ] }`. Watchers follow a `move` and are purged by a `DELETE` of the node.
+"Tag a person to this node." Watchers of a document are notified when it changes or lands for review; watchers of an agent hear when its output does. `POST` body `{ email }` (write); `DELETE …/watchers?email=` (write). All three return `{ "watchers": [ … ] }`. Watchers follow a `move` and are purged by a `DELETE` of the node. The list is addresses, so `GET` serves it to people on the nest who can read the node: a node the caller can't read answers `{ "watchers": [] }` (as a node with no watchers does), and so does every node for a caller who reaches the nest only through its visibility (`org` or `public`).
 
 ### Relations — GET/POST `/nests/:nestId/nodes/:nodeId/relations`, DELETE `…/relations/:relationId`
 Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_by`, read from the node's side. **Not behind `FEATURE_WORKFLOW_PLANE`** — relations are core task UX. They are stored as rows in the workflow plane's `edges` table under three reserved edge types (`task:blocks`, `task:relates-to`, `task:duplicates`, created lazily per nest, never flow types). `blocked_by` / `duplicated_by` are the inverse *view* of the stored `blocks` / `duplicates` edge, not a second row; `relates_to` is symmetric and stored once.
@@ -1598,9 +1598,11 @@ Cancels the pending review. Returns node to `draft`.
 Allowed for the person who submitted it (withdrawing your own submission) and for anyone with approve rights on the node. Anyone else gets 403 — read access to the nest alone is not enough.
 
 ### GET `/nests/:nestId/external-edits`
-Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only.
+Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only. The rescan stages what it finds, so it runs only for a caller with write access (the tier `POST /nests/:nestId/external-edits/scan` takes); for anyone else the flag is ignored and the list is served as it stands.
 
 Pending external (on-disk) edits awaiting approval, newest first. The list is computed by scanning every document's suggestions, so `?count=1` saves bytes (`{ "total": n }`), not server time — the UI uses it for the tab badge.
+
+A pending external edit is text nobody approved, so it is served only for documents the caller can read, and never to a caller who reaches the nest only through its visibility (`org` or `public`) — they read approved versions. Such a caller gets `{ "entries": [], "total": 0 }` here, `{ "pending": null }` from `GET /nests/:nestId/nodes/:nodeId/external-edits`, and `404` from `GET …/external-edits/:suggestionId` (the read that carries the edit's `patch`), the same answers as when nothing is pending.
 ```json
 { "entries": [{ "suggestion_id": "...", "document_id": "nodes/foo", "source": "out-of-band-edit", "detected_at": "...", "actor": "..." }], "total": 1 }
 ```
@@ -1684,6 +1686,8 @@ Body: `{ "folder": "projects/acme", "to": "archive/acme" }`. Renames or moves a 
 
 ### GET `/nests/:nestId/deletion-requests`
 Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
+
+Only requests about what the caller can read: a request names its target and carries who asked and why. A document's request is listed for callers who can read that document; a folder's or the nest's own is listed for callers who read the whole nest (not for one who reaches it only through its visibility). `total` counts what is listed. MCP `context_deletion_queue` follows the same rule.
 
 ```json
 {
@@ -2064,8 +2068,10 @@ The *stream* of them is bounded too: per nest per 5 minutes, one person may caus
 
 **Followers hear about every comment.** Besides the people it names, a new comment (or reply) notifies the document's **watchers** (`POST /nests/:nestId/nodes/:nodeId/watchers`) and its **reviewer stewards** at document, tag and nest scope: a `comment` row in `GET /me/notifications` linking the document, plus an email carrying the excerpt when SMTP is set up. Never the comment's author, never twice for someone the same comment mentions (they get the `mention`), never an address with no account or a person who can't open the document; at most 50 followers per comment (`MAX_COMMENT_FOLLOWERS`). Emails draw on the same per-actor budget as mention emails. There is no channel post for a plain comment — the connector audience isn't derived from who can read the document. This applies to the REST, annotation-thread and MCP `context_comment` write paths.
 
+**Only on a node the caller can read.** A comment posted to a node the caller can't read → `404`, and nothing is written or sent.
+
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
-Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
+Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`. A comment on a node the caller can't read → `404`, the same answer as an unknown comment id.
 
 ### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
 Per-node (or nest-wide) activity log — "who did what". Only for nodes the caller can read: the per-node log of an unreadable node is `{ "activity": [] }`, and the nest-wide log leaves out entries about nodes the caller can't read (so a visitor to a public nest sees approved documents' entries only). A read-only aggregation
