@@ -23,6 +23,30 @@ import { stubDashboard } from '../../src/lib/control_room_dashboard_stubs.js';
 
 const primaryRole = samples.primary_user ?? null;
 
+/**
+ * CI runs e2e against the deployed server (nest-dev), not this branch's build.
+ * Until that server ships the Control room (its /health carries
+ * `surfaces_enabled`), the suite skips rather than fails, as in
+ * control_room_setup.spec.js. CN_EXPECT_CONTROL_ROOM=1 turns the skip into a failure.
+ */
+let deployed = false;
+
+test.beforeAll(async ({ request }) => {
+  try {
+    const h = await (await request.get('/health')).json();
+    deployed = typeof h?.surfaces_enabled === 'boolean';
+  } catch {
+    deployed = false;
+  }
+});
+
+test.beforeEach(() => {
+  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+    expect(deployed, 'the server under test does not ship the Control room (/health has no surfaces_enabled)').toBe(true);
+  }
+  test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR2).');
+});
+
 /** The page's own range: the last 14 UTC days, today included. */
 function range14() {
   const now = Date.now();
