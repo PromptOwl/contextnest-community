@@ -2035,7 +2035,7 @@ Same node-level read check as the list above: `403` when the caller can't read t
 Comments are a standalone collaboration primitive — **not** part of the version/hash chain. They thread, carry attribution, anchor to a highlighted span, and resolve (Word/Docs-style "Comments", separate from Track Changes). Any caller with **read** access to the nest may leave or resolve a comment.
 
 ### GET `/nests/:nestId/nodes/:nodeId/comments?status=open`
-List comments on a node. Optional `status` = `open` | `resolved`.
+List comments on a node. Optional `status` = `open` | `resolved`. A node the caller can't read answers `{ "comments": [] }`, the same as a node with none.
 ```json
 {
   "comments": [
@@ -2068,7 +2068,7 @@ The *stream* of them is bounded too: per nest per 5 minutes, one person may caus
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
 
 ### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
-Per-node (or nest-wide) activity log — "who did what". A read-only aggregation
+Per-node (or nest-wide) activity log — "who did what". Only for nodes the caller can read: the per-node log of an unreadable node is `{ "activity": [] }`, and the nest-wide log leaves out entries about nodes the caller can't read (so a visitor to a public nest sees approved documents' entries only). A read-only aggregation
 over comments + committed edits (`node_versions`) + pending external-edit
 suggestions ("proposed an edit", read from nest storage) + reviews
 (`review_requests`); newest first, `?limit=` (default 100). Each entry:
@@ -2077,6 +2077,8 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 A `task_activity` entry (see below) also carries `status?`, `agent?` (the caller's
 `client.agent`), `key?` (`{ label?, prefix?, scoped }`) and `summary` — the
 one-line description the task's timeline shows.
+
+"Can read" is the same resolution as node listing: a public or org reader reads approved documents only, and a document proposed from chat stays out until it is approved, except for write+ callers. The nest-wide log drops entries after `limit` is applied, so a caller who can't read everything may get fewer than `limit`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/task-log` (write+)
 Register an interaction on a task — the simple way for an agent to say what it
@@ -2105,7 +2107,7 @@ Response (201):
 ```
 
 ### GET `/nests/:nestId/nodes/:nodeId/task-log`
-The logged interactions alone, newest first (`?limit=`, default 100): `{ entries: [...] }`.
+The logged interactions alone, newest first (`?limit=`, default 100): `{ entries: [...] }`. A task the caller can't read answers `{ "entries": [] }`.
 The task's full timeline (edits, reviews, comments too) is `…/activity` above.
 
 
