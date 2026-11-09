@@ -85,6 +85,7 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { onboardingRoutes } from "./onboarding/routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
@@ -1020,6 +1021,10 @@ export function createApp(): Hono<AuthEnv> {
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     type_view_enabled: ACCEPTED_NODE_TYPES.has("view"),
     hootie_enabled: config.HOOTIE_ENABLED,
+    // First-run onboarding (PO-1185).
+    onboarding_enabled: config.ONBOARDING_ENABLED,
+    distill_enabled: config.DISTILL_ENABLED,
+    surfaces_slack_self_serve: config.SURFACES_SLACK_SELF_SERVE,
     // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
@@ -1383,6 +1388,17 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Default OFF (CU-wdqcq03ewc). Both states are written explicitly so a
     // UI choice beats a deploy env of either value (db/settings.ts precedence).
+    // First-run onboarding toggles (PO-1185). Both states are written
+    // explicitly so a UI choice beats a deploy env of either value.
+    if ("onboarding_enabled" in body) {
+      pending.push({ name: "ONBOARDING_ENABLED", value: body.onboarding_enabled ? "true" : "false" });
+    }
+    if ("distill_enabled" in body) {
+      pending.push({ name: "DISTILL_ENABLED", value: body.distill_enabled ? "true" : "false" });
+    }
+    if ("surfaces_slack_self_serve" in body) {
+      pending.push({ name: "SURFACES_SLACK_SELF_SERVE", value: body.surfaces_slack_self_serve ? "true" : "false" });
+    }
     if ("hootie_enabled" in body) {
       pending.push({
         name: "HOOTIE_ENABLED",
@@ -2936,6 +2952,13 @@ export function createApp(): Hono<AuthEnv> {
   // Named systems (CU-wdqcq0538g). Admin-gated in the service layer
   // (owner/admin of the nests involved); a system or headless key never gets
   // here (the nest-scope guard fences those out).
+  // First-run onboarding (PO-1185): the welcome screen's state, "Create my
+  // nest", the connect proof, distill and self-serve Slack. Global like
+  // /systems: it acts on the caller and checks each nest it names.
+  app.use("/onboarding", flexAuthMiddleware);
+  app.use("/onboarding/*", flexAuthMiddleware);
+  app.route("/onboarding", onboardingRoutes);
+
   app.use("/systems", flexAuthMiddleware);
   app.use("/systems/*", flexAuthMiddleware);
   app.route("/systems", systemRoutes);

@@ -783,6 +783,35 @@ export const config = {
   get HOOTIE_MODEL(): string {
     return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
   },
+  /**
+   * First-run onboarding (PO-1185): the welcome screen a signed-in person with
+   * no nest of their own sees instead of an empty nest list. Default ON.
+   * Superadmin-editable at runtime via /admin/settings (onboarding_enabled).
+   */
+  get ONBOARDING_ENABLED(): boolean {
+    return process.env.ONBOARDING_ENABLED !== "false";
+  },
+  /**
+   * Server-side "Distill a site or repo" (PO-1185): the server fetches a public
+   * https URL and writes nodes into the caller's nest with the default ontology
+   * prompt. Default ON: it only spends model credits when a model key is
+   * configured, and is rate limited per person. Off, or with no model key, the
+   * welcome screen hands the same prompt to the person's connected agent.
+   * Superadmin-editable at runtime via /admin/settings (distill_enabled).
+   */
+  get DISTILL_ENABLED(): boolean {
+    return process.env.DISTILL_ENABLED !== "false";
+  },
+  /**
+   * Self-serve Slack (PO-1185): any signed-in person may connect their own
+   * Slack workspace to a nest they own through the hosted Slack app. Needs
+   * Surfaces and the hosted Slack app on (and its credentials set by a server
+   * admin). Default OFF. Superadmin-editable via /admin/settings
+   * (surfaces_slack_self_serve).
+   */
+  get SURFACES_SLACK_SELF_SERVE(): boolean {
+    return process.env.SURFACES_SLACK_SELF_SERVE === "true";
+  },
   /** Testing aid: log Hootie's full model request and answer (nest content!).
    *  Off by default; summaries (model, key tail, tokens) are always logged. */
   get HOOTIE_DEBUG_LOG(): boolean {
