@@ -4,6 +4,7 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2475,7 +2476,38 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("083_view_summaries");
   }
+
+  // 086: agent control room, CR1 (po-1186). The decision ledger is a view over
+  //   runs, run steps and the Surfaces tables, so these are columns, not a new
+  //   table. 084 and 085 are taken on open branches (onboarding, comment
+  //   mentions); ids match by string.
+  //   - runs.idempotency_key: one run per (nest, key) for an external agent's
+  //     retried start; runs.external_ref: the caller's own id, shown, never
+  //     trusted; runs.source: runner | external | server:metacognition |
+  //     server:surfaces (backfilled from claimed_by / triggered_by).
+  //   - runs.verdict / runs.reason_code: the strongest `decision` step's
+  //     verdict, written with the step so the ledger can filter on it in SQL.
+  //   - run_steps.client_key: one step per (run, key).
+  //   - surface_windows.run_id: the listener's run for the window it judged,
+  //     the run → window hop the ledger trace needs.
+  if (!hasMigration("086_control_room_ledger")) {
+    db.transaction(() => {
+      const cols = (table: string) =>
+        new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+      const runCols = cols("runs");
+      if (!runCols.has("idempotency_key")) db.exec("ALTER TABLE runs ADD COLUMN idempotency_key TEXT");
+      if (!runCols.has("source")) db.exec("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'runner'");
+      if (!runCols.has("external_ref")) db.exec("ALTER TABLE runs ADD COLUMN external_ref TEXT");
+      if (!runCols.has("verdict")) db.exec("ALTER TABLE runs ADD COLUMN verdict TEXT");
+      if (!runCols.has("reason_code")) db.exec("ALTER TABLE runs ADD COLUMN reason_code TEXT");
+      if (!cols("run_steps").has("client_key")) db.exec("ALTER TABLE run_steps ADD COLUMN client_key TEXT");
+      if (!cols("surface_windows").has("run_id")) db.exec("ALTER TABLE surface_windows ADD COLUMN run_id TEXT");
+      db.exec(controlRoomLedgerIndexesAndBackfill());
+    })();
+    recordMigration("086_control_room_ledger");
+  }
 }
+
 
 /**
  * `foreign_key_check` violations, counted per (child table, parent table,

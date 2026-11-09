@@ -166,8 +166,8 @@ export async function startMetacognitionRun(opts: {
         throw new ConflictError(`too many concurrent runs: ${roots.n} already running`);
       }
       await tx.run(
-        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, claimed_by, claimed_at)
-         VALUES (?, ?, ?, ?, 'running', ?, ?, NULL, 0, ?, ?)`,
+        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, claimed_by, claimed_at, source)
+         VALUES (?, ?, ?, ?, 'running', ?, ?, NULL, 0, ?, ?, 'server:metacognition')`,
         [
           id,
           opts.nestId,

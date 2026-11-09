@@ -583,7 +583,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
   } finally {
     clearTimeout(timer);
   }
-  await recordRun(binding.nest_id, listener.node_id, model, cost, verdict);
+  await recordRun(binding.nest_id, listener.node_id, model, cost, verdict, w.id);
   if (!verdict) {
     await end({ status: "judged", verdict: "error_schema", reason_code: null, model, cost_micros: cost });
     return;
@@ -710,15 +710,20 @@ async function noteRequester(binding: BindingRow, w: WindowRow, text: string): P
   void installRef;
 }
 
-/** The run, as a metacognition run of the listener — counts only, no text. */
-async function recordRun(nestId: string, agentNode: string, model: string, cost: number, v: Verdict | null): Promise<void> {
+/**
+ * The run, as a metacognition run of the listener — counts only, no text.
+ * The window carries the run's id (`surface_windows.run_id`), the run →
+ * window hop the decision ledger's trace follows (po-1186 AC-CR-05b).
+ */
+async function recordRun(nestId: string, agentNode: string, model: string, cost: number, v: Verdict | null, windowId: string): Promise<void> {
   const now = new Date().toISOString();
+  const runId = `run_${uuid()}`;
   try {
     await getDb().run(
-      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, trace, started_at, finished_at, claimed_by, claimed_at)
-       VALUES (?, ?, ?, 'surfaces:window', 'succeeded', NULL, ?, ?, ?, 'server:surfaces', ?)`,
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, trace, started_at, finished_at, claimed_by, claimed_at, source, verdict)
+       VALUES (?, ?, ?, 'surfaces:window', 'succeeded', NULL, ?, ?, ?, 'server:surfaces', ?, 'server:surfaces', ?)`,
       [
-        `run_${uuid()}`,
+        runId,
         nestId,
         agentNode,
         JSON.stringify({
@@ -732,8 +737,10 @@ async function recordRun(nestId: string, agentNode: string, model: string, cost:
         now,
         now,
         now,
+        v?.verdict ?? "error",
       ],
     );
+    await getDb().run("UPDATE surface_windows SET run_id = ? WHERE id = ? AND run_id IS NULL", [runId, windowId]);
   } catch {
     /* audit row is best effort */
   }

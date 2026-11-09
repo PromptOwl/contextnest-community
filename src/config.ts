@@ -936,6 +936,17 @@ export const config = {
     const n = parseInt(process.env.RUN_MAX_CONCURRENT_ROOTS || "50", 10);
     return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 50;
   },
+  /** Agent event API (po-1186): run steps a single credential may post per
+   *  minute (REST + MCP, every run). Excess → 429 + Retry-After. */
+  get AGENT_EVENTS_RATE_PER_MIN(): number {
+    const n = parseInt(process.env.AGENT_EVENTS_RATE_PER_MIN || "600", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(1, n)) : 600;
+  },
+  /** Agent event API (po-1186): runs a single credential may start per minute. */
+  get AGENT_RUNS_RATE_PER_MIN(): number {
+    const n = parseInt(process.env.AGENT_RUNS_RATE_PER_MIN || "60", 10);
+    return Number.isFinite(n) ? Math.min(10000, Math.max(1, n)) : 60;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

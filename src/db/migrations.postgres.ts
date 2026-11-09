@@ -4,6 +4,7 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -112,6 +113,7 @@ export const HISTORICAL_MIGRATIONS = [
   "081_surfaces_cards",
   "082_surfaces_seeds",
   "083_view_summaries",
+  "086_control_room_ledger",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1348,6 +1350,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         PRIMARY KEY (nest_id, cache_key)
       )
   `);
+
+  // Migration 086 parity: agent control room ledger columns (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'runner';
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS external_ref TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS verdict TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS reason_code TEXT;
+    ALTER TABLE run_steps ADD COLUMN IF NOT EXISTS client_key TEXT;
+    ALTER TABLE surface_windows ADD COLUMN IF NOT EXISTS run_id TEXT;
+  `);
+  await db.exec(controlRoomLedgerIndexesAndBackfill());
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
