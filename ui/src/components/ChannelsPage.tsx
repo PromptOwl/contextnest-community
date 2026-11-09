@@ -13,7 +13,7 @@
  * Message bodies render as plain text (whitespace kept), never as HTML, so a
  * post cannot inject markup; @mentions are highlighted as text spans.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Archive, Hash, Loader2, MessageSquare, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -26,6 +26,7 @@ import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { reads } from "../lib/queries";
 import * as api from "../lib/api";
 import type { ChannelMessage, ChannelPost, ChannelSummary } from "../lib/api";
+import { readChannelDeepLink } from "../lib/channel-deep-link";
 
 interface Props {
   nestId: string;
@@ -70,7 +71,7 @@ function Message({ m, children }: { m: ChannelMessage; children?: ReactNode }) {
 export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   const qc = useQueryClient();
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => readChannelDeepLink(window.location.search).channel);
   const [posts, setPosts] = useState<ChannelPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [canWrite, setCanWrite] = useState(false);
@@ -80,6 +81,10 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   const [newPurpose, setNewPurpose] = useState("");
   const [creating, setCreating] = useState(false);
   const [openThread, setOpenThread] = useState<string | null>(null);
+  // A My Work mention's deep link (?channel=&thread=, PO-1180): select that
+  // channel, and open that thread once its timeline has loaded.
+  const [deepLink] = useState(() => readChannelDeepLink(window.location.search));
+  const pendingThread = useRef<string | null>(deepLink.thread);
   const [replies, setReplies] = useState<ChannelMessage[]>([]);
   const [replyDraft, setReplyDraft] = useState("");
 
@@ -149,7 +154,15 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   }, [loadChannels]);
   useEffect(() => {
     setOpenThread(null);
-    loadTimeline();
+    loadTimeline().then(() => {
+      const t = pendingThread.current;
+      if (!t || !selected || selected !== deepLink.channel) return;
+      pendingThread.current = null;
+      setOpenThread(t);
+      setReplies([]);
+      loadThread(t);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadTimeline]);
 
   const create = async () => {

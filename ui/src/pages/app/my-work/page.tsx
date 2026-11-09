@@ -15,7 +15,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  ArrowLeft, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
+  ArrowLeft, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle, MessageSquare,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
@@ -28,6 +28,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
 import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
+import { channelThreadLink } from "../../../lib/channel-deep-link";
 
 export default function MyWorkPage() {
   const { openNest: onSelectNest, openReview: onOpenReview, goBack } = useAppNav();
@@ -39,7 +40,10 @@ export default function MyWorkPage() {
     notifications?: api.WatcherNotification[];
     assigned?: api.AssignedItem[];
     pagination?: api.WorkPagination;
+    mentions?: api.MentionItem[];
+    mentions_pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
+  const [loadingMentions, setLoadingMentions] = useState(false);
   // Gates the "My Work" empty state — without it, the empty message flashes
   // on every mount/tab switch before the best-effort /me/work fetch resolves.
   const [workLoading, setWorkLoading] = useState(true);
@@ -73,6 +77,9 @@ export default function MyWorkPage() {
         notifications: next.notifications ?? prev.notifications,
         assigned: next.assigned ?? prev.assigned,
         pagination: next.pagination,
+        // Review paging leaves the mentions page where it was.
+        mentions: prev.mentions,
+        mentions_pagination: prev.mentions_pagination,
       }));
       // A selection only means anything against the rows on screen. Carrying
       // it across a page turn (or over rows that just got resolved) left the
@@ -88,6 +95,30 @@ export default function MyWorkPage() {
     }
   };
 
+
+  // Mentions page on their own cursor (mentions_offset); the rest of the
+  // inbox stays as it is.
+  const goToMentionsPage = async (mentionsOffset: number) => {
+    setLoadingMentions(true);
+    try {
+      const next = await qc.fetchQuery(reads.myWork({ mentionsOffset }));
+      setWork((prev) => ({ ...prev, mentions: next.mentions, mentions_pagination: next.mentions_pagination }));
+    } catch (e) {
+      console.error("[MyWork] goToMentionsPage failed", e);
+    } finally {
+      setLoadingMentions(false);
+    }
+  };
+
+  // Jump to the thread: a channel post opens the channel timeline with the
+  // thread open; a document comment opens the document with it focused.
+  const openMention = (m: api.MentionItem) => {
+    if (m.kind === "channel" && m.channel) {
+      window.location.assign(channelThreadLink(m.nest_id, m.channel, m.thread_id));
+      return;
+    }
+    onOpenReview(m.nest_id, m.nest_name, m.node_id, { thread: m.thread_id });
+  };
 
   // First page on mount, and again whenever the signed-in user changes (in
   // open mode the page stays mounted across login). Best-effort: a failed
@@ -364,6 +395,77 @@ export default function MyWorkPage() {
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+            {/* Open threads that @mention you, in channels and on documents,
+                waiting on your reply (PO-1180). Reply or resolve and the row
+                goes. Newest first; click jumps to the thread. */}
+            {(work.mentions?.length ?? 0) > 0 && (
+              <div className="rounded-lg border" data-testid="my-work-mentions">
+                <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
+                  Mentions
+                  <span className="text-xs text-muted-foreground">
+                    ({work.mentions_pagination?.total ?? work.mentions!.length})
+                  </span>
+                </div>
+                <div className="divide-y border-t">
+                  {work.mentions!.map((m) => (
+                    <button
+                      key={`${m.nest_id}:${m.thread_id}`}
+                      type="button"
+                      onClick={() => openMention(m)}
+                      className="flex w-full items-start gap-2 px-4 py-2 text-left text-sm hover:bg-muted/50"
+                    >
+                      <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">
+                          <span className="font-medium">{m.author_label}</span>
+                          <span className="text-muted-foreground">
+                            {" in "}
+                            {m.channel ? `#${m.channel}` : m.title}
+                            {m.for_agent ? ` · for @${m.for_agent}` : ""}
+                          </span>
+                        </span>
+                        <span className="block truncate text-muted-foreground">{m.excerpt}</span>
+                      </span>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {m.nest_name} · {relTime(m.mentioned_at)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {work.mentions_pagination && work.mentions_pagination.total > work.mentions_pagination.limit && (
+                  <div className="flex items-center justify-end gap-2 border-t px-4 py-1.5 text-xs text-muted-foreground">
+                    <span>
+                      {work.mentions_pagination.offset + 1}–
+                      {work.mentions_pagination.offset + work.mentions!.length} of {work.mentions_pagination.total}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5"
+                      disabled={loadingMentions || work.mentions_pagination.offset === 0}
+                      onClick={() =>
+                        goToMentionsPage(Math.max(0, work.mentions_pagination!.offset - work.mentions_pagination!.limit))
+                      }
+                      aria-label="Previous mentions"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5"
+                      disabled={loadingMentions || !work.mentions_pagination.has_more}
+                      onClick={() =>
+                        goToMentionsPage(work.mentions_pagination!.offset + work.mentions_pagination!.limit)
+                      }
+                      aria-label="More mentions"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
             <div>

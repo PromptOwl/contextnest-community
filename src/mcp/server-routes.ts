@@ -840,7 +840,7 @@ Write endpoints (need write permission):
 
 ## Your inbox (server-level)
 
-- \`GET ${B}/me/work\` — reviews waiting on you and handoffs, across every nest
+- \`GET ${B}/me/work\` — reviews waiting on you, handoffs, and open threads that @mention you, across every nest (MCP: \`context_my_work\`)
 - \`GET ${B}/me/drafts\` — your documents never submitted for review
 - \`GET ${B}/me/notifications\` — watcher and review notifications
 

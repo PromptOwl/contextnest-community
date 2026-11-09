@@ -31,7 +31,12 @@ export function InboxBell({
   const label = count ? `My Work — ${count} waiting on you` : "My Work";
   const notes = data?.notifications ?? [];
   const assigned = data?.assigned ?? [];
-  const queued = data?.waiting_on_me_total ?? data?.pagination?.total ?? 0;
+  // The one-row read carries one mention; the count is all of them (PO-1180).
+  const mentions = data?.mentions ?? [];
+  const mentionTotal = data?.mentions_pagination?.total ?? mentions.length;
+  // waiting_on_me_total includes the open mentions; the summary row below is
+  // the reviews and requests alone.
+  const queued = Math.max(0, (data?.waiting_on_me_total ?? data?.pagination?.total ?? 0) - mentionTotal);
   const go = (fn: () => void) => {
     setOpen(false);
     fn();
@@ -82,6 +87,16 @@ export function InboxBell({
               <span className="text-xs text-muted-foreground">Assigned to you · {a.nest_name}</span>
             </button>
           ))}
+          {mentionTotal > 0 && (
+            <button type="button" className={row} onClick={() => go(onOpen)}>
+              <span className="line-clamp-2">
+                {mentions[0] ? `${mentions[0].author_label}: ${mentions[0].excerpt}` : "You were mentioned"}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {mentionTotal === 1 ? "1 mention waiting on your reply" : `${mentionTotal} mentions waiting on your reply`}
+              </span>
+            </button>
+          )}
           {queued > 0 && (
             <button type="button" className={row} onClick={() => go(onOpen)}>
               {queued} {queued === 1 ? "review or request" : "reviews and requests"} waiting

@@ -61,7 +61,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   /nests/:id/channels (list/create/archive, timeline/thread); channels are Community-only (a node
 //   convention over the comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM), so the
 //   engine has no channel operation to import a descriptor from.
-const BASELINE = 100;
+//   100->101 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
+//   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
+//   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
+//   operation to import a descriptor from.
+const BASELINE = 101;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

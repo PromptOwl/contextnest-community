@@ -64,6 +64,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_access_requests: read("View access requests", "Lists pending access requests."),
   context_review_queue: read("View review queue", "Lists review requests."),
   context_my_drafts: read("View my drafts", "Lists the caller's unsubmitted drafts."),
+  context_my_work: read("View my work", "Returns the caller's queue: mentions, reviews and requests, assignments, notifications."),
   context_versions: read("View version history", "Returns a document's version history."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 

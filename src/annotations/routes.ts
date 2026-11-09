@@ -18,6 +18,7 @@ import { notifyComment } from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
+import { indexPostedMessage } from "../mentions/mention-index.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -95,6 +96,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     actorEmail: userEmail,
     baseUrl: requestBaseUrl(c.req.url),
   });
+  // Who it tags, for My Work's Mentions (PO-1180).
+  await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread }, 201);
 });
@@ -144,6 +147,7 @@ export async function handleAnnotationReply(
     actorEmail: userEmail,
     baseUrl: requestBaseUrl(c.req.url),
   });
+  await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 }

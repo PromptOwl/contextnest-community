@@ -13,8 +13,8 @@ import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
 import { channelRoutes } from "./channels/routes.js";
+import { buildMyWork, parseMyWorkPaging } from "./me/my-work.js";
 import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
-import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
@@ -34,11 +34,7 @@ import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
-import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
-import {
-  getReviewQueue,
-  listDeletionRequests,
-} from "./governance/review-service.js";
+import { listVisibleNests } from "./nests/service.js";
 import { listMyDrafts } from "./governance/version-service.js";
 import { getDocStream } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
@@ -55,7 +51,6 @@ import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
-  resolveUserRoles,
 } from "./governance/stewardship-service.js";
 import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
@@ -143,8 +138,6 @@ import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
-  canDecideAccessRequests,
-  listAccessRequests,
   writeTargetForPath,
 } from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
@@ -550,38 +543,6 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     return next();
   },
 );
-
-// Short-TTL cache for the /me/work approve-capability check. The dashboard
-// polls this inbox, and a caller's nest roles change rarely — so caching the
-// per-(nest, user) "can approve here?" boolean for a few seconds skips the
-// repeated resolveUserRoles round-trips on each poll, without holding stale
-// governance long enough to matter. Global map (single-process server).
-const APPROVE_CACHE_TTL_MS = 30_000;
-const approveCache = new Map<string, { ok: boolean; exp: number }>();
-async function canApproveInNest(nestId: string, email: string): Promise<boolean> {
-  const key = `${nestId} ${email.toLowerCase()}`;
-  const now = Date.now();
-  const hit = approveCache.get(key);
-  if (hit && hit.exp > now) return hit.ok;
-  // MUST mirror canUserApprove's nest-level gate, not the pure canApproveWith:
-  // admin/reviewer approve always, but a BARE owner (no admin/reviewer steward
-  // role) can only approve when the nest allows self-approve. Using
-  // canApproveWith here — which treats "owner" as always approve-capable — put
-  // a dead Approve button back in front of owners who delegated approval to a
-  // reviewer and left self-approve off (the default SoD setup). Fetch the flag
-  // only for the owner-only case so reviewers/admins skip the extra read.
-  const roles = await resolveUserRoles(nestId, email);
-  let ok = roles.includes("admin") || roles.includes("reviewer");
-  if (!ok && roles.includes("owner")) ok = await nestAllowsSelfApprove(nestId);
-  // Cheap bound: sweep expired entries when the map grows, so a long-running
-  // server polling /me/work across many (nest, user) pairs doesn't accumulate
-  // stale keys forever. O(n) but only past a threshold, amortized to nothing.
-  if (approveCache.size > 500) {
-    for (const [k, v] of approveCache) if (v.exp <= now) approveCache.delete(k);
-  }
-  approveCache.set(key, { ok, exp: now + APPROVE_CACHE_TTL_MS });
-  return ok;
-}
 
 export function createApp(): Hono<AuthEnv> {
   // LinearRouter, not the default SmartRouter — parity with upstream
@@ -2401,239 +2362,16 @@ export function createApp(): Hono<AuthEnv> {
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
-    const userId = c.get("userId");
-    const me = await resolveCallerEmail(userId);
-    const nestName = new Map<string, string>();
-    for (const n of await listVisibleNests(userId))
-      nestName.set(n.id, n.name ?? n.id);
-
-    // Page the queue — 50 at a time by default — instead of pulling 200 up
-    // front. limit/offset are query params (?limit=&offset=), clamped to sane
-    // bounds. Scoping to the caller's visible nests up front also keeps
-    // getReviewQueue from title-mapping (= filesystem-scanning) nests they
-    // can't see.
-    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 100);
-    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
-    const { requests, total } = await getReviewQueue({
-      status: "pending",
-      nestIds: [...nestName.keys()],
-      limit,
-      offset,
+    // The whole inbox lives in me/my-work.ts so MCP context_my_work returns
+    // exactly this (PO-1180). limit/offset page the reviews; mentions_limit /
+    // mentions_offset page the Mentions section.
+    const paging = parseMyWorkPaging({
+      limit: c.req.query("limit"),
+      offset: c.req.query("offset"),
+      mentions_limit: c.req.query("mentions_limit"),
+      mentions_offset: c.req.query("mentions_offset"),
     });
-    const toItem = (r: (typeof requests)[number]) => ({
-      type: "review" as const,
-      nest_id: r.nestId,
-      nest_name: nestName.get(r.nestId)!,
-      node_id: r.nodeId,
-      title: r.title || r.nodeId,
-      requested_by: r.requestedBy,
-      requested_at: r.requestedAt,
-      priority: r.priority,
-      // Filed by an agent run (migration 060): the inbox links to its trace.
-      run_id: r.runId ?? null,
-    });
-    // Deletion flags ride the same inbox, as a second item type: `reason` and
-    // `request_id` are the extra fields resolving one needs.
-    const deletions = await listDeletionRequests({
-      nestIds: [...nestName.keys()],
-      status: "pending",
-    });
-    const toDeletionItem = (r: (typeof deletions)[number]) => ({
-      type: "deletion" as const,
-      nest_id: r.nestId,
-      nest_name: nestName.get(r.nestId)!,
-      node_id: r.nodeId,
-      title: r.title || r.nodeId,
-      requested_by: r.requestedBy,
-      requested_at: r.createdAt,
-      priority: "normal" as const,
-      reason: r.reason,
-      request_id: r.id,
-      // node_id holds a folder path / nest id for those targets, so a client
-      // must not treat it as a document to open.
-      target_type: r.targetType,
-    });
-    // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
-    // edit something they can only read. node_id is the document for a node
-    // target, else the folder path / nest id — target_type says which.
-    // Capped (500, newest first), not paginated: a person can have at most
-    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
-    // the count below reflects what is shown.
-    // Decider nests first, so only rows this caller can act on (or filed) load.
-    const deciderNestIds = (
-      await Promise.all(
-        [...nestName.keys()].map(async (id) =>
-          (await canDecideAccessRequests(id, userId)) ? id : null,
-        ),
-      )
-    ).filter((id): id is string => id !== null);
-    const [decidable, myAccessAsks] = await Promise.all([
-      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
-      listAccessRequests({
-        nestIds: [...nestName.keys()],
-        requesterId: userId,
-        status: "pending",
-        limit: 500,
-      }),
-    ]);
-    const toAccessItem = (r: (typeof decidable)[number]) => ({
-      type: "access" as const,
-      nest_id: r.nest_id,
-      nest_name: nestName.get(r.nest_id)!,
-      node_id: r.target_id,
-      title: r.title || r.target_id,
-      requested_by: r.requested_by,
-      requested_at: r.created_at,
-      priority: "normal" as const,
-      reason: r.note ?? "",
-      request_id: r.id,
-      target_type: r.target_type,
-      level: r.level,
-      run_id: r.run_id ?? null,
-    });
-    type WorkItem =
-      | ReturnType<typeof toItem>
-      | ReturnType<typeof toDeletionItem>
-      | ReturnType<typeof toAccessItem>;
-    const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
-      a.requested_at < b.requested_at ? 1 : -1;
-    // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
-    // An editor/viewer can SEE a nest but can't approve — the "waiting on me"
-    // bucket must only surface reviews this caller can actually action, else the
-    // inbox nags editors/viewers to approve work they have no rights over.
-    // Approve capability is a nest-level property here (a reviewer/admin role
-    // anywhere on the nest, or the owner with self-approve), so resolve it ONCE
-    // per distinct nest — not per request — in parallel. Bounded by nest count,
-    // not queue length, so no per-item latency blowup.
-    // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
-    // will see that whole nest's pending items, not just their scoped docs.
-    // Tighten to per-node canUserApprove if that over-inclusion ever matters.
-    // Resolved for every nest the caller can SEE, not just nests that happen
-    // to appear in this page of `requests` — pagination.total below needs
-    // the full picture (a nest with pending reviews from someone else, on a
-    // page the caller never fetched, still has to be excluded consistently).
-    const others = requests.filter((r) => r.requestedBy !== me);
-    const nestApprove = new Map<string, boolean>(
-      await Promise.all(
-        [...nestName.keys()].map(
-          async (nestId): Promise<[string, boolean]> => [
-            nestId,
-            await canApproveInNest(nestId, me),
-          ],
-        ),
-      ),
-    );
-    const items: WorkItem[] = others
-      .filter((r) => nestApprove.get(r.nestId))
-      .map(toItem);
-    const waiting: WorkItem[] = requests
-      .filter((r) => r.requestedBy === me)
-      .map(toItem);
-
-    // Waiting-on-me for the nest admins/owners who can action a flag,
-    // waiting-on-others for whoever asked. Deliberately NOT folded into the
-    // review queue's pagination — the flag set is small, and merging two
-    // offsets into one cursor buys nothing.
-    const othersDeletions = deletions.filter((r) => r.requestedBy !== me);
-    // Deleting is an owner/admin call (the same tier the UI shows Delete to),
-    // NOT the approve capability reviews use — resolved once per nest.
-    const nestManage = new Map<string, boolean>(
-      await Promise.all(
-        [...new Set(othersDeletions.map((r) => r.nestId))].map(
-          async (nestId): Promise<[string, boolean]> => {
-            const roles = await resolveUserRoles(nestId, me);
-            return [nestId, roles.includes("owner") || roles.includes("admin")];
-          },
-        ),
-      ),
-    );
-    items.push(
-      ...othersDeletions
-        .filter((r) => nestManage.get(r.nestId))
-        .map(toDeletionItem),
-    );
-    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
-    items.push(
-      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
-    );
-    items.sort(byNewest);
-    waiting.push(
-      ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
-      ...myAccessAsks.map(toAccessItem),
-    );
-    waiting.sort(byNewest);
-    // Watcher notifications (HITL tags) ride along so the inbox is one call.
-    const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
-    // `total` from getReviewQueue counts every PENDING REVIEW across every
-    // nest the caller can see — full stop, regardless of who requested it or
-    // whether the caller can approve it. But items/waiting only ever surface
-    // a review that is either the caller's own request or one the caller can
-    // actually approve (see nestApprove above); a review from someone else in
-    // a nest where the caller is a bare viewer/editor never appears in either
-    // bucket, yet was still counted in `total` — so the badge (which reads
-    // pagination.total, see my-work/meta.ts) overcounted relative to what My
-    // Work actually shows. Recompute the review portion of the total as
-    // exactly (pending reviews in nests the caller can approve) + (the
-    // caller's own pending reviews elsewhere) — the same two conditions
-    // items/waiting are built from — via two SQL counts rather than the raw,
-    // unfiltered getReviewQueue total.
-    const approvableNestIds = [...nestName.keys()].filter((id) =>
-      nestApprove.get(id),
-    );
-    const restNestIds = [...nestName.keys()].filter(
-      (id) => !nestApprove.get(id),
-    );
-    const [
-      { total: approvableReviewTotal },
-      { total: myReviewsElsewhereTotal },
-      { total: myReviewsTotal },
-    ] = await Promise.all([
-      getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
-      getReviewQueue({
-        status: "pending",
-        nestIds: restNestIds,
-        requestedByEmail: me,
-        limit: 1,
-      }),
-      getReviewQueue({
-        status: "pending",
-        nestIds: [...nestName.keys()],
-        requestedByEmail: me,
-        limit: 1,
-      }),
-    ]);
-    const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
-    // Deletion flags and access requests ride the same two buckets (above)
-    // but aren't paginated (both lists fetch every pending one), so folding in
-    // however many are actually shown keeps the total exact regardless of
-    // which review page this call fetched.
-    const requestsShown =
-      items.filter((i) => i.type === "deletion" || i.type === "access").length +
-      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
-    // Board cards assigned to me (open ones), across every nest I can see.
-    // Best-effort: a failure here must not take the reviews inbox down with it.
-    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
-      console.error("[me/work] assigned list failed", err);
-      return [];
-    });
-    // The badge's share (CU-wdqcq0658p): the same total minus what waits on
-    // others — the caller's own pending reviews and the requests they filed.
-    const waitingOnMeTotal =
-      reviewTotal + requestsShown - myReviewsTotal -
-      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
-    return c.json({
-      items,
-      waiting,
-      notifications,
-      assigned,
-      waiting_on_me_total: waitingOnMeTotal,
-      pagination: {
-        total: reviewTotal + requestsShown,
-        limit,
-        offset,
-        has_more: offset + requests.length < total,
-      },
-    });
+    return c.json(await buildMyWork({ userId: c.get("userId"), ...paging }));
   });
 
   // GET /me/drafts — the documents YOU left unsubmitted, across every nest you
