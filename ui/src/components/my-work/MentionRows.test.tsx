@@ -59,3 +59,26 @@ describe("AC-UX-08 My Work shows display names, not emails", () => {
     expect(mentionAuthor(mention({ agent: "grok", author_label: "grok, on behalf of walt@team.test" }))).toBe("grok, on behalf of Walt Writer");
   });
 });
+
+describe("My Work mention excerpts are one line of plain text (PO-1189)", () => {
+  it("drops markdown and shows the mentioned and mentioning people by name", () => {
+    const h = renderToStaticMarkup(
+      <MentionRows
+        mentions={[mention({ excerpt: "@reader@team.test can you sanity-check the **Risks** section? cc @walt@team.test" })]}
+        viewer={{ email: "reader@team.test", name: "Rita Reader" }}
+        loading={false}
+        busyThread={null}
+        onOpen={noop}
+        onDone={noop}
+        onPage={noop}
+      />,
+    );
+    expect(h).toContain("@Rita Reader can you sanity-check the Risks section? cc @Walt Writer");
+    expect(h).not.toContain("**");
+    expect(h).not.toContain("reader@team.test can");
+  });
+
+  it("without the viewer, an address shows its first part only", () => {
+    expect(render([mention({ excerpt: "@reader@team.test please look" })])).toContain("@reader please look");
+  });
+});

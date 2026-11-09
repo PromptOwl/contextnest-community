@@ -11,6 +11,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { toast } from "sonner";
 import { reads } from "../../lib/queries";
+import { isChannelDoc } from "../../lib/channel-docs";
+import { useHidesChannelDocs } from "../../lib/use-hides-channel-docs";
 import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty, childFolders, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
@@ -452,7 +454,13 @@ export function DocumentsTab({
   // drops keys.nodes, so react-query re-reads it — no manual reset.
   const [wantFull, setWantFull] = useState(false);
   const fullQuery = useQuery({ ...reads.nodes(nestId), enabled: wantFull });
-  const fullNodes: any[] | null = wantFull ? (fullQuery.data?.nodes ?? null) : null;
+  // The full listing is shared with wikilink resolution, so it still carries
+  // channel nodes; a document list leaves them out while channels are on.
+  const hideChannels = useHidesChannelDocs(nestId);
+  const fullNodes: any[] | null = useMemo(() => {
+    const all: any[] | null = wantFull ? (fullQuery.data?.nodes ?? null) : null;
+    return all && hideChannels ? all.filter((n) => !isChannelDoc(n)) : all;
+  }, [wantFull, fullQuery.data, hideChannels]);
   const fullLoading = wantFull && fullQuery.isLoading;
   const loadFullNest = useCallback(() => setWantFull(true), []);
 

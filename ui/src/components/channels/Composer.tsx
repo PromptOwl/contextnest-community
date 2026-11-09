@@ -1,14 +1,18 @@
 /**
  * The message box, used for a new post and for a thread reply alike, so the
  * two cannot drift: the same `MentionTextarea` as document comments (markdown
- * toolbar, `@` for people and agents), Enter adds a line as it does there, and
- * the button sends. When the reader may not post, the server's one-line
+ * toolbar, `@` for people and agents) in its chat mode. Enter sends and
+ * Shift+Enter adds a line; while the `@` list is open Enter picks from it; on
+ * a touch device Enter adds a line and the button sends. The hint under the
+ * box says which applies. When the reader may not post, the server's one-line
  * reason stands in its place instead of nothing.
  */
 import { useRef, useState } from "react";
 import { Loader2, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AgentHandle, ChannelSummary } from "../../lib/api";
+import { COARSE_POINTER } from "../../lib/composer-keys";
+import { useMediaQuery } from "../../lib/use-media-query";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 import { MentionTextarea } from "../MentionTextarea";
 
@@ -50,6 +54,7 @@ export function Composer({
   onCancel?: () => void;
 }) {
   const [sending, setSending] = useState(false);
+  const touch = useMediaQuery(COARSE_POINTER);
   const latest = useRef(value);
   latest.current = value;
   const send = async () => {
@@ -80,10 +85,20 @@ export function Composer({
         aria-label={ariaLabel}
         rows={2}
         autoFocus={autoFocus}
+        onEnterSend={() => void send()}
         className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm"
       />
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-        <p className="hidden text-xs text-muted-foreground sm:block">Markdown works. Type @ to mention a person or an agent.</p>
+        <p className="text-xs text-muted-foreground" data-testid="composer-hint">
+          {touch ? (
+            <>Enter adds a line. Tap {sendLabel} to post.</>
+          ) : (
+            <>
+              <kbd className="font-sans font-medium">Enter</kbd> to send, <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new
+              line. Type @ to mention a person or an agent.
+            </>
+          )}
+        </p>
         <div className="ml-auto flex gap-2">
           {onCancel && (
             <Button variant="ghost" size="sm" onClick={onCancel} disabled={sending}>

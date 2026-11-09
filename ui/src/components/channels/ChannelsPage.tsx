@@ -11,7 +11,7 @@
  * owns which channel and thread are open, and each part of the screen is its
  * own component in this folder.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Hash } from "lucide-react";
 import { toast } from "sonner";
 import { BetaBadge } from "@/components/ui/beta-badge";
@@ -23,6 +23,7 @@ import { copyTextWithToast } from "../../lib/clipboard";
 import { ReasonDialog } from "../governance";
 import { NestPageHeader } from "../NestPageHeader";
 import { ChannelHeader } from "./ChannelHeader";
+import { ChannelNavProvider } from "./channel-nav";
 import { ChannelList, ChannelSwitcher, NewChannelButton } from "./ChannelList";
 import { Composer, PostRefusal } from "./Composer";
 import { NewChannelDialog } from "./NewChannelDialog";
@@ -58,6 +59,11 @@ export function ChannelsPage({ nestId, nestName, onBack, channel: selected, thre
   // App hands a new callback each render; effects must not re-run for that.
   const go = useRef(onLocation);
   go.current = onLocation;
+
+  // Links inside messages open documents through the page's own navigation.
+  const openNode = useRef(onOpenNode);
+  openNode.current = onOpenNode;
+  const nav = useMemo(() => ({ nestId, openNode: (nodeId: string) => openNode.current(nodeId) }), [nestId]);
 
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
@@ -151,6 +157,7 @@ export function ChannelsPage({ nestId, nestName, onBack, channel: selected, thre
   const noChannels = !!list.data && list.live.length === 0 && !selected;
 
   return (
+    <ChannelNavProvider value={nav}>
     <div className="px-4 py-4 md:px-6">
       <NestPageHeader nestName={nestName} onBack={onBack} title={<h1 className="text-xl font-semibold">Channels</h1>} badges={<BetaBadge />} />
 
@@ -262,5 +269,6 @@ export function ChannelsPage({ nestId, nestName, onBack, channel: selected, thre
         }}
       />
     </div>
+    </ChannelNavProvider>
   );
 }

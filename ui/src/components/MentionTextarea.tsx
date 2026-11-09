@@ -26,6 +26,10 @@ import remarkGfm from "remark-gfm";
 import { Bold, Bot, Heading, List, ListOrdered } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../auth/AuthContext";
+import { COARSE_POINTER, enterSends } from "../lib/composer-keys";
+import { linkWikilinks, type MessageWikilink } from "../lib/message-wikilinks";
+import { useMediaQuery } from "../lib/use-media-query";
+import type { ArtifactCard } from "../lib/api";
 
 export interface MentionTextareaProps
   extends Omit<
@@ -42,6 +46,13 @@ export interface MentionTextareaProps
   agents?: MentionAgent[];
   /** Comment boxes: a markdown toolbar, and formatted paste kept as markdown. */
   formatting?: boolean;
+  /**
+   * Chat boxes (channels): Enter calls this instead of adding a line.
+   * Shift+Enter still adds one, Enter in the open `@` list still picks, and on
+   * a touch device Enter adds a line (the caller's button sends). Leave unset
+   * for the document comment box, where Enter adds a line.
+   */
+  onEnterSend?: () => void;
 }
 
 /** One row of the `@` list: a person (inserted by address) or an agent
@@ -65,10 +76,11 @@ export const MentionTextarea = forwardRef<
   HTMLTextAreaElement,
   MentionTextareaProps
 >(function MentionTextarea(
-  { value, onValueChange, members, agents, className, onKeyDown, formatting, ...rest },
+  { value, onValueChange, members, agents, className, onKeyDown, formatting, onEnterSend, ...rest },
   forwardedRef,
 ) {
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
+  const coarsePointer = useMediaQuery(COARSE_POINTER);
   const [caret, setCaret] = useState(0);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -245,6 +257,17 @@ export const MentionTextarea = forwardRef<
               return;
             }
           }
+          if (
+            onEnterSend &&
+            enterSends(
+              { key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode },
+              { coarsePointer },
+            )
+          ) {
+            e.preventDefault();
+            onEnterSend();
+            return;
+          }
           onKeyDown?.(e);
         }}
       />
@@ -297,6 +320,9 @@ export function CommentBody({
   body,
   members,
   mentions,
+  cards,
+  onOpenLink,
+  nestId,
   className,
 }: {
   body: string;
@@ -305,13 +331,35 @@ export function CommentBody({
    *  verdict (a person by display name, an agent, or nobody) instead of the
    *  roster's. */
   mentions?: MentionRef[];
+  /** A channel message's artifact cards. When given, each `[[wikilink]]` in
+   *  the text becomes a link titled from its card; without a card it shows
+   *  the id's last segment. Document comments leave this unset. */
+  cards?: ArtifactCard[];
+  /** Open a wikilink in the app. Returning false lets the address load. */
+  onOpenLink?: (link: MessageWikilink) => boolean;
+  /** The nest the message is in, for a link that has only a node id. */
+  nestId?: string;
   className?: string;
 }) {
   const segments = useMemo(
     () => mentionSegments(body, members, mentions),
     [body, members, mentions],
   );
-  const markdown = useMemo(() => mentionsToLinks(segments), [segments]);
+  // Mentions become `#mention-<i>` links (i = the segment), and, for a channel
+  // message, wikilinks in the text runs become `#wikilink-<k>` links.
+  const { markdown, wikilinks } = useMemo(() => {
+    if (!cards) return { markdown: mentionsToLinks(segments), wikilinks: [] as MessageWikilink[] };
+    const found: MessageWikilink[] = [];
+    const text = segments
+      .map((s, i) => {
+        if (s.kind === "mention") return `[${s.text.replace(/[[\]\\]/g, "\\$&")}](#mention-${i})`;
+        const linked = linkWikilinks(s.text, cards, found.length);
+        found.push(...linked.links);
+        return linked.markdown;
+      })
+      .join("");
+    return { markdown: text, wikilinks: found };
+  }, [segments, cards]);
   return (
     // Markdown, like a document. `anywhere`, not `break-word`: it also lowers
     // the min-content width, so a long URL can't widen the panel. Paragraphs
@@ -326,6 +374,37 @@ export function CommentBody({
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) => {
+            const w = /^#wikilink-(\d+)$/.exec(href ?? "")?.[1];
+            const link = w === undefined ? undefined : wikilinks[Number(w)];
+            if (link) {
+              const to =
+                link.href ?? (link.nodeId && nestId ? `/nest/${encodeURIComponent(nestId)}?doc=${encodeURIComponent(link.nodeId)}` : null);
+              if (!link.available || !to) {
+                return (
+                  <span
+                    className="text-muted-foreground"
+                    data-wikilink="text"
+                    title={link.available ? undefined : "Not available to you"}
+                  >
+                    {children}
+                  </span>
+                );
+              }
+              return (
+                <a
+                  href={to}
+                  data-wikilink="link"
+                  className="font-medium text-primary no-underline hover:underline"
+                  onClick={(e) => {
+                    // A plain click opens in the app; a modified one (new tab) is the browser's.
+                    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                    if (onOpenLink?.(link)) e.preventDefault();
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
             const i = /^#mention-(\d+)$/.exec(href ?? "")?.[1];
             const seg = i === undefined ? undefined : segments[Number(i)];
             if (seg?.kind !== "mention") {
@@ -341,12 +420,18 @@ export function CommentBody({
                 className={
                   seg.resolved
                     ? "rounded bg-primary/10 px-0.5 font-medium text-primary"
-                    : "rounded bg-muted px-0.5 text-muted-foreground line-through decoration-dotted"
+                    : ref?.kind === "nobody"
+                      ? // A channel message: the name reached nobody. Muted and
+                        // dotted, not struck through, which reads as deleted.
+                        "text-muted-foreground underline decoration-dotted underline-offset-2"
+                      : "rounded bg-muted px-0.5 text-muted-foreground line-through decoration-dotted"
                 }
                 data-mention={ref?.kind ?? (seg.resolved ? "resolved" : "nobody")}
                 title={
                   !seg.resolved
-                    ? `No member named "${seg.name}" in this nest`
+                    ? ref?.kind === "nobody"
+                      ? "Matched nobody in this nest"
+                      : `No member named "${seg.name}" in this nest`
                     : ref?.kind === "agent"
                       ? ref.wakeable
                         ? "Agent"

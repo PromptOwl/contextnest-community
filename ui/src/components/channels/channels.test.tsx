@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ChannelPost, ChannelSummary } from "../../lib/api";
 import type { TimelineState } from "../../lib/channels";
 import { ChannelHeader } from "./ChannelHeader";
+import { ChannelNavProvider } from "./channel-nav";
 import { ChannelList } from "./ChannelList";
 import { PostRefusal } from "./Composer";
 import { MessageView } from "./MessageView";
@@ -116,7 +117,14 @@ describe("AC-UX-08 mentions, names and times", () => {
     expect(h).not.toContain(">@rita@team.test<");
     expect(h).toContain('data-mention="agent"');
     expect(h).toMatch(/data-mention="nobody"[^>]*>@nosuch<\/span>\./);
-    expect(h).toContain("line-through");
+  });
+
+  it("a name that matched nobody is muted with a dotted underline and says so, not struck through like deleted text", () => {
+    const h = renderToStaticMarkup(
+      <MessageView message={post({ body: "ask @nosuch today", mentions: [{ name: "nosuch", kind: "nobody" }] })} />,
+    );
+    expect(h).toMatch(/<span class="text-muted-foreground underline decoration-dotted underline-offset-2" data-mention="nobody" title="Matched nobody in this nest">@nosuch<\/span>/);
+    expect(h).not.toContain("line-through");
   });
 
   it("shows the display name, not the email, and a relative time with the full time on hover", () => {
@@ -132,6 +140,52 @@ describe("AC-UX-08 mentions, names and times", () => {
     );
     expect(h).toContain(">grok</span>");
     expect(h).toContain("agent, on behalf of Walt Writer");
+  });
+});
+
+describe("wikilinks in a message become links titled from the message's cards (PO-1189)", () => {
+  const launchCard = {
+    link: "[[nodes/launch-plan]]",
+    resolved: true as const,
+    kind: "node" as const,
+    nest_id: "n1",
+    node_id: "nodes/launch-plan",
+    title: "Launch Plan",
+    type: "document",
+    stage: null,
+    status: "published",
+    version: 1,
+    url: "/nest/n1?doc=nodes%2Flaunch-plan",
+  };
+  const inNest = (message: ChannelPost) =>
+    renderToStaticMarkup(
+      <ChannelNavProvider value={{ nestId: "n1", openNode: noop }}>
+        <MessageView message={message} />
+      </ChannelNavProvider>,
+    );
+
+  it("shows the card's title as an in-app link instead of the raw brackets", () => {
+    const h = inNest(post({ body: "see [[nodes/launch-plan]] today", cards: [launchCard] }));
+    expect(h).toMatch(/<a href="\/nest\/n1\?doc=nodes%2Flaunch-plan" data-wikilink="link"[^>]*>Launch Plan<\/a>/);
+    expect(h).not.toContain("[[nodes/launch-plan]]");
+  });
+
+  it("with no card for it, links by id and shows only the id's last segment", () => {
+    const h = inNest(post({ body: "and [[nodes/plans/q4-roadmap]]", cards: [launchCard] }));
+    expect(h).toMatch(/<a href="\/nest\/n1\?doc=nodes%2Fplans%2Fq4-roadmap" data-wikilink="link"[^>]*>q4-roadmap<\/a>/);
+    expect(h).not.toContain("Launch Plan</a>");
+  });
+
+  it("a link the reader cannot open is text with no address and no title", () => {
+    const h = inNest(post({ body: "see [[nodes/secret-plan]]", cards: [{ link: "[[nodes/secret-plan]]", resolved: false }] }));
+    expect(h).toMatch(/<span class="text-muted-foreground" data-wikilink="text" title="Not available to you">secret-plan<\/span>/);
+    expect(h).not.toMatch(/<a [^>]*secret-plan/);
+  });
+
+  it("leaves a wikilink inside code as it was typed", () => {
+    const h = inNest(post({ body: "type `[[nodes/launch-plan]]` to link", cards: [launchCard] }));
+    expect(h).toContain("<code>[[nodes/launch-plan]]</code>");
+    expect(h).not.toContain("data-wikilink");
   });
 });
 

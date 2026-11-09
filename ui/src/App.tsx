@@ -28,7 +28,7 @@ import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
+import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
@@ -36,6 +36,9 @@ import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
 import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
+import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
+import { channelNameOfDoc } from "./lib/channel-docs";
+import { channelForDocument } from "./lib/queries";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
@@ -671,6 +674,46 @@ export default function App() {
     setDeepLinkProbe({ status: "loading" });
   }, [authenticated, loading]);
 
+  // A channel is a node, so search, a wikilink or a card can address it as a
+  // document. While channels are on, a person on the nest gets the channel's
+  // conversation instead (PO-1189). The document view waits for the answer so
+  // the node's page never flashes first; anyone else, and any plain document
+  // filed under channels/, opens as the document it is.
+  const channelDocKey =
+    view.page === "document" && agentStreamEnabled && channelNameOfDoc(view.nodeId)
+      ? `${view.nestId}/${view.nodeId}`
+      : null;
+  const [plainDocKey, setPlainDocKey] = useState<string | null>(null);
+  const channelDocPending = channelDocKey !== null && plainDocKey !== channelDocKey;
+  useEffect(() => {
+    if (!channelDocKey) return;
+    const v = viewRef.current;
+    if (v.page !== "document") return;
+    let cancelled = false;
+    void channelForDocument(v.nestId, v.nodeId).then((channel) => {
+      if (cancelled) return;
+      if (!channel) {
+        setPlainDocKey(channelDocKey);
+        return;
+      }
+      // In place of the document's entry, so Back does not return to an
+      // address that would only send the person here again.
+      replaceNextRef.current = true;
+      setViewNow({
+        page: "channels",
+        nestId: v.nestId,
+        nestName: v.nestName,
+        isOwner: v.isOwner,
+        isAnonOwned: v.isAnonOwned,
+        channel,
+        thread: v.initialThreadId,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [channelDocKey]);
+
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
   // The probe above consumes ?nest / ?doc on load, so we must NOT rewrite the
@@ -756,24 +799,24 @@ export default function App() {
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     const key = historyKey(path, view);
-    const state = window.history.state;
-    const onAppEntry = !!state && typeof state === "object" && "page" in state;
     const forceReplace = replaceNextRef.current;
     replaceNextRef.current = false;
-    if (next !== current) {
-      // `view` rides as the entry's state so the popstate handler below can
-      // restore it without re-deriving it from the URL.
-      if (!forceReplace && historyWriteMode(lastNodeKeyRef.current, key, onAppEntry) === "push") {
-        window.history.pushState(view, "", next);
-      } else {
-        window.history.replaceState(view, "", next);
-      }
-    } else if (view.page === "channels" && !onAppEntry && !(state as any)?.cnLeaveGuard) {
-      // A channel link opened directly already has the right address, so the
-      // entry never got its view. Stamp it: the next channel or thread then
-      // adds its own Back stop, and Back restores this one.
-      window.history.replaceState(view, "", next);
-    }
+    // `view` rides as the entry's state so the popstate handler below can
+    // restore it without re-deriving it from the URL. Which write, and why,
+    // is historyWrite's (lib/view-history.ts): a channel link opened directly
+    // already has the right address, so its entry is stamped with the view;
+    // the next channel or thread then adds a Back stop and Back restores it.
+    const write = historyWrite({
+      next,
+      current,
+      prevKey: lastNodeKeyRef.current,
+      key,
+      state: window.history.state,
+      forceReplace,
+      stampable: view.page === "channels",
+    });
+    if (write === "push") window.history.pushState(view, "", next);
+    else if (write !== "none") window.history.replaceState(view, "", next);
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
 
@@ -960,8 +1003,7 @@ export default function App() {
         // directly (a bookmark, a reload) has no view on its history entry,
         // and the first move away from such an entry reuses it; give it its
         // view so this one adds a Back stop instead.
-        const entry = window.history.state;
-        if (!entry || typeof entry !== "object" || (!("page" in entry) && !("cnLeaveGuard" in entry))) {
+        if (needsViewStamp(window.history.state)) {
           window.history.replaceState(viewRef.current, "", window.location.href);
         }
         void qc
@@ -1807,7 +1849,10 @@ export default function App() {
             }
           />
         )}
-        {view.page === "document" && (() => {
+        {view.page === "document" && channelDocPending && (
+          <div className="py-12 text-center text-muted-foreground">Loading...</div>
+        )}
+        {view.page === "document" && !channelDocPending && (() => {
           // Shared nav helpers to avoid setView shape duplication.
           const doc = view;
           const openDocument = (target: {
@@ -1989,17 +2034,12 @@ export default function App() {
             // Not a guarded navigation (the page holds no unsaved document),
             // and functional so it never writes over a newer view.
             setChannelLocation: (loc: { channel: string | null; thread?: string | null }, opts?: { replace?: boolean }) => {
-              const channel = loc.channel ?? undefined;
-              const thread = (loc.channel && loc.thread) || undefined;
-              const shown = viewRef.current;
               // Nothing to change: leave the "no Back stop" mark unset, or it
               // would apply to whatever navigation came next.
-              if (shown.page !== "channels" || shown.nestId !== v.nestId) return;
-              if (shown.channel === channel && shown.thread === thread) return;
+              const to = nextChannelLocation(viewRef.current, v.nestId, loc);
+              if (!to) return;
               if (opts?.replace) replaceNextRef.current = true;
-              setViewNow((cur) =>
-                cur.page === "channels" && cur.nestId === v.nestId ? { ...cur, channel, thread } : cur,
-              );
+              setViewNow((cur) => (cur.page === "channels" && cur.nestId === v.nestId ? { ...cur, ...to } : cur));
             },
           };
           return (

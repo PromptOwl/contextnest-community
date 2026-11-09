@@ -432,6 +432,7 @@ export default function MyWorkPage() {
                 and the row goes. Newest first; click jumps to the thread. */}
             <MentionRows
               mentions={work.mentions ?? []}
+              viewer={adminStatus?.me ?? null}
               pagination={work.mentions_pagination}
               loading={loadingMentions}
               busyThread={doneThread}

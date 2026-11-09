@@ -2,12 +2,14 @@
  * My Work's Mentions: open threads that @mention you, in channels and on
  * documents (PO-1180). A row opens its thread; "Mark done" (PO-1189) clears
  * the row for you without replying, and it only returns if a later message in
- * that thread mentions you again. People show by display name.
+ * that thread mentions you again. People show by display name, and the
+ * excerpt is one line of plain text (no markdown, no full addresses).
  */
 import { Check, ChevronLeft, ChevronRight, Loader2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { MentionItem, WorkPagination } from "../../lib/api";
 import { relTime } from "../../lib/dates";
+import { plainExcerpt, type NamedPerson } from "../../lib/plain-excerpt";
 
 /** Who mentioned you: the display name, with the agent that wrote it if any. */
 export function mentionAuthor(m: Pick<MentionItem, "author" | "author_name" | "author_label" | "agent">): string {
@@ -18,6 +20,7 @@ export function mentionAuthor(m: Pick<MentionItem, "author" | "author_name" | "a
 
 export function MentionRows({
   mentions,
+  viewer,
   pagination,
   loading,
   busyThread,
@@ -26,6 +29,8 @@ export function MentionRows({
   onPage,
 }: {
   mentions: MentionItem[];
+  /** The signed-in person, so "@their@address" in an excerpt reads as their name. */
+  viewer?: NamedPerson | null;
   pagination?: WorkPagination;
   /** A page of mentions is being fetched. */
   loading: boolean;
@@ -62,7 +67,9 @@ export function MentionRows({
                     {m.for_agent ? ` · for @${m.for_agent}` : ""}
                   </span>
                 </span>
-                <span className="block truncate text-muted-foreground">{m.excerpt}</span>
+                <span className="block truncate text-muted-foreground" data-testid="my-work-mention-excerpt">
+                  {plainExcerpt(m.excerpt, [...(viewer ? [viewer] : []), { email: m.author, name: m.author_name }])}
+                </span>
                 <span className="block text-xs text-muted-foreground sm:hidden">
                   {m.nest_name} · {relTime(m.mentioned_at)}
                 </span>

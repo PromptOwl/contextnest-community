@@ -3,9 +3,10 @@
  * when, and the body rendered as markdown with the same renderer as document
  * comments (`CommentBody`). Mentions take the message's own `mentions` list,
  * so a person reads by display name, an agent handle as an agent, and a name
- * that matched nobody as unresolved.
+ * that matched nobody as unresolved. A `[[wikilink]]` becomes a link titled
+ * from the message's own card for it.
  */
-import { memo, type ReactNode } from "react";
+import { memo, useCallback, type ReactNode } from "react";
 import { Bot } from "lucide-react";
 import type { ChannelMessage } from "../../lib/api";
 import { authorOf } from "../../lib/channels";
@@ -13,6 +14,8 @@ import { formatServerDate, relTime } from "../../lib/dates";
 import { ArtifactCards } from "../ArtifactCards";
 import { initialsOf } from "../AuthorshipChips";
 import { CommentBody } from "../MentionTextarea";
+import type { MessageWikilink } from "../../lib/message-wikilinks";
+import { useChannelNav } from "./channel-nav";
 
 const NO_MEMBERS: never[] = [];
 /** A heading inside a message is emphasis in a conversation, not a page
@@ -23,8 +26,30 @@ const BODY =
 /** The rendered markdown, memoized on the message's own fields: the page
  *  re-renders on every refresh to keep "2m ago" moving, and re-parsing every
  *  body each time would be the cost of that. */
-const MessageBody = memo(function MessageBody({ body, mentions }: Pick<ChannelMessage, "body" | "mentions">) {
-  return <CommentBody body={body} members={NO_MEMBERS} mentions={mentions ?? NO_MEMBERS} className={BODY} />;
+const MessageBody = memo(function MessageBody({ body, mentions, cards }: Pick<ChannelMessage, "body" | "mentions" | "cards">) {
+  const nav = useChannelNav();
+  const nestId = nav?.nestId;
+  const openNode = nav?.openNode;
+  // A wikilink into this nest opens in the app; one into another nest loads its address.
+  const onOpenLink = useCallback(
+    (link: MessageWikilink) => {
+      if (!openNode || !link.nodeId || (link.nestId && link.nestId !== nestId)) return false;
+      openNode(link.nodeId);
+      return true;
+    },
+    [nestId, openNode],
+  );
+  return (
+    <CommentBody
+      body={body}
+      members={NO_MEMBERS}
+      mentions={mentions ?? NO_MEMBERS}
+      cards={cards ?? NO_MEMBERS}
+      nestId={nestId}
+      onOpenLink={onOpenLink}
+      className={BODY}
+    />
+  );
 });
 
 export function MessageView({
@@ -67,7 +92,7 @@ export function MessageView({
             {relTime(message.created_at) || message.created_at}
           </time>
         </div>
-        <MessageBody body={message.body} mentions={message.mentions} />
+        <MessageBody body={message.body} mentions={message.mentions} cards={message.cards} />
         <ArtifactCards cards={message.cards} />
         {children}
       </div>

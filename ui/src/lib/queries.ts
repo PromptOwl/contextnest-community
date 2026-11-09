@@ -14,6 +14,15 @@
 import { QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 import * as api from "./api";
 import { channelPollInterval } from "./channels";
+import { channelRedirectTarget } from "./view-history";
+import {
+  channelNameOfDoc,
+  isChannelDoc,
+  withoutChannelDocs,
+  withoutChannelsInCensus,
+  withoutChannelsInGraph,
+  withoutChannelsInOverview,
+} from "./channel-docs";
 
 /**
  * Query keys, shaped as a hierarchy so invalidation can name either one entry
@@ -57,6 +66,9 @@ export const keys = {
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
   census: (nestId: string) => [...keys.nodes(nestId), "census"] as const,
+  // The nest's channel nodes (PO-1189): what the document surfaces leave out.
+  // Under keys.nodes so creating or archiving a channel re-reads it.
+  channelDocs: (nestId: string) => [...keys.nodes(nestId), "channel-docs"] as const,
   // Experimental document pins (CU-wdqcq02crw). Under keys.nodes so every
   // document write (rename, move, delete) drops the strip with the listing.
   docPins: (nestId: string) => [...keys.nodes(nestId), "pins"] as const,
@@ -513,6 +525,111 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
   }
 }
 
+// ── Channel nodes and the document surfaces (PO-1189) ────────────────────
+// A channel is a node, so every document listing returns it. While channels
+// are on, a person on the nest meets a channel on the Channels page; the
+// listing reads below (one folder level, the nest's metadata, the census, the
+// overview, the graph, search) leave channel nodes out for them. `reads.nodes`
+// (the full listing with bodies) is deliberately untouched: wikilink
+// resolution reads it, and a link to a channel must still resolve.
+
+/** The client the app runs on (set by connectReadCache); null in bare tests. */
+let activeClient: QueryClient | null = null;
+/** /health experimental.agent_stream, as last told by the auth context. */
+let channelsOn = false;
+
+/** Channels were switched on or off. Listings cached under the other setting
+ *  are dropped, so documents and channels do not show in both places. */
+export function setChannelsOn(on: boolean): void {
+  if (on === channelsOn) return;
+  channelsOn = on;
+  void activeClient?.invalidateQueries({ queryKey: keys.nests });
+}
+
+/**
+ * Are this nest's channel nodes kept out of its document surfaces for the
+ * caller? Only while channels are on and the caller is a person added to the
+ * nest: someone who holds just a share on a channel node has no Channels page
+ * and reads the node as the document it is.
+ */
+export async function hidesChannelDocs(nestId: string): Promise<boolean> {
+  if (!channelsOn || !activeClient) return false;
+  try {
+    return (await activeClient.fetchQuery(reads.nest(nestId))).member === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The nest's channel nodes when they are being hidden, else none. */
+async function hiddenChannelDocs(nestId: string): Promise<any[]> {
+  if (!(await hidesChannelDocs(nestId)) || !activeClient) return [];
+  try {
+    return (await activeClient.fetchQuery(reads.channelDocs(nestId))).nodes;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The channel to open when this node is addressed as a document (from search,
+ * a wikilink, a card), or null when it should open as the document it is.
+ */
+export async function channelForDocument(nestId: string, nodeId: string): Promise<string | null> {
+  if (!channelNameOfDoc(nodeId)) return null;
+  const member = await hidesChannelDocs(nestId);
+  if (!member) return null;
+  const isChannel = (await hiddenChannelDocs(nestId)).some((d) => d.id === nodeId);
+  return channelRedirectTarget(nodeId, { streamOn: channelsOn, member, isChannel });
+}
+
+/** A `{ count, nodes }` listing as the document surfaces should show it. */
+export async function asDocumentListing<T extends { nodes: any[]; count?: number }>(nestId: string, listing: T): Promise<T> {
+  if (!listing.nodes.some(isChannelDoc)) return listing;
+  return (await hidesChannelDocs(nestId)) ? withoutChannelDocs(listing) : listing;
+}
+
+/** GET /graph as the Graph view should show it. */
+export async function asDocumentGraph<G extends Parameters<typeof withoutChannelsInGraph>[0]>(nestId: string, graph: G): Promise<G> {
+  return (await hidesChannelDocs(nestId)) ? withoutChannelsInGraph(graph) : graph;
+}
+
+/**
+ * The census without the nest's channel nodes. "Recently edited" is a short
+ * list cut on the server, so when a channel is taken out of it the next most
+ * recent documents are read from the nest's metadata to fill the gap.
+ */
+async function asDocumentCensus(nestId: string, res: { census: api.NestCensus }): Promise<{ census: api.NestCensus }> {
+  const channels = await hiddenChannelDocs(nestId);
+  if (channels.length === 0) return res;
+  const census = withoutChannelsInCensus(res.census, channels);
+  const missing = res.census.recent.length - census.recent.length;
+  if (missing <= 0 || !activeClient) return { ...res, census };
+  try {
+    const have = new Set(census.recent.map((r) => r.id));
+    const { nodes } = await activeClient.fetchQuery(reads.nodesMeta(nestId));
+    const more = (nodes as any[])
+      .filter((n) => !have.has(n.id) && n.updated_at)
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      .slice(0, missing)
+      .map((n) => ({ id: n.id, title: n.title, type: n.type, updated_at: n.updated_at }));
+    const recent = [...census.recent, ...more].sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
+    return { ...res, census: { ...census, recent } };
+  } catch {
+    return { ...res, census };
+  }
+}
+
+/** Cross-nest search hits without the channel nodes of nests the caller is on. */
+async function asDocumentHits<R extends { nodes: api.GlobalSearchHit[]; count: number }>(res: R): Promise<R> {
+  const suspects = res.nodes.filter(isChannelDoc);
+  if (suspects.length === 0) return res;
+  const hidden = new Map<string, boolean>();
+  for (const nestId of new Set(suspects.map((n) => n.nest_id))) hidden.set(nestId, await hidesChannelDocs(nestId));
+  const nodes = res.nodes.filter((n) => !(isChannelDoc(n) && hidden.get(n.nest_id)));
+  return { ...res, nodes, count: Math.max(0, res.count - (res.nodes.length - nodes.length)) };
+}
+
 /**
  * Point the api module's invalidation hooks at this client, so every mutation
  * invalidates the reads it affects without any call site knowing this layer
@@ -520,6 +637,7 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
  * wiring without mounting React.
  */
 export function connectReadCache(qc: QueryClient): void {
+  activeClient = qc;
   api.registerReadCache({
     // Identity change: remove outright rather than mark stale. Permission
     // filtering means the previous user's response is not merely old, it is
@@ -592,7 +710,7 @@ export const reads = {
   folderNodes: (nestId: string, folder: string) =>
     queryOptions({
       queryKey: keys.folderNodes(nestId, folder),
-      queryFn: () => api.listFolderNodes(nestId, folder),
+      queryFn: async () => asDocumentListing(nestId, await api.listFolderNodes(nestId, folder)),
       staleTime: STALE.listing,
     }),
   // Nest-wide, body-free listing (DB index, no vault crawl) — for a dimension
@@ -600,7 +718,7 @@ export const reads = {
   nodesMeta: (nestId: string, approvedOnly = false) =>
     queryOptions({
       queryKey: keys.nodesMeta(nestId, approvedOnly),
-      queryFn: () => api.listNodesMeta(nestId, approvedOnly),
+      queryFn: async () => asDocumentListing(nestId, await api.listNodesMeta(nestId, approvedOnly)),
       staleTime: STALE.listing,
     }),
   // Just the View nodes, for the sidebar. Not reads.nodes: that is a whole-nest
@@ -611,10 +729,17 @@ export const reads = {
       queryFn: () => api.listViewNodes(nestId),
       staleTime: STALE.listing,
     }),
+  // The nest's channel nodes, read raw from their folder (see channel-docs.ts).
+  channelDocs: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.channelDocs(nestId),
+      queryFn: async () => ({ nodes: (await api.listFolderNodes(nestId, "channels")).nodes.filter(isChannelDoc) }),
+      staleTime: STALE.listing,
+    }),
   census: (nestId: string) =>
     queryOptions({
       queryKey: keys.census(nestId),
-      queryFn: () => api.getNestCensus(nestId),
+      queryFn: async () => asDocumentCensus(nestId, await api.getNestCensus(nestId)),
       staleTime: STALE.listing,
     }),
   stewards: (nestId: string) =>
@@ -702,7 +827,10 @@ export const reads = {
   overview: (nestId: string) =>
     queryOptions({
       queryKey: keys.overview(nestId),
-      queryFn: () => api.getOverview(nestId),
+      queryFn: async () => {
+        const overview = await api.getOverview(nestId);
+        return (await hidesChannelDocs(nestId)) ? withoutChannelsInOverview(overview) : overview;
+      },
       staleTime: STALE.listing,
     }),
   /**
@@ -716,7 +844,7 @@ export const reads = {
   globalSearch: (query: string, limit: number) =>
     queryOptions({
       queryKey: keys.globalSearch(query, limit),
-      queryFn: () => api.searchAllNests(query, limit),
+      queryFn: async () => asDocumentHits(await api.searchAllNests(query, limit)),
       staleTime: STALE.listing,
     }),
   // Tag vocabulary — reference data, and the steward picker reopens often.
@@ -729,7 +857,7 @@ export const reads = {
   graph: (nestId: string) =>
     queryOptions({
       queryKey: keys.graph(nestId),
-      queryFn: () => api.getNestGraph(nestId),
+      queryFn: async () => asDocumentGraph(nestId, await api.getNestGraph(nestId)),
       staleTime: STALE.listing,
     }),
   edgeTypes: (nestId: string) =>
