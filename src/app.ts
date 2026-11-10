@@ -582,6 +582,22 @@ async function canApproveInNest(nestId: string, email: string): Promise<boolean>
   return ok;
 }
 
+/**
+ * The review actions on a document that the nest middleware admits at read
+ * tier — POST /nests/:id/nodes/<node id…>/<action> — because a reviewer steward
+ * may hold only read collaborator access. Each handler decides who may act
+ * (canUserApprove, the submitter, canDecideExternalEdit). The external-edit
+ * decisions end in approve/reject too. Adding a name here loosens a route:
+ * its handler must check the caller itself.
+ */
+const STEWARD_NODE_ACTIONS = new Set([
+  "approve",
+  "approve-with-edits",
+  "reject",
+  "submit-review",
+  "cancel-review",
+]);
+
 export function createApp(): Hono<AuthEnv> {
   // LinearRouter, not the default SmartRouter — parity with upstream
   // development (bb96ca8), which hit the same bug class this branch fixed
@@ -3414,20 +3430,34 @@ export function createApp(): Hono<AuthEnv> {
     // trust the handler.
     // The batch approve/reject belongs here for the same reason: it is a
     // wrapper over those per-document decisions and re-checks every item
-    // through them. Exact trailing segment, so a node slug can't reach it.
+    // through them.
+    //
+    // Every exemption in this block names an ACTION, and every such action is
+    // a POST. So each one is matched as a POST on that action's own route
+    // shape — never as a substring of the path, and never for another method.
+    // A node id comes from the document's title and folder: "Approved
+    // Vendors" is `nodes/approved-vendors` and "Comments" is `nodes/comments`,
+    // so a substring match (`path.includes("/approve")`) or a method-blind
+    // suffix match (`/\/comments$/`) left PATCH/DELETE/move on those documents
+    // at "read" — a route whose handler trusts this middleware (PO-1193).
+    const isPost = c.req.method === "POST";
+    // A node action: POST /nests/:id/nodes/<node id…>/<action>.
+    const nodeAction =
+      isPost && parts[1] === "nodes" && parts.length >= 4
+        ? parts[parts.length - 1]
+        : null;
     const isStewardActionPath =
-      path.includes("/approve") ||
-      path.includes("/reject") ||
-      path.includes("/submit-review") ||
-      path.includes("/cancel-review") ||
-      /\/review-queue\/bulk$/.test(path) ||
-      (parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
+      (nodeAction !== null && STEWARD_NODE_ACTIONS.has(nodeAction)) ||
+      (isPost && parts.length === 3 && parts[1] === "review-queue" && parts[2] === "bulk") ||
+      (isPost && parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
     // Confirm/reject a held push (Push Confirmation Gate) is admitted at
     // read-tier so a read-only reviewer steward can decide it; the handler's
     // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
-    // (reject already matches isStewardActionPath's /reject; confirm needs this.)
     const isPushDecisionPath =
-      /\/pending-pushes\/[^/]+\/(confirm|reject)$/.test(path);
+      isPost &&
+      parts.length === 4 &&
+      parts[1] === "pending-pushes" &&
+      (parts[3] === "confirm" || parts[3] === "reject");
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.
@@ -3435,8 +3465,9 @@ export function createApp(): Hono<AuthEnv> {
     //   POST …/annotations                        → create thread
     //   POST …/annotations/:id/{comments,resolve,reopen}
     const isAnnotationAction =
-      /\/annotations$/.test(path) ||
-      /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
+      isPost &&
+      (/\/annotations$/.test(path) ||
+        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path));
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3447,9 +3478,12 @@ export function createApp(): Hono<AuthEnv> {
     // `comments-draft` → path `…/nodes/comments-draft` contains `/comments`.
     // A substring match left `required` at "read", letting a read-only
     // collaborator PATCH/DELETE any node whose slug starts with "comments".
+    // POST only, for the same reason: a document titled "Comments" IS
+    // `…/nodes/comments`, and only a POST there reaches the comment handler.
     const isCommentAction =
-      /\/comments$/.test(path) ||
-      /\/comments\/[^/]+\/resolve$/.test(path);
+      isPost &&
+      (/\/comments$/.test(path) ||
+        /\/comments\/[^/]+\/resolve$/.test(path));
     // Flagging a node for deletion is admitted at read-tier HERE so the
     // handler can answer 404-then-403 in the right order (a caller who can't
     // see the node must not learn it exists). The real gate is the handler's
@@ -3461,8 +3495,9 @@ export function createApp(): Hono<AuthEnv> {
     // admitted at read-tier — you don't need write access to undo your own
     // flag. The handler validates ownership (withdrawnBy === requestedBy).
     const isDeletionRequestAction =
-      /\/request-deletion$/.test(path) ||
-      /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+      isPost &&
+      (/\/request-deletion$/.test(path) ||
+        /\/deletion-requests\/[^/]+\/withdraw$/.test(path));
     // Asking for access is what a viewer does (CU-wdqcq041jn), so the whole
     // /access-requests surface sits at read tier. Approve/deny are refused in
     // the handler for anyone but the owner, a nest admin or the server admin.
