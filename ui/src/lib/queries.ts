@@ -89,6 +89,10 @@ export const keys = {
     [...keys.channels(nestId), "timeline", name] as const,
   channelThread: (nestId: string, name: string, threadId: string) =>
     [...keys.channels(nestId), "thread", name, threadId] as const,
+  // C1 message features (PO-1196): a channel's pins, my saved messages, a search.
+  channelPins: (nestId: string, name: string) => [...keys.channels(nestId), "pins", name] as const,
+  mySaved: () => [...keys.me, "saved"] as const,
+  chatSearch: (nestId: string | null, q: string, channel: string | null) => [...keys.me, "chat-search", nestId ?? "*", q, channel ?? "*"] as const,
   // Agent handles the @ picker offers, and their wake-up targets (owner/admin).
   agentHandles: (nestId: string) => [...keys.nest(nestId), "agent-handles"] as const,
   agentWebhooks: (nestId: string) => [...keys.nest(nestId), "agent-webhooks"] as const,
@@ -272,6 +276,21 @@ const NEST_WRITE_SCOPES: Array<{
   // Mark read is the caller's own mark; the page writes the returned row into
   // the cached list, so nothing needs refetching.
   { match: /^\/channels\/[^/]+\/read$/, affects: () => [] },
+  // A reaction, edit, delete, pin or save on one message (C1): the channel's
+  // timeline and threads are patched in place by the hook; pins and the
+  // saved list are re-read.
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+\/(?:pin)$/,
+    affects: (n) => [[...keys.channels(n), "pins"]],
+  },
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+\/(?:save)$/,
+    affects: () => [keys.mySaved(), keys.myWorkAll()],
+  },
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+(?:\/reactions(?:\/|$)|$)/,
+    affects: () => [],
+  },
   // Create, archive, restore: a channel is a node, so the document listing
   // (the sidebar's Channels folder) changes with the channel list.
   {
@@ -1156,6 +1175,24 @@ export const reads = {
       queryKey: keys.promptowlTeams(),
       queryFn: () => api.listPromptowlTeams(),
       staleTime: STALE.reference,
+    }),
+  channelPins: (nestId: string, name: string) =>
+    queryOptions({
+      queryKey: keys.channelPins(nestId, name),
+      queryFn: () => api.listChannelPins(nestId, name),
+      staleTime: 0,
+    }),
+  mySaved: () =>
+    queryOptions({
+      queryKey: keys.mySaved(),
+      queryFn: () => api.listSavedMessages({ limit: 50 }),
+      staleTime: 0,
+    }),
+  chatSearch: (nestId: string | null, q: string, channel: string | null) =>
+    queryOptions({
+      queryKey: keys.chatSearch(nestId, q, channel),
+      queryFn: () => api.searchChannelMessages(nestId, { q, channel: channel ?? undefined, limit: 20 }),
+      staleTime: 30_000,
     }),
   myMentions: () =>
     queryOptions({

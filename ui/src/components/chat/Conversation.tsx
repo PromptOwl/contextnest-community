@@ -17,8 +17,8 @@ import { buildConversation, newLineAnchor, sortChronological } from "../../lib/c
 import { jumpPill } from "../../lib/chat-layout";
 import { relTime } from "../../lib/dates";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
-import { ChatComposer, PostRefusal } from "./ChatComposer";
-import { MessageRow, messageActions, type MessageAction } from "./MessageRow";
+import { ChatComposer, MENTION_EXTRAS, PostRefusal } from "./ChatComposer";
+import { MessageRow, messageActions, type MessageAction, type MessageRowProps } from "./MessageRow";
 import { EmptyState } from "./States";
 
 export interface ConversationProps {
@@ -57,6 +57,8 @@ export interface ConversationProps {
   extraActions?: (post: ChannelPost) => MessageAction[];
   /** Rendered under a post's body (C1: reactions). */
   renderUnder?: (post: ChannelPost) => ReactNode;
+  /** Per-row state the page owns (C1: editing in place). */
+  rowProps?: (post: ChannelPost) => Partial<MessageRowProps>;
 }
 
 export function Conversation(p: ConversationProps) {
@@ -235,6 +237,7 @@ export function Conversation(p: ConversationProps) {
                   pinnedActions={p.openThread === row.message.id}
                   onOpenThread={() => p.onOpenThread(row.message)}
                   onOpenNode={p.onOpenNode}
+                  {...(p.rowProps?.(row.message) ?? {})}
                   actions={[
                     ...messageActions({
                       canPost: channel.can_post,
@@ -278,6 +281,7 @@ export function Conversation(p: ConversationProps) {
             onSend={p.onPost}
             people={p.people}
             agents={p.agents}
+            extras={MENTION_EXTRAS}
             placeholder={`Message ${channel.title}`}
             ariaLabel={`Message ${channel.title}`}
           />

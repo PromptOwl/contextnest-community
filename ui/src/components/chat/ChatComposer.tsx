@@ -17,6 +17,13 @@ import { useMediaQuery } from "../../lib/use-media-query";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 import { MentionTextarea } from "../MentionTextarea";
 
+/** The picker's last rows in a channel: everyone at once (C1, PO-1196).
+ *  `@here` reaches the same people as `@channel` until presence lands (C2). */
+export const MENTION_EXTRAS = [
+  { name: "channel", detail: "Everyone on this nest" },
+  { name: "here", detail: "Everyone, for now" },
+];
+
 /** Why the reader can't post here (archived channel, archived nest, not a member). */
 export function PostRefusal({ channel, className }: { channel: Pick<ChannelSummary, "post_refusal">; className?: string }) {
   return (
@@ -33,6 +40,7 @@ export function ChatComposer({
   onSend,
   people,
   agents,
+  extras,
   placeholder,
   ariaLabel,
   autoFocus,
@@ -45,6 +53,8 @@ export function ChatComposer({
   onSend: (body: string) => Promise<void>;
   people: MentionMember[];
   agents: AgentHandle[];
+  /** `@channel` and `@here` (C1), offered last in the picker. */
+  extras?: Array<{ name: string; detail: string }>;
   placeholder: string;
   ariaLabel: string;
   autoFocus?: boolean;
@@ -79,6 +89,7 @@ export function ChatComposer({
           formatting
           members={people}
           agents={agents}
+          extras={extras}
           value={value}
           onValueChange={onChange}
           placeholder={placeholder}

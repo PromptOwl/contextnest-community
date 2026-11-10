@@ -3057,7 +3057,9 @@ export async function listAnnotations(nestId: string, nodeId: string) {
 export type PostedMention =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
   | { name: string; kind: "agent"; wake: "sent" | "no_webhook" | "skipped" }
-  | { name: string; kind: "nobody" };
+  | { name: string; kind: "nobody" }
+  /** `@channel` / `@here` (C1, PO-1196): how many people it reached. */
+  | { name: "channel" | "here"; kind: "everyone"; reached: number };
 
 export async function createAnnotation(
   nestId: string,
@@ -3143,7 +3145,18 @@ export interface ChannelSummary {
 export type ChannelMention =
   | { name: string; kind: "person"; display_name: string }
   | { name: string; kind: "agent"; wakeable: boolean }
-  | { name: string; kind: "nobody" };
+  | { name: string; kind: "nobody" }
+  | { name: "channel" | "here"; kind: "everyone" };
+
+/** One emoji on a message and who put it there (C1, PO-1196). */
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  /** The reader is among them. */
+  me: boolean;
+  /** The first ten reactors' labels. */
+  by: string[];
+}
 
 export interface ChannelMessage {
   id: string;
@@ -3159,6 +3172,18 @@ export interface ChannelMessage {
   cards?: ArtifactCard[];
   /** Every `@name` in the body, in order (not in code spans). */
   mentions?: ChannelMention[];
+  // ── C1 (PO-1196): what a person can do to one message ──
+  reactions?: MessageReaction[];
+  pinned?: boolean;
+  /** For the reader only. */
+  saved?: boolean;
+  /** The in-app permalink. */
+  url?: string;
+  edited_at?: string | null;
+  /** A tombstone: body "", no reactions, mentions or cards. */
+  deleted?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: "author" | "moderator" | null;
 }
 
 /** A message from the "what is new" read: which thread it belongs to. */
@@ -3288,6 +3313,8 @@ export interface ChannelPromotion {
 
 /** A top-level post. Its `id` is the THREAD id. */
 export interface ChannelPost extends ChannelMessage {
+  /** The opening message's id: what the message routes take (C1). */
+  message_id?: string;
   status: "open" | "resolved";
   reply_count: number;
   last_reply_at: string | null;
@@ -3365,6 +3392,119 @@ export async function getChannelThread(nestId: string, name: string, threadId: s
 export async function getChannelSince(nestId: string, name: string, since: string) {
   return request<{ channel: ChannelSummary; messages: ChannelNewMessage[]; has_more: boolean; next_since: string }>(
     `${channelPath(nestId, name)}?since=${encodeURIComponent(since)}`,
+  );
+}
+
+// ─── Channel messages (C1, PO-1196): reactions, edit, delete, pins, saved, search ──
+
+const messagePath = (nestId: string, name: string, messageId: string) =>
+  `${channelPath(nestId, name)}/messages/${encodeURIComponent(messageId)}`;
+
+export async function reactToMessage(nestId: string, name: string, messageId: string, emoji: string) {
+  return request<{ message_id: string; reactions: MessageReaction[] }>(`${messagePath(nestId, name, messageId)}/reactions`, {
+    method: "POST",
+    body: JSON.stringify({ emoji }),
+  });
+}
+
+export async function unreactToMessage(nestId: string, name: string, messageId: string, emoji: string) {
+  return request<{ message_id: string; reactions: MessageReaction[] }>(`${messagePath(nestId, name, messageId)}/reactions/${encodeURIComponent(emoji)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function editMessage(nestId: string, name: string, messageId: string, body: string) {
+  return request<{ message: ChannelNewMessage; mentions: PostedMention[] }>(messagePath(nestId, name, messageId), {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function deleteMessage(nestId: string, name: string, messageId: string) {
+  return request<{ message: ChannelNewMessage }>(messagePath(nestId, name, messageId), { method: "DELETE" });
+}
+
+export interface MessageEdit {
+  body: string;
+  replaced_at: string;
+  by: ChannelActor;
+}
+
+export async function getMessageHistory(nestId: string, name: string, messageId: string) {
+  return request<{ message_id: string; edits: MessageEdit[] }>(`${messagePath(nestId, name, messageId)}/history`);
+}
+
+export async function setMessagePinned(nestId: string, name: string, messageId: string, pinned: boolean) {
+  return request<{ message: ChannelNewMessage }>(`${messagePath(nestId, name, messageId)}/pin`, { method: pinned ? "POST" : "DELETE" });
+}
+
+export async function setMessageSaved(nestId: string, name: string, messageId: string, saved: boolean) {
+  return request<{ message: ChannelNewMessage }>(`${messagePath(nestId, name, messageId)}/save`, { method: saved ? "POST" : "DELETE" });
+}
+
+export interface PinnedMessage {
+  message: ChannelNewMessage;
+  pinned_by: string;
+  pinned_by_name: string;
+  pinned_at: string;
+}
+
+export async function listChannelPins(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary; pins: PinnedMessage[] }>(`${channelPath(nestId, name)}/pins`);
+}
+
+export interface SavedItem {
+  type: "saved";
+  nest_id: string;
+  nest_name: string;
+  channel: string;
+  thread_id: string;
+  message: ChannelNewMessage;
+  saved_at: string;
+}
+
+export async function listSavedMessages(opts: { limit?: number; offset?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ saved: SavedItem[]; pagination: ChannelPagination }>(`/me/saved${qs ? `?${qs}` : ""}`);
+}
+
+export interface MessageSearchHit extends ChannelNewMessage {
+  nest_id: string;
+  nest_name: string;
+  channel: string;
+  message_id: string;
+  excerpt: string;
+  highlights: Array<{ start: number; end: number }>;
+}
+
+export interface MessageSearchResult {
+  results: MessageSearchHit[];
+  pagination: { limit: number; offset: number; has_more: boolean };
+  ceiling: number;
+}
+
+export async function searchChannelMessages(
+  nestId: string | null,
+  opts: { q: string; channel?: string; from?: string; before?: string; after?: string; limit?: number; offset?: number },
+) {
+  const q = new URLSearchParams({ q: opts.q });
+  if (opts.channel) q.set("channel", opts.channel);
+  if (opts.from) q.set("from", opts.from);
+  if (opts.before) q.set("before", opts.before);
+  if (opts.after) q.set("after", opts.after);
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const path = nestId ? `/nests/${nestId}/channels/search` : "/me/chat/search";
+  return request<MessageSearchResult>(`${path}?${q.toString()}`);
+}
+
+/** A message by id alone (a permalink without its channel). */
+export async function lookupMessage(nestId: string, messageId: string) {
+  return request<{ channel: ChannelSummary; thread_id: string; reply: boolean; message: ChannelNewMessage }>(
+    `/nests/${nestId}/messages/${encodeURIComponent(messageId)}`,
   );
 }
 

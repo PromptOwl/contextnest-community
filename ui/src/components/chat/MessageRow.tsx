@@ -8,13 +8,14 @@
  * A post also carries its thread summary and its markers (resolved,
  * promoted).
  */
-import { forwardRef, type ReactNode } from "react";
-import { CheckCircle2, CornerUpRight, Lightbulb, Link2, ListChecks, MessageSquare, RotateCcw, type LucideIcon } from "lucide-react";
+import { forwardRef, useState, type ReactNode } from "react";
+import { CheckCircle2, CornerUpRight, Lightbulb, Link2, ListChecks, MessageSquare, Pin, RotateCcw, Trash2, type LucideIcon } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { cn } from "@/lib/utils";
 import type { ChannelMessage, ChannelPost } from "../../lib/api";
 import { authorOf } from "../../lib/channels";
 import { threadSummary, timeLabel } from "../../lib/chat-grouping";
+import { tombstoneLine } from "../../lib/chat-messages";
 import { formatServerDate, relTime } from "../../lib/dates";
 import { ArtifactCards } from "../ArtifactCards";
 import { Avatar, MessageBody } from "./MessageBody";
@@ -47,6 +48,10 @@ export interface MessageRowProps {
   onOpenNode?: (nodeId: string) => void;
   /** Rendered under the body (reactions, cards the caller adds). */
   children?: ReactNode;
+  /** C1: the body is being edited in place. */
+  editing?: boolean;
+  onSaveEdit?: (body: string) => Promise<void>;
+  onCancelEdit?: () => void;
   className?: string;
   testId?: string;
 }
@@ -54,9 +59,10 @@ export interface MessageRowProps {
 const isPost = (m: ChannelMessage | ChannelPost): m is ChannelPost => "status" in m && "reply_count" in m;
 
 export const MessageRow = forwardRef<HTMLDivElement, MessageRowProps>(function MessageRow(
-  { message, first, last, actions = [], pinnedActions, highlight, onOpenThread, threadOpen, onOpenNode, children, className, testId },
+  { message, first, last, actions = [], pinnedActions, highlight, onOpenThread, threadOpen, onOpenNode, children, editing, onSaveEdit, onCancelEdit, className, testId },
   ref,
 ) {
+  const deleted = message.deleted === true;
   const who = authorOf(message);
   const post = isPost(message) ? message : null;
   const resolved = post?.status === "resolved";
@@ -104,9 +110,29 @@ export const MessageRow = forwardRef<HTMLDivElement, MessageRowProps>(function M
           </div>
         )}
         {!first && <span className="sr-only">{`${who.name}, ${full}`}</span>}
-        <MessageBody body={message.body} mentions={message.mentions} cards={message.cards} />
-        <ArtifactCards cards={message.cards} />
-        {children}
+        {deleted ? (
+          <p className="text-sm italic text-muted-foreground" data-testid="tombstone">
+            {tombstoneLine(message)}
+          </p>
+        ) : editing && onSaveEdit ? (
+          <InlineEdit initial={message.body} onSave={onSaveEdit} onCancel={onCancelEdit} />
+        ) : (
+          <>
+            <MessageBody body={message.body} mentions={message.mentions} cards={message.cards} />
+            {message.edited_at && (
+              <span className="text-[11px] text-muted-foreground" title={formatServerDate(message.edited_at) || undefined} data-testid="edited">
+                (edited)
+              </span>
+            )}
+            {message.pinned && (
+              <span className="ml-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground" data-testid="pinned-mark">
+                <Pin className="h-3 w-3" aria-hidden /> Pinned
+              </span>
+            )}
+          </>
+        )}
+        {!deleted && <ArtifactCards cards={message.cards} />}
+        {!deleted && children}
         {post && (resolved || (post.promoted?.length ?? 0) > 0) && (
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
             {resolved && (
@@ -147,7 +173,7 @@ export const MessageRow = forwardRef<HTMLDivElement, MessageRowProps>(function M
         )}
       </div>
 
-      {actions.length > 0 && (
+      {actions.length > 0 && !deleted && !editing && (
         <>
           {/* Wide screens: the toolbar for the message under the pointer or holding focus. */}
           <div
@@ -186,7 +212,55 @@ export const MessageRow = forwardRef<HTMLDivElement, MessageRowProps>(function M
   );
 });
 
+/** Editing a message where it stands: Enter saves, Escape cancels. */
+function InlineEdit({ initial, onSave, onCancel }: { initial: string; onSave: (body: string) => Promise<void>; onCancel?: () => void }) {
+  const [text, setText] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    const body = text.trim();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      await onSave(body);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-0.5" data-testid="message-edit">
+      <textarea
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onCancel?.();
+          } else if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            void save();
+          }
+        }}
+        rows={Math.min(8, Math.max(2, text.split("\n").length))}
+        aria-label="Edit message"
+        className="block w-full resize-y rounded-md border border-input bg-background px-2.5 py-1.5 text-sm leading-5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      />
+      <div className="mt-1.5 flex items-center gap-2 text-xs">
+        <button type="button" onClick={() => void save()} disabled={busy || !text.trim()} className="h-7 rounded-md bg-primary px-2.5 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+          Save
+        </button>
+        <button type="button" onClick={onCancel} className="h-7 rounded-md px-2 font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+          Cancel
+        </button>
+        <span className="text-muted-foreground">Enter saves, Escape cancels.</span>
+      </div>
+    </div>
+  );
+}
+
 /** The standard actions of a post or a reply, in the order the toolbar shows them. */
+export const DELETE_ICON = Trash2;
+
 export function messageActions(input: {
   canPost: boolean;
   canManage: boolean;

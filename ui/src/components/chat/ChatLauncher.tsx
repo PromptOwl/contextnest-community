@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost } from "../../lib/api";
 import { channelThreadLink } from "../../lib/channel-deep-link";
-import { initialChannel, mentionNotice } from "../../lib/channels";
+import { initialChannel } from "../../lib/channels";
 import { launcherPlacement, launcherShown } from "../../lib/chat-layout";
 import { orderByActivity, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
@@ -25,6 +25,7 @@ import { useSidePanel } from "../../lib/side-panel";
 import { ChannelNavProvider } from "./channel-nav";
 import { UnreadBadge } from "./ChatSidebar";
 import { Conversation } from "./Conversation";
+import { noticeMentions, useMessageExtras } from "./MessageExtras";
 import { PromoteDialog } from "./PromoteDialog";
 import { ConversationSkeleton, EmptyState, ErrorState } from "./States";
 import { ThreadPane } from "./ThreadPane";
@@ -139,10 +140,9 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
     return () => window.removeEventListener("keydown", on);
   }, [thread]);
 
-  const notify = (m: Parameters<typeof mentionNotice>[0]) => {
-    const note = mentionNotice(m);
-    if (note) toast.warning(note);
-  };
+  const notify = noticeMentions;
+  const meta = useQuery(reads.nest(p.nestId));
+  const extras = useMessageExtras({ channel, actions, permission: (meta.data as { permission?: string } | undefined)?.permission ?? null });
   const openPost = timeline.state?.posts.find((x) => x.id === thread) ?? data.thread.data?.post ?? null;
   const copyLink = (post: ChannelPost, messageId?: string) =>
     void copyTextWithToast(`${window.location.origin}${channelThreadLink(p.nestId, channel?.name ?? selected ?? "", post.id, messageId)}`, "Link copied");
@@ -248,6 +248,9 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
               onOpenNode={p.onOpenNode}
               onClose={() => setThread(null)}
               rail="folded"
+              extraActions={extras.extraActions}
+              renderUnder={extras.renderUnder}
+              rowProps={extras.rowProps}
             />
           ) : (
             <Conversation
@@ -279,10 +282,14 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
               onLoadMore={() => actions.loadMore().catch(fail("Could not load older posts"))}
               onOpenNode={p.onOpenNode}
               lag={list.lag}
+              extraActions={extras.extraActions}
+              renderUnder={extras.renderUnder}
+              rowProps={extras.rowProps}
             />
           )}
         </div>
       </aside>
+      {extras.dialogs}
       <PromoteDialog
         post={promoting}
         onClose={() => setPromoting(null)}

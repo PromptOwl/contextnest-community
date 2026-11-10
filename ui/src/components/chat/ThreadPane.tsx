@@ -13,8 +13,8 @@ import { buildConversation, dateLabel } from "../../lib/chat-grouping";
 import { parseServerDate } from "../../lib/dates";
 import { threadNodes, type ContextNode } from "../../lib/chat-sidebar";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
-import { ChatComposer, PostRefusal } from "./ChatComposer";
-import { MessageRow, messageActions, type MessageAction } from "./MessageRow";
+import { ChatComposer, MENTION_EXTRAS, PostRefusal } from "./ChatComposer";
+import { MessageRow, messageActions, type MessageAction, type MessageRowProps } from "./MessageRow";
 import { ErrorState, ThreadSkeleton } from "./States";
 import type { ThreadState } from "./useChannels";
 
@@ -106,6 +106,8 @@ export interface ThreadPaneProps {
   extraActions?: (m: ChannelMessage | ChannelPost, isPost: boolean) => MessageAction[];
   /** Rendered under a message's body (C1: reactions). */
   renderUnder?: (m: ChannelMessage | ChannelPost) => ReactNode;
+  /** Per-row state the page owns (C1: editing in place). */
+  rowProps?: (m: ChannelMessage | ChannelPost) => Partial<MessageRowProps>;
   className?: string;
 }
 
@@ -161,6 +163,7 @@ export function ThreadPane(p: ThreadPaneProps) {
               testId="thread-post"
               highlight={p.highlightMessage === post.id || p.highlightMessage === (post as { message_id?: string }).message_id}
               onOpenNode={p.onOpenNode}
+              {...(p.rowProps?.(post) ?? {})}
               actions={[
                 ...messageActions({
                   canPost: p.channel.can_post,
@@ -202,6 +205,7 @@ export function ThreadPane(p: ThreadPaneProps) {
                       testId="chat-reply"
                       highlight={p.highlightMessage === row.message.id}
                       onOpenNode={p.onOpenNode}
+                      {...(p.rowProps?.(row.message) ?? {})}
                       actions={[
                         { id: "link", label: "Copy link", icon: Link2, onSelect: () => p.onCopyLink(post, row.message.id) },
                         ...(p.extraActions?.(row.message, false) ?? []),
@@ -226,6 +230,7 @@ export function ThreadPane(p: ThreadPaneProps) {
             onSend={(body) => p.onReply(post, body)}
             people={p.people}
             agents={p.agents}
+            extras={MENTION_EXTRAS}
             placeholder={resolved ? "Reply (reopens this thread)…" : "Reply…"}
             ariaLabel="Reply"
           />

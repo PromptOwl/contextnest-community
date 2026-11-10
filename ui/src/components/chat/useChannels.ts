@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { keys, reads } from "../../lib/queries";
+import { messageIdOf, reactionToggle } from "../../lib/chat-messages";
 import {
   TIMELINE_MAX,
   TIMELINE_PAGE,
@@ -214,6 +215,38 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
         await qc.invalidateQueries({ queryKey: keys.channelTimeline(nestId, name) });
         return r.channel;
       },
+      // ── C1 (PO-1196): one message ──
+      // Each write returns the message as the server now holds it; the copy
+      // on screen is patched in place (the timeline's post keeps its thread
+      // fields), so nothing is refetched for a reaction.
+      react: async (m: api.ChannelMessage | api.ChannelPost, emoji: string) => {
+        if (!selected) return;
+        const id = messageIdOf(m);
+        const r = await (reactionToggle(m.reactions, emoji) === "add" ? api.reactToMessage : api.unreactToMessage)(nestId, selected, id, emoji);
+        patchEverywhere(qc, timelineKey, threadKey, m.id, { reactions: r.reactions });
+      },
+      edit: async (m: api.ChannelMessage | api.ChannelPost, body: string) => {
+        if (!selected) throw new Error("No channel");
+        const r = await api.editMessage(nestId, selected, messageIdOf(m), body);
+        patchEverywhere(qc, timelineKey, threadKey, m.id, { body: r.message.body, edited_at: r.message.edited_at, mentions: r.message.mentions, cards: r.message.cards });
+        return r.mentions;
+      },
+      remove: async (m: api.ChannelMessage | api.ChannelPost) => {
+        if (!selected) return;
+        const r = await api.deleteMessage(nestId, selected, messageIdOf(m));
+        const t = r.message;
+        patchEverywhere(qc, timelineKey, threadKey, m.id, { body: "", deleted: true, deleted_at: t.deleted_at, deleted_by: t.deleted_by, reactions: [], pinned: false, saved: false, mentions: [], cards: [] });
+      },
+      setPinned: async (m: api.ChannelMessage | api.ChannelPost, pinned: boolean) => {
+        if (!selected) return;
+        const r = await api.setMessagePinned(nestId, selected, messageIdOf(m), pinned);
+        patchEverywhere(qc, timelineKey, threadKey, m.id, { pinned: r.message.pinned });
+      },
+      setSaved: async (m: api.ChannelMessage | api.ChannelPost, saved: boolean) => {
+        if (!selected) return;
+        const r = await api.setMessageSaved(nestId, selected, messageIdOf(m), saved);
+        patchEverywhere(qc, timelineKey, threadKey, m.id, { saved: r.message.saved });
+      },
       /** The next page of older posts. */
       loadMore: async () => {
         const shown = qc.getQueryData<TimelineState>(timelineKey)?.posts.length ?? 0;
@@ -261,6 +294,26 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
     roster,
     actions,
   };
+}
+
+/** One message's new fields, wherever the page holds it: the timeline's
+ *  post, the open thread's post, or one of its replies. */
+function patchEverywhere(
+  qc: ReturnType<typeof useQueryClient>,
+  timelineKey: readonly unknown[],
+  threadKey: readonly unknown[],
+  id: string,
+  patch: Partial<api.ChannelMessage>,
+) {
+  qc.setQueryData<TimelineState>(timelineKey, (t) => (t ? { ...t, posts: t.posts.map((p) => (p.id === id ? { ...p, ...patch } : p)) } : t));
+  qc.setQueryData<ThreadState>(threadKey, (th) =>
+    th
+      ? {
+          post: th.post.id === id ? { ...th.post, ...patch } : th.post,
+          replies: th.replies.map((r) => (r.id === id ? { ...r, ...patch } : r)),
+        }
+      : th,
+  );
 }
 
 const EMPTY_PEOPLE: Array<{ email: string; name: string | null; member?: boolean }> = [];

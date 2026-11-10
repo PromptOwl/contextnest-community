@@ -12,9 +12,9 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../../auth/AuthContext";
-import type { ChannelPost, ChannelSummary, MentionItem } from "../../lib/api";
+import type { ChannelPost, ChannelSummary, MentionItem, MessageSearchHit, PinnedMessage, SavedItem } from "../../lib/api";
 import { channelThreadLink, readChannelDeepLink } from "../../lib/channel-deep-link";
-import { initialChannel, mentionNotice } from "../../lib/channels";
+import { initialChannel } from "../../lib/channels";
 import { paneLayout } from "../../lib/chat-layout";
 import { mentionsForNest, threadNodes, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
@@ -26,6 +26,10 @@ import { ChatSidebar, UnreadBadge } from "./ChatSidebar";
 import { Conversation } from "./Conversation";
 import { NewChannelDialog } from "./NewChannelDialog";
 import { PromoteDialog } from "./PromoteDialog";
+import { noticeMentions, useMessageExtras } from "./MessageExtras";
+import { PinsButton } from "./PinsPanel";
+import { SavedPane } from "./SavedPane";
+import { SearchPane } from "./SearchPane";
 import { ConversationSkeleton, EmptyState, ErrorState, SidebarSkeleton } from "./States";
 import { ContextRail, ThreadPane } from "./ThreadPane";
 import { useChannels } from "./useChannels";
@@ -92,6 +96,13 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   const layout = paneLayout(width);
   const mentionsQuery = useQuery(reads.myMentions());
   const mentions = useMemo(() => mentionsForNest(mentionsQuery.data?.mentions, nestId), [mentionsQuery.data, nestId]);
+  // C1: who may delete whose message, and the saved count for the sidebar.
+  const meta = useQuery(reads.nest(nestId));
+  const permission = (meta.data as { permission?: string } | undefined)?.permission ?? null;
+  const savedQuery = useQuery(reads.mySaved());
+  const extras = useMessageExtras({ channel, actions, permission });
+  // What stands in the conversation's place: nothing, Saved, or a search.
+  const [pane, setPane] = useState<null | { kind: "saved" } | { kind: "search"; q: string }>(null);
 
   // App hands a new callback each render; effects must not re-run for that.
   const go = useRef(onLocation);
@@ -121,8 +132,9 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   useEffect(() => {
     setArrived(openThread && openThread !== clicked.current ? openThread : null);
   }, [selected, openThread]);
-  // A permalink's message (C1): read once from the address.
-  const [message] = useState(() => (typeof window === "undefined" ? null : readChannelDeepLink(window.location.search).message));
+  // A permalink's message (C1): from the address on arrival, from a search
+  // hit or a pin after; scrolled to and flashed in its thread.
+  const [message, setMessage] = useState(() => (typeof window === "undefined" ? null : readChannelDeepLink(window.location.search).message));
 
   // The unread count the channel was opened with, for the "New" line.
   const unreadAtOpen = useRef<{ channel: string; unread: number } | null>(null);
@@ -159,10 +171,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openThread, layout.thread, selected]);
 
-  const notify = (mentions: Parameters<typeof mentionNotice>[0]) => {
-    const note = mentionNotice(mentions);
-    if (note) toast.warning(note);
-  };
+  const notify = noticeMentions;
   const post = async (body: string) => {
     try {
       notify(await actions.post(body));
@@ -207,6 +216,33 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   };
   const copyLink = (p: ChannelPost, messageId?: string) =>
     void copyTextWithToast(`${window.location.origin}${channelThreadLink(nestId, channel?.name ?? selected ?? "", p.id, messageId)}`, "Link copied");
+  const jumpTo = (channelName: string, threadId: string, messageId: string | null) => {
+    setPane(null);
+    clicked.current = null;
+    setMessage(messageId);
+    go.current({ channel: channelName, thread: threadId });
+  };
+  const openPin = (pin: PinnedMessage) => jumpTo(channel?.name ?? selected ?? "", pin.message.thread_id, pin.message.id);
+  const openSaved = (item: SavedItem) => {
+    if (item.nest_id !== nestId) {
+      window.location.assign(item.message.url ?? channelThreadLink(item.nest_id, item.channel, item.thread_id, item.message.id));
+      return;
+    }
+    jumpTo(item.channel, item.thread_id, item.message.id);
+  };
+  const openHit = (hit: MessageSearchHit) => jumpTo(hit.channel, hit.thread_id, hit.message_id);
+  // Escape leaves Saved or a search (the thread pane handles its own).
+  useEffect(() => {
+    if (!pane) return;
+    const on = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.closest("[role=dialog]") || t.closest("[role=menu]") || t.closest("[role=listbox]"))) return;
+      setPane(null);
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [pane]);
   const openMention = (m: MentionItem) => {
     setSidebarSheet(false);
     if (m.kind === "channel" && m.channel) {
@@ -233,6 +269,8 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       onNew={() => setCreating(true)}
       onRestore={(c) => void restore(c)}
       onOpenMention={openMention}
+      saved={{ available: true, count: savedQuery.data?.pagination.total ?? 0, open: pane?.kind === "saved", onOpen: () => setPane({ kind: "saved" }) }}
+      onSearchMessages={(q) => setPane({ kind: "search", q })}
     />
   );
 
@@ -258,13 +296,20 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       onOpenNode={onOpenNode}
       onClose={closeThread}
       highlightMessage={message}
+      extraActions={extras.extraActions}
+      renderUnder={extras.renderUnder}
+      rowProps={extras.rowProps}
       rail={layout.rail}
       leading={layout.thread === "sheet" ? <SheetClose label="Close thread" /> : undefined}
       className={layout.thread === "beside" ? "w-[23rem] shrink-0 border-l" : undefined}
     />
   );
 
-  const conversation = noChannels ? (
+  const conversation = pane?.kind === "saved" ? (
+    <SavedPane onOpen={openSaved} onClose={() => setPane(null)} />
+  ) : pane?.kind === "search" ? (
+    <SearchPane nestId={nestId} query={pane.q} channel={channel?.name ?? null} onOpen={openHit} onClose={() => setPane(null)} />
+  ) : noChannels ? (
     <EmptyState
       icon={Hash}
       title="No channels yet"
@@ -316,6 +361,10 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       onArchive={() => setArchiving(channel)}
       onRestore={() => void restore(channel)}
       lag={list.lag}
+      extraActions={extras.extraActions}
+      renderUnder={extras.renderUnder}
+      rowProps={extras.rowProps}
+      trailing={<PinsButton nestId={nestId} channel={channel.name} onOpen={openPin} />}
       leading={
         layout.sidebar === "sheet" ? (
           <button type="button" onClick={() => setSidebarSheet(true)} aria-label="Channels" title="Channels" data-testid="chat-open-sidebar" className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
@@ -372,6 +421,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
         }}
       />
       <PromoteDialog post={promoting} onClose={() => setPromoting(null)} onPromote={promote} />
+      {extras.dialogs}
       <ReasonDialog
         open={!!archiving}
         onOpenChange={(open) => !open && setArchiving(null)}
