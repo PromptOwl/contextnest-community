@@ -173,6 +173,9 @@ export const keys = {
   me: ["me"] as const,
   unreadNotifications: () => [...keys.me, "notifications", "unread"] as const,
   myWorkAll: () => [...keys.me, "work"] as const,
+  /** My open mentions on their own (the chat sidebar, PO-1200); under
+   *  myWorkAll so a reply or Mark done refreshes it with the rest. */
+  myMentions: () => [...keys.myWorkAll(), "mentions"] as const,
   myWork: (limit?: number, offset?: number, mentionsOffset?: number) =>
     [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
@@ -1153,6 +1156,12 @@ export const reads = {
       queryKey: keys.promptowlTeams(),
       queryFn: () => api.listPromptowlTeams(),
       staleTime: STALE.reference,
+    }),
+  myMentions: () =>
+    queryOptions({
+      queryKey: keys.myMentions(),
+      queryFn: () => api.getMyMentions({ limit: 50 }),
+      staleTime: 0,
     }),
   myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number }) =>
     queryOptions({

@@ -1,5 +1,5 @@
 /**
- * useChannels — the Channels page's one data hook (PO-1189).
+ * useChannels — the chat page's one data hook (PO-1189, PO-1200).
  *
  * Three cached reads and the rule that ties them together:
  *
@@ -240,6 +240,9 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
       retry: () => void list.refetch(),
       /** Changes on every poll, so "2m ago" labels keep moving while visible. */
       refreshedAt: list.dataUpdatedAt,
+      /** The poll has failed since it last succeeded (AC-C3-09): the page
+       *  shows "Reconnecting…" with when it last heard from the server. */
+      lag: { stale: list.isError && !!list.data, lastSuccessAt: list.dataUpdatedAt || null },
     },
     channel,
     timeline: {

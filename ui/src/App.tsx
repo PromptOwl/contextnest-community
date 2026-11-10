@@ -27,6 +27,7 @@ import { ribbonTarget, type RibbonKey } from "./lib/header-ribbon";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
+import { ChatLauncher } from "./components/chat/ChatLauncher";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -558,7 +559,7 @@ export default function App() {
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
     // Channels are gated on a /health flag the same way.
-    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
+    if (loading && ["workflows", "channels", "chat"].includes(nestViewFromLocation() ?? "")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -2006,7 +2007,7 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar && !isDocPage ? "px-8 py-6" : ""}>
+        <div className={withSidebar && !isDocPage && view.page !== "channels" ? "px-8 py-6" : ""}>
         {/* One boundary for every lazily loaded page: the shell (header, rail)
             stays put while a page chunk arrives. */}
         <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -2287,6 +2288,8 @@ export default function App() {
             openDocument: (nodeId: string) =>
               // returnTo: Back, and publishing a draft, come back to this view (the Board).
               setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, returnTo: v }),
+            openDocumentThread: (nodeId: string, threadId: string) =>
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialThreadId: threadId, returnTo: v }),
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
@@ -2328,7 +2331,7 @@ export default function App() {
           block — so the version line held Save and Discard off the bottom of
           the window at full scroll. The build version is a footnote; a write
           action reaching the edge of the screen is not. */}
-      {view.page !== "document" && (
+      {view.page !== "document" && view.page !== "channels" && (
         readerBrand ? (
           <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
@@ -2349,6 +2352,27 @@ export default function App() {
           onOpenSettings={
             isAdmin ? () => setView({ page: "dashboard", tab: "settings" }) : undefined
           }
+        />
+      )}
+      {/* The chat launcher (PO-1200): on every nest page for a member while
+          the switch is on; opens the chat as a slide-over beside Hootie's. */}
+      {(authenticated || authMode === "open") && "nestId" in view && (
+        <ChatLauncher
+          nestId={view.nestId}
+          nestName={view.nestName}
+          onChatPage={view.page === "channels"}
+          onOpenFull={(channel, thread) =>
+            setView({
+              page: "channels",
+              nestId: view.nestId,
+              nestName: view.nestName,
+              isOwner: view.isOwner,
+              isAnonOwned: view.isAnonOwned,
+              channel: channel ?? undefined,
+              thread: thread ?? undefined,
+            })
+          }
+          onOpenNode={(nodeId) => void openNodeFromHootie(view.nestId, nodeId)}
         />
       )}
       {showConnect && "nestId" in view && (

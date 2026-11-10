@@ -4174,6 +4174,14 @@ export async function getMyWork(opts?: { limit?: number; offset?: number; mentio
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 
+/** Only my open mentions (the chat sidebar's section and its badge), one
+ *  cheap read: `GET /me/work?sections=mentions` (PO-1200). */
+export async function getMyMentions(opts?: { limit?: number }) {
+  const q = new URLSearchParams({ sections: "mentions" });
+  if (opts?.limit != null) q.set("limit", String(opts.limit));
+  return request<{ mentions?: MentionItem[]; mentions_pagination?: WorkPagination }>(`/me/work?${q.toString()}`);
+}
+
 /** A document you left unsubmitted (or that came back rejected). */
 export interface MyDraft {
   nest_id: string;
