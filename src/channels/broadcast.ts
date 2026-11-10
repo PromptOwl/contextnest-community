@@ -26,6 +26,10 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { listNestPeople, type NestPerson } from "../nests/people-service.js";
 import { extractMentions } from "../shared/mentions.js";
+import { retryAfterSeconds, tryConsume, type RateLimitConfig } from "../shared/rate-limit.js";
+
+/** `@channel` / `@here` per person: each is a fan-out. */
+export const BROADCAST_LIMIT: RateLimitConfig = { max: 10, windowMs: 10 * 60_000 };
 
 export const BROADCAST_NAMES = new Set(["channel", "here"]);
 
@@ -46,16 +50,37 @@ export function isBroadcastName(name: string): boolean {
   return BROADCAST_NAMES.has(String(name ?? "").trim().toLowerCase());
 }
 
+export interface BroadcastRefusal {
+  status: 400 | 429;
+  error: string;
+  retryAfter?: number;
+}
+
 /**
- * Why a body with `@channel` / `@here` may not be posted in this nest, or
- * null: the roster is too big to broadcast to. Costs nothing for a body
- * without a broadcast name.
+ * Why a body with `@channel` / `@here` may not be posted in this nest by this
+ * person, or null: the roster is too big to broadcast to (400), or they have
+ * broadcast BROADCAST_LIMIT times lately (429; a token is spent on each
+ * attempt that gets this far). Costs nothing for a body without a broadcast
+ * name. Checked BEFORE the message is written, by post and by edit alike.
  */
-export async function broadcastRefusal(nestId: string, body: string): Promise<string | null> {
+export async function broadcastRefusal(nestId: string, body: string, userId: string): Promise<BroadcastRefusal | null> {
   if (broadcastNames(body).length === 0) return null;
   const people = (await listNestPeople(nestId)).filter((p) => p.userId && isMemberSource(p));
-  if (people.length <= BROADCAST_MAX_MEMBERS) return null;
-  return `@channel and @here reach everyone added to the nest, and this nest has more than ${BROADCAST_MAX_MEMBERS} people. Name the people you mean instead.`;
+  if (people.length > BROADCAST_MAX_MEMBERS) {
+    return {
+      status: 400,
+      error: `@channel and @here reach everyone added to the nest, and this nest has more than ${BROADCAST_MAX_MEMBERS} people. Name the people you mean instead.`,
+    };
+  }
+  const key = `chat-broadcast:${userId}`;
+  if (!tryConsume(key, BROADCAST_LIMIT)) {
+    return {
+      status: 429,
+      error: "You have reached everyone with @channel or @here several times just now — wait a while, or name the people you mean.",
+      retryAfter: retryAfterSeconds(key, BROADCAST_LIMIT),
+    };
+  }
+  return null;
 }
 
 /**

@@ -130,7 +130,7 @@ export interface Caller {
   crossNest?: boolean;
 }
 
-export type PostRefusal = { status: 400 | 403 | 409; error: string };
+export type PostRefusal = { status: 400 | 403 | 409 | 429; error: string };
 
 const NOT_A_MEMBER =
   "Posting in a channel is for people added to this nest. Ask the nest's owner to add you as a collaborator.";
@@ -201,8 +201,8 @@ export async function channelPostRefusal(
   const refusal = (await channelAccess({ nestId, userId, userEmail }, node)).post;
   if (refusal) return refusal;
   if (typeof body === "string") {
-    const broadcast = await broadcastRefusal(nestId, body);
-    if (broadcast) return { status: 400, error: broadcast };
+    const broadcast = await broadcastRefusal(nestId, body, userId);
+    if (broadcast) return { status: broadcast.status, error: broadcast.error };
   }
   return null;
 }
@@ -249,7 +249,7 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
             CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
             MAX(t.created_at) AS last_at,
             MAX(c.created_at) AS last_activity_at,
-            CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
+            CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND c.deleted_at IS NULL AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
        FROM annotation_threads t
        JOIN annotation_comments c ON c.thread_id = t.id
        LEFT JOIN stream_marks r

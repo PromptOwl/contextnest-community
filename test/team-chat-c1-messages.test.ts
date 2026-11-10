@@ -737,7 +737,19 @@ describe("AC-C1-09: search a nest's channels", () => {
     expect(top.highlights.length).toBeGreaterThan(0);
     for (const h of top.highlights) expect(top.excerpt.slice(h.start, h.end).toLowerCase()).toMatch(/^(quokka|plan)$/);
     expect(r.data.pagination).toMatchObject({ limit: 20, offset: 0, has_more: false });
-    expect(r.data.ceiling).toBe(1000);
+    expect(r.data.ceiling).toBe(5000);
+    // The same matcher as the document search: accent-insensitive, and the
+    // existing search routes carry the message hits too.
+    const accent = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=quokka%20RELEASE`, undefined, rita.apiKey);
+    expect(accent.data.results.map((x: any) => x.message_id)).toEqual([hits.a.message_id]);
+    const docSearch = await jsonRequest(app, "GET", `/nests/${nestId}/search?q=quokka%20plan`, undefined, rita.apiKey);
+    expect(docSearch.status).toBe(200);
+    expect(docSearch.data.messages.map((x: any) => x.message_id)).toEqual([hits.b.id, hits.a.message_id]);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/search?q=quokka`, undefined, stranger.apiKey)).status).toBeGreaterThanOrEqual(400);
+    const global = await jsonRequest(app, "GET", `/search?q=quokka%20plan`, undefined, rita.apiKey);
+    expect(global.data.messages.map((x: any) => x.message_id)).toEqual([hits.b.id, hits.a.message_id]);
+    const mcpSearch = await callTool(rita.apiKey, "context_search", { query: "quokka plan" });
+    expect(mcpSearch.data.messages.map((x: any) => x.message_id)).toEqual([hits.b.id, hits.a.message_id]);
     // Filters: channel, from, before / after.
     const inGeneral = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=quokka&channel=general`, undefined, rita.apiKey);
     expect(inGeneral.data.results.every((x: any) => x.channel === "general")).toBe(true);
@@ -999,5 +1011,174 @@ describe("AC-C1-15: every message read carries the new fields", () => {
     const mcp = await callTool(rita.apiKey, "context_channel_read", { channel: "fields", thread: t.id });
     for (const k of [...keys, "message_id"]) expect(mcp.data.thread.post, k).toHaveProperty(k);
     for (const k of keys) expect(mcp.data.thread.replies[0], k).toHaveProperty(k);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SEC-C1 — security review findings, pinned
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("SEC-C1: review findings", () => {
+  it("SEC-C1-1 an edit can't smuggle an @channel past the member bound, and a broadcast is rate limited per person", async () => {
+    const big = (await jsonRequest(app, "POST", "/nests", { name: "Big2" }, owner.apiKey)).data.nest.id;
+    await newChannel("general", owner, big);
+    const { getDb } = await import("../src/db/client.js");
+    const { randomUUID } = await import("node:crypto");
+    const db = getDb();
+    for (let i = 0; i < 201; i++) {
+      const id = randomUUID();
+      await db.run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)", [id, `m-${i}-${id.slice(0, 8)}@big2.test`, null, "x"]);
+      await db.run("INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, 'read', ?)", [randomUUID(), big, id, owner.userId]);
+    }
+    const t = await open(owner, "plain post", "nodes/channels/general", {}, big);
+    const r = await edit(owner, t.message_id, "@channel now everyone", {}, "general", big);
+    expect(r.status, JSON.stringify(r.data)).toBe(400);
+    const rows = (await db.get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM comment_mentions WHERE comment_id = ?", [t.message_id])) as any;
+    expect(Number(rows.n)).toBe(0);
+    expect((await timeline(owner, "general", "", big)).data.posts[0].body).toBe("plain post");
+
+    // Per person: past 10 broadcasts in 10 minutes, the next is refused and nothing is written.
+    await resetAuthRateLimit();
+    const node = await newChannel("broadcasts");
+    for (let i = 0; i < 10; i++) expect((await post(alice, `@channel ping ${i}`, node)).status, `post ${i}`).toBe(201);
+    const refused = await post(alice, "@here one more", node);
+    expect(refused.status).toBe(429);
+    expect((await timeline(alice, "broadcasts")).data.pagination.total).toBe(10);
+    // A post without the broadcast still goes through, and so does another person's.
+    expect((await post(alice, "no broadcast", node)).status).toBe(201);
+    expect((await post(rita, "@channel from rita", node)).status).toBe(201);
+    await resetAuthRateLimit();
+  });
+
+  it("SEC-C1-2 pin and save churn is rate limited", async () => {
+    const t = await open(alice, "churn");
+    await resetAuthRateLimit();
+    let status = 0;
+    for (let i = 0; i < 130; i++) {
+      const r =
+        i % 2 === 0
+          ? await jsonRequest(app, "POST", msgRoute("general", t.message_id, "/save"), {}, rita.apiKey)
+          : await jsonRequest(app, "DELETE", msgRoute("general", t.message_id, "/save"), undefined, rita.apiKey);
+      status = r.status;
+      if (status === 429) break;
+    }
+    expect(status).toBe(429);
+    await resetAuthRateLimit();
+  });
+
+  it("SEC-C1-3 LIKE wildcards in a query are literal, and `from` takes a login, not a name", async () => {
+    const node = await newChannel("literal");
+    await open(alice, "a 100% literal_underscore match", node);
+    await open(alice, "nothing special", node);
+    const pct = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=100%25&channel=literal`, undefined, rita.apiKey);
+    expect(pct.status, JSON.stringify(pct.data)).toBe(200);
+    expect(pct.data.results.map((x: any) => x.body)).toEqual(["a 100% literal_underscore match"]);
+    const under = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=l_x&channel=literal`, undefined, rita.apiKey);
+    expect(under.data.results).toEqual([]);
+    const wild = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=%25%25&channel=literal`, undefined, rita.apiKey);
+    expect(wild.data.results).toEqual([]);
+    const back = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=${encodeURIComponent("\\%")}&channel=literal`, undefined, rita.apiKey);
+    expect(back.status).toBe(200);
+    expect(back.data.results).toEqual([]);
+    const byName = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=literal&from=${encodeURIComponent("Alice Example")}`, undefined, rita.apiKey);
+    expect(byName.data.results).toEqual([]);
+  });
+
+  it("SEC-C1-4 a message id from another nest is not found on this nest's routes, and is untouched", async () => {
+    const theirs = await open(stranger, "stranger's message", "nodes/channels/general", {}, otherNestId);
+    const calls: Array<[string, string, any?]> = [
+      ["POST", msgRoute("general", theirs.message_id, "/reactions"), { emoji: "👍" }],
+      ["DELETE", msgRoute("general", theirs.message_id, "/reactions/%F0%9F%91%8D")],
+      ["PATCH", msgRoute("general", theirs.message_id), { body: "rewritten" }],
+      ["DELETE", msgRoute("general", theirs.message_id)],
+      ["GET", msgRoute("general", theirs.message_id, "/history")],
+      ["POST", msgRoute("general", theirs.message_id, "/pin"), {}],
+      ["POST", msgRoute("general", theirs.message_id, "/save"), {}],
+      ["GET", `/nests/${nestId}/messages/${theirs.message_id}`],
+    ];
+    for (const [method, path, body] of calls) {
+      const r = await jsonRequest(app, method, path, body, owner.apiKey);
+      expect(r.status, `${method} ${path}`).toBe(404);
+    }
+    for (const action of ["react", "edit", "delete", "pin", "save"]) {
+      const r = await callTool(owner.apiKey, "context_message", { action, message: theirs.message_id, emoji: "👍", body: "x" });
+      expect(r.isError, action).toBe(true);
+      expect(r.text).not.toContain("stranger's message");
+    }
+    const look = await callTool(owner.apiKey, "context_message_read", { message: theirs.message_id });
+    expect(look.isError).toBe(true);
+    const tl = await timeline(stranger, "general", "", otherNestId);
+    expect(tl.data.posts[0]).toMatchObject({ body: "stranger's message", reactions: [], pinned: false, deleted: false });
+  });
+
+  it("SEC-C1-5 a tombstone's text is gone from the flat thread read, the inbox, My Work excerpts and the lookup", async () => {
+    const t = await open(alice, "@rita the-secret-phrase-42");
+    await edit(alice, t.message_id, "@rita the-secret-phrase-42 v2");
+    await del(alice, t.message_id);
+    const flat = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${GENERAL}/annotations`, undefined, rita.apiKey);
+    expect(flat.status).toBe(200);
+    expect(JSON.stringify(flat.data)).not.toContain("the-secret-phrase-42");
+    const tomb = flat.data.threads.find((x: any) => x.id === t.id).comments[0];
+    expect(tomb).toMatchObject({ body: "", deleted: true });
+    expect(JSON.stringify(await inbox(rita))).not.toContain("the-secret-phrase-42");
+    const { getDb } = await import("../src/db/client.js");
+    expect(((await getDb().get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM message_edits WHERE comment_id = ?", [t.message_id])) as any).n).toBe(0);
+    const mcpHistory = await callTool(rita.apiKey, "context_message_read", { message: t.message_id, history: true });
+    expect(mcpHistory.isError, mcpHistory.text).toBe(false);
+    expect(mcpHistory.data.edits).toEqual([]);
+    expect(JSON.stringify(await work(rita, "?sections=mentions"))).not.toContain("the-secret-phrase-42");
+    const look = await jsonRequest(app, "GET", `/nests/${nestId}/messages/${t.message_id}`, undefined, rita.apiKey);
+    expect(look.status).toBe(200);
+    expect(JSON.stringify(look.data)).not.toContain("the-secret-phrase-42");
+    const mcp = await callTool(rita.apiKey, "context_message_read", { message: t.message_id, history: true });
+    expect(`${mcp.text}${JSON.stringify(mcp.data ?? {})}`).not.toContain("the-secret-phrase-42");
+  });
+
+  it("SEC-C1-6 a key label is not an agent on either side of the author rule", async () => {
+    const grokKey = await mintKey(alice, "grok");
+    const t = await open({ apiKey: grokKey }, "posted with a key labelled grok, declaring nothing");
+    // Declaring grok later does not make the message grok's.
+    expect((await edit(alice, t.message_id, "grok claims it", { client: { agent: "grok" } })).status).toBe(403);
+    // The person, acting as nobody, may; so may the same key with nothing declared.
+    expect((await edit({ apiKey: grokKey }, t.message_id, "fixed by the key")).status).toBe(200);
+    expect((await edit(alice, t.message_id, "fixed by alice")).status).toBe(200);
+  });
+
+  it("SEC-C1-7 reactions per message are capped, and a refused caller pays for no lookup", async () => {
+    const t = await open(alice, "capped");
+    await resetAuthRateLimit();
+    const emojis = ["😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙", "🥲"];
+    for (let i = 0; i < 20; i++) expect((await react(rita, t.message_id, emojis[i])).status, emojis[i]).toBe(200);
+    const over = await react(rita, t.message_id, emojis[20]);
+    expect(over.status).toBe(400);
+    expect(String(over.data.error)).toMatch(/20/);
+    // The same emoji again is still fine (idempotent), and removing one frees a slot.
+    expect((await react(rita, t.message_id, emojis[0])).status).toBe(200);
+    expect((await unreact(rita, t.message_id, emojis[0])).status).toBe(200);
+    expect((await react(rita, t.message_id, emojis[20])).status).toBe(200);
+    await resetAuthRateLimit();
+  });
+
+  it("SEC-C1-8 a name an edit adds is open for that person even if they touched the thread before", async () => {
+    const t = await open(alice, "an old post");
+    await reply(rita, t.id, "rita was here", GENERAL);
+    await tick();
+    expect((await edit(alice, t.message_id, "an old post, now @rita")).status).toBe(200);
+    expect(mentionMessages(await work(rita, "?sections=mentions"))).toContain(t.message_id);
+    // A name that was already there keeps its time: marking it done sticks across an unrelated edit.
+    const u = await open(alice, "@rita please");
+    expect((await jsonRequest(app, "POST", `/me/work/mentions/${u.id}/done`, {}, rita.apiKey)).status).toBe(200);
+    await tick();
+    expect((await edit(alice, u.message_id, "@rita please, with a typo fixed")).status).toBe(200);
+    expect(mentionMessages(await work(rita, "?sections=mentions"))).not.toContain(u.message_id);
+  });
+
+  it("SEC-C1-9 before/after accept only a readable channel message id, and a search with an unknown id is refused", async () => {
+    const doc = await post(owner, "a document comment id", "nodes/launch-plan");
+    const r = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=quokka&after=${doc.data.comment_id}`, undefined, rita.apiKey);
+    expect(r.status).toBe(400);
+    const unknown = await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=quokka&after=00000000-0000-4000-8000-000000000001`, undefined, rita.apiKey);
+    expect(unknown.status).toBe(400);
+    expect(unknown.data).toEqual(r.data);
   });
 });

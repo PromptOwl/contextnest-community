@@ -150,7 +150,8 @@ export async function runMessageTool(toolName: string, args: Record<string, any>
       const data: MessageLookup & { edits?: MessageHistory["edits"] } = { ...look };
       let text = messageLine(look.message, look.channel.name);
       if (args.history === true) {
-        const h = await messageHistory(caller, null, args.message);
+        // A tombstone has no history to serve: `edits: []`, not a refusal.
+        const h = look.message.deleted ? { edits: [] } : await messageHistory(caller, null, args.message);
         data.edits = h.edits;
         text += h.edits.length
           ? `\n\nEarlier versions (newest first):\n${h.edits.map((e) => `- ${e.replaced_at} by ${e.by.label}: ${e.body}`).join("\n")}`

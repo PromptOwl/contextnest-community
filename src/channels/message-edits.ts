@@ -28,16 +28,17 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { newMentions } from "../shared/mentions.js";
 import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import type { ActorLabel } from "./actor-label.js";
-import { indexBroadcast } from "./broadcast.js";
+import { broadcastRefusal, indexBroadcast } from "./broadcast.js";
 import type { ChannelNewMessage } from "./channel-service.js";
 import {
   EDIT_LIMIT,
+  RateLimitedError,
   assertMayAct,
   assertNotDeleted,
   isAuthor,
   isModerator,
   locateMessage,
-  takeOrRefuse,
+  memberOrRefuse,
   viewOf,
   type ActingCaller,
 } from "./message-access.js";
@@ -65,17 +66,26 @@ export async function editMessage(
   if (typeof rawBody !== "string" || !rawBody.trim()) throw new ValidationError("body is required — the new text of the message.");
   const body = rawBody.trim();
   if (body.length > MAX_MESSAGE_LENGTH) throw new ValidationError(`body is at most ${MAX_MESSAGE_LENGTH} characters.`);
+  await memberOrRefuse(caller, `chat-edit:${caller.userId}`, EDIT_LIMIT, "edits");
   const located = await locateMessage(caller, channel, rawId);
   await assertMayAct(caller, located);
   assertNotDeleted(located);
   if (!isAuthor(caller, located.row)) throw new ForbiddenError(NOT_YOURS);
-  takeOrRefuse(`chat-edit:${caller.userId}`, EDIT_LIMIT, "edits");
+  // An `@channel` added by an edit is bounded exactly as in a post.
+  const broadcast = await broadcastRefusal(caller.nestId, body, caller.userId);
+  if (broadcast) throw broadcast.status === 429 ? new RateLimitedError(broadcast.error, broadcast.retryAfter ?? 60) : new ValidationError(broadcast.error);
 
   const { nestId } = caller;
   const nodeId = located.node.id;
   const previous = located.row.body;
   const db = getDb();
-  if (previous !== body) {
+  const added = newMentions(previous, body);
+  if (previous === body) {
+    // Nothing to change: no history row, no re-index, no fan-out.
+    const message = await viewOf(caller, located);
+    return { message, mentions: await outcomes(caller, nodeId, body, [], 0, new Map()) };
+  }
+  {
     await db.transaction(async (tx) => {
       await tx.run(
         `INSERT INTO message_edits (id, nest_id, comment_id, body, edited_by, client_json, replaced_at)
@@ -86,11 +96,22 @@ export async function editMessage(
     });
   }
 
-  // Re-index who it names from the new text. The rows keep the message's own
-  // time, so an earlier "mark done" still covers a name that was there.
-  const added = newMentions(previous, body);
+  // Re-index who it names from the new text. A name that was already there
+  // keeps the message's own time, so an earlier "mark done" or reply still
+  // covers it; a name the edit ADDED is stamped with the edit's time, so it
+  // is open for that person now.
+  const stamp = (await db.get("SELECT edited_at FROM annotation_comments WHERE id = ?", [located.row.id])) as { edited_at: string } | undefined;
+  const addedSet = new Set(added.map((n) => n.toLowerCase()));
   await db.run("DELETE FROM comment_mentions WHERE comment_id = ?", [located.row.id]);
-  await indexCommentMentions({ nestId, nodeId, threadId: located.row.thread_id, commentId: located.row.id, body, authorEmail: caller.userEmail });
+  await indexCommentMentions({
+    nestId,
+    nodeId,
+    threadId: located.row.thread_id,
+    commentId: located.row.id,
+    body,
+    authorEmail: caller.userEmail,
+    at: (name) => (addedSet.has(name.toLowerCase()) && stamp?.edited_at ? stamp.edited_at : undefined),
+  });
   const reached = await indexBroadcast({ nestId, nodeId, threadId: located.row.thread_id, commentId: located.row.id, body, authorEmail: caller.userEmail });
   if (added.length) {
     await notifyComment({ nestId, nodeId, body, actorEmail: caller.userEmail, baseUrl, channel: true, onlyNames: added });
@@ -164,22 +185,27 @@ export interface DeletedMessage {
 }
 
 export async function deleteMessage(caller: ActingCaller, channel: unknown | null, rawId: unknown): Promise<DeletedMessage> {
+  await memberOrRefuse(caller, `chat-edit:${caller.userId}`, EDIT_LIMIT, "deletions");
   const located = await locateMessage(caller, channel, rawId);
   await assertMayAct(caller, located);
   if (located.row.deleted_at) throw new ConflictError("This message was already deleted.");
   const author = isAuthor(caller, located.row);
   const moderator = !author && (await isModerator(caller));
   if (!author && !moderator) throw new ForbiddenError("Only the person who wrote a message, or a nest owner or admin, can delete it.");
-  takeOrRefuse(`chat-edit:${caller.userId}`, EDIT_LIMIT, "deletions");
   const db = getDb();
   await db.transaction(async (tx) => {
     await tx.run(
       `UPDATE annotation_comments SET body = '', deleted_at = ${nowMsExpr(db)}, deleted_by = ?, deleted_reason = ? WHERE id = ?`,
       [caller.userEmail, moderator ? "moderation" : "author", located.row.id],
     );
-    for (const table of ["comment_mentions", "message_reactions", "message_pins", "saved_messages"]) {
-      await tx.run(`DELETE FROM ${table} WHERE comment_id = ?`, [located.row.id]);
-    }
+    await tx.run("DELETE FROM comment_mentions WHERE comment_id = ?", [located.row.id]);
+    await tx.run("DELETE FROM message_reactions WHERE comment_id = ?", [located.row.id]);
+    // Its pins and saves (node_pins, migration 088), and its earlier texts.
+    await tx.run("DELETE FROM node_pins WHERE message_id = ?", [located.row.id]);
+    await tx.run("DELETE FROM message_edits WHERE comment_id = ?", [located.row.id]);
+    // The inbox rows its @mentions raised name the thread, never the text
+    // (mention-notify.ts; the excerpt goes only into email and connector
+    // deliveries, which are already sent).
   });
   const row = (await db.get(
     "SELECT deleted_at, deleted_by, deleted_reason FROM annotation_comments WHERE id = ?",

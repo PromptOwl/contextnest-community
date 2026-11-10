@@ -38,7 +38,8 @@ import {
   type ChannelView,
   type CommentRow,
 } from "./channel-service.js";
-import { normHandle, writerHandlesOf } from "./message-meta.js";
+import { deserializeClient } from "../shared/client-metadata.js";
+import { normHandle } from "./message-meta.js";
 
 const NOT_FOUND = "Message not found";
 
@@ -58,9 +59,20 @@ export function takeOrRefuse(key: string, cfg: RateLimitConfig, what: string): v
   throw new RateLimitedError(`Too many ${what} — wait a moment and try again.`, retryAfterSeconds(key, cfg));
 }
 
+/** The limiter first, after only the membership check (one cached access
+ *  read), so a refused caller never pays for the message lookup. A
+ *  non-member is NotFound before any token is spent. */
+export async function memberOrRefuse(caller: Caller, key: string, cfg: RateLimitConfig, what: string): Promise<void> {
+  if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError(NOT_FOUND);
+  takeOrRefuse(key, cfg, what);
+}
+
 export const REACTION_LIMIT: RateLimitConfig = { max: 60, windowMs: 60_000 };
 export const EDIT_LIMIT: RateLimitConfig = { max: 30, windowMs: 60_000 };
 export const SEARCH_LIMIT: RateLimitConfig = { max: 60, windowMs: 60_000 };
+/** Pin, unpin, save, unsave: cheap rows, so a generous limit on churn. */
+export const MARK_LIMIT: RateLimitConfig = { max: 120, windowMs: 60_000 };
+
 
 export type ActingCaller = Caller & { client?: ClientMetadata };
 
@@ -170,7 +182,9 @@ export function isAuthor(caller: ActingCaller, row: CommentRow): boolean {
   if (row.author.toLowerCase() !== caller.userEmail.toLowerCase()) return false;
   const agent = actingAs(caller.client);
   if (!agent) return true;
-  return writerHandlesOf(row.client_json).includes(agent);
+  // The message's DECLARED agent only (never its key label: a bare label is
+  // not an agent on either side).
+  return normHandle(deserializeClient(row.client_json)?.agent) === agent;
 }
 
 /** A nest owner or admin: may delete anyone's message (moderation). */

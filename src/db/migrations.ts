@@ -2600,22 +2600,48 @@ export function runMigrations(db: Database.Database): void {
   }
 
   // 088: what a person or an agent can do to ONE channel message (PO-1196,
-  //   team chat harness C1). Four small tables keyed on the message
-  //   (annotation_comments.id) and four nullable columns on the message row:
+  //   team chat harness C1). Built on what exists:
+  //     node_pins (071) gains `message_id` and `thread_id`: a channel's pinned
+  //       messages are editorial pins (scope 'nest') on the channel node with
+  //       the message set, and a person's saved messages are their personal
+  //       pins (scope 'user') the same way — so the existing pin cascades
+  //       (nest deleted, account removed, person leaves the nest) cover them.
+  //       The two per-scope unique indexes now exclude message rows, which
+  //       get their own.
+  //     annotation_comments gains four nullable columns: `edited_at`, and the
+  //       tombstone `deleted_at` / `deleted_by` (the login) / `deleted_reason`
+  //       ('author' or 'moderation'). A deleted message keeps its row with a
+  //       blank body, so the thread, its replies and the message's place in
+  //       the timeline are kept.
+  //   Two tables where nothing existed:
   //     message_reactions  one row per (message, emoji, person); `client_json`
   //                        keeps the agent that reacted, as a message row does.
-  //     message_edits      the body each edit REPLACED, so earlier texts can be
-  //                        read back by members; the live body stays on the
-  //                        message row, which gains `edited_at`.
-  //     message_pins       one row per pinned message, per nest (a channel's
-  //                        pins are the rows for its node).
-  //     saved_messages     a person's own "saved for later" rows.
-  //   A deleted message is a TOMBSTONE, not a removed row: `deleted_at`,
-  //   `deleted_by` (the login that deleted it) and `deleted_reason` ('author'
-  //   or 'moderation') are set and the body is blanked, so the thread, its
-  //   replies and the message's place in the timeline are kept. Rows go with
-  //   their message, thread or nest (ON DELETE CASCADE). Nothing to backfill.
+  //     message_edits      the body each edit REPLACED (comments have no
+  //                        version chain; node_versions is for nodes), so
+  //                        earlier texts can be read back by members.
+  //   Rows go with their message, thread or nest (ON DELETE CASCADE). Nothing
+  //   to backfill.
   if (!hasMigration("088_channel_message_actions")) {
+    const pinCols = (
+      db.prepare("PRAGMA table_info(node_pins)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (pinCols.length) {
+      if (!pinCols.includes("message_id")) db.exec("ALTER TABLE node_pins ADD COLUMN message_id TEXT");
+      if (!pinCols.includes("thread_id")) db.exec("ALTER TABLE node_pins ADD COLUMN thread_id TEXT");
+      db.exec(`
+        DROP INDEX IF EXISTS idx_node_pins_editorial;
+        DROP INDEX IF EXISTS idx_node_pins_personal;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+          ON node_pins(nest_id, node_id) WHERE scope = 'nest' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+          ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_editorial
+          ON node_pins(nest_id, message_id) WHERE scope = 'nest' AND message_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_personal
+          ON node_pins(nest_id, message_id, user_id) WHERE scope = 'user' AND message_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_node_pins_message ON node_pins(message_id) WHERE message_id IS NOT NULL;
+      `);
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS message_reactions (
         nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -2640,26 +2666,6 @@ export function runMigrations(db: Database.Database): void {
         replaced_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
-      CREATE TABLE IF NOT EXISTS message_pins (
-        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-        node_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
-        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
-        pinned_by TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (nest_id, comment_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_message_pins_node ON message_pins(nest_id, node_id, created_at);
-      CREATE TABLE IF NOT EXISTS saved_messages (
-        user_id TEXT NOT NULL,
-        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-        node_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
-        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (user_id, comment_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_saved_messages_user ON saved_messages(user_id, created_at);
     `);
     const cols = (
       db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>

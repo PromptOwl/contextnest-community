@@ -14,7 +14,7 @@ import { getDb } from "../db/client.js";
 import { nowMsExpr } from "../db/sql.js";
 import { serializeClient } from "../shared/client-metadata.js";
 import { ValidationError } from "../shared/errors.js";
-import { REACTION_LIMIT, assertMayAct, assertNotDeleted, locateMessage, takeOrRefuse, type ActingCaller } from "./message-access.js";
+import { REACTION_LIMIT, assertMayAct, assertNotDeleted, locateMessage, memberOrRefuse, type ActingCaller } from "./message-access.js";
 import { reactionsFor, type ReactionView } from "./message-extras.js";
 
 /** Shortcodes a client (or an agent) may send instead of the character. */
@@ -73,6 +73,11 @@ export function parseEmoji(raw: unknown): string {
   throw new ValidationError("emoji must be one emoji, or a shortcode such as :+1:.");
 }
 
+/** Most distinct emojis one person may put on one message, and most on a
+ *  message altogether: a reaction strip, not a keyboard. */
+export const MAX_REACTIONS_PER_PERSON = 20;
+export const MAX_REACTIONS_PER_MESSAGE = 200;
+
 export interface ReactionResult {
   message_id: string;
   reactions: ReactionView[];
@@ -85,11 +90,26 @@ async function after(caller: ActingCaller, messageId: string): Promise<ReactionR
 /** Add the caller's reaction (idempotent). */
 export async function addReaction(caller: ActingCaller, channel: unknown | null, rawId: unknown, rawEmoji: unknown): Promise<ReactionResult> {
   const emoji = parseEmoji(rawEmoji);
+  await memberOrRefuse(caller, `chat-react:${caller.userId}`, REACTION_LIMIT, "reactions");
   const located = await locateMessage(caller, channel, rawId);
   await assertMayAct(caller, located);
   assertNotDeleted(located);
-  takeOrRefuse(`chat-react:${caller.userId}`, REACTION_LIMIT, "reactions");
   const db = getDb();
+  const counts = (await db.get(
+    `SELECT CAST(COUNT(*) AS INTEGER) AS total,
+            CAST(SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) AS INTEGER) AS mine,
+            CAST(SUM(CASE WHEN user_id = ? AND emoji = ? THEN 1 ELSE 0 END) AS INTEGER) AS same
+       FROM message_reactions WHERE comment_id = ?`,
+    [caller.userId, caller.userId, emoji, located.row.id],
+  )) as { total: number | string; mine: number | string | null; same: number | string | null };
+  if (!Number(counts.same)) {
+    if (Number(counts.mine) >= MAX_REACTIONS_PER_PERSON) {
+      throw new ValidationError(`You have reacted to this message with ${MAX_REACTIONS_PER_PERSON} different emojis already — remove one first.`);
+    }
+    if (Number(counts.total) >= MAX_REACTIONS_PER_MESSAGE) {
+      throw new ValidationError(`This message has ${MAX_REACTIONS_PER_MESSAGE} reactions already.`);
+    }
+  }
   await db.run(
     `INSERT INTO message_reactions (nest_id, node_id, thread_id, comment_id, emoji, user_id, author, client_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${nowMsExpr(db)})
@@ -102,9 +122,9 @@ export async function addReaction(caller: ActingCaller, channel: unknown | null,
 /** Remove the caller's reaction (a no-op when there is none). */
 export async function removeReaction(caller: ActingCaller, channel: unknown | null, rawId: unknown, rawEmoji: unknown): Promise<ReactionResult> {
   const emoji = parseEmoji(rawEmoji);
+  await memberOrRefuse(caller, `chat-react:${caller.userId}`, REACTION_LIMIT, "reactions");
   const located = await locateMessage(caller, channel, rawId);
   await assertMayAct(caller, located);
-  takeOrRefuse(`chat-react:${caller.userId}`, REACTION_LIMIT, "reactions");
   await getDb().run("DELETE FROM message_reactions WHERE comment_id = ? AND emoji = ? AND user_id = ?", [located.row.id, emoji, caller.userId]);
   return after(caller, located.row.id);
 }

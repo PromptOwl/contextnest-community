@@ -1,7 +1,13 @@
 /**
  * Saved messages — a person's own "later" list across nests (PO-1196, team
- * chat C1). Saving needs only to be able to read the message (a member of
- * the nest; an archived channel is fine); the list is private to the saver.
+ * chat C1) — are their PERSONAL pins (node_pins, scope 'user', src/nodes/
+ * doc-pins.ts) with `message_id` set: the bookmark store that already exists,
+ * so leaving a nest, being removed from it or deleting the account clears
+ * them along with the document pins (dropPersonalPinsIfGone and the
+ * account-removal cascade), and the document pin lists leave them out.
+ *
+ * Saving needs only to be able to read the message (a member of the nest; an
+ * archived channel is fine); the list is private to the saver.
  *
  * `GET /me/saved`, the `saved` section of My Work and `context_my_work` all
  * come from `listSaved`: one query over the saver's rows in the nests they
@@ -9,9 +15,11 @@
  * read time — a nest or channel the person can no longer read takes its rows
  * out of the list and the count at once, as the Mentions section does.
  */
+import { randomUUID } from "node:crypto";
 import { getDb } from "../db/client.js";
 import { nowMsExpr } from "../db/sql.js";
 import { canOpenNode } from "../governance/mention-notify.js";
+import { isUniqueViolation } from "../governance/stewardship-service.js";
 import { channelNameOf } from "./channel-node.js";
 import {
   MESSAGE_COLUMNS,
@@ -21,7 +29,7 @@ import {
   type ChannelNewMessage,
   type CommentRow,
 } from "./channel-service.js";
-import { assertNotDeleted, locateMessage, viewOf, type ActingCaller } from "./message-access.js";
+import { MARK_LIMIT, assertNotDeleted, locateMessage, memberOrRefuse, viewOf, type ActingCaller } from "./message-access.js";
 
 /** Default and largest page of saved items. */
 export const SAVED_PAGE_DEFAULT = 50;
@@ -46,21 +54,31 @@ export interface SavedList {
 }
 
 export async function saveMessage(caller: ActingCaller, channel: unknown | null, rawId: unknown): Promise<{ message: ChannelNewMessage }> {
+  await memberOrRefuse(caller, `chat-mark:${caller.userId}`, MARK_LIMIT, "pins and saves");
   const located = await locateMessage(caller, channel, rawId);
   assertNotDeleted(located);
   const db = getDb();
-  await db.run(
-    `INSERT INTO saved_messages (user_id, nest_id, node_id, thread_id, comment_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ${nowMsExpr(db)})
-     ON CONFLICT (user_id, comment_id) DO NOTHING`,
-    [caller.userId, caller.nestId, located.node.id, located.row.thread_id, located.row.id],
-  );
+  try {
+    await db.run(
+      `INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position, pinned_by, created_at, message_id, thread_id)
+       VALUES (?, ?, ?, 'user', ?, 0, ?, ${nowMsExpr(db)}, ?, ?)`,
+      [randomUUID(), caller.nestId, located.node.id, caller.userId, caller.userEmail, located.row.id, located.row.thread_id],
+    );
+  } catch (err) {
+    // Already saved: that is what the caller asked for.
+    if (!isUniqueViolation(err)) throw err;
+  }
   return { message: await viewOf(caller, located) };
 }
 
 export async function unsaveMessage(caller: ActingCaller, channel: unknown | null, rawId: unknown): Promise<{ message: ChannelNewMessage }> {
+  await memberOrRefuse(caller, `chat-mark:${caller.userId}`, MARK_LIMIT, "pins and saves");
   const located = await locateMessage(caller, channel, rawId);
-  await getDb().run("DELETE FROM saved_messages WHERE user_id = ? AND comment_id = ?", [caller.userId, located.row.id]);
+  await getDb().run("DELETE FROM node_pins WHERE nest_id = ? AND message_id = ? AND scope = 'user' AND user_id = ?", [
+    caller.nestId,
+    located.row.id,
+    caller.userId,
+  ]);
   return { message: await viewOf(caller, located) };
 }
 
@@ -91,11 +109,12 @@ export async function listSaved(params: {
   const empty: SavedList = { saved: [], pagination: { total: 0, limit, offset, has_more: false } };
   if (nestIds.length === 0 || !userId) return empty;
   const rows = (await getDb().all(
-    `SELECT ${MESSAGE_COLUMNS}, s.nest_id, s.node_id, s.created_at AS saved_at
-       FROM saved_messages s
-       JOIN annotation_comments c ON c.id = s.comment_id
-      WHERE s.user_id = ? AND s.nest_id IN (${nestIds.map(() => "?").join(", ")}) AND c.deleted_at IS NULL
-      ORDER BY s.created_at DESC, s.comment_id DESC
+    `SELECT ${MESSAGE_COLUMNS}, p.nest_id, p.node_id, p.created_at AS saved_at
+       FROM node_pins p
+       JOIN annotation_comments c ON c.id = p.message_id
+      WHERE p.scope = 'user' AND p.user_id = ? AND p.message_id IS NOT NULL
+        AND p.nest_id IN (${nestIds.map(() => "?").join(", ")}) AND c.deleted_at IS NULL
+      ORDER BY p.created_at DESC, p.message_id DESC
       LIMIT ${MAX_SCAN}`,
     [userId, ...nestIds],
   )) as SavedRow[];

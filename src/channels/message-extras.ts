@@ -74,10 +74,13 @@ interface ReactionRow {
 export async function reactionsFor(callerUserId: string, commentIds: string[]): Promise<Map<string, ReactionView[]>> {
   const out = new Map<string, ReactionView[]>();
   if (commentIds.length === 0) return out;
+  // Bounded: a page is at most 200 messages; past this many rows the `by`
+  // lists are still exact (the earliest reactors) and counts stop short.
   const rows = (await getDb().all(
     `SELECT comment_id, emoji, user_id, author, client_json FROM message_reactions
       WHERE comment_id IN (${commentIds.map(() => "?").join(", ")})
-      ORDER BY created_at ASC, user_id ASC`,
+      ORDER BY created_at ASC, user_id ASC
+      LIMIT 10000`,
     commentIds,
   )) as ReactionRow[];
   if (rows.length === 0) return out;
@@ -122,8 +125,9 @@ export async function messageExtras(
   const marks = ids.map(() => "?").join(", ");
   const [reactions, pinned, saved] = await Promise.all([
     reactionsFor(caller.userId, ids),
-    idSet(`SELECT comment_id FROM message_pins WHERE nest_id = ? AND comment_id IN (${marks})`, [caller.nestId, ...ids]),
-    idSet(`SELECT comment_id FROM saved_messages WHERE user_id = ? AND comment_id IN (${marks})`, [caller.userId, ...ids]),
+    // Pins and saves live in the document pin store (node_pins, migration 088).
+    idSet(`SELECT message_id AS comment_id FROM node_pins WHERE nest_id = ? AND scope = 'nest' AND message_id IN (${marks})`, [caller.nestId, ...ids]),
+    idSet(`SELECT message_id AS comment_id FROM node_pins WHERE scope = 'user' AND user_id = ? AND message_id IN (${marks})`, [caller.userId, ...ids]),
   ]);
   for (const r of rows) {
     const deleted = !!r.deleted_at;

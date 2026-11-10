@@ -14,6 +14,7 @@ import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
 import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 import { meChatRoutes, messageLookupRoutes } from "./channels/message-routes.js";
+import { messageHitsForDocumentSearch } from "./channels/message-search.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
@@ -2690,10 +2691,19 @@ export function createApp(): Hono<AuthEnv> {
       .flat()
       .sort((a, b) => titleScore(b.title, q) - titleScore(a.title, q));
 
+    // Channel messages that match, across the nests the caller is a member
+    // of (PO-1196); the key is absent while channels are off.
+    const messages = await messageHitsForDocumentSearch(
+      { userId, userEmail },
+      new Map(searchable.map((n) => [n.id, n.name ?? n.id])),
+      q,
+      limit,
+    );
     return c.json({
       query: q,
       count: hits.length,
       nodes: hits.slice(0, limit),
+      ...(messages ? { messages } : {}),
     });
   });
 
