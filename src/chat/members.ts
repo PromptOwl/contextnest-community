@@ -77,13 +77,21 @@ async function isNestAdmin(nestId: string, userId: string): Promise<boolean> {
   return p === "owner" || p === "admin";
 }
 
+/** People added to the nest only: a share on the channel node (which reads
+ *  its threads through the node routes) does not read who joined. */
+async function nestMember(caller: Caller): Promise<void> {
+  if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Channel not found");
+}
+
 export async function listChannelMembers(caller: Caller, rawName: unknown): Promise<ChannelMembers> {
+  await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   return { channel: node.id, private: await isPrivateChannel(caller.nestId, node.id), members: await memberViews(caller.nestId, node.id) };
 }
 
 /** Invite a person added to the nest (or a known agent): a writer, or a member of the channel. */
 export async function inviteChannelMember(caller: Caller, rawName: unknown, member: unknown): Promise<ChannelMembers> {
+  await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   const mayInvite = (await isContainerMember(caller.nestId, node.id, caller.userId)) || (await canCreateInNest(caller.nestId, caller.userEmail));
   if (!mayInvite) throw new ForbiddenError("Inviting to a channel is for its members and the nest's writers.");
@@ -109,6 +117,7 @@ export async function joinChannel(caller: Caller, rawName: unknown): Promise<{ c
 }
 
 export async function leaveChannel(caller: Caller, rawName: unknown): Promise<{ left: true; channel: string }> {
+  await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   const me = caller.userEmail.toLowerCase();
   if (await isPrivateChannel(caller.nestId, node.id)) {
@@ -125,6 +134,7 @@ export async function leaveChannel(caller: Caller, rawName: unknown): Promise<{ 
 /** Make a channel private (members only) or public again. Owner/admin who can read it. */
 export async function setChannelPrivate(caller: Caller, rawName: unknown, priv: unknown): Promise<{ channel: ChannelView }> {
   if (typeof priv !== "boolean") throw new ValidationError("private must be a boolean");
+  await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   if (!(await isNestAdmin(caller.nestId, caller.userId))) throw new ForbiddenError("Only the nest's owner or an admin can make a channel private or public.");
   const me = caller.userEmail.toLowerCase();

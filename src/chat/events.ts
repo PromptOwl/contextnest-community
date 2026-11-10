@@ -70,12 +70,19 @@ const rings = new Map<string, StoredChatEvent[]>();
 const subscribers = new Map<string, Set<ChatSubscriber>>();
 let heartbeatOverride: number | null = null;
 
+/** Events that mean nothing after the moment: delivered live, never
+ *  buffered, so a typing storm can't push real events out of the resume
+ *  buffer (security review, resource exhaustion). */
+const EPHEMERAL = new Set<string>(["typing", "presence"]);
+
 export function emitChatEvent(nestId: string, event: ChatEvent, opts: { only?: string } = {}): StoredChatEvent {
   const stored: StoredChatEvent = { id: ++seq, nestId, at: Date.now(), event, ...(opts.only ? { only: opts.only } : {}) };
-  let ring = rings.get(nestId);
-  if (!ring) rings.set(nestId, (ring = []));
-  ring.push(stored);
-  if (ring.length > RING_SIZE) ring.splice(0, ring.length - RING_SIZE);
+  if (!EPHEMERAL.has(String(event.type))) {
+    let ring = rings.get(nestId);
+    if (!ring) rings.set(nestId, (ring = []));
+    ring.push(stored);
+    if (ring.length > RING_SIZE) ring.splice(0, ring.length - RING_SIZE);
+  }
   const subs = subscribers.get(nestId);
   if (subs) {
     for (const s of subs) {
@@ -112,9 +119,11 @@ export function replaySince(nestId: string, lastId: string | undefined): { event
   if (!lastId || !Number.isFinite(n) || n < 0) return { events: [], tooOld: false };
   const ring = rings.get(nestId) ?? [];
   if (n >= seq) return { events: [], tooOld: false };
-  // The oldest buffered event must be the one right after `n` — or `n` itself
-  // — for the replay to be complete.
-  if (ring.length === 0 || ring[0].id > n + 1) return { events: [], tooOld: true };
+  // Complete only if nothing buffered for this nest was dropped after `n`:
+  // the buffer must still reach back to `n` (ephemeral events are never in
+  // it, and other nests' ids interleave, so "the next id" is not the test).
+  if (ring.length === 0) return { events: [], tooOld: false };
+  if (ring.length >= RING_SIZE && ring[0].id > n) return { events: [], tooOld: true };
   return { events: ring.filter((e) => e.id > n), tooOld: false };
 }
 

@@ -992,7 +992,7 @@ describe("AC-C2-14: GET /nests/:id/chat/events", () => {
     await back.close();
     // Push the buffer past what `seen` can resume from: a reset, not a replay.
     const events: EventsModule = await import("../src/chat/events.js");
-    for (let i = 0; i < events.RING_SIZE + 1; i++) events.emitChatEvent(nestId, { type: "presence", email: "ring@c2.test", agent: null, status: null, active: false });
+    for (let i = 0; i < events.RING_SIZE + 1; i++) events.emitChatEvent(nestId, { type: "message.changed", conversation: GENERAL, thread_id: "ring", message_id: `m${i}` });
     const stale = await subscribe(rita, { lastEventId: seen!.id! });
     expect((await stale.next("reset"))?.event).toBe("reset");
     expect(await stale.next("message.new", 200)).toBeNull();
@@ -1183,6 +1183,36 @@ describe("SEC-C2: existence oracles, cross-nest ids, leaks", () => {
     await open(alice, "after sam left", g);
     expect(await rs.next("message.new", 300)).toBeNull();
     await rs.close();
+  });
+
+  it("SEC-C2-07 typing and presence are never buffered: a typing storm does not push messages out of the resume buffer", async () => {
+    const events: EventsModule = await import("../src/chat/events.js");
+    const rs = await subscribe(rita);
+    await rs.next("hello");
+    await open(alice, "kept through the storm", GENERAL);
+    const seen = await rs.next("message.new");
+    await rs.close();
+    for (let i = 0; i < events.RING_SIZE * 2; i++) events.emitChatEvent(nestId, { type: "typing", conversation: GENERAL, who: { email: "x", name: "x", agent: null } });
+    await open(alice, "after the storm", GENERAL);
+    const back = await subscribe(rita, { lastEventId: seen!.id! });
+    const f = await back.next("message.new");
+    expect(f?.data.conversation).toBe(GENERAL);
+    expect(await back.next("reset", 200)).toBeNull();
+    await back.close();
+  });
+
+  it("SEC-C2-08 the global search and the public docs listing never name a private channel to a non-member; a share on the channel node reads no member list", async () => {
+    const g = await jsonRequest(app, "GET", "/search?q=secret", undefined, sam.apiKey);
+    if (g.status === 200) expect(JSON.stringify(g.data)).not.toContain("channels/secret");
+    // Carl: a share on the #general node itself, nothing else on the nest.
+    const carl = await registerUser(app, "carl@c2.test", "Carl Channel");
+    const grant = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "document", target: GENERAL, email: carl.email, role: "read" }, owner.apiKey);
+    expect(grant.status, JSON.stringify(grant.data)).toBe(201);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${enc(GENERAL)}/annotations`, undefined, carl.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels/general/members`, undefined, carl.apiKey)).status).toBe(404);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/general/join`, {}, carl.apiKey)).status).toBe(404);
+    expect((await conversations(carl)).status).toBe(404);
+    expect((await subscribe(carl)).status).toBe(404);
   });
 
   it("SEC-C2-06 per-nest off while the server is on: the stream, presence and the thread routes on a conversation are 404 too", async () => {
