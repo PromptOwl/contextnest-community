@@ -140,6 +140,8 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMessageTool, runMessageTool } from "./message-tools.js";
+import { messageHitsForDocumentSearch } from "../channels/message-search.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -488,6 +490,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
   "context_channels",
+  // Channel messages (PO-1196): the permalink lookup and search read only;
+  // context_message (react, edit, …) writes and is not here.
+  "context_message_read",
+  "context_channel_search",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -2818,10 +2824,23 @@ async function runTool(
         accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
       }
       const count = accessible.length;
+      // Channel messages that match (PO-1196): the same matcher over the
+      // channels this member can read; [] while channels are off.
+      const messageHits = await messageHitsForDocumentSearch(
+        { userId, userEmail },
+        new Map([[nestId, nestId]]),
+        query,
+        limit,
+      );
+      const messagesText = messageHits?.length
+        ? `\n\nChannel messages matching "${query}" (${messageHits.length}):\n${messageHits
+            .map((m) => `- **${m.actor.label}** in #${m.channel} (${m.created_at}) [thread ${m.thread_id}; message ${m.message_id}]: ${m.excerpt}`)
+            .join("\n")}`
+        : "";
       if (count === 0)
         return {
-          text: `No nodes matched search: "${query}"`,
-          data: { results: [], count },
+          text: `No nodes matched search: "${query}"${messagesText}`,
+          data: { results: [], count, ...(messageHits ? { messages: messageHits } : {}) },
         };
       // Bodies stay gated exactly as before: under stewardship the LLM only
       // ever sees the approved version, and a hit with no approved version
@@ -2851,14 +2870,15 @@ async function runTool(
           ? ` (showing the first ${page.length}; pass \`limit\` for more)`
           : "";
       return {
-        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}`,
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${messagesText}`,
         // `count` is everything found (like REST); `results` is the page.
         // Bodies are the gated ones the prose is built from. No `score`:
         // this is a term-containment filter with title-first ordering, not
-        // a ranked search.
+        // a ranked search. `messages` are the channel hits (PO-1196).
         data: {
           results: page.map(({ node: n, body }) => summarizeNode(n, body)),
           count,
+          ...(messageHits ? { messages: messageHits } : {}),
         },
       };
     }
@@ -3508,11 +3528,11 @@ async function runTool(
 
       // A channel takes posts — and resolves — from people added to the nest
       // only; the same rule the REST comment routes apply.
-      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail, isResolve ? undefined : body);
       if (channelRefusal) {
         return toolError(
           channelRefusal.error,
-          channelRefusal.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+          channelRefusal.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
         );
       }
 
@@ -5022,6 +5042,10 @@ async function runTool(
       // on (mcp/routes.ts); runChannelTool re-checks the switch.
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
+      }
+      // Channel messages (PO-1196): same switch, re-checked in runMessageTool.
+      if (isMessageTool(toolName)) {
+        return runMessageTool(toolName, args, ctx);
       }
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {

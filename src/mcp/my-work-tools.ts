@@ -37,6 +37,8 @@ import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
 /** What a call gets when it names no sections: everything but the person's
  *  unread-notification list. */
 const DEFAULT_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting"];
+/** The sections the totals are built from. */
+const CORE_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting", "notifications"];
 
 export const MY_WORK_TOOL_DEFINITIONS = [
   {
@@ -46,7 +48,7 @@ export const MY_WORK_TOOL_DEFINITIONS = [
       "`mentions` (open threads, in channels and on documents, that @mention you — or the agent this key or `client.agent` names, marked `for_agent` — and that haven't been answered: " +
       "reply in the thread with context_comment { thread, body }, resolve it, or clear it with context_resolve_comment { thread, mention_done: true }), " +
       "`items` (reviews, deletion and access requests you can decide), `assigned` (open cards assigned to you) and `waiting` (what you handed off). " +
-      "`notifications` (the person's unread inbox) is returned only when asked for in `sections`. " +
+      "`notifications` (the person's unread inbox) and `saved` (channel messages you saved for later, with the channels switch on) are returned only when asked for in `sections`. " +
       "`sections` picks what comes back; `limit` caps every section. A nest-scoped key sees only this nest.",
     inputSchema: {
       type: "object" as const,
@@ -110,6 +112,13 @@ export function myWorkText(w: MyWork, actingAs: string | null = null): string {
     out.push(`\n## Unread notifications (${w.notifications.length})`);
     for (const n of w.notifications) out.push(`- ${line(String(n.message ?? ""))}`);
   }
+  if (w.saved) {
+    out.push(`\n## Saved messages (${w.saved_pagination?.total ?? w.saved.length})`);
+    if (w.saved.length === 0) out.push("Nothing saved. Save one with context_message { action: \"save\", message }.");
+    for (const s of w.saved) {
+      out.push(`- ${s.message.actor.label} in #${s.channel} · ${s.nest_name} — ${line(s.message.body)}\n  thread: ${s.thread_id} · message: ${s.message.id} · ${s.message.url}`);
+    }
+  }
   if (w.waiting_on_me_total !== undefined) {
     out.push(`\n**Waiting on you in total:** ${w.waiting_on_me_total}${w.assigned ? ` (plus ${w.assigned.length} assigned)` : ""}.`);
   }
@@ -130,9 +139,10 @@ export async function runMyWorkTool(
   }
   const paging = parseMyWorkPaging(args ?? {});
   const actingAs = actingAgentHandle(ctx.client);
-  // Every section asked for (the REST default set) → the full object, totals
-  // included, exactly as GET /me/work returns it.
-  const all = MY_WORK_SECTIONS.every((s) => sections.includes(s));
+  // Every counted section asked for (the REST default set) → the full object,
+  // totals included, exactly as GET /me/work returns it (`saved` rides on it
+  // while channels are on; it is not part of any total).
+  const all = CORE_SECTIONS.every((s) => sections.includes(s));
   const data = await buildMyWork({
     userId: ctx.userId,
     ...paging,

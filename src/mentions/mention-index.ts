@@ -39,6 +39,7 @@ import { nowMsExpr } from "../db/sql.js";
 import { NotFoundError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { agentHandlesOwnedBy } from "./agent-mentions.js";
+import { isBroadcastName } from "../channels/broadcast.js";
 
 /** The longest excerpt a mention item carries (then "…"). */
 export const MENTION_EXCERPT_MAX = 280;
@@ -63,6 +64,9 @@ export async function indexCommentMentions(params: {
   commentId: string;
   body: string;
   authorEmail: string;
+  /** The row's time for a name, when not the message's own (an edit stamps
+   *  the names it added with the edit's time; PO-1196). */
+  at?: (name: string) => string | undefined;
 }): Promise<number> {
   const { nestId, nodeId, threadId, commentId, body, authorEmail } = params;
   try {
@@ -73,23 +77,26 @@ export async function indexCommentMentions(params: {
     const author = authorEmail.toLowerCase();
     const people = new Set<string>();
     const handles = new Set<string>();
-    const rows: Array<{ userId: string | null; handle: string }> = [];
+    const rows: Array<{ userId: string | null; handle: string; at?: string }> = [];
     for (const name of names) {
       if (rows.length >= MAX_MENTION_RECIPIENTS) break;
       const person = resolveMention(roster, name) ?? (await findDirectoryPerson(name));
       if (person?.userId) {
         if (person.email.toLowerCase() === author || people.has(person.userId)) continue;
         people.add(person.userId);
-        rows.push({ userId: person.userId, handle: person.email.toLowerCase() });
+        rows.push({ userId: person.userId, handle: person.email.toLowerCase(), at: params.at?.(name) });
         continue;
       }
       // A steward invited by email who never signed up has an email but no
       // account: nobody to put it in front of, and not an agent either.
       if (person) continue;
+      // `@channel` / `@here` are a broadcast (channels/broadcast.ts), never a
+      // handle that could be woken.
+      if (isBroadcastName(name)) continue;
       const handle = name.trim().toLowerCase();
       if (!handle || handles.has(handle)) continue;
       handles.add(handle);
-      rows.push({ userId: null, handle });
+      rows.push({ userId: null, handle, at: params.at?.(name) });
     }
     if (rows.length === 0) return 0;
 
@@ -105,7 +112,7 @@ export async function indexCommentMentions(params: {
         `INSERT INTO comment_mentions
            (id, nest_id, node_id, thread_id, comment_id, mentioned_user_id, handle, author, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, nodeId, threadId, commentId, r.userId, r.handle, author, msg.created_at],
+        [uuid(), nestId, nodeId, threadId, commentId, r.userId, r.handle, author, r.at ?? msg.created_at],
       );
     }
     return rows.length;
@@ -292,7 +299,7 @@ export async function listOpenMentions(params: {
                  WHERE r.thread_id = m.thread_id
                    AND LOWER(r.author) = ?
                    AND r.id <> m.comment_id
-                   AND r.created_at >= c.created_at))
+                   AND r.created_at >= m.created_at))
         )
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT ${MAX_SCAN}`,

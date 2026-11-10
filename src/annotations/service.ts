@@ -43,13 +43,14 @@ interface CommentRow {
   body: string;
   created_at: string;
   run_id: string | null;
+  deleted_at?: string | null;
 }
 
 async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
   const rows = await db
     .all(
-      "SELECT id, author, body, created_at, run_id FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT id, author, body, created_at, run_id, deleted_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
       [threadId],
     ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
@@ -58,6 +59,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
     body: r.body,
     createdAt: r.created_at,
     ...(r.run_id ? { runId: r.run_id } : {}),
+    ...(r.deleted_at ? { deleted: true as const } : {}),
   }));
 }
 

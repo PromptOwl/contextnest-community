@@ -78,7 +78,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 103;
+//   103->106 context_message_read, context_message, context_channel_search (PO-1196, src/mcp/message-tools.ts) —
+//   twins of the channel message routes (/channels/:name/messages/:id/…, /messages/:id, /channels/search);
+//   reactions, edit history, pins, saved items and the LIKE search are Community-only tables over the
+//   comment-thread store, behind EXPERIMENTAL_AGENT_STREAM, so the engine has no operation to import a
+//   descriptor from. Pins ride on context_channels { action: "pins" } and saved items on context_my_work
+//   { sections: ["saved"] } (no new literal for either).
+const BASELINE = 106;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

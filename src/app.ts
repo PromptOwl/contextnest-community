@@ -13,6 +13,8 @@ import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
 import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
+import { meChatRoutes, messageLookupRoutes } from "./channels/message-routes.js";
+import { messageHitsForDocumentSearch } from "./channels/message-search.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
@@ -2368,6 +2370,9 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/link", linkPageRoutes);
 
   app.use("/me/*", flexAuthMiddleware);
+  // Saved messages and cross-nest message search (PO-1196); each 404s while
+  // the channels switch is off.
+  app.route("/me", meChatRoutes);
   app.get("/me/work", async (c) => {
     // The whole inbox lives in me/my-work.ts so MCP context_my_work returns
     // exactly this (PO-1180). limit/offset page the reviews; mentions_limit /
@@ -2686,10 +2691,19 @@ export function createApp(): Hono<AuthEnv> {
       .flat()
       .sort((a, b) => titleScore(b.title, q) - titleScore(a.title, q));
 
+    // Channel messages that match, across the nests the caller is a member
+    // of (PO-1196); the key is absent while channels are off.
+    const messages = await messageHitsForDocumentSearch(
+      { userId, userEmail },
+      new Map(searchable.map((n) => [n.id, n.name ?? n.id])),
+      q,
+      limit,
+    );
     return c.json({
       query: q,
       count: hits.length,
       nodes: hits.slice(0, limit),
+      ...(messages ? { messages } : {}),
     });
   });
 
@@ -2828,7 +2842,8 @@ export function createApp(): Hono<AuthEnv> {
     // Experimental agent team stream channels (PO-1179): same rule as pins —
     // while the switch is off the routes do not exist, for anyone. Exact
     // resource segment; channel NODES live under /nodes and stay ordinary.
-    if ((parts[1] === "channels" || parts[1] === "agent-handles") && !config.EXPERIMENTAL_AGENT_STREAM) {
+    // …and the message permalink lookup (PO-1196) with them.
+    if ((parts[1] === "channels" || parts[1] === "agent-handles" || parts[1] === "messages") && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
 
@@ -2977,7 +2992,8 @@ export function createApp(): Hono<AuthEnv> {
         // Channels (PO-1179) are a collaboration view over comment threads,
         // licensed like /comments and /feed even on GET. Exact segment.
         parts[1] === "channels" ||
-        parts[1] === "agent-handles";
+        parts[1] === "agent-handles" ||
+        parts[1] === "messages";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -3247,6 +3263,13 @@ export function createApp(): Hono<AuthEnv> {
     //   POST /nests/:id/channels/:name/read
     const isChannelReadMark =
       parts.length === 4 && parts[1] === "channels" && parts[3] === "read" && c.req.method === "POST";
+    // Acting on a channel message (PO-1196: react, edit or delete one's own,
+    // pin, save) is for every person added to the nest, a read-only
+    // collaborator included, so these stay at read tier; the service applies
+    // the posting rule and the author rule. A read-only API key is refused
+    // above by the capability gate. Exact segments:
+    //   /nests/:id/channels/:name/messages/:id[/…]
+    const isChannelMessageAction = parts.length >= 5 && parts[1] === "channels" && parts[3] === "messages";
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3391,6 +3414,7 @@ export function createApp(): Hono<AuthEnv> {
       !isDocPinsPath &&
       !isAnnotationAction &&
       !isChannelReadMark &&
+      !isChannelMessageAction &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3743,6 +3767,8 @@ export function createApp(): Hono<AuthEnv> {
   // The agent handles a composer can offer (PO-1189): members only, checked
   // in the handler.
   nestsApp.route("/:nestId/agent-handles", agentHandleRoutes);
+  // Message permalink lookup (PO-1196): members only, checked in the handler.
+  nestsApp.route("/:nestId/messages", messageLookupRoutes);
   // Agent team stream S3 (PO-1181): artifact cards, agent wake-up targets,
   // promote a thread to a node. Not behind the channels switch — cards,
   // wake-up and promote work on document comment threads too.

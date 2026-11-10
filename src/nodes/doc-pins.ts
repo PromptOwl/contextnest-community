@@ -1,7 +1,11 @@
 /**
  * Document pins (CU-wdqcq02crw) — experimental, behind EXPERIMENTAL_DOC_PINS.
  *
- * Two kinds of pin on one table (node_pins, migration 071):
+ * Two kinds of pin on one table (node_pins, migration 071). Since migration
+ * 088 the same table also holds a channel's pinned MESSAGES (scope 'nest' with
+ * `message_id` set) and a person's saved messages (scope 'user' with
+ * `message_id` set; src/channels/pins.ts and saved.ts). Every query here is
+ * `message_id IS NULL`: a document pin is a row without a message.
  *   - editorial (scope 'nest'): the nest's own front page. A steward pins for
  *     everyone, in an order they choose. Who may: the nest owner, a nest admin,
  *     the server admin, or a nest-wide reviewer steward — the same curator set
@@ -151,12 +155,12 @@ export async function listPins(nestId: string, userId: string | undefined): Prom
                     FROM node_pins p
                     JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id`;
   const editorialRows = (await db.all(
-    `${select} WHERE p.nest_id = ? AND p.scope = 'nest' ORDER BY p.position, p.created_at, p.node_id`,
+    `${select} WHERE p.nest_id = ? AND p.scope = 'nest' AND p.message_id IS NULL ORDER BY p.position, p.created_at, p.node_id`,
     [nestId],
   )) as PinRow[];
   const personalRows = userId
     ? ((await db.all(
-        `${select} WHERE p.nest_id = ? AND p.scope = 'user' AND p.user_id = ?
+        `${select} WHERE p.nest_id = ? AND p.scope = 'user' AND p.user_id = ? AND p.message_id IS NULL
           ORDER BY p.position, p.created_at, p.node_id`,
         [nestId, userId],
       )) as PinRow[])
@@ -210,12 +214,12 @@ export async function pinDocument(params: {
   const existing = async () =>
     (await db.get(
       `SELECT node_id, scope, position, pinned_by, created_at FROM node_pins
-        WHERE nest_id = ? AND node_id = ? AND scope = ?
+        WHERE nest_id = ? AND node_id = ? AND scope = ? AND message_id IS NULL
           AND ${owner === null ? "user_id IS NULL" : "user_id = ?"}`,
       owner === null ? [nestId, nodeId, scope] : [nestId, nodeId, scope, owner],
     )) as Omit<PinRow, "title" | "type" | "status"> | undefined;
 
-  const listWhere = `nest_id = ? AND scope = ? AND ${owner === null ? "user_id IS NULL" : "user_id = ?"}`;
+  const listWhere = `nest_id = ? AND scope = ? AND message_id IS NULL AND ${owner === null ? "user_id IS NULL" : "user_id = ?"}`;
   const listParams = owner === null ? [nestId, scope] : [nestId, scope, owner];
   let created = false;
   if (!(await existing())) {
@@ -286,13 +290,13 @@ export async function unpinDocument(params: {
   if (scope === "nest") {
     await assertCanCurate(nestId, userId);
     const r = await getDb().run(
-      "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'nest'",
+      "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'nest' AND message_id IS NULL",
       [nestId, nodeId],
     );
     return r.changes > 0;
   }
   const r = await getDb().run(
-    "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'user' AND user_id = ?",
+    "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'user' AND user_id = ? AND message_id IS NULL",
     [nestId, nodeId, userId],
   );
   return r.changes > 0;
@@ -319,7 +323,7 @@ export async function reorderEditorialPins(params: {
   await ensureNodeIndex(nestId);
   const orderedSql = `SELECT p.node_id FROM node_pins p
        JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
-      WHERE p.nest_id = ? AND p.scope = 'nest'
+      WHERE p.nest_id = ? AND p.scope = 'nest' AND p.message_id IS NULL
       ORDER BY p.position, p.created_at, p.node_id`;
   // What this curator can see — the set GET showed them. Resolved before the
   // transaction: the access check reads through its own queries, not `tx`.
@@ -351,12 +355,12 @@ export async function reorderEditorialPins(params: {
     const order = mergeEditorialOrder(full, nodeIds);
     // Dangling rows sink behind the real ones rather than keeping a slot.
     await tx.run(
-      "UPDATE node_pins SET position = ? WHERE nest_id = ? AND scope = 'nest'",
+      "UPDATE node_pins SET position = ? WHERE nest_id = ? AND scope = 'nest' AND message_id IS NULL",
       [order.length, nestId],
     );
     for (let i = 0; i < order.length; i++) {
       await tx.run(
-        "UPDATE node_pins SET position = ? WHERE nest_id = ? AND node_id = ? AND scope = 'nest'",
+        "UPDATE node_pins SET position = ? WHERE nest_id = ? AND node_id = ? AND scope = 'nest' AND message_id IS NULL",
         [i, nestId, order[i]],
       );
     }
@@ -377,7 +381,8 @@ export function mergeEditorialOrder(full: string[], visibleOrder: string[]): str
 }
 
 /**
- * Drop someone's personal pins in a nest once they no longer reach it at all.
+ * Drop someone's personal pins in a nest — their saved messages too (088) —
+ * once they no longer reach it at all.
  * One rule for leaving and for being removed as a collaborator: anyone who
  * still reaches the nest (a team share, a document/folder grant, its
  * visibility) keeps their pins. Runs after the access change has committed,
@@ -412,7 +417,7 @@ async function pruneHiddenPins(nestId: string, scope: PinScope, userId: string):
   if (scope === "nest") {
     await db.run(
       `DELETE FROM node_pins
-        WHERE nest_id = ? AND scope = 'nest'
+        WHERE nest_id = ? AND scope = 'nest' AND message_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM node_index i
                            WHERE i.nest_id = node_pins.nest_id AND i.node_id = node_pins.node_id)`,
       [nestId],
@@ -423,7 +428,7 @@ async function pruneHiddenPins(nestId: string, scope: PinScope, userId: string):
     `SELECT p.node_id, i.node_id AS indexed
        FROM node_pins p
        LEFT JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
-      WHERE p.nest_id = ? AND p.scope = 'user' AND p.user_id = ?`,
+      WHERE p.nest_id = ? AND p.scope = 'user' AND p.user_id = ? AND p.message_id IS NULL`,
     [nestId, userId],
   )) as Array<{ node_id: string; indexed: string | null }>;
   if (rows.length === 0) return;
@@ -441,7 +446,7 @@ async function pruneHiddenPins(nestId: string, scope: PinScope, userId: string):
   const hidden = rows.map((r) => r.node_id).filter((id) => !readable.has(id));
   for (const id of hidden) {
     await db.run(
-      "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'user' AND user_id = ?",
+      "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'user' AND user_id = ? AND message_id IS NULL",
       [nestId, id, userId],
     );
   }

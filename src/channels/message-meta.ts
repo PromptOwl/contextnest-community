@@ -28,6 +28,7 @@ import { listNestPeople, findDirectoryPerson, type NestPerson } from "../nests/p
 import { extractMentions, resolveMention } from "../shared/mentions.js";
 import { deserializeClient, parseClientMetadata, type ClientMetadata } from "../shared/client-metadata.js";
 import { resolveActorLabel, type ActorLabel } from "./actor-label.js";
+import { isBroadcastName } from "./broadcast.js";
 
 // ─── Display names ──────────────────────────────────────────────────────
 
@@ -156,20 +157,29 @@ const MAX_NAMES_PER_BODY = 50;
 export type MentionRef =
   | { name: string; kind: "person"; display_name: string }
   | { name: string; kind: "agent"; wakeable: boolean }
+  /** `@channel` / `@here` in a channel: everyone added to the nest (PO-1196). */
+  | { name: string; kind: "everyone" }
   | { name: string; kind: "nobody" };
 
 export interface ResolvedMention {
   name: string;
   person?: NestPerson;
   agent?: KnownAgent;
+  everyone?: true;
 }
 
 /**
  * Resolve every `@name` in each body, in order of appearance. Loads the
  * roster once, and the known agents only when some name is not a person;
- * bodies with no mention cost nothing.
+ * bodies with no mention cost nothing. With `broadcast` (a channel message),
+ * `@channel` and `@here` are everyone, ahead of a person who happens to be
+ * called that.
  */
-export async function resolveBodyMentions(nestId: string, bodies: string[]): Promise<ResolvedMention[][]> {
+export async function resolveBodyMentions(
+  nestId: string,
+  bodies: string[],
+  opts: { broadcast?: boolean } = {},
+): Promise<ResolvedMention[][]> {
   // Each name costs a lookup; nobody tags this many people in one message.
   const names = bodies.map((b) => extractMentions(b || "").slice(0, MAX_NAMES_PER_BODY));
   if (names.every((n) => n.length === 0)) return names.map(() => []);
@@ -183,6 +193,10 @@ export async function resolveBodyMentions(nestId: string, bodies: string[]): Pro
   for (const list of names) {
     const row: ResolvedMention[] = [];
     for (const name of list) {
+      if (opts.broadcast && isBroadcastName(name)) {
+        row.push({ name, everyone: true });
+        continue;
+      }
       const person = people.get(name.toLowerCase());
       if (person) {
         row.push({ name, person });
@@ -198,12 +212,13 @@ export async function resolveBodyMentions(nestId: string, bodies: string[]): Pro
 }
 
 export function toMentionRef(m: ResolvedMention): MentionRef {
+  if (m.everyone) return { name: m.name, kind: "everyone" };
   if (m.person) return { name: m.name, kind: "person", display_name: m.person.name?.trim() || m.person.email };
   if (m.agent) return { name: m.name, kind: "agent", wakeable: m.agent.wakeable };
   return { name: m.name, kind: "nobody" };
 }
 
 /** `mentions` for each body, as a timeline shows them. */
-export async function bodyMentions(nestId: string, bodies: string[]): Promise<MentionRef[][]> {
-  return (await resolveBodyMentions(nestId, bodies)).map((row) => row.map(toMentionRef));
+export async function bodyMentions(nestId: string, bodies: string[], opts: { broadcast?: boolean } = {}): Promise<MentionRef[][]> {
+  return (await resolveBodyMentions(nestId, bodies, opts)).map((row) => row.map(toMentionRef));
 }

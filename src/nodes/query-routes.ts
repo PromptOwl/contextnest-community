@@ -46,6 +46,7 @@ import {
   isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
+import { messageHitsForDocumentSearch } from "../channels/message-search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { liveVersions, recordNodeAccess } from "../governance/access-log.js";
@@ -403,10 +404,15 @@ queryRoutes.get("/search", async (c) => {
     detail: "search",
   });
 
+  // Channel messages that match (PO-1196): the same matcher over the
+  // channels a member can read; the key is absent while channels are off
+  // and [] for a non-member. The document hits are untouched.
+  const messages = await messageHitsForDocumentSearch({ userId, userEmail }, new Map([[nestId, nestId]]), q, 20);
   return c.json({
     query: q,
     count: accessible.length,
     nodes: accessible.map((n) => toSearchHit(n, q)),
+    ...(messages ? { messages } : {}),
   });
 });
 
