@@ -35,6 +35,9 @@ export interface NestPageCaps {
 export interface NestPageMeta {
   /** URL segment under /nest/<id>, e.g. "board" → /nest/<id>/board. */
   path: string;
+  /** Older segments that still open this page; the address is rewritten to
+   *  `path` once the page is on screen (the URL sync writes `path`). */
+  legacyPaths?: string[];
   label: string;
   icon: LucideIcon;
   /** Sidebar / tab-strip order, ascending. */
@@ -73,7 +76,7 @@ export const nestPageForView = (viewPage: string): NestPage | undefined =>
   nestPages.find((p) => p.viewPage === viewPage);
 
 export const nestPageForPath = (segment: string | null | undefined): NestPage | undefined =>
-  segment ? nestPages.find((p) => p.path === segment) : undefined;
+  segment ? nestPages.find((p) => p.path === segment || p.legacyPaths?.includes(segment)) : undefined;
 
 export const visibleNestPages = (caps: NestPageCaps): NestPage[] =>
   nestPages.filter((p) => !p.visible || p.visible(caps));

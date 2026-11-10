@@ -1,10 +1,12 @@
-import { Hash } from "lucide-react";
+import { MessagesSquare } from "lucide-react";
 import type { NestPageMeta } from "../../../lib/nest-pages";
 
 export const meta: NestPageMeta = {
-  path: "channels",
-  label: "Channels",
-  icon: Hash,
+  path: "chat",
+  // The page shipped as /channels (PO-1189); links to it still open the chat.
+  legacyPaths: ["channels"],
+  label: "Chat",
+  icon: MessagesSquare,
   order: 6,
   viewPage: "channels",
   beta: true,
