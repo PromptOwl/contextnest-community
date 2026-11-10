@@ -69,10 +69,6 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  // A channel takes posts from people added to the nest only.
-  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
-  if (refusal) return c.json({ error: refusal.error }, refusal.status);
-
   const input = await c.req.json<{
     body?: string;
     anchor?: Partial<AnnotationAnchor> | null;
@@ -82,6 +78,11 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
   if (!input.body || !input.body.trim()) {
     throw new ValidationError("body is required");
   }
+
+  // A channel takes posts from people added to the nest only (and refuses an
+  // @channel the nest is too big for, before anything is written).
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail, input.body);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
 
   const thread = await createThread(
     nestId,
@@ -128,13 +129,13 @@ export async function handleAnnotationReply(
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
-  if (refusal) return c.json({ error: refusal.error }, refusal.status);
-
   const input = (await c.req.json()) as { body?: string; client?: unknown };
   if (!input.body || !input.body.trim()) {
     throw new ValidationError("body is required");
   }
+
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail, input.body);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
 
   // addComment also reopens the thread when it was resolved.
   const thread = await addComment(

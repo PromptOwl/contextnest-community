@@ -39,6 +39,7 @@ import { nowMsExpr } from "../db/sql.js";
 import { NotFoundError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { agentHandlesOwnedBy } from "./agent-mentions.js";
+import { isBroadcastName } from "../channels/broadcast.js";
 
 /** The longest excerpt a mention item carries (then "…"). */
 export const MENTION_EXCERPT_MAX = 280;
@@ -86,6 +87,9 @@ export async function indexCommentMentions(params: {
       // A steward invited by email who never signed up has an email but no
       // account: nobody to put it in front of, and not an agent either.
       if (person) continue;
+      // `@channel` / `@here` are a broadcast (channels/broadcast.ts), never a
+      // handle that could be woken.
+      if (isBroadcastName(name)) continue;
       const handle = name.trim().toLowerCase();
       if (!handle || handles.has(handle)) continue;
       handles.add(handle);

@@ -3,7 +3,7 @@
  * /nests/:id/channels. Experimental: registered only while
  * EXPERIMENTAL_AGENT_STREAM is on (mcp/routes.ts), and re-checked here.
  *
- *   context_channels      list (default) | agents | mark_read | create | archive | unarchive
+ *   context_channels      list (default) | agents | pins | mark_read | create | archive | unarchive
  *   context_channel_read  a channel's timeline, one thread, or what is new since
  *
  * Posting is `context_comment { channel, body }` — the same tool and the same
@@ -30,11 +30,13 @@ import {
   listChannels,
   listKnownAgents,
   markChannelRead,
+  messageText,
   readChannel,
   setChannelArchived,
   timelineText,
   type ChannelView,
 } from "../channels/channel-service.js";
+import { listPins } from "../channels/pins.js";
 import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
 
 /** What a write tool answers a read-only key (AC-AX-06). */
@@ -46,14 +48,14 @@ export const CHANNEL_TOOL_DEFINITIONS = [
     description:
       "Channels in this nest: Slack-style conversations where agents and people post, reply in threads and @tag each other, next to the knowledge. " +
       'action "list" (default) returns the channels, each with `unread` (messages by others since you last marked it read) and `last_activity_at`; ' +
-      '"agents" returns the agent handles you can @tag and whether tagging one sends a wake-up; "mark_read" clears your unread for one channel; ' +
+      '"agents" returns the agent handles you can @tag and whether tagging one sends a wake-up; "pins" (name) lists a channel\'s pinned messages; "mark_read" clears your unread for one channel; ' +
       '"create" makes one (name, optional purpose) and "archive" / "unarchive" hides or restores one (these three need write access). ' +
       'Post with context_comment { channel: "<name>", body }; read with context_channel_read.',
     inputSchema: {
       type: "object" as const,
       properties: {
-        action: { type: "string", description: 'One of "list" (default), "agents", "mark_read", "create", "archive", "unarchive".' },
-        name: { type: "string", description: 'Channel name, e.g. "ops" (mark_read, create, archive, unarchive).' },
+        action: { type: "string", description: 'One of "list" (default), "agents", "pins", "mark_read", "create", "archive", "unarchive".' },
+        name: { type: "string", description: 'Channel name, e.g. "ops" (pins, mark_read, create, archive, unarchive).' },
         purpose: { type: "string", description: "What the channel is for (create). Stored as the channel node's body." },
         include_archived: { type: "boolean", description: "list: include archived channels." },
       },
@@ -83,7 +85,8 @@ export const CHANNEL_TOOL_DEFINITIONS = [
 ];
 
 const LIST_ONLY_PROPERTIES = {
-  action: { type: "string", description: 'One of "list" (default) or "agents".' },
+  action: { type: "string", description: 'One of "list" (default), "agents" or "pins".' },
+  name: { type: "string", description: 'Channel name, e.g. "ops" (pins).' },
   include_archived: { type: "boolean", description: "list: include archived channels." },
 };
 
@@ -102,7 +105,7 @@ export const READ_KEY_TOOL_VIEWS: Record<
 > = {
   context_channels: {
     description:
-      "List the channels in this nest (action \"list\", the default), or the agent handles that can be @tagged (\"agents\"). " +
+      "List the channels in this nest (action \"list\", the default), the agent handles that can be @tagged (\"agents\"), or a channel's pinned messages (\"pins\", name). " +
       "This key is read-only: it can read channels with context_channel_read, and cannot post, create or archive.",
     schema: { type: "object", properties: LIST_ONLY_PROPERTIES },
     annotations: { title: "List channels", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -200,6 +203,18 @@ export async function runChannelTool(
         : "No known agents in this nest yet. An agent becomes known when an admin gives its handle a webhook, or when it posts in a channel declaring client.agent.";
       return { text, data };
     }
+    if (action === "pins") {
+      const data = await listPins(caller, args.name);
+      const text = data.pins.length
+        ? `# Pinned in ${data.channel.title} (${data.pins.length})\n\n${data.pins
+            .map(
+              (p) =>
+                `- **${p.message.actor.label}** (${p.message.created_at}) [thread ${p.message.thread_id}; message ${p.message.id}]: ${messageText(p.message)} — pinned by ${p.pinned_by_name} ${p.pinned_at}`,
+            )
+            .join("\n")}`
+        : `Nothing is pinned in ${data.channel.title}. Pin a message with context_message { action: "pin", message }.`;
+      return { text, data };
+    }
     // Every other action writes — a read-only key is told so plainly.
     if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
     if (action === "mark_read") {
@@ -217,7 +232,7 @@ export async function runChannelTool(
       const data = await setChannelArchived({ ...caller, client: ctx.client }, args.name, action === "archive");
       return { text: `${data.channel.title} is ${data.channel.archived ? "archived" : "active"}.`, data };
     }
-    return toolError(`Unknown action "${action}" — use list, agents, mark_read, create, archive or unarchive.`, "VALIDATION_FAILED");
+    return toolError(`Unknown action "${action}" — use list, agents, pins, mark_read, create, archive or unarchive.`, "VALIDATION_FAILED");
   } catch (err) {
     return refusal(err);
   }

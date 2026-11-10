@@ -395,10 +395,14 @@ async function commentMentionFanOut(params: {
   body: string;
   actorEmail: string;
   baseUrl?: string;
+  /** Notify only these of the body's @names (an edit: the names it added,
+   *  PO-1196). Unset: every name. */
+  onlyNames?: string[];
 }): Promise<Recipient[]> {
   const { nestId, nodeId, body, actorEmail, baseUrl } = params;
   try {
-    const names = extractMentions(body || "");
+    const only = params.onlyNames ? new Set(params.onlyNames.map((n) => n.toLowerCase())) : null;
+    const names = extractMentions(body || "").filter((n) => !only || only.has(n.toLowerCase()));
     const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
     if (recipients.length === 0) return [];
 
@@ -592,6 +596,8 @@ export async function notifyComment(params: {
    * AC-UX-14).
    */
   channel?: boolean;
+  /** Notify only these @names (an edit's newly added ones; PO-1196). */
+  onlyNames?: string[];
 }): Promise<{ mentioned: number; participants: number; followers: number }> {
   const mentioned = await commentMentionFanOut(params);
   const reached = mentioned.map((r) => r.email);

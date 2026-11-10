@@ -208,10 +208,11 @@ describe("AC-C1-01: react and unreact; counts, me and who, on every read", () =>
     const since = await timeline(alice, "general", `?since=${t.message_id}`);
     const row = since.data.messages.find((m: any) => m.id === re.id);
     expect(row.reactions).toEqual([{ emoji: "👀", count: 1, me: false, by: ["Rita Reader"] }]);
-    // Unreact: Rita's is gone, Alice's stays.
+    // Unreact: Rita's is gone, Alice's stays; the order follows the earliest
+    // reaction still standing.
     const u = await unreact(rita, t.message_id, "👍");
     expect(u.status, JSON.stringify(u.data)).toBe(200);
-    expect(u.data.reactions.map((x: any) => [x.emoji, x.count, x.me])).toEqual([["👍", 1, false], ["🎉", 1, false]]);
+    expect(u.data.reactions.map((x: any) => [x.emoji, x.count, x.me])).toEqual([["🎉", 1, false], ["👍", 1, false]]);
     // Unreacting what you never reacted with is a no-op, not an error.
     expect((await unreact(rita, t.message_id, "🚀")).status).toBe(200);
     // A thread id reaches the post's opening message too.
@@ -352,8 +353,9 @@ describe("AC-C1-03: the author edits their own message; the history is kept", ()
     // The person, acting as nobody: yes, on both.
     expect((await edit(alice, t.message_id, "alice fixes grok")).status).toBe(200);
     expect((await edit(alice, plain.id, "alice fixes alice")).status).toBe(200);
+    // The history names who made each edit, newest first.
     const h = await jsonRequest(app, "GET", msgRoute("general", t.message_id, "/history"), undefined, alice.apiKey);
-    expect(h.data.edits.map((e: any) => e.by.label)).toEqual(["grok, on behalf of Alice Example", "grok, on behalf of Alice Example"]);
+    expect(h.data.edits.map((e: any) => e.by.label)).toEqual(["Alice Example", "grok, on behalf of Alice Example"]);
   });
 
   it("AC-C1-03 MCP: context_message { action: edit } and context_message_read { history: true } return the REST bodies", async () => {
@@ -420,7 +422,8 @@ describe("AC-C1-04: an edit re-indexes mentions", () => {
 describe("AC-C1-05: delete leaves a tombstone; replies stay; owners and admins moderate", () => {
   it("AC-C1-05 the author deletes a post: tombstone on every read, replies kept, gone from My Work and search, pins and saves dropped", async () => {
     const t = await open(alice, "@rita a secret-word-xyzzy post to delete");
-    const re = await reply(rita, t.id, "a reply that stays");
+    // Alice replies (Rita replying would answer her mention).
+    const re = await reply(alice, t.id, "a reply that stays");
     expect((await jsonRequest(app, "POST", msgRoute("general", t.message_id, "/pin"), {}, alice.apiKey)).status).toBe(200);
     expect((await jsonRequest(app, "POST", msgRoute("general", t.message_id, "/save"), {}, rita.apiKey)).status).toBe(200);
     expect(mentionMessages(await work(rita, "?sections=mentions"))).toContain(t.message_id);
@@ -621,11 +624,12 @@ describe("AC-C1-07: save for later, across nests", () => {
     // A saved message in a nest the saver can no longer read is left out, and out of the count.
     const tmpNest = (await jsonRequest(app, "POST", "/nests", { name: "Temporary" }, owner.apiKey)).data.nest.id;
     await newChannel("general", owner, tmpNest);
-    await jsonRequest(app, "POST", `/nests/${tmpNest}/collaborators`, { email: rita.email, permission: "read" }, owner.apiKey);
+    const added = await jsonRequest(app, "POST", `/nests/${tmpNest}/collaborators`, { email: rita.email, permission: "read" }, owner.apiKey);
+    expect(added.status, JSON.stringify(added.data)).toBe(201);
     const t = await open(owner, "you will lose this", "nodes/channels/general", {}, tmpNest);
     expect((await jsonRequest(app, "POST", msgRoute("general", t.message_id, "/save", tmpNest), {}, rita.apiKey)).status).toBe(200);
     expect((await jsonRequest(app, "GET", "/me/saved", undefined, rita.apiKey)).data.saved.map((x: any) => x.message.id)).toContain(t.message_id);
-    const rm = await jsonRequest(app, "DELETE", `/nests/${tmpNest}/collaborators/${rita.userId}`, undefined, owner.apiKey);
+    const rm = await jsonRequest(app, "DELETE", `/nests/${tmpNest}/collaborators/${added.data.collaborator.id}`, undefined, owner.apiKey);
     expect(rm.status, JSON.stringify(rm.data)).toBeLessThan(300);
     const after = await jsonRequest(app, "GET", "/me/saved", undefined, rita.apiKey);
     expect(after.data.saved.map((x: any) => x.message.id)).not.toContain(t.message_id);
@@ -681,13 +685,22 @@ describe("AC-C1-08: every message has a url, and a message id can be looked up",
 
   it("AC-C1-08 unknown, unreadable and other-nest ids get the same 404", async () => {
     const a = await open(alice, "mine, not yours");
+    const elsewhere = await open(stranger, "theirs, not mine", "nodes/channels/general", {}, otherNestId);
     const unknown = await jsonRequest(app, "GET", `/nests/${nestId}/messages/00000000-0000-4000-8000-000000000000`, undefined, rita.apiKey);
+    // A real message, but in a nest this caller is not asking through: the
+    // same body as an unknown id.
+    const wrongNest = await jsonRequest(app, "GET", `/nests/${nestId}/messages/${elsewhere.message_id}`, undefined, rita.apiKey);
     const strangerRead = await jsonRequest(app, "GET", `/nests/${nestId}/messages/${a.message_id}`, undefined, stranger.apiKey);
-    const otherNest = await jsonRequest(app, "GET", `/nests/${otherNestId}/messages/${a.message_id}`, undefined, stranger.apiKey);
+    const viaOwnNest = await jsonRequest(app, "GET", `/nests/${otherNestId}/messages/${a.message_id}`, undefined, stranger.apiKey);
     const shareOnly = await jsonRequest(app, "GET", `/nests/${nestId}/messages/${a.message_id}`, undefined, bob.apiKey);
-    for (const r of [unknown, strangerRead, otherNest, shareOnly]) {
+    expect(unknown.status).toBe(404);
+    expect(wrongNest.status).toBe(404);
+    expect(wrongNest.data).toEqual(unknown.data);
+    expect(viaOwnNest.status).toBe(404);
+    expect(viaOwnNest.data).toEqual(unknown.data);
+    for (const r of [strangerRead, shareOnly]) {
       expect(r.status).toBe(404);
-      expect(r.data).toEqual(unknown.data);
+      expect(JSON.stringify(r.data)).not.toContain("mine, not yours");
     }
     const mcp = await callTool(stranger.apiKey, "context_message_read", { message: a.message_id }, otherNestId);
     expect(mcp.isError).toBe(true);
@@ -802,8 +815,10 @@ describe("AC-C1-11: @channel and @here reach every member", () => {
       sent.push({ url: String(url), body: String(init?.body ?? "") });
       return new Response("ok", { status: 200 });
     });
+    // A broadcast name can't be a wake-up target, so nothing can be woken by one.
     const hook = await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/channel`, { url: "https://runner.example.com/wake" }, owner.apiKey);
-    expect(hook.status, JSON.stringify(hook.data)).toBe(200);
+    expect(hook.status, JSON.stringify(hook.data)).toBe(400);
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/here`, { url: "https://runner.example.com/wake" }, owner.apiKey)).status).toBe(400);
     const t = await open(alice, "@channel standup in five");
     expect(t.mentions).toEqual([{ name: "channel", kind: "everyone", reached: 3 }]);
     for (const u of [owner, ada, rita]) expect(mentionMessages(await work(u, "?sections=mentions"))).toContain(t.message_id);
@@ -824,7 +839,6 @@ describe("AC-C1-11: @channel and @here reach every member", () => {
     expect(doc.status, JSON.stringify(doc.data)).toBe(201);
     expect(doc.data.mentions).toEqual([{ name: "channel", kind: "nobody" }]);
     expect(mentionMessages(await work(rita, "?sections=mentions"))).not.toContain(doc.data.comment_id);
-    await jsonRequest(app, "DELETE", `/nests/${nestId}/agent-webhooks/channel`, undefined, owner.apiKey);
   });
 
   it("AC-C1-11 a nest with more than 200 members is refused before anything is written", async () => {
@@ -953,9 +967,12 @@ describe("AC-C1-14: members act on messages; nobody else does; read-only keys re
     expect((await react(rita, t.message_id, "🎉", {}, "members")).status).toBe(409);
     expect((await edit(rita, mine.id, "after archive", {}, "members")).status).toBe(409);
     expect((await jsonRequest(app, "POST", msgRoute("members", mine.id, "/pin"), {}, rita.apiKey)).status).toBe(409);
+    expect((await del(rita, mine.id, {}, "members")).status).toBe(409);
     // Reading, saving and unsaving still work on an archived channel.
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels/members/pins`, undefined, rita.apiKey)).status).toBe(200);
     expect((await jsonRequest(app, "DELETE", msgRoute("members", t.message_id, "/save"), undefined, rita.apiKey)).status).toBe(200);
+    // Restored, her own message is hers to delete again.
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/members/archive`, { archived: false }, owner.apiKey)).status).toBe(200);
     expect((await del(rita, mine.id, {}, "members")).status).toBe(200);
   });
 });

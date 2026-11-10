@@ -1417,6 +1417,58 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
   `);
 
+  // Migration 088 parity: channel message actions — reactions, edit history,
+  // pins, saved items, and the tombstone columns on a message (PO-1196).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      author TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (comment_id, emoji, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_reactions_user ON message_reactions(user_id, created_at);
+    CREATE TABLE IF NOT EXISTS message_edits (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      edited_by TEXT NOT NULL,
+      client_json TEXT,
+      replaced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
+    CREATE TABLE IF NOT EXISTS message_pins (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      pinned_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, comment_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_pins_node ON message_pins(nest_id, node_id, created_at);
+    CREATE TABLE IF NOT EXISTS saved_messages (
+      user_id TEXT NOT NULL,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, comment_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_saved_messages_user ON saved_messages(user_id, created_at);
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS edited_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+  `);
+
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
     "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",

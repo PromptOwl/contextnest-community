@@ -140,6 +140,7 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMessageTool, runMessageTool } from "./message-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -488,6 +489,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
   "context_channels",
+  // Channel messages (PO-1196): the permalink lookup and search read only;
+  // context_message (react, edit, …) writes and is not here.
+  "context_message_read",
+  "context_channel_search",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -3508,11 +3513,11 @@ async function runTool(
 
       // A channel takes posts — and resolves — from people added to the nest
       // only; the same rule the REST comment routes apply.
-      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail, isResolve ? undefined : body);
       if (channelRefusal) {
         return toolError(
           channelRefusal.error,
-          channelRefusal.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+          channelRefusal.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
         );
       }
 
@@ -5022,6 +5027,10 @@ async function runTool(
       // on (mcp/routes.ts); runChannelTool re-checks the switch.
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
+      }
+      // Channel messages (PO-1196): same switch, re-checked in runMessageTool.
+      if (isMessageTool(toolName)) {
+        return runMessageTool(toolName, args, ctx);
       }
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {

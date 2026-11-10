@@ -26,11 +26,20 @@ import { listNotifications } from "../governance/notify-service.js";
 import { canDecideAccessRequests, listAccessRequests } from "../governance/access-request-service.js";
 import { listAssignedTo } from "../nodes/assigned-service.js";
 import { listOpenMentions, mentionedNodeKeys } from "../mentions/mention-index.js";
+import { SAVED_PAGE_DEFAULT, listSaved, type SavedList } from "../channels/saved.js";
+import { config } from "../config.js";
 import { ValidationError } from "../shared/errors.js";
 
-/** The sections of My Work, in the order an agent reads them. */
-export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications"] as const;
+/** The sections of My Work, in the order an agent reads them. `saved` (the
+ *  caller's saved channel messages, PO-1196) exists only while
+ *  EXPERIMENTAL_AGENT_STREAM is on. */
+export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications", "saved"] as const;
 export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
+
+/** The sections that exist right now (the switch decides `saved`). */
+export function availableMyWorkSections(): MyWorkSection[] {
+  return MY_WORK_SECTIONS.filter((s) => s !== "saved" || config.EXPERIMENTAL_AGENT_STREAM);
+}
 
 /** `sections` from a query string ("mentions,items") or an MCP argument
  *  (["mentions", "items"]); null when none was given. */
@@ -38,11 +47,12 @@ export function parseMyWorkSections(raw: unknown): MyWorkSection[] | null {
   if (raw === undefined || raw === null || raw === "") return null;
   const list = Array.isArray(raw) ? raw : String(raw).split(",");
   const out: MyWorkSection[] = [];
+  const available = availableMyWorkSections();
   for (const item of list) {
     const s = String(item ?? "").trim().toLowerCase();
     if (!s) continue;
-    if (!(MY_WORK_SECTIONS as readonly string[]).includes(s)) {
-      throw new ValidationError(`sections takes any of: ${MY_WORK_SECTIONS.join(", ")}.`);
+    if (!(available as readonly string[]).includes(s)) {
+      throw new ValidationError(`sections takes any of: ${available.join(", ")}.`);
     }
     if (!out.includes(s as MyWorkSection)) out.push(s as MyWorkSection);
   }
@@ -377,6 +387,15 @@ export async function buildMyWork(params: {
         return [];
       });
   const mentions = allMentions.slice(mentionsOffset, mentionsOffset + mentionsLimit);
+  // Saved channel messages (PO-1196): the caller's own list, newest saved
+  // first, over the same visible nests; only while channels are on.
+  const saved: SavedList | null =
+    want("saved") && config.EXPERIMENTAL_AGENT_STREAM
+      ? await listSaved({ userId, email: me, nestNames: nestName, limit: params.sectionLimit ?? SAVED_PAGE_DEFAULT, offset: 0 }).catch((err) => {
+          console.error("[me/work] saved list failed", err);
+          return { saved: [], pagination: { total: 0, limit: SAVED_PAGE_DEFAULT, offset: 0, has_more: false } };
+        })
+      : null;
   // The badge's share (CU-wdqcq0658p): the same total minus what waits on
   // others — the caller's own pending reviews and the requests they filed.
   // Plus every open mention (all pages), each counted once.
@@ -404,6 +423,8 @@ export async function buildMyWork(params: {
       offset: mentionsOffset,
       has_more: mentionsOffset + mentions.length < allMentions.length,
     },
+    // Absent while channels are off: the section does not exist then.
+    ...(saved ? { saved: saved.saved, saved_pagination: saved.pagination } : {}),
   };
   if (!sections) return full as Partial<typeof full>;
   // Only what was asked for. The totals span sections, so they ride only on
@@ -412,6 +433,7 @@ export async function buildMyWork(params: {
   for (const s of sections) (out as Record<string, unknown>)[s] = full[s];
   if (wantQueue) out.pagination = full.pagination;
   if (want("mentions")) out.mentions_pagination = full.mentions_pagination;
+  if (saved) out.saved_pagination = saved.pagination;
   return out;
 }
 
