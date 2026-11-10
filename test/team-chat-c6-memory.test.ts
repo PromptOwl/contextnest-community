@@ -94,6 +94,13 @@ const thread = async (u: User, threadId: string, channel = "ops") => {
   return r.data.thread as { post: any; replies: any[]; related_nodes: any[] };
 };
 const relations = (u: User, id: string, nest = nestId) => jsonRequest(app, "GET", `/nests/${nest}/nodes/${id}/relations`, undefined, u.apiKey);
+/** A node the owner creates on the governed nest is a draft: send it through review so it is approved text. */
+const publish = async (id: string) => {
+  const sub = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/submit-review`, {}, owner.apiKey);
+  expect(sub.status, JSON.stringify(sub.data)).toBeLessThan(300);
+  const ok = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/approve`, { note: "ok" }, sam.apiKey);
+  expect(ok.status, JSON.stringify(ok.data)).toBe(200);
+};
 
 beforeAll(async () => {
   env = setupTestEnv();
@@ -322,6 +329,7 @@ describe("AC-C6-05: a correction becomes an edit proposal on the node it correct
     const doc = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Support Hours", content: "# Support Hours\n\n9 to 5 CET." }, owner.apiKey);
     expect(doc.status, JSON.stringify(doc.data)).toBe(201);
     const id: string = doc.data.node.id;
+    await publish(id);
     const t = await open(alice, OPS, "Support hours changed to 8 to 6 CET.");
     const mcp = await callTool(alice.apiKey, "context_correct", {
       thread: t.id,
@@ -359,6 +367,7 @@ describe("AC-C6-06: correct refusals", () => {
     const doc = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Oncall Rota", content: "# Oncall\n\nAlice this week." }, owner.apiKey);
     expect(doc.status).toBe(201);
     const id: string = doc.data.node.id;
+    await publish(id);
     const first = await correct(alice, t.id, { message_id: m, node_id: id });
     expect(first.status, JSON.stringify(first.data)).toBe(201);
     const again = await correct(alice, t.id, { message_id: m, node_id: id });
@@ -448,6 +457,7 @@ describe("AC-C6-08: the channel knowledge view", () => {
     expect(m.status).toBe(201);
     const doc = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Design Tokens", content: "# Tokens\n\nSpacing 4px." }, owner.apiKey);
     expect(doc.status).toBe(201);
+    await publish(doc.data.node.id);
     const c = await correct(alice, t3.id, { message_id: t3.comments[0].id, node_id: doc.data.node.id, replacement: "# Tokens\n\nSpacing 8px." });
     expect(c.status, JSON.stringify(c.data)).toBe(201);
 
@@ -542,6 +552,25 @@ describe("SEC-C6-02: a thread id from another nest is not found on either nest",
     expect((await remember(alice, t.id, { message_id: side.comments[0].id, kind: "note" })).status).toBe(404);
     const mcp = await callTool(alice.apiKey, "context_remember", { thread: side.id, kind: "note" });
     expect(mcp.isError).toBe(true);
+  });
+});
+
+describe("SEC-C6-05: a correction never folds in someone else's unsaved draft", () => {
+  it("refuses with 409 while another person has an unsealed draft on the node, and again when the head moved", async () => {
+    const doc = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Release Checklist", content: "# Checklist\n\nRun the smoke tests." }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const id: string = doc.data.node.id;
+    await publish(id);
+    // The owner starts an edit (a draft on a governed nest, not submitted).
+    const draft = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "# Checklist\n\nRun the smoke tests.\n\nOwner's unsaved thought." }, owner.apiKey);
+    expect(draft.status, JSON.stringify(draft.data)).toBe(200);
+    const t = await open(alice, OPS, "The checklist also needs the rollback step.");
+    const r = await correct(alice, t.id, { message_id: t.comments[0].id, node_id: id });
+    expect(r.status, JSON.stringify(r.data)).toBe(409);
+    expect(r.data.error).toMatch(/draft someone else/i);
+    const after = await readNode(owner, id);
+    expect(after.node.content ?? after.node.body).not.toContain("Correction from");
+    expect((await queue(sam)).some((q) => q.nodeId === id)).toBe(false);
   });
 });
 

@@ -27,7 +27,8 @@ import { findThreadRelations, recordThreadRelation } from "../nodes/relations.js
 import { getCurrentVersion } from "../governance/version-service.js";
 import { getDb } from "../db/client.js";
 import { justWritten } from "../mentions/mention-index.js";
-import { ValidationError } from "../shared/errors.js";
+import { ConflictError, ValidationError } from "../shared/errors.js";
+import { canOpenNode } from "../governance/mention-notify.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import type { ActorLabel } from "../channels/actor-label.js";
 import { deriveTitle, MAX_SUMMARY } from "../stream/promote.js";
@@ -136,6 +137,10 @@ export async function rememberThread(
   const earlier = (await findThreadRelations(nestId, { hostNodeIds: [thread.node_id], threadIds: [thread.id] })).find(
     (r) => r.kind === "remembered" && r.message_id === messageId && r.memory_kind === kind,
   );
+  // As promote: an earlier node the caller can't open is not described.
+  if (earlier && !(await canOpenNode(nestId, earlier.node_id, caller.userId, userEmail))) {
+    throw new ConflictError(`This ${messageId ? "message" : "thread"} was already remembered as a ${kind}.`);
+  }
   if (earlier) {
     const head = await headOf(nestId, earlier.node_id);
     return {
@@ -190,6 +195,10 @@ export async function rememberThread(
       requestedBy: userEmail,
       note: `Remembered from a thread on ${thread.node_id} by ${proposer.label}`,
       ...(caller.client ? { client: caller.client } : {}),
+    }).catch((err) => {
+      // A review raced in between the create and the submit: the draft is
+      // there and in the queue; say so rather than 500.
+      throw err instanceof Error && /already pending/i.test(err.message) ? new ConflictError(err.message) : err;
     });
     reviewId = review.id;
   }

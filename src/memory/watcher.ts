@@ -60,6 +60,7 @@ import { displayNames } from "../channels/message-meta.js";
 import { recordThreadRelation } from "../nodes/relations.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { indexedTitles } from "./links.js";
+import { hiddenSurfaceDrafts, isHidden } from "../surfaces/draft-visibility.js";
 
 /** Tests only: a credential override (`null` = none configured) and a shorter quiet window. */
 export const watcherTestHooks: { credential?: ModelCredential | null; quietMs?: number } = {};
@@ -72,6 +73,8 @@ export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const MAX_TOOL_RESULT_CHARS = 8_000;
 export const MAX_OUTPUT_TOKENS = 2_000;
 const MAX_ITEMS = 10;
+/** Relation (link) items applied per run. */
+export const MAX_LINKS_PER_RUN = 3;
 const CLAIM = "server:channel-watch";
 const READ_TOOLS = new Set(["search_nest", "list_nodes", "read_node"]);
 const ASK_RE = /(^|[\s(])@(nest|hootie|[a-z0-9][\w.-]{0,40})\s+remember(\s+this)?\b/i;
@@ -159,8 +162,10 @@ async function lastRunOf(nestId: string, agentNode: string, channelName: string)
   };
 }
 
-async function toView(nestId: string, channelId: string, agent: MetacognitionAgent, entry: ChannelWatchConfig): Promise<WatchView> {
-  const reason = await inactiveReason(nestId, agent, entry);
+/** `detailed`: owner/admin see why it can't run (the key state, the owner's standing); members only that it can't. */
+async function toView(nestId: string, channelId: string, agent: MetacognitionAgent, entry: ChannelWatchConfig, detailed: boolean): Promise<WatchView> {
+  const full = await inactiveReason(nestId, agent, entry);
+  const reason = full === null ? null : detailed || full === "The watch is off." ? full : "The watcher can't run right now; the nest's owner or an admin can see why.";
   return {
     channel: entry.channel,
     channel_id: channelId,
@@ -179,7 +184,8 @@ export async function getChannelWatch(caller: Caller, rawName: unknown): Promise
   if (!metacognitionEnabled()) throw new NotFoundError(NOT_ENABLED);
   const { node, view } = await getReadableChannel(caller, rawName);
   const w = await watcherFor(caller.nestId, view.name);
-  return { watch: w ? await toView(caller.nestId, node.id, w.agent, w.entry) : null };
+  const admin = await assertCanManageMetacognition(caller.nestId, caller.userId).then(() => true, () => false);
+  return { watch: w ? await toView(caller.nestId, node.id, w.agent, w.entry, admin) : null };
 }
 
 /**
@@ -244,7 +250,7 @@ export async function setChannelWatch(
     savedBy: caller.userEmail,
   });
   clearQuietTimer(caller.nestId, node.id);
-  return { watch: await toView(caller.nestId, node.id, saved, entry) };
+  return { watch: await toView(caller.nestId, node.id, saved, entry, true) };
 }
 
 // ─── The trigger ────────────────────────────────────────────────────────
@@ -421,7 +427,9 @@ export async function runChannelWatch(
     return silent(trigger, "too_short", rows.length);
   }
   const hour = new Date(Date.now() - 3600_000).toISOString();
-  const starts = (await db.get("SELECT COUNT(*) AS n FROM runs WHERE nest_id = ? AND agent_node = ? AND triggered_by LIKE 'channel:%' AND started_at > ?", [
+  // The agent's one hourly budget, every trigger counted together (a channel
+  // ask must not be a second budget); silent runs don't count as starts.
+  const starts = (await db.get("SELECT COUNT(*) AS n FROM runs WHERE nest_id = ? AND agent_node = ? AND status <> 'cancelled' AND started_at > ?", [
     nestId,
     agent.node_id,
     hour,
@@ -454,7 +462,9 @@ export async function runChannelWatch(
     read: new Set(),
     mcp: new McpPool(() => null),
     signal: ac.signal,
-    quiet: true,
+    // Steps are recorded, as for any metacognition run: the review request
+    // links back to the run, and a refused read is on the record.
+    quiet: false,
   };
 
   const result: WatchRunResult = { ran: true, trigger, reason: null, verdict: null, proposals: [], relations: 0, refused: 0, messages: rows.length, run_id: runId };
@@ -501,9 +511,10 @@ export async function runChannelWatch(
     clearTimeout(timer);
   }
 
-  // Cursor: everything in this batch is seen.
+  // Cursor: everything in this batch is seen. An ask run read one thread
+  // only, so it leaves the cursor for the next quiet run.
   const newest = rows[rows.length - 1].created_at;
-  await db.run(
+  if (!forced) await db.run(
     `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at) VALUES (?, ?, 'watch', ?, '', ?)
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = CASE WHEN excluded.at > stream_marks.at THEN excluded.at ELSE stream_marks.at END`,
     [agent.persona.user_id, nestId, channelId, newest],
@@ -691,9 +702,19 @@ async function apply(ctx: ToolContext, items: Item[], ids: Map<string, BatchMess
       continue;
     }
     if (it.kind === "relation") {
+      // A link the agent suggests (kind `linked`, no content): the node must
+      // exist, sit in its read scope, not be a hidden chat draft, and not be
+      // the channel itself; at most MAX_LINKS_PER_RUN per run.
       const nodeId = it.node_id ? safeId(it.node_id) : null;
       const known = nodeId ? (await indexedTitles(ctx.nestId, [nodeId])).has(nodeId) : false;
-      if (!nodeId || !known || !inFolders(nodeId, ctx.agent.config.scope.read) || nodeId === channelId) {
+      if (
+        !nodeId ||
+        !known ||
+        !inFolders(nodeId, ctx.agent.config.scope.read) ||
+        nodeId === channelId ||
+        isHidden(await hiddenSurfaceDrafts(ctx.nestId), nodeId) ||
+        result.relations >= MAX_LINKS_PER_RUN
+      ) {
         result.refused++;
         continue;
       }
@@ -702,7 +723,7 @@ async function apply(ctx: ToolContext, items: Item[], ids: Map<string, BatchMess
         nodeId,
         hostNodeId: channelId,
         createdBy: persona.email,
-        meta: { thread_id: threadId, message_id: null, kind: "proposed", memory_kind: null, proposer: persona.name },
+        meta: { thread_id: threadId, message_id: null, kind: "linked", memory_kind: null, proposer: persona.name },
       }).catch(() => undefined);
       result.relations++;
       continue;

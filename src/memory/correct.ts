@@ -24,7 +24,8 @@ import { canUserEdit } from "../governance/stewardship-service.js";
 import { getPendingReview, submitForReview } from "../governance/review-service.js";
 import { canOpenNode } from "../governance/mention-notify.js";
 import { callerCanRead, findThreadRelations, recordThreadRelation } from "../nodes/relations.js";
-import { getCurrentVersion } from "../governance/version-service.js";
+import { getApprovedVersion, getCurrentVersion } from "../governance/version-service.js";
+import { getDb } from "../db/client.js";
 import { addComment, setThreadStatus, syncAnnotationsNode } from "../annotations/service.js";
 import { justWritten } from "../mentions/mention-index.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -124,13 +125,27 @@ export async function correctNode(
   if (await getPendingReview(nestId, nodeId)) {
     throw new ConflictError(`${nodeId} already has a change waiting for review. Approve or reject it first, then correct it.`);
   }
+  // Someone else's unsaved draft must not be folded into a "correction"
+  // under this caller's name: when the working copy is a draft past the
+  // approved text, it must be the caller's own (their PATCH continues it).
+  // The head read here is handed to the write, which re-checks it inside the
+  // node's lock, so a save landing in between is refused, never overwritten.
+  const head = await getCurrentVersion(nestId, nodeId);
+  if (head > ((await getApprovedVersion(nestId, nodeId)) ?? 0)) {
+    const draft = (await getDb().get("SELECT author FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = ?", [nestId, nodeId, head])) as
+      | { author: string }
+      | undefined;
+    if (draft && draft.author.toLowerCase() !== userEmail.toLowerCase()) {
+      throw new ConflictError(`${nodeId} has a draft someone else is working on. Ask them to submit or discard it, then correct it.`);
+    }
+  }
 
   const channel = channelNameOf(thread.node_id);
   const where = channel ? `#${channel}` : `a thread on [[${thread.node_id}]]`;
   const heading = `## Correction from ${where} (${readableDate(message.created_at)}), by ${proposer.label}`;
   const block = replacement === null
     ? `${heading}\n\n${await quotedMessages([message])}\n`
-    : `${heading}\n\n_The text above replaces the earlier version; the correction came from ${where}._\n`;
+    : `${heading}\n\n_The text above is ${proposer.label}'s correction of the earlier version, made from ${where}; the message that prompted it:_\n\n${await quotedMessages([message])}\n`;
   const content = replacement === null ? `${String(node.body ?? "").replace(/\s+$/, "")}\n\n${block}` : `${replacement.replace(/\s+$/, "")}\n\n${block}`;
   const changeNote = `Correction from ${where} by ${proposer.label}${note ? `: ${note}` : ""}`;
 
@@ -139,7 +154,7 @@ export async function correctNode(
     nodeId,
     { content, changeNote, ...(caller.client ? { client: caller.client } : {}) },
     userEmail,
-    { notifyMentions: false },
+    { notifyMentions: false, expectHead: head },
   );
 
   let reviewId: string | null = null;
@@ -152,6 +167,8 @@ export async function correctNode(
       requestedBy: userEmail,
       note: changeNote,
       ...(caller.client ? { client: caller.client } : {}),
+    }).catch((err) => {
+      throw err instanceof Error && /already pending/i.test(err.message) ? new ConflictError(err.message) : err;
     });
     reviewId = review.id;
   }

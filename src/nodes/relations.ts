@@ -600,7 +600,8 @@ const DISCUSSED_IN: StoredType = {
   color: "#0f766e",
 };
 
-export const THREAD_RELATION_KINDS = ["mentioned", "promoted", "remembered", "corrected", "proposed"] as const;
+/** `linked` = a relation the channel watcher suggested (no content of its own); the rest produced or changed the node. */
+export const THREAD_RELATION_KINDS = ["mentioned", "promoted", "remembered", "corrected", "proposed", "linked"] as const;
 export type ThreadRelationKind = (typeof THREAD_RELATION_KINDS)[number];
 
 export interface ThreadRelationMeta {

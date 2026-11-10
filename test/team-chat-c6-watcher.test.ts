@@ -220,6 +220,12 @@ describe("AC-C6-09: adding the agent to a channel", () => {
     expect(saved.data.watch.enabled).toBe(true);
     expect(saved.data.watch.active).toBe(false);
     expect(saved.data.watch.inactive_reason).toMatch(/model key/i);
+    // SEC-C6-06: a member sees that it can't run, not why (the key state, the admin's email).
+    const asMember = await getWatch(alice);
+    expect(asMember.status).toBe(200);
+    expect(asMember.data.watch.active).toBe(false);
+    expect(asMember.data.watch.inactive_reason).not.toMatch(/model key/i);
+    expect(JSON.stringify(asMember.data)).not.toContain(owner.email);
     // A run with no key is a logged skip, not an error, and calls no model.
     await open(alice, "@nest remember this: the worker restarts at 02:00 UTC every night.");
     const ran = await runWatch(owner);
@@ -342,8 +348,6 @@ describe("AC-C6-10: a quiet-window run proposes through the persona's draft + re
     expect(rows.map((n: any) => n.node_id).sort()).toEqual(["nodes/ops/runbook", created.node_id].sort());
     expect(rows[0].proposer).toContain("Archivist");
     expect(rows.every((n: any) => n.thread_id === t.id)).toBe(true);
-    const rel = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/ops/runbook/relations`, undefined, alice.apiKey);
-    expect(rel.data.discussed_in.map((d: any) => [d.thread_id, d.kind])).toContainEqual([t.id, "proposed"]);
 
     // The run is on record with counts only, never chat text.
     const w = await getWatch(owner);
@@ -354,6 +358,15 @@ describe("AC-C6-10: a quiet-window run proposes through the persona's draft + re
     const mine = (runs.data.runs ?? []).filter((r: any) => r.triggered_by === "channel:ops");
     expect(mine.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(mine)).not.toContain("backup overlaps");
+
+    const rel = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/ops/runbook/relations`, undefined, alice.apiKey);
+    expect(rel.data.discussed_in.map((d: any) => [d.thread_id, d.kind])).toContainEqual([t.id, "proposed"]);
+    // The relation item is a link the agent suggested, not something it produced.
+    expect(rel.data.discussed_in.map((d: any) => [d.thread_id, d.kind])).toContainEqual([t.id, "linked"]);
+    expect(k.data.nodes.some((n: any) => n.kind === "linked")).toBe(false);
+    // The review requests point back at the run.
+    const runRow = (runs.data.runs ?? []).find((r: any) => r.id === ran.data.result.run_id);
+    expect(runRow).toBeTruthy();
 
     // Nothing new since → silent, and the model is not called again.
     requests = [];
