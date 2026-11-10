@@ -7,7 +7,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Hash, PanelLeft } from "lucide-react";
+import { Hash, PanelLeft } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -63,7 +63,27 @@ function useViewportWidth(): number {
   return w;
 }
 
-export function ChatPage({ nestId, nestName, onBack, channel: selected, thread: openThread, onLocation, onOpenNode, onOpenDocumentThread }: Props) {
+/** The page fills the window under whatever the shell draws above it (the
+ *  header, and on a phone the nest's tab strip): measured, not assumed. */
+function usePageTop(): [React.RefObject<HTMLDivElement>, number] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(64);
+  useEffect(() => {
+    const measure = () => {
+      const el = ref.current;
+      if (!el) return;
+      const t = Math.round(el.getBoundingClientRect().top + window.scrollY);
+      setTop((cur) => (Math.abs(cur - t) > 1 ? t : cur));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  return [ref, top];
+}
+
+export function ChatPage({ nestId, nestName, channel: selected, thread: openThread, onLocation, onOpenNode, onOpenDocumentThread }: Props) {
+  const [pageRef, top] = usePageTop();
   const data = useChannels(nestId, selected, openThread);
   const { list, channel, timeline, actions } = data;
   const { adminStatus } = useAuth();
@@ -309,14 +329,7 @@ export function ChatPage({ nestId, nestName, onBack, channel: selected, thread: 
 
   return (
     <ChannelNavProvider value={nav}>
-      <div className="flex h-[calc(100vh-4rem)] min-h-[24rem] flex-col" data-testid="chat-page">
-        {/* The page's own back row only on a phone: the shell's breadcrumb carries it elsewhere. */}
-        <div className="flex h-10 shrink-0 items-center gap-1 border-b px-2 md:hidden">
-          <Button variant="ghost" size="sm" onClick={onBack} className="px-2" title="Back to nests">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <span className="truncate text-sm font-medium">{nestName}</span>
-        </div>
+      <div ref={pageRef} className="flex min-h-[24rem] flex-col" style={{ height: `calc(100dvh - ${top}px)` }} data-testid="chat-page">
         <div className="flex min-h-0 flex-1">
           {layout.sidebar === "inline" ? (
             <aside className="w-[13.5rem] shrink-0 border-r bg-muted/20">{sidebar}</aside>

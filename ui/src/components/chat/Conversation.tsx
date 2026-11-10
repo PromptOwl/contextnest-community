@@ -147,7 +147,8 @@ export function Conversation(p: ConversationProps) {
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-label={channel.title} data-testid="chat-conversation">
-      <header className={cn("flex shrink-0 items-center gap-2 border-b px-3", p.compact ? "h-11" : "h-12")}>
+      {!p.compact && (
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {p.leading}
         <div className="flex min-w-0 flex-1 items-baseline gap-2 px-1">
           <h2 className="flex min-w-0 shrink-0 items-center gap-1 truncate text-base font-semibold leading-6">
@@ -180,6 +181,7 @@ export function Conversation(p: ConversationProps) {
             )
           ))}
       </header>
+      )}
 
       {p.lag.stale && (
         <div className="flex shrink-0 items-center gap-2 border-b bg-muted/60 px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="chat-lag">
