@@ -35,6 +35,7 @@ import { isPrivateAddress } from "../metacognition/net.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { AppError } from "../shared/errors.js";
 import { lastDeliveries, sendAgentTestEvent, type DeliveryView } from "./agent-wake.js";
+import { isReservedHandle, RESERVED_HANDLES } from "../agents/reserved.js";
 
 /** An agent handle as typed after "@": lowercase letters, digits, dot, dash,
  *  underscore. No "@" inside, so an email-shaped name (a person) never
@@ -47,6 +48,10 @@ export function parseAgentHandle(raw: unknown): string {
     throw new ValidationError(
       "handle is an agent's @name: 1–63 characters, lowercase letters, digits, dots, dashes or underscores.",
     );
+  }
+  // The nest's own assistant and the broadcast words (C7, src/agents/reserved.ts).
+  if (isReservedHandle(h)) {
+    throw new ValidationError(`"${h}" is a reserved handle (${[...RESERVED_HANDLES].join(", ")}) and can't be an agent's name.`);
   }
   return h;
 }

@@ -47,6 +47,8 @@ let scriptedRounds: Round[] = [];
 let scriptedAnswer = "Hoot.";
 let scriptedError: unknown = null;
 let modelRounds: Array<{ system: string; messages: any[]; tools: string[]; toolChoice?: string }> = [];
+/** Runs at the start of round N (1-based) — something that happens mid-turn. */
+let beforeRound: ((n: number) => Promise<void>) | null = null;
 
 beforeAll(() => {
   vi.doMock("../src/hootie/model.js", () => ({
@@ -57,6 +59,7 @@ beforeAll(() => {
         tools: (params.tools ?? []).map((t) => t.name),
         toolChoice: params.toolChoice,
       });
+      if (beforeRound) await beforeRound(n);
       if (scriptedError) {
         const e = scriptedError;
         scriptedError = null;
@@ -167,6 +170,7 @@ beforeAll(async () => {
     const r = await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: u.email, permission }, owner.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
   }
+  // Reviewers, so a proposal (a draft in the review queue) can be decided.
   const ch = await jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "general", purpose: "Everything" }, owner.apiKey);
   expect(ch.status, JSON.stringify(ch.data)).toBe(201);
 
@@ -180,8 +184,13 @@ beforeAll(async () => {
   );
   expect(pricing.status, JSON.stringify(pricing.data)).toBeLessThan(300);
   pricingId = pricing.data.node.id;
-  const pub = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${pricingId}/publish`, {}, owner.apiKey);
-  expect(pub.status, JSON.stringify(pub.data)).toBeLessThan(300);
+  // Stewardship on from here: the owner's next create lands as a draft, which
+  // has no approved body for anyone but its author.
+  const gov = await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
+  expect(gov.status, JSON.stringify(gov.data)).toBeLessThan(300);
+  // A reviewer, so a proposal (a draft in the review queue) can be decided.
+  const st = await jsonRequest(app, "POST", `/nests/${nestId}/stewards`, { scope: "nest", email: alice.email, role: "reviewer" }, owner.apiKey);
+  expect(st.status, JSON.stringify(st.data)).toBeLessThan(300);
   const draft = await jsonRequest(
     app,
     "POST",
@@ -191,9 +200,7 @@ beforeAll(async () => {
   );
   expect(draft.status, JSON.stringify(draft.data)).toBeLessThan(300);
   draftId = draft.data.node.id;
-  // Stewardship on, so a draft has no approved body for anyone but its author.
-  const gov = await jsonRequest(app, "PATCH", `/nests/${nestId}`, { stewardship_enabled: true }, owner.apiKey);
-  expect(gov.status, JSON.stringify(gov.data)).toBeLessThan(300);
+  expect(draft.data.node.status).not.toBe("published");
 });
 
 afterAll(async () => {
@@ -207,6 +214,7 @@ beforeEach(() => {
   scriptedAnswer = "Hoot.";
   scriptedError = null;
   modelRounds = [];
+  beforeRound = null;
   sent = [];
   process.env.HOOTIE_ENABLED = "true";
   process.env.EXPERIMENTAL_AGENT_STREAM = "true";
@@ -281,12 +289,13 @@ describe("AC-C7-02: the turn runs as the asker, with the thread as fenced untrus
     expect(h.citations.map((c: any) => c.id)).toContain(pricingId);
   });
 
-  it("AC-C7-02 the owner's own question can draw on the draft", async () => {
-    scriptedAnswer = "March, 55 dollars [[Secret roadmap]].";
+  it("AC-C7-02 a draft is not conversation context for its author either: only approved text is retrieved for a thread", async () => {
+    scriptedAnswer = "March, 55 dollars [[Secret roadmap]] [[Pricing plan]].";
     const t = await open(owner, "@hootie what does the secret roadmap say about pricing v2?");
     const view = await thread(owner, t.id);
     const h = hootieMessages(view)[0];
-    expect(h.citations.map((c: any) => c.id)).toContain(draftId);
+    expect(h.citations.map((c: any) => c.id)).toEqual([pricingId]);
+    expect(modelRounds[0].system).not.toContain("55 dollar seat");
   });
 
   it("AC-C7-02 earlier thread messages are in the prompt only inside a fenced block marked untrusted", async () => {
@@ -384,7 +393,7 @@ describe("AC-C7-03: bounded, never silent, never a loop", () => {
     const h = hootieMessages(await thread(alice, t.id))[0];
     expect(h.body).not.toContain("https://evil.example.com");
     expect(h.body).toContain("[[Pricing plan]]");
-    expect(h.body).toContain("[link removed]");
+    expect(h.body).toContain("\\[link removed\\]");
   });
 });
 
@@ -401,34 +410,10 @@ describe("AC-C7-04: off means off", () => {
     expect(tool.isError || !!tool.rpcError).toBe(true);
   });
 
-  it("AC-C7-04 with no model key the mention posts nothing and /ask is 503 no_api_key", async () => {
-    const noKey = await createTestApp("key", { ownerEmail: "olivia@c7.test", features: ["byok"], gateway: null });
-    const o = await registerUser(noKey, "olivia@c7.test", "Olivia Owner");
-    const n = (await jsonRequest(noKey, "POST", "/nests", { name: "NoKey" }, o.apiKey)).data.nest.id;
-    await jsonRequest(noKey, "POST", `/nests/${n}/channels`, { name: "general" }, o.apiKey);
-    const askNoKey = await import("../src/agents/ask-nest.js");
-    const p = await jsonRequest(noKey, "POST", `/nests/${n}/nodes/${GENERAL}/annotations`, { body: "@hootie hi" }, o.apiKey);
-    expect(p.status).toBe(201);
-    await askNoKey.settleNestAsks();
-    const r = await jsonRequest(noKey, "GET", `/nests/${n}/channels/general?thread=${p.data.thread.id}`, undefined, o.apiKey);
-    expect(r.data.thread.replies).toHaveLength(0);
-    const a = await jsonRequest(noKey, "POST", `/nests/${n}/ask`, { channel: "general", question: "hi" }, o.apiKey);
-    expect(a.status).toBe(503);
-    expect(a.data.reason).toBe("no_api_key");
-    // Back to the suite's app.
-    app = await createTestApp("key", { ownerEmail: "olivia@c7.test", features: ["byok"], gateway: TEST_GATEWAY });
-    ask = await import("../src/agents/ask-nest.js");
-    wake = await import("../src/stream/agent-wake.js");
-    wake.setAgentWakeBackoff([]);
-    captureWakes();
-  });
-
   it("AC-C7-04 with EXPERIMENTAL_AGENT_STREAM off every new route is 404 and no tool is listed", async () => {
     process.env.EXPERIMENTAL_AGENT_STREAM = "false";
     for (const [method, path, body] of [
       ["POST", `/nests/${nestId}/ask`, { channel: "general", question: "hi" }],
-      ["GET", `/nests/${nestId}/proposals`, undefined],
-      ["POST", `/nests/${nestId}/proposals/x/approve`, {}],
       ["GET", `/nests/${nestId}/agents`, undefined],
       ["GET", `/nests/${nestId}/agents/hootie`, undefined],
       ["POST", `/nests/${nestId}/threads/x/handoff`, { to: "grok" }],
@@ -438,10 +423,10 @@ describe("AC-C7-04: off means off", () => {
       expect(r.status, `${method} ${path}`).toBe(404);
     }
     const names = await listTools(owner.apiKey);
-    for (const n of ["context_ask_nest", "context_proposals", "context_agents", "context_handoff"]) expect(names).not.toContain(n);
+    for (const n of ["context_ask_nest", "context_agents", "context_handoff"]) expect(names).not.toContain(n);
     process.env.EXPERIMENTAL_AGENT_STREAM = "true";
     const on = await listTools(owner.apiKey);
-    for (const n of ["context_ask_nest", "context_proposals", "context_agents", "context_handoff"]) expect(on).toContain(n);
+    for (const n of ["context_ask_nest", "context_agents", "context_handoff"]) expect(on).toContain(n);
   });
 });
 
@@ -484,7 +469,7 @@ describe("AC-C7-05: ask over MCP and REST, posting only when asked to", () => {
     expect(r.status).toBe(404);
     const tool = await callTool(stranger.apiKey, "context_ask_nest", { channel: "general", question: "hi" });
     expect(tool.isError || !!tool.rpcError).toBe(true);
-    const readKey = await mintKey(rita, "reader", { capability: "read" });
+    const readKey = await mintKey(rita, "reader", { capability: "read", nest_id: nestId });
     const ro = await callTool(readKey, "context_ask_nest", { channel: "general", question: "hi" });
     expect(ro.isError || !!ro.rpcError).toBe(true);
     const bad = await jsonRequest(app, "POST", `/nests/${nestId}/ask`, { channel: "general" }, alice.apiKey);
@@ -494,12 +479,12 @@ describe("AC-C7-05: ask over MCP and REST, posting only when asked to", () => {
   });
 });
 
-// ─── AC-C7-06 / AC-C7-07 ─────────────────────────────────────────────────
-describe("AC-C7-06: a Hootie turn that wants to write posts a proposal card instead", () => {
+// ─── AC-C7-06 / AC-C7-07 ─────────────────────────────────────────────
+describe("AC-C7-06: a Hootie turn that wants to write files a draft for review and posts a card", () => {
   let threadId: string;
-  let proposalId: string;
+  let card: any;
 
-  it("AC-C7-06 propose_create_node writes nothing and posts a card", async () => {
+  it("AC-C7-06 propose_create_node publishes nothing: a hootie-authored draft in the review queue, and a card in the thread", async () => {
     scriptedRounds = [
       {
         text: "",
@@ -517,137 +502,132 @@ describe("AC-C7-06: a Hootie turn that wants to write posts a proposal card inst
     const view = await thread(alice, t.id);
     const h = hootieMessages(view);
     expect(h.map((m: any) => !!m.proposal)).toEqual(expect.arrayContaining([true]));
-    const card = h.find((m: any) => m.proposal);
+    card = h.find((m: any) => m.proposal);
+    expect(card.model_answer).toBe(true);
     expect(card.proposal).toEqual(
       expect.objectContaining({
-        proposal_id: expect.any(String),
         kind: "create_node",
-        status: "open",
-        target: expect.objectContaining({ title: "Follow up with Acme", type: "task", folder: "tasks" }),
+        status: "pending",
+        node_id: expect.stringMatching(/^nodes\/tasks\//),
+        version: 1,
+        review_id: expect.any(String),
+        title: "Follow up with Acme",
         preview: expect.stringContaining("Call Acme"),
-        expires_at: expect.any(String),
       }),
     );
-    proposalId = card.proposal.proposal_id;
-    expect(card.model_answer).toBe(true);
-    // Nothing was written.
-    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes?limit=200`, undefined, owner.apiKey);
-    expect(JSON.stringify(list.data)).not.toContain("Follow up with Acme");
-    // Listed for members, not for a stranger.
-    const mine = await jsonRequest(app, "GET", `/nests/${nestId}/proposals`, undefined, rita.apiKey);
-    expect(mine.status).toBe(200);
-    expect(mine.data.proposals.map((p: any) => p.proposal_id)).toContain(proposalId);
-    expect(mine.data.proposals[0]).toEqual(expect.objectContaining({ proposer: "hootie", asked_by: alice.email, thread_id: threadId, status: "open" }));
-    const not = await jsonRequest(app, "GET", `/nests/${nestId}/proposals`, undefined, stranger.apiKey);
-    expect(not.status).toBe(404);
-  });
-
-  it("AC-C7-06 a proposal naming a node the turn was never handed is refused and not recorded", async () => {
-    scriptedRounds = [
-      { text: "", calls: [{ name: "propose_assign_task", input: { node: { id: draftId }, assignee: alice.email } }] },
-      { text: "Could not propose that." },
-    ];
-    const before = (await jsonRequest(app, "GET", `/nests/${nestId}/proposals`, undefined, owner.apiKey)).data.proposals.length;
-    const t = await open(rita, "@hootie assign the secret roadmap to alice");
-    const view = await thread(rita, t.id);
-    expect(hootieMessages(view).filter((m: any) => m.proposal)).toHaveLength(0);
-    const after = (await jsonRequest(app, "GET", `/nests/${nestId}/proposals`, undefined, owner.apiKey)).data.proposals.length;
-    expect(after).toBe(before);
-    expect(JSON.stringify(modelRounds[1].messages.at(-1).content)).toMatch(/Not allowed/);
-  });
-
-  it("AC-C7-07 a non-writer member is 403; a stranger and another nest's id are 404", async () => {
-    const r = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${proposalId}/approve`, {}, rita.apiKey);
-    expect(r.status).toBe(403);
-    const s = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${proposalId}/approve`, {}, stranger.apiKey);
-    expect(s.status).toBe(404);
-    const other = (await jsonRequest(app, "POST", "/nests", { name: "Other" }, owner.apiKey)).data.nest.id;
-    const x = await jsonRequest(app, "POST", `/nests/${other}/proposals/${proposalId}/approve`, {}, owner.apiKey);
-    expect(x.status).toBe(404);
-  });
-
-  it("AC-C7-07 a writer's approval runs the write as the approver and posts the outcome", async () => {
-    const r = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${proposalId}/approve`, {}, owner.apiKey);
-    expect(r.status, JSON.stringify(r.data)).toBe(200);
-    expect(r.data.proposal.status).toBe("approved");
-    expect(r.data.proposal.decided_by).toBe(owner.email);
-    expect(r.data.outcome.node.id).toMatch(/^nodes\/tasks\//);
-    const node = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${r.data.outcome.node.id}`, undefined, owner.apiKey);
-    expect(node.status).toBe(200);
-    expect(node.data.node.author).toBe(owner.email);
+    expect(card.body).toContain("Call Acme");
+    // The draft: authored by hootie, not published, waiting in the review queue.
+    const node = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${card.proposal.node_id}`, undefined, owner.apiKey);
+    expect(node.status, JSON.stringify(node.data)).toBe(200);
+    expect(node.data.node.status).not.toBe("published");
+    expect(node.data.node.author).toBe("hootie");
     expect(node.data.node.type).toBe("task");
     expect(node.data.node.source_thread).toEqual({ node_id: GENERAL, thread_id: threadId });
-    expect(node.data.node.content).toContain("Proposed by Hootie");
-    expect(node.data.node.content).toContain("Call Acme about the enterprise tier.");
-    const view = await thread(owner, threadId);
-    const outcome = view.replies.find((m: any) => m.proposal_outcome);
-    expect(outcome).toBeTruthy();
-    expect(outcome.proposal_outcome).toEqual(expect.objectContaining({ proposal_id: proposalId, status: "approved", node_id: r.data.outcome.node.id }));
-    expect(outcome.author).toBe(owner.email);
-    // The card itself now reads approved.
-    const card = view.replies.find((m: any) => m.proposal?.proposal_id === proposalId);
-    expect(card.proposal.status).toBe("approved");
-    // A second decision is a conflict.
-    const again = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${proposalId}/reject`, {}, owner.apiKey);
-    expect(again.status).toBe(409);
+    expect(node.data.node.content).toContain("Proposed by Hootie in #general for alice@c7.test");
+    const queue = await jsonRequest(app, "GET", `/nests/${nestId}/review-queue`, undefined, owner.apiKey);
+    expect(queue.status).toBe(200);
+    const req = (queue.data.requests ?? queue.data).find((r: any) => r.id === card.proposal.review_id);
+    expect(req).toEqual(expect.objectContaining({ nodeId: card.proposal.node_id, requestedBy: "hootie", status: "pending" }));
   });
 
-  it("AC-C7-07 reject posts an outcome and MCP context_proposals lists and decides the same objects", async () => {
+  it("AC-C7-06 a proposal naming a node the turn was never handed is refused by the tool and nothing is filed", async () => {
     scriptedRounds = [
-      { text: "", calls: [{ name: "propose_edit_node", input: { node: { title: "Pricing plan" }, append: "## Note\nAcme asked for a discount." } }] },
-      { text: "Proposed an edit." },
+      { text: "", calls: [{ name: "propose_edit_node", input: { node: { id: draftId }, append: "## Leak\nplanted" } }] },
+      { text: "Could not propose that." },
     ];
-    const t = await open(alice, "@hootie note on the pricing plan that acme asked for a discount");
-    const view = await thread(alice, t.id);
-    const card = hootieMessages(view).find((m: any) => m.proposal);
-    expect(card.proposal.kind).toBe("edit_node");
-    expect(card.proposal.target).toEqual(expect.objectContaining({ node_id: pricingId }));
-    const listed = await callTool(alice.apiKey, "context_proposals", { action: "list" });
-    expect(listed.isError, listed.text).toBe(false);
-    expect(listed.data.proposals.map((p: any) => p.proposal_id)).toContain(card.proposal.proposal_id);
-    const no = await callTool(rita.apiKey, "context_proposals", { action: "reject", proposal_id: card.proposal.proposal_id });
-    expect(no.isError).toBe(true);
-    const rej = await callTool(alice.apiKey, "context_proposals", { action: "reject", proposal_id: card.proposal.proposal_id, reason: "not now" });
-    expect(rej.isError, rej.text).toBe(false);
-    expect(rej.data.proposal.status).toBe("rejected");
-    const after = await thread(alice, t.id);
-    expect(after.replies.find((m: any) => m.proposal_outcome)?.proposal_outcome).toEqual(expect.objectContaining({ status: "rejected" }));
-    const doc = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}`, undefined, owner.apiKey);
-    expect(doc.data.node.content).not.toContain("Acme asked for a discount");
+    const before = (await jsonRequest(app, "GET", `/nests/${nestId}/review-queue`, undefined, owner.apiKey)).data;
+    const t = await open(rita, "@hootie add a note to the secret roadmap");
+    const view = await thread(rita, t.id);
+    expect(hootieMessages(view).filter((m: any) => m.proposal)).toHaveLength(0);
+    const after = (await jsonRequest(app, "GET", `/nests/${nestId}/review-queue`, undefined, owner.apiKey)).data;
+    expect((after.requests ?? after).length).toBe((before.requests ?? before).length);
+    expect(JSON.stringify(modelRounds[1].messages.at(-1).content)).toMatch(/Not allowed/);
+    const doc = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${draftId}`, undefined, owner.apiKey);
+    expect(doc.data.node.content).not.toContain("planted");
   });
 
-  it("AC-C7-07 approving an edit appends to the node as the approver, through the governed path", async () => {
+  it("AC-C7-07 a non-reviewer member can't approve; a stranger is not found", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${card.proposal.node_id}/approve`, {}, rita.apiKey);
+    expect(r.status).toBe(403);
+    const s = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${card.proposal.node_id}/approve`, {}, stranger.apiKey);
+    expect(s.status).toBe(404);
+    expect((await thread(owner, threadId)).replies.find((m: any) => m.proposal)!.proposal.status).toBe("pending");
+  });
+
+  it("AC-C7-07 a reviewer's approval through the ordinary review route publishes it as the approver's decision, and the card reads approved", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${card.proposal.node_id}/approve`, { note: "yes" }, alice.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    const node = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${card.proposal.node_id}`, undefined, rita.apiKey);
+    expect(node.status).toBe(200);
+    expect(node.data.node.status).toBe("published");
+    const view = await thread(owner, threadId);
+    const live = view.replies.find((m: any) => m.proposal?.review_id === card.proposal.review_id);
+    expect(live.proposal).toEqual(expect.objectContaining({ status: "approved", decided_by: alice.email, decided_at: expect.any(String) }));
+    const again = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${card.proposal.node_id}/reject`, { note: "no" }, alice.apiKey);
+    expect(again.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("AC-C7-07 an edit proposal is a hootie-authored draft version; approving it with context_approve publishes the appended text", async () => {
     scriptedRounds = [
       { text: "", calls: [{ name: "propose_edit_node", input: { node: { id: pricingId }, append: "## Addendum\nTeam tier is 20 dollars." } }] },
       { text: "Proposed." },
     ];
     const t = await open(alice, "@hootie add the team price to the pricing plan");
-    const card = hootieMessages(await thread(alice, t.id)).find((m: any) => m.proposal);
-    const r = await callTool(alice.apiKey, "context_proposals", { action: "approve", proposal_id: card.proposal.proposal_id });
-    expect(r.isError, r.text).toBe(false);
-    expect(r.data.outcome.node.id).toBe(pricingId);
-    const doc = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}`, undefined, alice.apiKey);
+    const edit = hootieMessages(await thread(alice, t.id)).find((m: any) => m.proposal);
+    expect(edit.proposal).toEqual(expect.objectContaining({ kind: "edit_node", node_id: pricingId, status: "pending", version: 2 }));
+    // The approved version is unchanged until a reviewer decides.
+    let versions = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}/versions`, undefined, owner.apiKey);
+    expect(versions.data.approvedVersion).toBe(1);
+    expect(versions.data.versions[0]).toEqual(expect.objectContaining({ version: 2, changeNote: expect.stringContaining("Proposed by Hootie") }));
+    const no = await callTool(rita.apiKey, "context_approve", { title: "Pricing plan" });
+    expect(no.text).toMatch(/Cannot approve/);
+    const ok = await callTool(alice.apiKey, "context_approve", { title: "Pricing plan" });
+    expect(ok.text).toMatch(/^Approved/);
+    const doc = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}`, undefined, rita.apiKey);
     expect(doc.data.node.content).toContain("Team tier is 20 dollars.");
-    const versions = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}/versions`, undefined, owner.apiKey);
-    const newest = (versions.data.versions ?? versions.data).at?.(-1) ?? (versions.data.versions ?? versions.data)[0];
-    expect(JSON.stringify(versions.data)).toContain(alice.email);
-    expect(newest).toBeTruthy();
+    versions = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}/versions`, undefined, owner.apiKey);
+    expect(versions.data.approvedVersion).toBeGreaterThanOrEqual(2);
+    expect((await thread(alice, t.id)).replies.find((m: any) => m.proposal)!.proposal).toEqual(expect.objectContaining({ status: "approved", decided_by: alice.email }));
   });
 
-  it("AC-C7-07 an expired proposal cannot be decided", async () => {
+  it("AC-C7-07 reject via context_reject marks the card rejected and publishes nothing", async () => {
     scriptedRounds = [
-      { text: "", calls: [{ name: "propose_create_node", input: { title: "Stale idea", content: "old", type: "document" } }] },
+      { text: "", calls: [{ name: "propose_edit_node", input: { node: { title: "Pricing plan" }, append: "## Note\nAcme asked for a discount." } }] },
+      { text: "Proposed an edit." },
+    ];
+    const t = await open(alice, "@hootie note on the pricing plan that acme asked for a discount");
+    const edit = hootieMessages(await thread(alice, t.id)).find((m: any) => m.proposal);
+    expect(edit.proposal).toEqual(expect.objectContaining({ kind: "edit_node", node_id: pricingId, status: "pending", version: expect.any(Number) }));
+    const approvedBefore = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}/versions`, undefined, owner.apiKey)).data.approvedVersion;
+    const no = await callTool(rita.apiKey, "context_reject", { title: "Pricing plan", note: "not now" });
+    expect(no.text).toMatch(/Cannot reject/);
+    const rej = await callTool(alice.apiKey, "context_reject", { title: "Pricing plan", note: "not now" });
+    expect(rej.text).toMatch(/^Rejected/);
+    expect((await thread(alice, t.id)).replies.find((m: any) => m.proposal)!.proposal).toEqual(expect.objectContaining({ status: "rejected", decided_by: alice.email }));
+    const versions = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}/versions`, undefined, owner.apiKey);
+    expect(versions.data.approvedVersion).toBe(approvedBefore);
+  });
+
+  it("AC-C7-07 a proposal that can't be filed posts a failed card instead of silence; without post nothing is filed", async () => {
+    // The rejected draft still sits on the document: a new proposal over it
+    // is refused the way the metacognition agent's would be.
+    scriptedRounds = [
+      { text: "", calls: [{ name: "propose_edit_node", input: { node: { id: pricingId }, append: "more" } }] },
       { text: "Proposed." },
     ];
-    const t = await open(alice, "@hootie propose something stale");
-    const card = hootieMessages(await thread(alice, t.id)).find((m: any) => m.proposal);
-    const { getDb } = await import("../src/db/client.js");
-    await getDb().run("UPDATE chat_proposals SET expires_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", card.proposal.proposal_id]);
-    const r = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${card.proposal.proposal_id}/approve`, {}, owner.apiKey);
-    expect(r.status).toBe(409);
-    expect(r.data.error).toMatch(/expired/i);
-    const list = await jsonRequest(app, "GET", `/nests/${nestId}/proposals?status=expired`, undefined, owner.apiKey);
-    expect(list.data.proposals.map((p: any) => p.proposal_id)).toContain(card.proposal.proposal_id);
+    const t = await open(owner, "@hootie add more to the pricing plan");
+    const failed = hootieMessages(await thread(owner, t.id)).find((m: any) => m.proposal);
+    expect(failed.proposal).toEqual(expect.objectContaining({ status: "failed", review_id: null, reason: expect.any(String) }));
+    scriptedRounds = [
+      { text: "", calls: [{ name: "propose_create_node", input: { title: "Unfiled idea", content: "nope" } }] },
+      { text: "Proposed." },
+    ];
+    const dry = await callTool(owner.apiKey, "context_ask_nest", { thread: t.id, question: "propose something" });
+    expect(dry.isError, dry.text).toBe(false);
+    expect(dry.data.proposals).toEqual([expect.objectContaining({ kind: "create_node", status: "unfiled", title: "Unfiled idea" })]);
+    expect(dry.data.posted).toBeNull();
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes?limit=200`, undefined, owner.apiKey);
+    expect(JSON.stringify(list.data)).not.toContain("Unfiled idea");
   });
 });
 
@@ -682,7 +662,7 @@ describe("AC-C7-08: agent profiles — what an agent is, did and knows", () => {
     expect(r.data.agent.did.messages.length).toBeLessThanOrEqual(20);
     expect(r.data.agent.did.messages[0]).toEqual(expect.objectContaining({ thread_id: expect.any(String), channel: "general", created_at: expect.any(String), excerpt: expect.any(String) }));
     expect(r.data.agent.did.proposals.length).toBeGreaterThan(0);
-    expect(r.data.agent.did.proposals[0]).toEqual(expect.objectContaining({ proposal_id: expect.any(String), kind: expect.any(String), status: expect.any(String) }));
+    expect(r.data.agent.did.proposals[0]).toEqual(expect.objectContaining({ review_id: expect.any(String), node_id: expect.any(String), status: expect.any(String) }));
     // Knows: the task the owner approved from Hootie's proposal.
     expect(r.data.agent.knows.map((n: any) => n.id)).toEqual(expect.arrayContaining([expect.stringMatching(/^nodes\/tasks\//)]));
     expect(r.data.agent.knows.length).toBeLessThanOrEqual(50);
@@ -789,7 +769,7 @@ describe("AC-C7-09: handoffs are recorded in the thread and reach the target", (
     const done = await callTool(owner.apiKey, "context_handoff", { action: "done", message_id: c.data.handoff.handoff_id });
     expect(done.isError, done.text).toBe(false);
     expect(done.data.handoff.status).toBe("done");
-    const ro = await mintKey(rita, "ro", { capability: "read" });
+    const ro = await mintKey(rita, "ro", { capability: "read", nest_id: nestId });
     const refused = await callTool(ro, "context_handoff", { action: "create", thread: t.id, to: "muse" });
     expect(refused.isError || !!refused.rpcError).toBe(true);
   });
@@ -849,13 +829,17 @@ describe("SEC-C7: model text is never a person's, and server-only marks can't be
     expect(h.author).not.toBe(alice.email);
   });
 
-  it("SEC-C7-03 a Hootie turn from a channel the asker lost access to posts nothing", async () => {
+  it("SEC-C7-03 a Hootie turn whose asker lost access mid-turn posts nothing", async () => {
+    // Rita is removed while the model answers: the turn re-checks access
+    // before anything lands in the thread.
+    beforeRound = async () => {
+      beforeRound = null;
+      const collabs = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, owner.apiKey);
+      const row = collabs.data.collaborators.find((c: any) => c.email === rita.email);
+      const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/collaborators/${row.id}`, undefined, owner.apiKey);
+      expect(del.status, JSON.stringify(del.data)).toBeLessThan(300);
+    };
     const t = await open(rita, "@hootie are you there?");
-    // Remove rita between the post and the turn: the turn re-checks access.
-    const collabs = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, owner.apiKey);
-    const row = collabs.data.collaborators.find((c: any) => c.email === rita.email);
-    // The post already queued the turn; the settle below runs it. Take rita off first.
-    await jsonRequest(app, "DELETE", `/nests/${nestId}/collaborators/${row.id}`, undefined, owner.apiKey);
     await ask.settleNestAsks();
     const view = await thread(owner, t.id);
     expect(hootieMessages(view)).toHaveLength(0);
@@ -863,12 +847,37 @@ describe("SEC-C7: model text is never a person's, and server-only marks can't be
     expect(back.status).toBeLessThan(300);
   });
 
-  it("SEC-C7-04 proposal ids are not an oracle: a stranger gets the same 404 for a real and a fake id", async () => {
-    const real = (await jsonRequest(app, "GET", `/nests/${nestId}/proposals?status=any`, undefined, owner.apiKey)).data.proposals[0].proposal_id;
-    const a = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/${real}/reject`, {}, stranger.apiKey);
-    const b = await jsonRequest(app, "POST", `/nests/${nestId}/proposals/no-such-id/reject`, {}, stranger.apiKey);
-    expect(a.status).toBe(404);
-    expect(b.status).toBe(404);
+  it("SEC-C7-04 handoff ids are not an oracle: a stranger gets the same 404 for a real, a fake and a non-handoff message id", async () => {
+    const t = await open(alice, "oracle check");
+    const h = await jsonRequest(app, "POST", `/nests/${nestId}/threads/${t.id}/handoff`, { to: "grok" }, alice.apiKey);
+    expect(h.status).toBe(201);
+    const a = await jsonRequest(app, "POST", `/nests/${nestId}/handoffs/${h.data.handoff.handoff_id}/accept`, {}, stranger.apiKey);
+    const b = await jsonRequest(app, "POST", `/nests/${nestId}/handoffs/no-such-id/accept`, {}, stranger.apiKey);
+    const c = await jsonRequest(app, "POST", `/nests/${nestId}/handoffs/${t.comments[0].id}/accept`, {}, owner.apiKey);
+    const d = await jsonRequest(app, "POST", `/nests/${nestId}/handoffs/no-such-id/accept`, {}, owner.apiKey);
+    expect([a.status, b.status, c.status, d.status]).toEqual([404, 404, 404, 404]);
     expect(a.data).toEqual(b.data);
+    expect(c.data).toEqual(d.data);
   });
+});
+
+// ─── AC-C7-04, last: a server with no model key (a fresh app) ────────────
+describe("AC-C7-04: no model key (fresh app, runs last)", () => {
+  it("AC-C7-04 with no model key the mention posts nothing and /ask is 503 no_api_key", async () => {
+    const noKey = await createTestApp("key", { ownerEmail: "nokey@c7.test", features: ["byok"], gateway: null });
+    const o = await registerUser(noKey, "nokey@c7.test", "No Key");
+    const n = (await jsonRequest(noKey, "POST", "/nests", { name: "NoKey" }, o.apiKey)).data.nest.id;
+    await jsonRequest(noKey, "POST", `/nests/${n}/channels`, { name: "general" }, o.apiKey);
+    const askNoKey = await import("../src/agents/ask-nest.js");
+    const p = await jsonRequest(noKey, "POST", `/nests/${n}/nodes/${GENERAL}/annotations`, { body: "@hootie hi" }, o.apiKey);
+    expect(p.status).toBe(201);
+    await askNoKey.settleNestAsks();
+    const r = await jsonRequest(noKey, "GET", `/nests/${n}/channels/general?thread=${p.data.thread.id}`, undefined, o.apiKey);
+    expect(r.data.thread.replies).toHaveLength(0);
+    const a = await jsonRequest(noKey, "POST", `/nests/${n}/ask`, { channel: "general", question: "hi" }, o.apiKey);
+    expect(a.status).toBe(503);
+    expect(a.data.reason).toBe("no_api_key");
+    ask = askNoKey;
+  });
+
 });

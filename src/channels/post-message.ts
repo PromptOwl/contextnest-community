@@ -69,6 +69,13 @@ export async function fanOutPostedMessage(params: {
   await syncAnnotationsNode(nestId, nodeId, authorEmail);
 
   const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions: [] };
+  // "@hootie …" in a channel (C7, PO-1198): the nest answers in the thread, as
+  // this person, in the background. Only here — a person's own message on a
+  // channel node; the answer it posts never comes back through this function.
+  if (channel && posted.comment_id) {
+    const { triggerHootieForMessage } = await import("../agents/ask-nest.js");
+    triggerHootieForMessage({ nestId, nodeId, threadId: thread.id, commentId: posted.comment_id, body, authorEmail, authorUserId: params.authorUserId, baseUrl });
+  }
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 
