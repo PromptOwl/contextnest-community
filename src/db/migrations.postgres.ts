@@ -116,6 +116,7 @@ export const HISTORICAL_MIGRATIONS = [
   "085_comment_mentions",
   "086_agent_webhooks",
   "087_stream_marks",
+  "088_channel_message_actions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {

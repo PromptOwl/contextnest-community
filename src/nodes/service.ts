@@ -3492,6 +3492,10 @@ export const NODE_KEYED_TABLES = [
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
   ["node_pins", "node_id"],
+  // Reactions on a channel message (PO-1196, migration 088) are keyed to the
+  // channel node; a channel can't be moved or deleted through the document
+  // routes today (archive is the way), but the rule is the same as the pins'.
+  ["message_reactions", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
