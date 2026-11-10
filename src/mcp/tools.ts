@@ -140,6 +140,7 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMemoryTool, runMemoryTool } from "./memory-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -497,6 +498,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_deletion_queue",
   "context_unsynced_list",
   "context_relations",
+  // Memory snowball (team chat C6, PO-1199): the decision ledger and the
+  // channel knowledge view are reads (members only, checked in the service).
+  "context_decisions",
+  "context_channel_knowledge",
   "context_boards",
   "context_board_items",
   "context_fields",
@@ -559,6 +564,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // The channel watcher (team chat C6, PO-1199) is the metacognition agent
+  // with a channel trigger: setting and running it is owner/admin too.
+  "context_channel_watch",
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
@@ -5030,6 +5038,11 @@ async function runTool(
       // Promote a thread (PO-1181): always registered (mcp/routes.ts).
       if (isStreamTool(toolName)) {
         return runStreamTool(toolName, args, ctx);
+      }
+      // Memory snowball (team chat C6): remember / correct / decisions always;
+      // the channel tools re-check the switch.
+      if (isMemoryTool(toolName)) {
+        return runMemoryTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

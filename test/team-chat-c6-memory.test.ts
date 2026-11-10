@@ -455,7 +455,8 @@ describe("AC-C6-08: the channel knowledge view", () => {
     expect(k.status, JSON.stringify(k.data)).toBe(200);
     expect(k.data.channel.name).toBe("design");
     const byId = Object.fromEntries(k.data.nodes.map((n: any) => [n.node_id, n]));
-    expect(byId[p.data.node.id]).toMatchObject({ kind: "promoted", status: "pending_review", thread_id: t1.id, by: alice.email, title: "Use 8px spacing" });
+    // Promote keeps its existing rule: a draft on a governed nest, not yet submitted.
+    expect(byId[p.data.node.id]).toMatchObject({ kind: "promoted", status: "draft", thread_id: t1.id, by: alice.email, title: "Use 8px spacing" });
     expect(byId[m.data.node.id]).toMatchObject({ kind: "remembered", status: "pending_review", thread_id: t2.id, memory_kind: "fact" });
     expect(byId[doc.data.node.id]).toMatchObject({ kind: "corrected", status: "pending_review", thread_id: t3.id });
     for (const n of k.data.nodes) {
@@ -463,16 +464,16 @@ describe("AC-C6-08: the channel knowledge view", () => {
       expect(n.url).toContain(encodeURIComponent(n.node_id));
       expect(n.proposer).toBeTruthy();
     }
-    expect(k.data.open_proposals.map((o: any) => o.node_id).sort()).toEqual([p.data.node.id, m.data.node.id, doc.data.node.id].sort());
+    expect(k.data.open_proposals.map((o: any) => o.node_id).sort()).toEqual([m.data.node.id, doc.data.node.id].sort());
     expect(k.data.open_proposals[0]).toMatchObject({ requested_by: alice.email });
-    expect(k.data.counts).toMatchObject({ total: 3, pending_review: 3 });
+    expect(k.data.counts).toMatchObject({ total: 3, pending_review: 2, draft: 1 });
 
     // Approve the remembered fact: its status moves on.
     const ok = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${m.data.node.id}/approve`, { note: "yes" }, sam.apiKey);
     expect(ok.status, JSON.stringify(ok.data)).toBe(200);
     const k2 = await jsonRequest(app, "GET", `/nests/${nestId}/channels/design/knowledge`, undefined, alice.apiKey);
     expect(k2.data.nodes.find((n: any) => n.node_id === m.data.node.id).status).toMatch(/^(approved|published)$/);
-    expect(k2.data.open_proposals).toHaveLength(2);
+    expect(k2.data.open_proposals).toHaveLength(1);
 
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/channels`, undefined, alice.apiKey);
     expect(list.data.channels.find((c: any) => c.name === "design").knowledge_count).toBe(3);

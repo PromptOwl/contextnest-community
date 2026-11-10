@@ -39,7 +39,8 @@ import { resolveNestAccess } from "../shared/access.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { deserializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { createNode, type SourceThread } from "../nodes/service.js";
-import { addRelation } from "../nodes/relations.js";
+import { addRelation, recordThreadRelation } from "../nodes/relations.js";
+import { proposerLabel } from "../memory/format.js";
 import { addComment, setThreadStatus, syncAnnotationsNode } from "../annotations/service.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
 import { displayNames, namedActor } from "../channels/message-meta.js";
@@ -314,6 +315,15 @@ export async function promoteThread(
   await addRelation({ nestId, userId, userEmail }, node.id, "relates_to", row.node_id).catch((err) => {
     console.warn("[promote] relation not added", nestId, node.id, row.node_id, err?.message ?? err);
   });
+  // …and the thread itself (team chat C6, PO-1199): the discussed-in edge
+  // the knowledge view and the decision ledger read.
+  await recordThreadRelation({
+    nestId,
+    nodeId: node.id,
+    hostNodeId: row.node_id,
+    createdBy: userEmail,
+    meta: { thread_id: threadId, message_id: null, kind: "promoted", memory_kind: kind, proposer: (await proposerLabel(userEmail, "replyClient" in caller ? caller.replyClient : caller.client)).label },
+  }).catch((err) => console.warn("[promote] thread relation not recorded", nestId, node.id, err?.message ?? err));
 
   // The reply that links the node, attributed to the person who promoted.
   // addComment reopens a resolved thread; a promotion shouldn't, so put the

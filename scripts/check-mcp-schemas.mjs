@@ -78,7 +78,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 103;
+//   103->108 team chat C6 memory snowball (PO-1199, src/mcp/memory-tools.ts): context_remember, context_correct,
+//   context_decisions, context_channel_knowledge, context_channel_watch — twins of POST /threads/:id/remember,
+//   POST /threads/:id/correct, GET /decisions, GET /channels/:name/knowledge and GET/PUT /channels/:name/watch;
+//   the comment-thread store, the review queue and the metacognition agent are Community-only, so the engine
+//   has no operation to import a descriptor from.
+const BASELINE = 108;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

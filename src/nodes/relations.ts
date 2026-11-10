@@ -285,6 +285,9 @@ export interface RelationsResult {
   /** Blockers that aren't done yet, readable or not. */
   open_blockers: number;
   blocked: boolean;
+  /** Conversation threads that touched this node (team chat C6, PO-1199):
+   *  the newest first, only those on a node the caller can open. */
+  discussed_in: ThreadRelationView[];
 }
 
 export interface RelationCaller {
@@ -398,6 +401,7 @@ export async function listRelations(
     hidden_count: hiddenCount,
     open_blockers: openBlockers,
     blocked: openBlockers > 0,
+    discussed_in: await discussedIn(caller, nodeId),
   };
 }
 
@@ -560,9 +564,226 @@ export function relationsProse(r: RelationsResult): string {
     if (hidden) parts.push(`${hidden} hidden`);
     lines.push(`- ${label[kind]}: ${parts.join("; ")}`);
   }
-  if (!lines.length) return "No relations.";
+  const discussed = (r.discussed_in ?? []).length
+    ? `\nDiscussed in ${r.discussed_in.length} thread(s): ${r.discussed_in
+        .map((d) => `${d.kind} in ${d.channel ? `#${d.channel}` : d.node_id} thread ${d.thread_id}${d.excerpt ? ` ("${d.excerpt}")` : ""}`)
+        .join("; ")}.`
+    : "";
+  if (!lines.length) return `No relations.${discussed}`;
   const head = r.blocked
     ? `Blocked: ${r.open_blockers} open blocker${r.open_blockers === 1 ? "" : "s"}.`
     : "Not blocked.";
-  return `${head}\n${lines.join("\n")}`;
+  return `${head}\n${lines.join("\n")}${discussed}`;
+}
+
+// ─── Thread ↔ node relations (team chat C6, PO-1199) ─────────────────────
+//
+// A conversation thread is not a node, so "this thread discussed that node"
+// is stored on the thread's HOST node (the channel, or the document the
+// thread is on): one `task:discussed-in` edge per (node, host, thread, kind
+// [, message, memory kind]) — `node —discussed-in→ host`, the thread and the
+// rest in the edge's metadata. The same store, type registry and purge rules
+// as the task relations above (a deleted node takes its edges with it); the
+// task-relation views leave this type out (viewFrom answers null for it), so
+// it reaches callers only through `discussed_in` here and the memory views.
+//
+// Written by the server, never by a caller naming the type: when a message
+// links a node, when a thread is promoted, remembered, corrected, or when the
+// channel watcher proposes from it. `created_by` is the person the write is
+// attributed to; `proposer` the label shown ("grok, on behalf of alice", or
+// the watcher's persona).
+
+const DISCUSSED_IN: StoredType = {
+  name: "task:discussed-in",
+  description: "Conversation relation: the source node was discussed in a thread on the target node.",
+  direction: "directed",
+  color: "#0f766e",
+};
+
+export const THREAD_RELATION_KINDS = ["mentioned", "promoted", "remembered", "corrected", "proposed"] as const;
+export type ThreadRelationKind = (typeof THREAD_RELATION_KINDS)[number];
+
+export interface ThreadRelationMeta {
+  thread_id: string;
+  message_id: string | null;
+  kind: ThreadRelationKind;
+  /** For remembered / promoted: note, decision, task, fact. */
+  memory_kind: string | null;
+  /** The label shown as who proposed it (an agent on behalf of a person, or a persona). */
+  proposer: string | null;
+}
+
+export interface ThreadRelationRow extends ThreadRelationMeta {
+  id: string;
+  node_id: string;
+  host_node_id: string;
+  created_by: string;
+  created_at: string;
+}
+
+/** Most thread relations read per node or thread (newest first). */
+export const MAX_THREAD_RELATIONS = 50;
+
+function parseThreadMeta(raw: string | null): ThreadRelationMeta | null {
+  if (!raw) return null;
+  let m: any;
+  try {
+    m = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!m || typeof m.thread_id !== "string" || !(THREAD_RELATION_KINDS as readonly string[]).includes(m.kind)) return null;
+  return {
+    thread_id: m.thread_id,
+    message_id: typeof m.message_id === "string" ? m.message_id : null,
+    kind: m.kind,
+    memory_kind: typeof m.memory_kind === "string" ? m.memory_kind : null,
+    proposer: typeof m.proposer === "string" ? m.proposer : null,
+  };
+}
+
+/**
+ * Thread relations matching a filter, newest first, parsed. Any of the ids
+ * may be given; the LIKE on the thread ids is a prefilter, the parse decides.
+ */
+export async function findThreadRelations(
+  nestId: string,
+  filter: { nodeIds?: string[]; hostNodeIds?: string[]; threadIds?: string[]; limit?: number },
+): Promise<ThreadRelationRow[]> {
+  const where: string[] = ["e.nest_id = ?", "LOWER(t.name) = ?"];
+  const args: Array<string | number> = [nestId, DISCUSSED_IN.name];
+  const inList = (col: string, ids: string[] | undefined) => {
+    if (!ids) return true;
+    if (ids.length === 0) return false;
+    const unique = [...new Set(ids)].slice(0, 500);
+    where.push(`${col} IN (${unique.map(() => "?").join(",")})`);
+    args.push(...unique);
+    return true;
+  };
+  if (!inList("e.from_node", filter.nodeIds) || !inList("e.to_node", filter.hostNodeIds)) return [];
+  if (filter.threadIds) {
+    if (filter.threadIds.length === 0) return [];
+    const unique = [...new Set(filter.threadIds)].slice(0, 500);
+    where.push(`(${unique.map(() => "e.metadata LIKE ?").join(" OR ")})`);
+    args.push(...unique.map((id) => `%"thread_id":"${id.replace(/[%_\\"]/g, "")}"%`));
+  }
+  const limit = Math.min(Math.max(filter.limit ?? 2000, 1), 5000);
+  const rows = (await getDb().all(
+    `SELECT e.id, e.from_node, e.to_node, e.metadata, e.created_by, e.created_at
+       FROM edges e JOIN edge_types t ON t.id = e.type_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY e.created_at DESC, e.id DESC
+      LIMIT ?`,
+    [...args, limit],
+  )) as Array<{ id: string; from_node: string; to_node: string; metadata: string | null; created_by: string; created_at: string }>;
+  const wanted = filter.threadIds ? new Set(filter.threadIds) : null;
+  const out: ThreadRelationRow[] = [];
+  for (const r of rows) {
+    const meta = parseThreadMeta(r.metadata);
+    if (!meta || (wanted && !wanted.has(meta.thread_id))) continue;
+    out.push({ id: r.id, node_id: r.from_node, host_node_id: r.to_node, created_by: r.created_by, created_at: r.created_at, ...meta });
+  }
+  return out;
+}
+
+/**
+ * Record that a thread touched a node. Idempotent on (node, host, thread,
+ * kind, message, memory kind): the same mention or the same remember twice
+ * returns the existing row. The CALLER has checked that the person may
+ * read the node and the host; nothing here is a permission gate.
+ */
+export async function recordThreadRelation(input: {
+  nestId: string;
+  nodeId: string;
+  hostNodeId: string;
+  createdBy: string;
+  meta: ThreadRelationMeta;
+}): Promise<{ row: ThreadRelationRow; created: boolean }> {
+  const nodeId = assertSafeNodeId(input.nodeId);
+  const hostNodeId = assertSafeNodeId(input.hostNodeId);
+  if (nodeId === hostNodeId) throw new ValidationError("A thread can't relate its own node to itself.");
+  const m = input.meta;
+  const existing = (await findThreadRelations(input.nestId, { nodeIds: [nodeId], hostNodeIds: [hostNodeId], threadIds: [m.thread_id] })).find(
+    (r) => r.kind === m.kind && (r.message_id ?? null) === (m.message_id ?? null) && (r.memory_kind ?? null) === (m.memory_kind ?? null),
+  );
+  if (existing) return { row: existing, created: false };
+  const db = getDb();
+  const id = uuid();
+  const now = new Date().toISOString();
+  await db.transaction(async (tx) => {
+    const typeId = await ensureRelationType(tx, input.nestId, DISCUSSED_IN, input.createdBy);
+    await tx.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      [id, input.nestId, nodeId, hostNodeId, typeId, JSON.stringify(m), input.createdBy, now, now],
+    );
+  });
+  return {
+    row: { id, node_id: nodeId, host_node_id: hostNodeId, created_by: input.createdBy, created_at: now, ...m },
+    created: true,
+  };
+}
+
+export interface ThreadRelationView {
+  id: string;
+  thread_id: string;
+  /** The node the thread lives on (a channel, or a document). */
+  node_id: string;
+  /** The channel's name, or null for a document thread. */
+  channel: string | null;
+  kind: ThreadRelationKind;
+  memory_kind: string | null;
+  message_id: string | null;
+  created_by: string;
+  proposer: string | null;
+  created_at: string;
+  /** The thread's first line, at most 160 characters; only when the thread still exists. */
+  excerpt: string | null;
+}
+
+/**
+ * The threads that touched a node, as THIS caller may see them: only
+ * threads on a node they can open (so a visibility-only reader of a public
+ * nest, who may never read a channel, sees none), newest first, bounded.
+ */
+async function discussedIn(caller: RelationCaller, nodeId: string): Promise<ThreadRelationView[]> {
+  const rows = await findThreadRelations(caller.nestId, { nodeIds: [nodeId], limit: MAX_THREAD_RELATIONS * 4 });
+  if (rows.length === 0) return [];
+  const { canOpenNode } = await import("../governance/mention-notify.js");
+  const { channelNameOf } = await import("../channels/channel-node.js");
+  const hosts = [...new Set(rows.map((r) => r.host_node_id))];
+  const open = new Map<string, boolean>();
+  for (const h of hosts) open.set(h, await canOpenNode(caller.nestId, h, caller.userId, caller.userEmail).catch(() => false));
+  const kept = rows.filter((r) => open.get(r.host_node_id)).slice(0, MAX_THREAD_RELATIONS);
+  if (kept.length === 0) return [];
+  const threadIds = [...new Set(kept.map((r) => r.thread_id))];
+  const firsts = new Map<string, string>();
+  for (const r of (await getDb().all(
+    `SELECT c.thread_id, c.body FROM annotation_comments c
+       JOIN annotation_threads t ON t.id = c.thread_id
+      WHERE t.nest_id = ? AND c.thread_id IN (${threadIds.map(() => "?").join(",")})
+      ORDER BY c.created_at DESC, c.id DESC`,
+    [caller.nestId, ...threadIds],
+  )) as Array<{ thread_id: string; body: string }>) {
+    firsts.set(r.thread_id, r.body); // newest first → the last write per thread is its opener
+  }
+  return kept.map((r) => ({
+    id: r.id,
+    thread_id: r.thread_id,
+    node_id: r.host_node_id,
+    channel: channelNameOf(r.host_node_id),
+    kind: r.kind,
+    memory_kind: r.memory_kind,
+    message_id: r.message_id,
+    created_by: r.created_by,
+    proposer: r.proposer,
+    created_at: r.created_at,
+    excerpt: firsts.has(r.thread_id) ? excerptOf(firsts.get(r.thread_id)!) : null,
+  }));
+}
+
+function excerptOf(body: string): string {
+  const line = String(body ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > 160 ? `${line.slice(0, 159).trimEnd()}…` : line;
 }

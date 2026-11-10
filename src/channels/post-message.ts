@@ -33,6 +33,8 @@ import { wakeForPostedMessage, type WakeOutcome } from "../stream/agent-wake.js"
 import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { isChannelNode } from "./channel-node.js";
 import { normHandle, resolveBodyMentions } from "./message-meta.js";
+import { recordMessageLinks } from "../memory/links.js";
+import { onPostedMessage as watchPostedMessage } from "../memory/watcher.js";
 
 export type MentionOutcome =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
@@ -69,6 +71,13 @@ export async function fanOutPostedMessage(params: {
   await syncAnnotationsNode(nestId, nodeId, authorEmail);
 
   const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions: [] };
+  // Memory snowball (team chat C6, PO-1199): the nodes this message names
+  // become thread→node relations, and a watched channel's agent sees it.
+  // Both best effort — never the poster's problem.
+  await recordMessageLinks({ nestId, nodeId, threadId: thread.id, messageId: posted.comment_id, body, authorEmail, authorUserId: params.authorUserId }).catch((err) =>
+    console.warn("[memory] links not recorded", nestId, thread.id, err?.message ?? err),
+  );
+  await watchPostedMessage({ nestId, nodeId, threadId: thread.id, body }).catch(() => {});
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 
