@@ -81,7 +81,7 @@ channelRoutes.post("/", async (c) => {
   const who = await caller(c);
   const result = await createChannel(
     { ...who, client: attributeRequest(c, body.client) },
-    { name: body.name, purpose: body.purpose },
+    { name: body.name, purpose: body.purpose, private: body.private },
   );
   return c.json(result, 201);
 });

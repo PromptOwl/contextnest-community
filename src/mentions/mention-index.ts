@@ -33,6 +33,8 @@ import { MAX_MENTION_RECIPIENTS, extractMentions, resolveMention } from "../shar
 import { canOpenNode } from "../governance/mention-notify.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { isChannelId, CHANNEL_TAG } from "../channels/channel-node.js";
+import { isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { displayNames, namedActor, normHandle, writerHandlesOf } from "../channels/message-meta.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { nowMsExpr } from "../db/sql.js";
@@ -156,8 +158,9 @@ export async function indexPostedMessage(params: {
 export interface MentionItem {
   type: "mention";
   /** "channel" = a channel post (open it in the channel timeline at
-   *  `thread_id`); "document" = a document comment thread. */
-  kind: "channel" | "document";
+   *  `thread_id`); "conversation" = a direct or group message (C2; `node_id`
+   *  is the conversation id); "document" = a document comment thread. */
+  kind: "channel" | "conversation" | "document";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -341,19 +344,32 @@ export async function listOpenMentions(params: {
     }),
   );
 
-  const shown = [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)));
+  // A conversation's mentions exist only while chat is on there (C2): the
+  // server switch, and the nest's own setting (asked once per nest).
+  const chatOn = new Map<string, boolean>();
+  const visible: Row[] = [];
+  for (const r of [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)))) {
+    if (isConversationId(r.node_id)) {
+      if (!config.TEAM_CHAT_ENABLED) continue;
+      if (!chatOn.has(r.nest_id)) chatOn.set(r.nest_id, await nestChatEnabled(r.nest_id).catch(() => false));
+      if (!chatOn.get(r.nest_id)) continue;
+    }
+    visible.push(r);
+  }
+  const shown = visible;
   const names = await displayNames(shown.map((r) => r.author));
   const out: MentionItem[] = [];
   for (const r of shown) {
     const { actor, name } = await namedActor(r.author, deserializeClient(r.client_json), names);
     const channel = config.EXPERIMENTAL_AGENT_STREAM && isChannelRow(r) ? r.node_id.split("/").pop()! : null;
+    const conversation = config.TEAM_CHAT_ENABLED && isConversationId(r.node_id);
     out.push({
       type: "mention",
-      kind: channel ? "channel" : "document",
+      kind: channel ? "channel" : conversation ? "conversation" : "document",
       nest_id: r.nest_id,
       nest_name: nestNames.get(r.nest_id) ?? r.nest_id,
       node_id: r.node_id,
-      title: r.title || r.node_id.split("/").pop() || r.node_id,
+      title: conversation ? "Conversation" : r.title || r.node_id.split("/").pop() || r.node_id,
       channel,
       thread_id: r.thread_id,
       comment_id: r.comment_id,

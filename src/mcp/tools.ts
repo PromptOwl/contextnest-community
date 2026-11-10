@@ -138,6 +138,9 @@ import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
+import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
 import { channelsHint } from "./channel-tools.js";
@@ -484,6 +487,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_comments",
   // Channels (PO-1179, experimental): reading a timeline or thread.
   "context_channel_read",
+  // Team chat C2 (PO-1197): the read actions; the write actions of the same
+  // tools are refused inside (chat-tools.ts), and a read-only key is offered
+  // a read-only view of each (CHAT_READ_KEY_TOOL_VIEWS).
+  ...CHAT_READ_TOOL_NAMES,
   // …and listing them (PO-1190, AC-AX-06). The tool also creates and
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
@@ -3371,6 +3378,11 @@ async function runTool(
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
+      // A channel or a conversation while the nest's chat is off (C2): the
+      // same answer REST gives, not found.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) {
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
       if (oneThread) {
         const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
         if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
@@ -3487,6 +3499,16 @@ async function runTool(
         const t = await getThread(threadId);
         if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
       }
+      // A direct or group conversation (team chat C2) has no document: a
+      // virtual node, so the same read, posting and thread checks run on it.
+      if (!node && config.TEAM_CHAT_ENABLED && !args.channel && !args.title) {
+        let cid = conversationIdOf(args.id);
+        if (!cid && !args.id && threadId) {
+          const t = await getThread(threadId);
+          if (t && t.nestId === nestId && isConversationId(t.nodeId)) cid = t.nodeId;
+        }
+        if (cid) node = { id: cid, frontmatter: { title: "Conversation" } } as unknown as ContextNode;
+      }
       const named = args.channel || args.title || args.id;
       const notFound = async () =>
         toolError(
@@ -3504,6 +3526,8 @@ async function runTool(
         // title — otherwise the refusal confirms what the caller guessed.
         return notFound();
       }
+      // A channel or a conversation while the nest's chat is off (C2): not found, as on REST.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) return notFound();
       const label = node.frontmatter.title || node.id;
 
       // A channel takes posts — and resolves — from people added to the nest
@@ -5022,6 +5046,10 @@ async function runTool(
       // on (mcp/routes.ts); runChannelTool re-checks the switch.
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
+      }
+      // Team chat C2 (PO-1197): registered while TEAM_CHAT_ENABLED is on.
+      if (isChatTool(toolName)) {
+        return runChatTool(toolName, args, ctx);
       }
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {

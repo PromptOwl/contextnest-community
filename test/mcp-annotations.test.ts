@@ -29,6 +29,8 @@ const READ_ONLY = [
   "context_export",
   "context_comments",
   "context_channel_read",
+  // Team chat C2 (PO-1197): reading a conversation.
+  "context_conversation_read",
   // My Work (PO-1180): the caller's own queue.
   "context_my_work",
   "context_relations",
@@ -100,6 +102,11 @@ const DESTRUCTIVE = [
   "context_channels",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Team chat C2 (PO-1197): leave removes a membership, set_private changes
+  // who reads a channel, set replaces a preference.
+  "context_conversations",
+  "context_channel_members",
+  "context_chat_preferences",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -191,8 +198,10 @@ async function allDefinedNames(): Promise<string[]> {
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { CHAT_TOOL_DEFINITIONS } = await import("../src/mcp/chat-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...CHAT_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,

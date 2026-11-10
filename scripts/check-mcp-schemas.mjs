@@ -78,7 +78,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 103;
+//   103->108 team chat C2 (PO-1197, src/mcp/chat-tools.ts): context_conversations, context_conversation_read,
+//   context_channel_members, context_chat_preferences, context_presence — twins of /nests/:id/conversations,
+//   the channel membership routes, /me/chat/preferences and /nests/:id/chat/presence; Community-only tables
+//   (chat_containers, chat_members, chat_preferences) and in-memory presence the engine does not model, so no
+//   engine op exists. No tool for the SSE stream (an MCP client polls `since`).
+const BASELINE = 108;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
