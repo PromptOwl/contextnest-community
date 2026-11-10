@@ -100,6 +100,8 @@ const DESTRUCTIVE = [
   "context_channels",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Agent profiles (team chat C7): a description replaces the earlier one.
+  "context_agents",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -136,6 +138,8 @@ const OPEN_WORLD = [
   "context_promote_thread",
   // Points a nest's mention events at an outside URL.
   "context_agent_webhooks",
+  // Ask the nest (team chat C7): the question and retrieved text go to the model provider.
+  "context_ask_nest",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -191,7 +195,9 @@ async function allDefinedNames(): Promise<string[]> {
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const all = [
+    ...AGENT_TOOL_DEFINITIONS,
     ...CHANNEL_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,

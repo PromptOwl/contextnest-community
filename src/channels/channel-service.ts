@@ -554,7 +554,7 @@ async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMe
     displayNames([...rows.map((r) => r.author), ...askedFor]),
     bodyMentions(caller.nestId, bodies),
     resolveMessageCards(caller, bodies),
-    proposalStatuses(reviewIds),
+    proposalStatuses(caller.nestId, reviewIds),
   ]);
   return Promise.all(
     rows.map(async (row, i) => {

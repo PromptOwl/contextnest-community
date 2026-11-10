@@ -82,6 +82,10 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Comments and relations ─────────────────────────────────────────────
   context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
   context_agent_webhooks: overwriteOutside("Manage agent webhooks", "Lists, sets or removes where an agent's @mentions are POSTed; set replaces a target and the server then sends events to that outside URL."),
+  // The nest in the conversation (team chat C7, PO-1198).
+  context_ask_nest: addOutside("Ask the nest in a thread", "Runs a Hootie turn as the caller: the question, the thread's text and retrieved documents go to the configured model provider (outside); with post, adds messages and files hootie-authored drafts for review — never publishes or edits what exists."),
+  context_agents: overwrite("Agent profiles", "Lists and reads agent profiles (a query over existing data); with a description, replaces the agent's earlier description. A read-only key gets a list/read-only view."),
+  context_handoff: add("Hand off a thread", "Adds a handoff message (which mentions the target, so it notifies or wakes them like any comment) or a status update; nothing is edited or removed."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),

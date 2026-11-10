@@ -103,14 +103,16 @@ export async function fileProposal(params: {
   }
 }
 
-/** The live status of each review a card names, in one query. */
-export async function proposalStatuses(reviewIds: string[]): Promise<Map<string, { status: string; decided_by: string | null; decided_at: string | null }>> {
+/** The live status of each review a card names, in one query — scoped to
+ *  the nest the cards are read in, so a review id can never be looked up
+ *  across nests whatever a stored card says. */
+export async function proposalStatuses(nestId: string, reviewIds: string[]): Promise<Map<string, { status: string; decided_by: string | null; decided_at: string | null }>> {
   const out = new Map<string, { status: string; decided_by: string | null; decided_at: string | null }>();
-  const ids = [...new Set(reviewIds.filter(Boolean))];
+  const ids = [...new Set(reviewIds.filter(Boolean))].slice(0, 500);
   if (ids.length === 0) return out;
   const rows = (await getDb().all(
-    `SELECT id, status, resolved_by, resolved_at FROM review_requests WHERE id IN (${ids.map(() => "?").join(", ")})`,
-    ids,
+    `SELECT id, status, resolved_by, resolved_at FROM review_requests WHERE nest_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+    [nestId, ...ids],
   )) as Array<{ id: string; status: string; resolved_by: string | null; resolved_at: string | null }>;
   for (const r of rows) out.set(r.id, { status: r.status, decided_by: r.resolved_by, decided_at: r.resolved_at });
   return out;
