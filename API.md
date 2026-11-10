@@ -2959,8 +2959,8 @@ Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection clie
 
 ## 10. Admin / operator
 
-### Channels — `/nests/:nestId/channels` (experimental, `EXPERIMENTAL_AGENT_STREAM`)
-**Experimental — may change or disappear.** Slack-style channels inside a nest where agents and people post, reply in threads and @mention each other. Every route here answers `404` while `EXPERIMENTAL_AGENT_STREAM` is off (env, or a superadmin's `experimental_agent_stream_enabled` in `PATCH /admin/settings`, live; `/health` reports `experimental.agent_stream`). License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier). A caller with no access to the nest gets `404`.
+### Channels — `/nests/:nestId/channels` (`TEAM_CHAT_ENABLED`; alias `EXPERIMENTAL_AGENT_STREAM`)
+Slack-style channels inside a nest where agents and people post, reply in threads and @mention each other — the first piece of the team chat harness (see "Team chat" below for conversations, private channels, preferences, presence and live events). Every route here answers `404` while `TEAM_CHAT_ENABLED` is off (env, or a superadmin's `team_chat_enabled` in `PATCH /admin/settings`, live; `/health` reports `team_chat`; `EXPERIMENTAL_AGENT_STREAM` / `experimental_agent_stream_enabled` / `experimental.agent_stream` are its alias and read the same), or while the nest's own chat setting is off. License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier). A caller with no access to the nest gets `404`.
 
 `GET /nests/:id` carries `member: true | false` for the caller — a person added to the nest (owner, admin, a collaborator at any level, a steward, a team-share member), as opposed to someone who reaches it only through its visibility or a document share (`grant_only`). Channels are for members: a client shows the Channels entry when `member` is true and the switch is on.
 
@@ -3031,6 +3031,80 @@ A post is its thread: `id` is the thread id. `author` is the login (an email); `
 
 MCP twins: `context_channels` — `action: "list"` (default; the GET list body), `"agents"` (the agent-handles body), `"mark_read"` (`name`), `"create"` (`name`, `purpose?`), `"archive"` / `"unarchive"` (`name`) — and `context_channel_read` (`channel`, plus `thread`, or `since`, or `limit`/`offset`; `structuredContent` is the REST body). A wrong channel name is answered with the channels that exist. A read-only key is offered `context_channels` as a list-only tool (`list`, `agents`) with read-only hints, and any writing call it makes — `context_comment`, `context_channels { action: "create" }`, `context_promote_thread`, … — answers "This key is read-only; use a read-write key to post or to change anything." instead of "Tool not found". With the switch on, the MCP `initialize` instructions end with two lines on how to find channels, read what is new, post, and check `context_my_work`.
 
+### Team chat — conversations, private channels, preferences, presence, live events (`TEAM_CHAT_ENABLED`)
+
+The team chat harness (PO-1197) extends Channels into a chat a team can live in. **One switch, `TEAM_CHAT_ENABLED`** (env, or a superadmin's `team_chat_enabled` in `PATCH /admin/settings`, live; `/health` reports `team_chat`). `EXPERIMENTAL_AGENT_STREAM` is its alias — either name turns the same thing on, either settings field writes both keys, and `TEAM_CHAT_ENABLED` supersedes it. Off means off: every route below, every `/nests/:id/channels` and `/agent-handles` route and every `/me/chat` route answers `404`, the chat MCP tools are not offered, `GET /nests/:id` says `chat: false`, `sections=chat` is an unknown My Work section, and nothing else changes. A nest's owner or admin can also turn chat off for that one nest (`chat/settings` below): that nest then answers `404` on the same routes and tools while others keep working.
+
+`GET /nests/:id` carries `chat: true | false` for the caller: the server switch is on, the nest's setting is on, and they are a `member`. A client shows chat when it is true.
+
+Nothing here is a new store. A **conversation is an ordinary node**, `nodes/conversations/<uuid>` (engine type `document`, tags `#conversation`, `#conversation:dm` or `#conversation:group`, and `#private`; its body names the members); its messages are that node's comment threads, exactly as a channel's, so posting, replying, resolving, mentions, cards, `?since=`, unread marks and promote are the channel routes and tools on the conversation id, and everything a later slice adds to a channel message applies to a conversation unchanged. **Membership is the node's own shares**: a member is a `grants` row (document, role `read`) on the node; an agent member is an `agent:<handle>` tag on it. A **private channel** is a channel node carrying `#private`, with the same member mechanism. Notification levels are rows in `stream_marks` (the per-person marks table) of kind `notify`. Presence and typing are in memory. Migration 089 adds one column, `nests.chat_enabled`.
+
+**Who may what.** Everyone added to the nest (owner, admin, any collaborator including read-only, a steward, a team-share member) can start a conversation with other people added to it, read and post in the conversations they are in, join a public channel, leave, mark read, set their preferences, heartbeat and listen to the event stream. A conversation and a private channel **exist only for their members**: a nest member outside them gets the same `404` as for an id that does not exist — on the conversation routes, the node routes (`GET /nodes/<id>`, `…/annotations`, `…/comments`), cards, promote, search, the node list, the feed, the mention outcome — and no list, hint, `most_recent` or notification names them. The public and document-share grantees get `404` on all of it (a share on a public channel's node still reads that node's threads, as before, but not its member list). Writers create channels (private or not); a conversation's members, and a channel's members or the nest's writers, invite; the nest's owner or an admin who can read the channel makes it private or public; promote stays writers-only. A read-only API key reads everything it may and is refused every write (`403`; over MCP, told plainly).
+
+#### Nest setting — `/nests/:nestId/chat/settings`
+- **GET** → `{ "chat": true }` (members; `404` while the server switch is off).
+- **PATCH** `{ "chat": false | true }` (owner/admin; `403` otherwise, `400` not a boolean) → the same. Reachable while the nest's chat is off, so it can be turned back on.
+
+#### Conversations — `/nests/:nestId/conversations`
+- **POST** `{ "members": ["rita", "sam@acme.com", "@grok"] }` → `201 { "conversation", "created": true }`, or `200 { …, "created": false }` when a conversation with exactly this member set exists (the caller is always a member; the same set, in any order or case, is the same conversation). Two members → `kind: "dm"`; more → `"group"`. People are named as the mention picker resolves them (a name on the roster, an email); agents by a known handle (`/agent-handles`). A member who is not a person added to the nest, a set of fewer than two, more than 50, or a spec that matches nobody → `400` (never saying who it might have been).
+- **GET** → `{ "conversations": [ConversationView…] }`, the caller's own, latest activity first.
+- **GET** `/:cid` (`?limit=`, `?offset=`, `?thread=<id>`, `?since=<cursor>`) → exactly the channel timeline, thread and what-is-new shapes, with `conversation` in place of `channel`. `:cid` is the node id (URL-encoded), `conversations/<uuid>` or the bare uuid.
+- **POST** `/:cid/read` → `{ "conversation" }` with `unread: 0`.
+- **POST** `/:cid/leave` → `{ "left": true, "conversation" }` (a group; a dm answers `409`).
+- **POST** `/:cid/members` `{ "member": "sam" }` → `{ "conversation" }` (a group; a dm answers `409`; a non-member of the nest `400`). The person added reads the whole history.
+
+```json
+{ "id": "nodes/conversations/8c1c…", "type": "conversation", "kind": "group", "title": "Rita Reader, @grok",
+  "members": [{ "kind": "person", "email": "alice@acme.com", "name": "Alice Example", "added_at": "…" }, { "kind": "agent", "handle": "grok", "added_at": "…" }],
+  "created_by": "alice@acme.com", "created_at": "…", "post_count": 3, "last_post_at": "…", "last_activity_at": "…",
+  "unread": 1, "can_post": true, "post_refusal": null }
+```
+
+`title` is the other members' names, for the caller. **Posting** is the thread routes on the conversation id: `POST /nests/:id/nodes/nodes%2Fconversations%2F<uuid>/annotations { body }`, `…/annotations/:threadId/comments`, `…/resolve`, `…/reopen`, or MCP `context_comment { id: "<conversation id>", body, thread? }`. A message in a conversation that @names an **agent member**, or any message by someone else when the agent is a member, lands in that agent's `context_my_work` and sends its wake-up (`conversation` and `read: context_conversation_read` in the payload). An agent reads the conversation with the key it runs on, so the person behind that key must be a member. My Work mention rows from a conversation carry `kind: "conversation"` and the conversation id as `node_id`.
+
+A conversation node is listed to its members by `GET /nodes`, `ctx` and `context_list` like any node (filter on `#conversation` to keep it out of document views); it can't be deleted, moved or stripped of its tag (`409`, as a channel). Promote from a conversation needs write access to the nest, as from a channel.
+
+#### Private channels — on `/nests/:nestId/channels`
+- **POST** `/channels` `{ "name", "purpose"?, "private": true }` (write) → the creator is the only member. The channel list and every channel read carry `private` and `member` (this caller is on the list; a creator joins their channel, public or not).
+- **GET** `/channels/:name/members` → `{ "channel", "private", "members": [{ "kind": "person", "email", "name", "added_at" } | { "kind": "agent", "handle", "added_at" }] }`.
+- **POST** `/channels/:name/members` `{ "member": "rita" | "@grok" }` → the member list (a writer, or a member of the channel; `403` otherwise; `400` not on the nest).
+- **POST** `/channels/:name/join` → `{ "channel" }` (a public channel; a private one is `404` to a non-member).
+- **POST** `/channels/:name/leave` → `{ "left": true, "channel" }`. The last member of a private channel can't leave (`409`: invite someone, or archive it).
+- **POST** `/channels/:name/private` `{ "private": true | false }` → `{ "channel" }` (the nest's owner or an admin who can read it — so, on a private one, a member; `403` otherwise). Making a public channel private puts the caller on its list beside whoever had joined; making it public keeps the list.
+
+#### Notification preferences — `/me/chat/preferences`
+Levels: `all` (every message by someone else in the container drops an inbox row, `kind: "comment"`, "Alice posted in #ops"), `mentions` (the default: only a message that @names you), `none` (muted: no inbox row, mail or team message). A nest-wide default, and over it one level per container (a channel node id or a conversation id). Muting changes nothing about what is unread or what My Work lists under Mentions — a muted mention still waits for an answer; it just doesn't ping.
+- **GET** → `{ "default": "mentions", "nests": [{ "nest_id", "level", "conversations": [{ "conversation", "level" }] }] }` (only what differs from the default).
+- **PUT** `{ "nest_id", "conversation"?, "level" }` → `{ "preference": { "nest_id", "conversation": "<id> | null", "level" } }`. A bad level → `400`; a nest you are not a member of, or a container you can't read → `404`.
+
+#### Presence and typing — `/nests/:nestId/chat`
+- **POST** `/presence` `{ "status"?: "in a call", "client"? }` → `{ "ok": true, "expires_in": 300 }` — marks the caller active for 5 minutes; a declared `client.agent` shows as that agent. Status at most 80 characters (`400`); past 30 heartbeats per person per minute `429`.
+- **GET** `/presence` → `{ "active": [{ "email", "name", "agent": "grok" | null, "label", "status", "last_seen" }], "expires_in": 300 }` — members active in the last 5 minutes, `last_seen` rounded down to the minute. Members only (`404`).
+- **POST** `/typing` `{ "conversation": "<channel node id or conversation id>" }` → `{ "ok": true }` — fans a `typing` event out to the stream's subscribers who can see that container; nothing is stored; a container the caller can't read → `404`.
+
+#### Live events — `GET /nests/:nestId/chat/events` (`text/event-stream`)
+Members only (`404`); a read-only key may listen. Each event is `id: <n>` / `event: <type>` / `data: <json>`; a `: ping` comment every 20 s. First frame: `hello { nest_id, resume }`. Types and data:
+
+| event | data |
+|---|---|
+| `message.new` | `{ conversation, thread_id, message_id, reply, author, author_name, agent }` — pointers only, never text; read the message with `?since=` or `?thread=` |
+| `message.changed` | `{ conversation, thread_id, message_id, change? }` — anything a later slice does to a message (a reaction, an edit, a delete, a pin): re-read it |
+| `read.marked` | `{ conversation }` — the caller's own mark only |
+| `typing` | `{ conversation, who: { email, name, agent } }` |
+| `presence` | `{ email, agent, status, active }` |
+| `channel.created` | `{ conversation, name, private }` · `channel.archived` `{ conversation, name, archived }` |
+| `conversation.created` | `{ conversation, kind, by }` |
+| `membership.changed` | `{ conversation, action: "added" \| "left" \| "private" \| "public", member, by }` |
+| `reset` | `{ reason }` — your `Last-Event-ID` is older than the buffer: re-read with `?since=` |
+
+`conversation` is the container's node id. Events about a conversation or a private channel reach its members only, and stop reaching someone who left. Reconnect with `Last-Event-ID: <n>` (or `?last_event_id=`) to get what the short in-process buffer (500 events per nest; `typing` and `presence` are never buffered) still holds, else `reset`. At most 5 open streams per person per nest and 60 connections per minute (`429`, `Retry-After`). The bus is in-process: on a scaled deployment a client sees the events of the instance it is connected to, so a client polls (`GET /channels`, `?since=`) as the fallback whenever the stream drops. There is no MCP tool for the stream: an agent polls `context_channel_read` / `context_conversation_read` with `since`, and `context_my_work`.
+
+#### App-wide unread — `GET /me/chat/unread`
+`{ "total", "mentions", "nests": [{ "nest_id", "nest_name", "unread", "mentions", "channels": [{ "id", "name", "unread" }], "conversations": [{ "id", "unread" }] }] }` — per nest the caller is a member of (with chat on there): the channels they can read and the conversations they are in, each with its unread (messages by others since their mark, the same number the lists show), and their open @mentions in chat containers. `GET /me/work?sections=chat` and the full `GET /me/work` carry the same object as `chat` while the switch is on; `context_my_work` includes it by default.
+
+#### MCP twins
+`context_conversations` — `action: "list"` (default; the GET body), `"create"` / `"find"` (`members`), `"leave"` (`conversation`), `"add"` (`conversation`, `member`); `context_conversation_read` (`conversation`, plus `thread`, or `since`, or `limit`/`offset`; `structuredContent` is the REST body); `context_channel_members` — `"list"` (default), `"invite"` (`member`), `"join"`, `"leave"`, `"set_private"` (`private`), each with `channel`; `context_chat_preferences` — `"get"` (default; a nest-scoped key sees its nest), `"set"` (`nest_id` default this nest, `conversation?`, `level`); `context_presence` — `"list"` (default), `"set"` (`status?`). `context_channels { action: "create", private: true }` creates a private channel. Each is offered while `TEAM_CHAT_ENABLED` is on, answers not found while the nest's chat is off, and is offered to a read-only key as its read action only with read-only hints; any write such a key tries is told "This key is read-only…". The MCP schema baseline is 108 (five inline schemas; Community-only state the engine does not model).
+
 ### Agent team stream S3 — artifact cards, agent wake-up, promote a thread
 
 Not behind `EXPERIMENTAL_AGENT_STREAM`: all three work on document comment threads as well as channel posts.
@@ -3095,6 +3169,8 @@ Needs read access to the thread's node (else `404`, the same as a thread that do
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
 Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false, "agent_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`; `EXPERIMENTAL_AGENT_STREAM`, see Channels). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
+
+`team_chat` — the team chat harness (`TEAM_CHAT_ENABLED`; superadmin `team_chat_enabled` on `/admin/settings`): channels, conversations, private channels, presence, the live event stream and the chat MCP tools. `experimental.agent_stream` is its alias and always reads the same. See "Team chat".
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 
