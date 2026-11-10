@@ -35,6 +35,7 @@ import { emitChatEvent } from "./events.js";
 import {
   addAgentMember,
   addPersonMember,
+  assertRoom,
   isContainerMember,
   isPrivateContainer,
   listPeople,
@@ -90,6 +91,7 @@ export async function inviteChannelMember(caller: Caller, rawName: unknown, memb
   if (!mayInvite) throw new ForbiddenError("Inviting to a channel is for its members and the nest's writers.");
   if (typeof member !== "string" || !member.trim()) throw new ValidationError("member is required — a name, an email or an @handle.");
   const { people, agents } = await resolveMemberSpecs(caller.nestId, [member]);
+  if (await isPrivateContainer(caller.nestId, node.id)) await assertRoom(caller.nestId, node.id);
   const me = caller.userEmail.toLowerCase();
   let added: string | null = null;
   for (const p of people) if (await addPersonMember(caller.nestId, node.id, p, me)) added = p.email;
@@ -135,11 +137,11 @@ export async function setChannelPrivate(caller: Caller, rawName: unknown, priv: 
   if (priv && !was) {
     // The caller joins first, so the channel is never nobody's; then the tag.
     await addPersonMember(caller.nestId, node.id, { email: me, userId: caller.userId }, me);
-    await updateNode(caller.nestId, node.id, { tags: [...tagsOf(node), `#${PRIVATE_TAG}`], changeNote: "Made the channel private" }, me);
+    await updateNode(caller.nestId, node.id, { tags: [...tagsOf(node), `#${PRIVATE_TAG}`], changeNote: "Made the channel private" }, me, { chatMembership: true });
     emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "private", member: null, by: me });
   } else if (!priv && was) {
     // Members stay listed (as on a public channel); the tag that gated reads goes.
-    await updateNode(caller.nestId, node.id, { tags: tagsOf(node).filter((t) => normalizeTag(t) !== PRIVATE_TAG), changeNote: "Made the channel public" }, me);
+    await updateNode(caller.nestId, node.id, { tags: tagsOf(node).filter((t) => normalizeTag(t) !== PRIVATE_TAG), changeNote: "Made the channel public" }, me, { chatMembership: true });
     emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "public", member: null, by: me });
   }
   return { channel: (await getReadableChannel(caller, node.id)).view };

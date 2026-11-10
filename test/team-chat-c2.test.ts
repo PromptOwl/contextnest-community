@@ -1215,6 +1215,124 @@ describe("SEC-C2: existence oracles, cross-nest ids, leaks", () => {
     expect((await subscribe(carl)).status).toBe(404);
   });
 
+  it("SEC-C2-09 a conversation's or private channel's shares are not the sharing roster: no listing, no outside share, no unshare", async () => {
+    const dm = (await startConversation(alice, [rita.email])).data.conversation.id;
+    // The roster an admin reads never names a dm or a private channel, nor who is in it.
+    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/grants`, undefined, owner.apiKey);
+    expect(roster.status).toBe(200);
+    expect(roster.data.grants.map((g: any) => g.target)).not.toContain(dm);
+    expect(roster.data.grants.some((g: any) => String(g.target).startsWith("nodes/conversations/"))).toBe(false);
+    expect(roster.data.grants.map((g: any) => g.target)).not.toContain("nodes/channels/secret");
+    // The owner can't share the dm with an outsider, nor a private channel.
+    for (const target of [dm, "nodes/channels/secret"]) {
+      const r = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "document", target, email: stranger.email, role: "read" }, owner.apiKey);
+      expect(r.status, target).toBe(409);
+    }
+    expect((await conversation(stranger, dm)).status).toBe(404);
+  });
+
+  it("SEC-C2-10 a collaborator removed from the nest keeps nothing: the share alone opens no conversation, listing or feed, and their stream ends", async () => {
+    const zed = await registerUser(app, "zed@c2.test", "Zed Leaving");
+    await resetAuthRateLimit();
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: zed.email, permission: "read" }, owner.apiKey)).status).toBeLessThan(300);
+    const g = (await startConversation(alice, [rita.email, zed.email])).data.conversation.id;
+    await open(alice, "zed was here", g);
+    expect((await conversation(zed, g)).status).toBe(200);
+    const events: EventsModule = await import("../src/chat/events.js");
+    events._setHeartbeatMs(50);
+    const zs = await subscribe(zed);
+    expect(zs.status).toBe(200);
+    await zs.next("hello");
+    const collabs = (await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, owner.apiKey)).data;
+    const row = (collabs.collaborators ?? collabs).find((x: any) => x.email === zed.email);
+    expect(row, JSON.stringify(collabs).slice(0, 200)).toBeTruthy();
+    expect((await jsonRequest(app, "DELETE", `/nests/${nestId}/collaborators/${row.id}`, undefined, owner.apiKey)).status).toBeLessThan(300);
+    // Zed still holds a share on the conversation node: it opens nothing.
+    for (const path of [`/nests/${nestId}/conversations/${enc(g)}`, `/nests/${nestId}/nodes/${enc(g)}`, `/nests/${nestId}/nodes/${enc(g)}/annotations`, `/nests/${nestId}/conversations`]) {
+      expect((await jsonRequest(app, "GET", path, undefined, zed.apiKey)).status, path).toBe(404);
+    }
+    for (const path of [`/nests/${nestId}/nodes`, `/nests/${nestId}/feed`, `/nests/${nestId}/search?q=zed`]) {
+      const r = await jsonRequest(app, "GET", path, undefined, zed.apiKey);
+      if (r.status === 200) expect(JSON.stringify(r.data), path).not.toContain("zed was here");
+      if (r.status === 200) expect(JSON.stringify(r.data), path).not.toContain(g);
+    }
+    expect((await post(zed, "still here?", g)).status).toBe(404);
+    await vi.waitFor(() => expect(events._subscriberCount(nestId, zed.userId)).toBe(0), { timeout: 2000, interval: 20 });
+    await zs.close();
+    events._setHeartbeatMs(null);
+    // The others' view is unchanged and a message after the removal never reaches zed's inbox.
+    expect((await conversation(rita, g)).status).toBe(200);
+  });
+
+  it("SEC-C2-11 the #private and agent:* tags change only through the chat routes: a writer editing tags is refused", async () => {
+    const node = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${enc("nodes/channels/secret")}`, undefined, alice.apiKey)).data;
+    expect(node.tags ?? node.node?.tags).toBeTruthy();
+    const tags: string[] = (node.tags ?? node.node?.tags).map((t: string) => t.replace(/^#/, ""));
+    expect(tags).toContain("private");
+    const dropped = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${enc("nodes/channels/secret")}`, { tags: tags.filter((t) => t !== "private") }, alice.apiKey);
+    expect(dropped.status, JSON.stringify(dropped.data)).toBe(409);
+    const agent = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${enc("nodes/channels/secret")}`, { tags: [...tags, "agent:evil"] }, alice.apiKey);
+    expect(agent.status).toBe(409);
+    const mcp = await callTool(alice.apiKey, "context_update", { id: "nodes/channels/secret", tags: tags.filter((t) => t !== "private") });
+    expect(mcp.isError || /409|chat container/i.test(mcp.text)).toBeTruthy();
+    expect((await channel(sam, "secret")).status).toBe(404);
+    // Other tags still edit normally.
+    const fine = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${enc("nodes/channels/secret")}`, { tags: [...tags, "ops"] }, alice.apiKey);
+    expect(fine.status, JSON.stringify(fine.data)).toBe(200);
+  });
+
+  it("SEC-C2-12 per-nest off is off over MCP too: context_comment and context_comments on a channel or conversation say not found", async () => {
+    const dm = (await startConversation(alice, [rita.email])).data.conversation.id;
+    const t = await open(alice, "before the nest went quiet", dm);
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: false }, owner.apiKey)).status).toBe(200);
+    for (const [tool, args] of [
+      ["context_comment", { channel: "general", body: "x" }],
+      ["context_comment", { id: dm, body: "x" }],
+      ["context_comment", { thread: t.id, body: "x" }],
+      ["context_comments", { id: GENERAL }],
+      ["context_comments", { id: dm }],
+      ["context_comments", { thread: t.id }],
+      ["context_resolve_comment", { thread: t.id }],
+    ] as const) {
+      const r = await callTool(alice.apiKey, tool, args as Record<string, unknown>);
+      expect(r.isError || /not found/i.test(r.text), `${tool} ${JSON.stringify(args)}: ${r.text}`).toBeTruthy();
+    }
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: true }, owner.apiKey)).status).toBe(200);
+    expect((await callTool(alice.apiKey, "context_comments", { id: dm })).isError).toBe(false);
+  });
+
+  it("SEC-C2-13 a replay never hands someone else's read mark to a reconnecting member", async () => {
+    const rs = await subscribe(rita);
+    await rs.next("hello");
+    await open(alice, "mark me", GENERAL);
+    const seen = await rs.next("message.new");
+    await rs.close();
+    await jsonRequest(app, "POST", `/nests/${nestId}/channels/general/read`, {}, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/channels/general/read`, {}, rita.apiKey);
+    const back = await subscribe(rita, { lastEventId: seen!.id! });
+    const marks: any[] = [];
+    for (;;) {
+      const f = await back.next("read.marked", 400);
+      if (!f) break;
+      marks.push(f);
+    }
+    expect(marks.length).toBe(1); // rita's own, never alice's
+    await back.close();
+  });
+
+  it("SEC-C2-14 conversation mention rows exist only while chat is on: switch off, they are gone from My Work; on, they are back", async () => {
+    const dm = (await startConversation(alice, [sam.email])).data.conversation.id;
+    const t = await open(alice, "@sam only while chat is on", dm);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).toContain(t.id);
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: false }, owner.apiKey)).status).toBe(200);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).not.toContain(t.id);
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: true }, owner.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "PATCH", "/admin/settings", { team_chat_enabled: false }, owner.apiKey)).status).toBe(200);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).not.toContain(t.id);
+    expect((await jsonRequest(app, "PATCH", "/admin/settings", { team_chat_enabled: true }, owner.apiKey)).status).toBe(200);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).toContain(t.id);
+  });
+
   it("SEC-C2-06 per-nest off while the server is on: the stream, presence and the thread routes on a conversation are 404 too", async () => {
     const dm = (await startConversation(alice, [rita.email])).data.conversation.id;
     expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: false }, owner.apiKey)).status).toBe(200);

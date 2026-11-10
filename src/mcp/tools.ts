@@ -139,7 +139,8 @@ import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
-import { conversationIdOf, isConversationId } from "../chat/containers.js";
+import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
 import { channelsHint } from "./channel-tools.js";
@@ -3377,6 +3378,11 @@ async function runTool(
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
+      // A channel or a conversation while the nest's chat is off (C2): the
+      // same answer REST gives, not found.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) {
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
       if (oneThread) {
         const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
         if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
@@ -3520,6 +3526,8 @@ async function runTool(
         // title — otherwise the refusal confirms what the caller guessed.
         return notFound();
       }
+      // A channel or a conversation while the nest's chat is off (C2): not found, as on REST.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) return notFound();
       const label = node.frontmatter.title || node.id;
 
       // A channel takes posts — and resolves — from people added to the nest

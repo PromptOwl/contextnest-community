@@ -32,9 +32,40 @@ export interface ChatUnread {
   }>;
 }
 
-export async function chatUnreadSummary(params: { userId: string; email: string; onlyNestId?: string | null; actingAs?: string | null }): Promise<ChatUnread> {
+/** A summary is served from memory for this long per person (the dashboard
+ *  polls; counts a few seconds old are fine). */
+const CACHE_MS = 5_000;
+const cache = new Map<string, { at: number; value: ChatUnread }>();
+
+export async function chatUnreadSummary(params: {
+  userId: string;
+  email: string;
+  onlyNestId?: string | null;
+  actingAs?: string | null;
+  /** My Work's already-read open mentions, so the index isn't read twice. */
+  mentions?: Array<{ nest_id: string; node_id: string }>;
+}): Promise<ChatUnread> {
   const out: ChatUnread = { total: 0, mentions: 0, nests: [] };
   if (!config.TEAM_CHAT_ENABLED) return out;
+  const { userId, email } = params;
+  const cacheKey = `${userId}\u0000${params.onlyNestId ?? ""}\u0000${params.actingAs ?? ""}`;
+  const hit = cache.get(cacheKey);
+  if (hit && hit.at > Date.now() - CACHE_MS) return hit.value;
+  if (cache.size > 2000) for (const [k, v] of cache) if (v.at <= Date.now() - CACHE_MS) cache.delete(k);
+  const value = await build(params, out);
+  cache.set(cacheKey, { at: Date.now(), value });
+  return value;
+}
+
+/** Tests only. */
+export function _resetUnreadCache(): void {
+  cache.clear();
+}
+
+async function build(
+  params: { userId: string; email: string; onlyNestId?: string | null; actingAs?: string | null; mentions?: Array<{ nest_id: string; node_id: string }> },
+  out: ChatUnread,
+): Promise<ChatUnread> {
   const { userId, email } = params;
   const nestNames = new Map<string, string>();
   for (const n of await listVisibleNests(userId)) {
@@ -47,7 +78,8 @@ export async function chatUnreadSummary(params: { userId: string; email: string;
 
   // Open mentions in chat containers, per nest (access-checked by the index read).
   const mentionsByNest = new Map<string, number>();
-  for (const m of await listOpenMentions({ userId, email, nestNames, actingAs: params.actingAs ?? null })) {
+  const mentions = params.mentions ?? (await listOpenMentions({ userId, email, nestNames, actingAs: params.actingAs ?? null }));
+  for (const m of mentions) {
     if (!isChannelId(m.node_id) && !isConversationId(m.node_id)) continue;
     mentionsByNest.set(m.nest_id, (mentionsByNest.get(m.nest_id) ?? 0) + 1);
   }

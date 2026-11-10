@@ -34,6 +34,7 @@ import { canOpenNode } from "../governance/mention-notify.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { isChannelId, CHANNEL_TAG } from "../channels/channel-node.js";
 import { isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { displayNames, namedActor, normHandle, writerHandlesOf } from "../channels/message-meta.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { nowMsExpr } from "../db/sql.js";
@@ -343,7 +344,19 @@ export async function listOpenMentions(params: {
     }),
   );
 
-  const shown = [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)));
+  // A conversation's mentions exist only while chat is on there (C2): the
+  // server switch, and the nest's own setting (asked once per nest).
+  const chatOn = new Map<string, boolean>();
+  const visible: Row[] = [];
+  for (const r of [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)))) {
+    if (isConversationId(r.node_id)) {
+      if (!config.TEAM_CHAT_ENABLED) continue;
+      if (!chatOn.has(r.nest_id)) chatOn.set(r.nest_id, await nestChatEnabled(r.nest_id).catch(() => false));
+      if (!chatOn.get(r.nest_id)) continue;
+    }
+    visible.push(r);
+  }
+  const shown = visible;
   const names = await displayNames(shown.map((r) => r.author));
   const out: MentionItem[] = [];
   for (const r of shown) {

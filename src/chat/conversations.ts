@@ -42,6 +42,7 @@ import {
   addPersonMember,
   agentMembers,
   agentTag,
+  assertRoom,
   conversationDocs,
   conversationIdOf,
   conversationMemberKeys,
@@ -278,6 +279,7 @@ export async function addConversationMember(caller: Caller, raw: unknown, member
   if (view.kind !== "group") throw new ConflictError("A direct message has a fixed pair of members; start a group to add someone.");
   if (typeof member !== "string" || !member.trim()) throw new ValidationError("member is required — a name, an email or an @handle.");
   const { people, agents } = await resolveMemberSpecs(caller.nestId, [member]);
+  await assertRoom(caller.nestId, node.id);
   const me = caller.userEmail.toLowerCase();
   let added: string | null = null;
   for (const p of people) if (await addPersonMember(caller.nestId, node.id, p, me)) added = p.email;

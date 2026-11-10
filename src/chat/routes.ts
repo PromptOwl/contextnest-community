@@ -54,12 +54,16 @@ import {
   readConversation,
 } from "./conversations.js";
 import { inviteChannelMember, joinChannel, leaveChannel, listChannelMembers, setChannelPrivate } from "./members.js";
-import { getNestChatSettings, setNestChat } from "./settings.js";
+import { getNestChatSettings, nestChatEnabled, setNestChat } from "./settings.js";
 import { activePresence, heartbeat, parseStatus, PRESENCE_TTL_MS, typing } from "./presence.js";
 import { canReadContainer, getPreferences, setPreference } from "./preferences.js";
 import { chatUnreadSummary } from "./unread.js";
 import { containerReadVerdict } from "./containers.js";
 import { heartbeatMs, latestEventId, mayOpenStream, replaySince, subscribeChat, type StoredChatEvent } from "./events.js";
+import { tryConsume } from "../shared/rate-limit.js";
+
+/** Unread summaries one person may ask for per minute. */
+const UNREAD_BUDGET = { max: 60, windowMs: 60_000 };
 
 export const conversationRoutes = new Hono<AuthEnv>();
 export const channelMembershipRoutes = new Hono<AuthEnv>();
@@ -200,7 +204,11 @@ chatRoutes.get("/events", async (c) => {
     );
   }
   const lastEventId = c.req.header("Last-Event-ID") ?? c.req.query("last_event_id") ?? undefined;
-  const { events: missed, tooOld } = replaySince(who.nestId, lastEventId);
+  const replay = replaySince(who.nestId, lastEventId);
+  // A buffered event meant for one person (their own read mark) is replayed
+  // to that person only, as it was delivered live.
+  const missed = replay.events.filter((ev) => !ev.only || ev.only === who.userId);
+  const tooOld = replay.tooOld;
 
   // May this subscriber see an event about this container? Public channels
   // and nest-wide events: yes. A conversation or a private channel: members
@@ -242,8 +250,13 @@ chatRoutes.get("/events", async (c) => {
       if (!(await canSee(ev))) return;
       await stream.writeSSE({ id: String(ev.id), event: String(ev.event.type), data: JSON.stringify(ev.event) });
     };
+    // Every heartbeat also re-asks whether the person is still added to the
+    // nest with chat on: someone removed from the nest stops hearing it.
     const heartbeat = setInterval(() => {
-      void stream.write(": ping\n\n").catch(hangUp);
+      void (async () => {
+        if (!(await isNestMember(who.nestId, who.userId)) || !(await nestChatEnabled(who.nestId))) return hangUp();
+        await stream.write(": ping\n\n");
+      })().catch(hangUp);
     }, heartbeatMs());
     try {
       await stream.writeSSE({ id: String(latestEventId()), event: "hello", data: JSON.stringify({ nest_id: who.nestId, resume: !tooOld }) });
@@ -293,5 +306,8 @@ meChatRoutes.put("/preferences", async (c) => {
 
 meChatRoutes.get("/unread", async (c) => {
   const userId = c.get("userId");
+  if (!tryConsume(`chat-unread:${userId}`, UNREAD_BUDGET)) {
+    return c.json({ error: "Too many unread reads — every 30 s is plenty." }, 429, { "Retry-After": "10" });
+  }
   return c.json(await chatUnreadSummary({ userId, email: await resolveCallerEmail(userId) }));
 });

@@ -37,6 +37,8 @@ import { knownAgents, normHandle } from "../channels/message-meta.js";
 import { listNestPeople, type NestPerson } from "../nests/people-service.js";
 import { resolveMention } from "../shared/mentions.js";
 import { ValidationError } from "../shared/errors.js";
+import { config } from "../config.js";
+import { resolveNestAccess } from "../shared/access.js";
 
 export const CONVERSATION_FOLDER = "conversations";
 export const CONVERSATION_TAG = "conversation";
@@ -109,18 +111,36 @@ export async function privateContainerIds(nestId: string): Promise<Set<string>> 
 
 // ─── Members (grants rows) ──────────────────────────────────────────────
 
+/** A person added to the nest (owner, admin, collaborator, steward, team
+ *  member) — never someone who reaches it only through its visibility or a
+ *  share. The same rule as channel-service's isNestMember, inlined to keep
+ *  this leaf free of the service. */
+export async function nestMemberOf(nestId: string, userId: string): Promise<boolean> {
+  if (config.AUTH_MODE === "open") return true;
+  if (!userId) return false;
+  const access = await resolveNestAccess(nestId, userId);
+  return access.permission !== "none" && !access.isPublicReader;
+}
+
+/**
+ * A member = a share (grant) on the node AND a person added to the nest.
+ * A grant that outlives someone's nest access — a removed collaborator, an
+ * owner sharing the node with an outsider — opens nothing (security review).
+ */
 export async function isContainerMember(nestId: string, container: string, userId: string): Promise<boolean> {
   if (!userId) return false;
-  return !!(await getDb().get("SELECT 1 AS hit FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document' AND target = ?", [
+  const row = await getDb().get("SELECT 1 AS hit FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document' AND target = ?", [
     nestId,
     userId,
     container,
-  ]));
+  ]);
+  return !!row && (await nestMemberOf(nestId, userId));
 }
 
-/** The chat containers this user holds a grant on in the nest. */
+/** The chat containers this user holds a grant on in the nest (none unless
+ *  they are a person added to the nest). */
 export async function memberContainers(nestId: string, userId: string): Promise<Set<string>> {
-  if (!userId) return new Set();
+  if (!userId || !(await nestMemberOf(nestId, userId))) return new Set();
   const rows = (await getDb().all(
     `SELECT target FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document'
         AND (target LIKE 'nodes/channels/%' OR target LIKE 'nodes/conversations/%')`,
@@ -161,6 +181,14 @@ export async function agentMembers(nestId: string, container: string, node?: Con
   return rows.map((r) => r.tag_name.slice(AGENT_TAG_PREFIX.length));
 }
 
+/** Room for one more? People (grants) plus agents (tags) stay under the cap. */
+export async function assertRoom(nestId: string, container: string): Promise<void> {
+  const [people, agents] = await Promise.all([listPeople(nestId, container), agentMembers(nestId, container)]);
+  if (people.length + agents.length >= MAX_CONVERSATION_MEMBERS) {
+    throw new ValidationError(`This conversation already has ${MAX_CONVERSATION_MEMBERS} members, the most it can hold.`);
+  }
+}
+
 /** Add a person as a member: a read grant on the node (grants-service; it
  *  emails nobody who is already on the nest). False when already a member. */
 export async function addPersonMember(nestId: string, container: string, person: { email: string; userId: string }, addedBy: string): Promise<boolean> {
@@ -180,7 +208,7 @@ export async function addAgentMember(nestId: string, container: string, handle: 
   const tag = agentTag(handle);
   const tags = tagsOf(node);
   if (tags.some((t) => normalizeTag(t) === tag)) return false;
-  await updateNode(nestId, container, { tags: [...tags, `#${tag}`], changeNote: `Added @${normHandle(handle)}` }, byEmail);
+  await updateNode(nestId, container, { tags: [...tags, `#${tag}`], changeNote: `Added @${normHandle(handle)}` }, byEmail, { chatMembership: true });
   return true;
 }
 

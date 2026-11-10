@@ -79,6 +79,7 @@ import {
 import { isPublicReader } from "../shared/access.js";
 import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
 import { isConversationDoc } from "../chat/containers.js";
+import { normalizeTag as normalizeChatTag } from "../governance/tag-index-service.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -1834,6 +1835,12 @@ export interface WriteOptions {
    */
   expectHead?: number;
   /**
+   * The chat services (src/chat) changing a container's membership tags
+   * (#private, agent:<handle>) on a channel or conversation node. Anyone
+   * else editing those tags is refused: they are the node's access rule.
+   */
+  chatMembership?: boolean;
+  /**
    * Never publish this write, whatever the nest's posture (ungoverned,
    * prime-only, self-approve, creator-reviews): it lands as a draft for a
    * reviewer. A metacognition agent's proposals use it — an agent's change is
@@ -2982,6 +2989,20 @@ export async function updateNode(
         if (!hasTag({ frontmatter: { tags: nextTags } }, CHANNEL_TAG)) {
           const refusal = channelRetireRefusal(node, "removing its #channel tag");
           if (refusal) throw refusal;
+        }
+        // A container's membership tags (team chat C2) are its access rule:
+        // #private and agent:<handle> change through the chat routes only
+        // (make private/public: owner/admin; invite: members and writers).
+        if (!opts.chatMembership && (isChannelDoc(node) || isConversationDoc(node))) {
+          const gated = (tags: string[]) =>
+            new Set(tags.map(normalizeChatTag).filter((t) => t === "private" || t.startsWith("agent:")));
+          const before = gated(priorTags);
+          const after = gated(nextTags);
+          if (before.size !== after.size || [...before].some((t) => !after.has(t))) {
+            throw new ConflictError(
+              `${node.id} is a chat container: its #private and agent:<handle> tags are its member list and change through the chat routes (POST …/channels/:name/private, …/members), not by editing tags.`,
+            );
+          }
         }
         if (node.frontmatter.type === TASK_NODE_TYPE) {
           nextTags = enforceTaskTagRules(

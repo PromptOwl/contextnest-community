@@ -82,6 +82,13 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Comments and relations ─────────────────────────────────────────────
   context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
   context_agent_webhooks: overwriteOutside("Manage agent webhooks", "Lists, sets or removes where an agent's @mentions are POSTed; set replaces a target and the server then sends events to that outside URL."),
+  // Team chat C2 (PO-1197). Conversations and private channels are nodes the
+  // public docs site never serves, so none of these reaches outside.
+  context_conversation_read: read("Read conversation", "Returns a direct or group conversation's posts, one thread, or what is new since a cursor; nothing changes."),
+  context_conversations: overwrite("Manage conversations", "Lists, starts or finds direct and group conversations, adds a member, or leaves one; leaving removes your own membership."),
+  context_channel_members: overwrite("Manage channel members", "Lists a channel's members, invites, joins or leaves, or makes it private or public, which changes who can read it."),
+  context_chat_preferences: overwrite("Chat notification preferences", "Reads or sets your chat notification level for a nest or one conversation, replacing the previous level."),
+  context_presence: add("Set presence", "Lists who is around in the nest, or marks you active for five minutes; nothing is kept beyond that."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),

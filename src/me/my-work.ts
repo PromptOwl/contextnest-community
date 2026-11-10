@@ -395,7 +395,13 @@ export async function buildMyWork(params: {
   // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
   const chat =
     config.TEAM_CHAT_ENABLED && want("chat")
-      ? await chatUnreadSummary({ userId, email: me, onlyNestId, actingAs: params.actingAs ?? null }).catch((err) => {
+      ? await chatUnreadSummary({
+          userId,
+          email: me,
+          onlyNestId,
+          actingAs: params.actingAs ?? null,
+          ...(want("mentions") ? { mentions: allMentions } : {}),
+        }).catch((err) => {
           console.error("[my-work] chat unread failed", err);
           return undefined;
         })

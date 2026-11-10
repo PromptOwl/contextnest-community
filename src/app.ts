@@ -17,7 +17,7 @@ import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 // settings/presence/typing/events, /me/chat.
 import { channelMembershipRoutes, chatRoutes, conversationRoutes, meChatRoutes } from "./chat/routes.js";
 import { nestChatEnabled } from "./chat/settings.js";
-import { conversationIdOf, isContainerMember, isPrivateContainer } from "./chat/containers.js";
+import { conversationIdOf, hiddenContainersFor, isContainerMember, isPrivateContainer } from "./chat/containers.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
@@ -3750,7 +3750,10 @@ export function createApp(): Hono<AuthEnv> {
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });
-    return c.json(page);
+    // A conversation or a private channel the admin is not a member of is
+    // not theirs to watch (team chat C2).
+    const hidden = await hiddenContainersFor(nestId, c.get("userId"), page.items.map((i: { nodeId?: string | null }) => String(i.nodeId ?? "")));
+    return c.json(hidden.size ? { ...page, items: page.items.filter((i: { nodeId?: string | null }) => !hidden.has(String(i.nodeId ?? ""))) } : page);
   });
 
   // Nest list/CRUD

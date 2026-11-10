@@ -85,7 +85,7 @@ export const CHAT_TOOL_DEFINITIONS = [
   {
     name: "context_channel_members",
     description:
-      "A channel's member list and membership (team chat). " +
+      "Lists a channel's members and manages membership (team chat). " +
       'action "list" (default) returns the members and whether the channel is private; ' +
       '"invite" adds a `member` (a person added to the nest, or an agent @handle) — for the nest\'s writers and the channel\'s members; ' +
       '"join" joins a public channel; "leave" leaves one; ' +
@@ -105,7 +105,7 @@ export const CHAT_TOOL_DEFINITIONS = [
   {
     name: "context_chat_preferences",
     description:
-      "Your chat notification preferences (team chat). " +
+      "Reads or sets your chat notification preferences (team chat). " +
       'action "get" (default) lists them; "set" sets `level` — "all" (every message in the conversation drops an inbox row), ' +
       '"mentions" (the default: only a message that @names you), "none" (muted: no inbox row, mail or team message) — ' +
       "for a nest (`nest_id`, default this nest) or one `conversation` in it (a channel node id or a conversation id). " +
@@ -123,7 +123,7 @@ export const CHAT_TOOL_DEFINITIONS = [
   {
     name: "context_presence",
     description:
-      "Who is around in this nest (team chat). " +
+      "Lists who is around in this nest, or sends your heartbeat (team chat). " +
       'action "list" (default) returns the members active in the last 5 minutes, each with `status` and `last_seen` (to the minute), agents shown as the agent; ' +
       '"set" is a heartbeat: marks you (or the agent your `client.agent` declares) active for 5 minutes, with an optional short `status`. ' +
       "Send one every minute or two while working here, not more.",
@@ -147,12 +147,12 @@ export const CHAT_READ_KEY_TOOL_VIEWS: Record<
   }
 > = {
   context_conversations: {
-    description: "List the direct and group conversations you are in (this key is read-only: it can read them with context_conversation_read, and cannot create, leave or add).",
+    description: "Lists the direct and group conversations you are in (this key is read-only: it can read them with context_conversation_read, and cannot create, leave or add).",
     schema: { type: "object", properties: { action: { type: "string", description: '"list" (the only action for this key).' } } },
     annotations: { title: "List conversations", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   context_channel_members: {
-    description: "List a channel's members and whether it is private (this key is read-only: it cannot invite, join, leave or change privacy).",
+    description: "Lists a channel's members and whether it is private (this key is read-only: it cannot invite, join, leave or change privacy).",
     schema: {
       type: "object",
       properties: {
@@ -164,14 +164,14 @@ export const CHAT_READ_KEY_TOOL_VIEWS: Record<
     annotations: { title: "List channel members", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   context_chat_preferences: {
-    description: "Read your chat notification preferences (this key is read-only: it cannot change them).",
+    description: "Reads your chat notification preferences (this key is read-only: it cannot change them).",
     schema: { type: "object", properties: { action: { type: "string", description: '"get" (the only action for this key).' } } },
-    annotations: { title: "Chat preferences", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: "Read chat preferences", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   context_presence: {
-    description: "Who is around in this nest: members active in the last 5 minutes (this key is read-only: it cannot send a heartbeat).",
+    description: "Lists who is around in this nest: members active in the last 5 minutes (this key is read-only: it cannot send a heartbeat).",
     schema: { type: "object", properties: { action: { type: "string", description: '"list" (the only action for this key).' } } },
-    annotations: { title: "Presence", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: "Who is around", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
 };
 
