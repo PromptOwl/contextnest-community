@@ -36,6 +36,7 @@ import {
   type ChannelView,
 } from "../channels/channel-service.js";
 import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
+import { nestChatEnabled } from "../chat/settings.js";
 
 /** What a write tool answers a read-only key (AC-AX-06). */
 export const READ_ONLY_KEY_REFUSAL = "This key is read-only; use a read-write key to post or to change anything.";
@@ -55,6 +56,7 @@ export const CHANNEL_TOOL_DEFINITIONS = [
         action: { type: "string", description: 'One of "list" (default), "agents", "mark_read", "create", "archive", "unarchive".' },
         name: { type: "string", description: 'Channel name, e.g. "ops" (mark_read, create, archive, unarchive).' },
         purpose: { type: "string", description: "What the channel is for (create). Stored as the channel node's body." },
+        private: { type: "boolean", description: "create: a private channel — its members only (you first); invite with context_channel_members." },
         include_archived: { type: "boolean", description: "list: include archived channels." },
       },
     },
@@ -163,6 +165,8 @@ export async function runChannelTool(
       "DOCUMENT_NOT_FOUND",
     );
   }
+  // The nest's own chat setting (C2): off means off here too.
+  if (!(await nestChatEnabled(ctx.nestId))) return toolError("Chat is turned off for this nest.", "DOCUMENT_NOT_FOUND");
   const caller = callerOf(ctx);
   try {
     if (toolName === "context_channel_read") {
@@ -207,7 +211,7 @@ export async function runChannelTool(
       return { text: `Marked ${data.channel.title} read.`, data };
     }
     if (action === "create") {
-      const data = await createChannel({ ...caller, client: ctx.client }, { name: args.name, purpose: args.purpose });
+      const data = await createChannel({ ...caller, client: ctx.client }, { name: args.name, purpose: args.purpose, private: args.private });
       return {
         text: `Created ${data.channel.title} (${data.channel.id}). Post with context_comment { channel: "${data.channel.name}", body }.`,
         data,

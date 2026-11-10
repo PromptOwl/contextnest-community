@@ -69,6 +69,11 @@ import {
   tagsOf,
 } from "./channel-node.js";
 import { bodyMentions, displayNames, knownAgents, namedActor, type KnownAgent, type MentionRef } from "./message-meta.js";
+// Team chat harness C2 (PO-1197): private channels, conversations, live events.
+import { emitChatEvent } from "../chat/events.js";
+import { isConversationId, isPrivateChannel, isContainerMember, memberContainers, privateChannelIds } from "../chat/containers.js";
+import { conversationPostRefusal } from "../chat/conversations.js";
+import { recordChannelCreator } from "../chat/members.js";
 
 export { ARCHIVED_TAG, CHANNEL_FOLDER, CHANNEL_TAG, isChannelDoc, isChannelId, isChannelNode } from "./channel-node.js";
 
@@ -179,6 +184,8 @@ export async function channelPostRefusal(
   userId: string,
   userEmail: string,
 ): Promise<PostRefusal | null> {
+  // A conversation (C2) is a container with its own member list.
+  if (isConversationId(nodeId)) return conversationPostRefusal(nestId, nodeId, userId, userEmail);
   if (!isChannelId(nodeId)) return null;
   const node = await readChannelDoc(nestId, nodeId);
   if (!node) {
@@ -212,6 +219,11 @@ export interface ChannelView {
    *  a composer. */
   can_post: boolean;
   post_refusal: string | null;
+  /** A private channel: readable by its member list only (C2, PO-1197). */
+  private: boolean;
+  /** This caller is on the channel's member list (joined, invited, or its
+   *  creator). Always true for a readable private channel. */
+  member: boolean;
 }
 
 interface Stats {
@@ -223,7 +235,7 @@ interface Stats {
 
 /** Post counts, latest activity and this caller's unread, for many channels
  *  in ONE query (the channel list is what a visible tab re-reads). */
-async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<string, Stats>> {
+export async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<string, Stats>> {
   const out = new Map<string, Stats>();
   if (nodeIds.length === 0) return out;
   const rows = (await getDb().all(
@@ -251,7 +263,12 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
   return out;
 }
 
-function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal | null): ChannelView {
+function toView(
+  node: ContextNode,
+  stats: Stats | undefined,
+  post: PostRefusal | null,
+  flags: { private: boolean; member: boolean } = { private: false, member: false },
+): ChannelView {
   const name = channelNameOf(node.id)!;
   return {
     id: node.id,
@@ -266,7 +283,15 @@ function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal |
     unread: stats?.unread ?? 0,
     can_post: !post,
     post_refusal: post?.error ?? null,
+    private: flags.private,
+    member: flags.member,
   };
+}
+
+/** The C2 membership flags for one channel, as this caller sees them. */
+async function channelFlags(caller: Caller, nodeId: string): Promise<{ private: boolean; member: boolean }> {
+  const [priv, member] = await Promise.all([isPrivateChannel(caller.nestId, nodeId), isContainerMember(caller.nestId, nodeId, caller.userId)]);
+  return { private: priv, member };
 }
 
 /** The channel by name, if it exists and the caller may read it; NotFound
@@ -286,7 +311,7 @@ export async function getReadableChannel(
   const access = await channelAccess(caller, node);
   if (!access.read) throw new NotFoundError("Channel not found");
   const stats = await channelStats(caller, [node.id]);
-  return { node, view: toView(node, stats.get(node.id), access.post) };
+  return { node, view: toView(node, stats.get(node.id), access.post, await channelFlags(caller, node.id)) };
 }
 
 // ─── List / create / archive / mark read ────────────────────────────────
@@ -313,7 +338,11 @@ export async function listChannels(
   // The posting rule is the same for every channel but its archived tag, so
   // the nest-level half is resolved once.
   const refusal = await nestPostRefusal(caller.nestId, caller.userId);
-  const all = readable.map((d) => toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal));
+  // Private channels and the caller's memberships, two queries for the list (C2).
+  const [priv, mine] = await Promise.all([privateChannelIds(caller.nestId), memberContainers(caller.nestId, caller.userId)]);
+  const all = readable.map((d) =>
+    toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal, { private: priv.has(d.id), member: mine.has(d.id) }),
+  );
   const live = all.filter((c) => !c.archived);
   const most = live
     .filter((c) => c.last_activity_at)
@@ -327,11 +356,14 @@ export async function listChannels(
 
 export async function createChannel(
   caller: Caller & { client?: ClientMetadata },
-  input: { name: unknown; purpose?: unknown },
+  input: { name: unknown; purpose?: unknown; private?: unknown },
 ): Promise<{ channel: ChannelView }> {
   const name = parseChannelName(input.name);
   if (input.purpose !== undefined && input.purpose !== null && typeof input.purpose !== "string") {
     throw new ValidationError("purpose must be a string");
+  }
+  if (input.private !== undefined && input.private !== null && typeof input.private !== "boolean") {
+    throw new ValidationError("private must be a boolean");
   }
   const purpose = String(input.purpose ?? "").trim();
   if (purpose.length > MAX_PURPOSE_LENGTH) {
@@ -359,6 +391,10 @@ export async function createChannel(
     },
     caller.userEmail,
   );
+  // The creator joins their channel (C2); a private one is theirs alone
+  // until they invite someone.
+  await recordChannelCreator(caller.nestId, id, caller, input.private === true);
+  emitChatEvent(caller.nestId, { type: "channel.created", conversation: id, name, private: input.private === true });
   return { channel: (await getReadableChannel(caller, name)).view };
 }
 
@@ -384,6 +420,7 @@ export async function setChannelArchived(
       },
       caller.userEmail,
     );
+    emitChatEvent(caller.nestId, { type: "channel.archived", conversation: node.id, name: view.name, archived });
   }
   return { channel: (await getReadableChannel(caller, view.name)).view };
 }
@@ -402,6 +439,7 @@ export async function markChannelRead(caller: Caller, rawName: unknown): Promise
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
     [caller.userId, caller.nestId, node.id],
   );
+  emitChatEvent(caller.nestId, { type: "read.marked", conversation: node.id }, { only: caller.userId });
   return { channel: (await getReadableChannel(caller, view.name)).view };
 }
 
@@ -625,8 +663,11 @@ async function sinceCursor(nestId: string, nodeId: string, raw: string): Promise
 export async function readChannel(
   caller: Caller,
   input: { channel: unknown; thread?: unknown; since?: unknown; limit?: unknown; offset?: unknown },
+  /** An already-resolved container (a conversation, C2): the same read over
+   *  its threads, with `view` returned as `channel`. */
+  container?: { node: { id: string }; view: ChannelView },
 ): Promise<ChannelTimeline> {
-  const { node, view } = await getReadableChannel(caller, input.channel);
+  const { node, view } = container ?? (await getReadableChannel(caller, input.channel));
   const db = getDb();
 
   if (input.thread !== undefined && input.thread !== null && input.thread !== "") {

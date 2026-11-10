@@ -29,14 +29,15 @@
  * a descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 101,
  * documented there).
  */
-import { MY_WORK_SECTIONS, buildMyWork, parseMyWorkPaging, parseMyWorkSections, type MyWork, type MyWorkSection } from "../me/my-work.js";
+import { buildMyWork, myWorkSections, parseMyWorkPaging, parseMyWorkSections, type MyWork, type MyWorkSection } from "../me/my-work.js";
+import { chatUnreadText } from "../chat/unread.js";
 import { actingAgentHandle } from "../mentions/mention-index.js";
 import { ValidationError } from "../shared/errors.js";
 import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
 
 /** What a call gets when it names no sections: everything but the person's
- *  unread-notification list. */
-const DEFAULT_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting"];
+ *  unread-notification list (plus the chat unread summary while chat is on). */
+const defaultSections = (): MyWorkSection[] => myWorkSections().filter((s) => s !== "notifications");
 
 export const MY_WORK_TOOL_DEFINITIONS = [
   {
@@ -54,7 +55,7 @@ export const MY_WORK_TOOL_DEFINITIONS = [
         sections: {
           type: "array",
           items: { type: "string" },
-          description: `Which sections to return: any of ${MY_WORK_SECTIONS.join(", ")}. Default: all but notifications.`,
+          description: "Which sections to return: any of mentions, items, assigned, waiting, notifications, chat (the team chat unread summary, when chat is on). Default: all but notifications.",
         },
         limit: { type: "number", description: "Rows per section (max 100). Default: 50 reviews and 50 mentions, the other sections whole." },
         offset: { type: "number", description: "Reviews to skip (default 0)." },
@@ -110,6 +111,9 @@ export function myWorkText(w: MyWork, actingAs: string | null = null): string {
     out.push(`\n## Unread notifications (${w.notifications.length})`);
     for (const n of w.notifications) out.push(`- ${line(String(n.message ?? ""))}`);
   }
+  if ((w as { chat?: Parameters<typeof chatUnreadText>[0] }).chat) {
+    out.push(chatUnreadText((w as { chat: Parameters<typeof chatUnreadText>[0] }).chat));
+  }
   if (w.waiting_on_me_total !== undefined) {
     out.push(`\n**Waiting on you in total:** ${w.waiting_on_me_total}${w.assigned ? ` (plus ${w.assigned.length} assigned)` : ""}.`);
   }
@@ -123,7 +127,7 @@ export async function runMyWorkTool(
 ): Promise<ToolResult> {
   let sections: MyWorkSection[];
   try {
-    sections = parseMyWorkSections(args?.sections) ?? DEFAULT_SECTIONS;
+    sections = parseMyWorkSections(args?.sections) ?? defaultSections();
   } catch (err) {
     if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
     throw err;
@@ -132,7 +136,9 @@ export async function runMyWorkTool(
   const actingAs = actingAgentHandle(ctx.client);
   // Every section asked for (the REST default set) → the full object, totals
   // included, exactly as GET /me/work returns it.
-  const all = MY_WORK_SECTIONS.every((s) => sections.includes(s));
+  // The chat summary rides along with the full object either way (C2), so
+  // it doesn't decide whether the call asked for everything.
+  const all = myWorkSections().filter((s) => s !== "chat").every((s) => sections.includes(s));
   const data = await buildMyWork({
     userId: ctx.userId,
     ...paging,

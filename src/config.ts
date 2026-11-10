@@ -887,7 +887,24 @@ export const config = {
    * (`experimental_agent_stream_enabled`). May change or disappear.
    */
   get EXPERIMENTAL_AGENT_STREAM(): boolean {
-    return process.env.EXPERIMENTAL_AGENT_STREAM === "true";
+    // An alias of TEAM_CHAT_ENABLED since the team chat harness (PO-1197):
+    // either name turns the same thing on. Kept so existing deploys and
+    // settings rows keep working; TEAM_CHAT_ENABLED supersedes it.
+    return this.TEAM_CHAT_ENABLED;
+  },
+  /**
+   * The team chat harness (PO-1197): channels, direct and group messages,
+   * private channels, presence, the live event stream and the chat MCP tools.
+   * Default OFF. On by `TEAM_CHAT_ENABLED=true` (or its older alias
+   * `EXPERIMENTAL_AGENT_STREAM=true`), or by a superadmin under Settings
+   * (`team_chat_enabled`), live, no restart. Off → every /nests/:id/channels,
+   * /conversations and /chat route and every /me/chat route answers 404, the
+   * chat MCP tools are not offered, `GET /nests/:id` says `chat: false`, and
+   * nothing else changes. A nest's owner or admin can also turn chat off for
+   * that one nest (`PATCH /nests/:id/chat/settings`).
+   */
+  get TEAM_CHAT_ENABLED(): boolean {
+    return process.env.TEAM_CHAT_ENABLED === "true" || process.env.EXPERIMENTAL_AGENT_STREAM === "true";
   },
   /**
    * Development only: let a metacognition agent's feeds and MCP servers be

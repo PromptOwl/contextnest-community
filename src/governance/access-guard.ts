@@ -21,6 +21,10 @@ import {
   grantCoversNode,
 } from "./grants-service.js";
 import { isChannelDoc, isChannelId, isChannelNode } from "../channels/channel-node.js";
+// Team chat harness C2 (PO-1197): conversations and private channels have a
+// member list that decides reads; everything else keeps its usual rule.
+import { containerReadVerdict, hiddenContainersFor, isConversationId } from "../chat/containers.js";
+import { resolveNestAccess } from "../shared/access.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -57,6 +61,17 @@ export async function canReadNode(
   // A pending Surfaces draft (a new document proposed from chat) is unseen
   // until approved, except by the nest's editors and admins (AC-JDG-13).
   if (isHidden(await hiddenSurfaceDrafts(nestId), nodeId) && !(await seesSurfaceDrafts(nestId, userId))) return false;
+  // A conversation or a private channel (C2): its members only — and still a
+  // person added to the nest, so a membership row outliving their access
+  // opens nothing. A conversation has no node, so the base rule never runs.
+  const chat = await containerReadVerdict(nestId, nodeId, userId);
+  if (chat === false) return false;
+  if (chat === true) {
+    const access = await resolveNestAccess(nestId, userId);
+    const member = access.permission !== "none" && !access.isPublicReader;
+    if (!member) return false;
+    if (isConversationId(nodeId)) return true;
+  }
   return canReadNodeBase(nestId, nodeId, userId, userEmail);
 }
 
@@ -166,7 +181,10 @@ export async function filterAccessible<T extends { id: string }>(
     anyHidden(hidden) && nodes.some((n) => isHidden(hidden, n.id)) && !(await seesSurfaceDrafts(nestId, userId))
       ? nodes.filter((n) => !isHidden(hidden, n.id))
       : nodes;
-  return filterAccessibleBase(nestId, userId, userEmail, visible, approvedVersions);
+  // Private channels this caller is not a member of are not listed (C2).
+  const hiddenChat = await hiddenContainersFor(nestId, userId, visible.map((n) => n.id));
+  const shown = hiddenChat.size ? visible.filter((n) => !hiddenChat.has(n.id)) : visible;
+  return filterAccessibleBase(nestId, userId, userEmail, shown, approvedVersions);
 }
 
 async function filterAccessibleBase<T extends { id: string }>(

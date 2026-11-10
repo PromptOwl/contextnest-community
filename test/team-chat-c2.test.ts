@@ -74,8 +74,8 @@ const post = (u: User, body: string, node = GENERAL, extra: Record<string, unkno
   jsonRequest(app, "POST", `/nests/${nest}/nodes/${enc(node)}/annotations`, { body, ...extra }, u.apiKey);
 const replyTo = (u: User, node: string, threadId: string, body: string, nest = nestId) =>
   jsonRequest(app, "POST", `/nests/${nest}/nodes/${enc(node)}/annotations/${threadId}/comments`, { body }, u.apiKey);
-async function open(u: User, body: string, node = GENERAL, extra: Record<string, unknown> = {}) {
-  const r = await post(u, body, node, extra);
+async function open(u: User, body: string, node = GENERAL, extra: Record<string, unknown> = {}, nest = nestId) {
+  const r = await post(u, body, node, extra, nest);
   expect(r.status, JSON.stringify(r.data)).toBe(201);
   return r.data.thread as { id: string; comments: Array<{ id: string; body: string }> };
 }
@@ -878,7 +878,7 @@ describe("AC-C2-12: presence", () => {
       expect((await jsonRequest(app, "POST", `/nests/${nestId}/chat/presence`, {}, u.apiKey)).status).toBe(404);
       expect((await jsonRequest(app, "GET", `/nests/${nestId}/chat/presence`, undefined, u.apiKey)).status).toBe(404);
     }
-    const ro = await mintKey(rita, "ro", { capability: "read" });
+    const ro = await mintKey(rita, "ro", { capability: "read", nest_id: nestId });
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/chat/presence`, {}, ro)).status).toBe(403);
     expect((await jsonRequest(app, "GET", `/nests/${nestId}/chat/presence`, undefined, ro)).status).toBe(200);
     let last = 200;
@@ -990,8 +990,12 @@ describe("AC-C2-14: GET /nests/:id/chat/events", () => {
     expect(replayed.length).toBe(2);
     expect(replayed.every((f) => Number(f.id) > Number(seen!.id))).toBe(true);
     await back.close();
-    const stale = await subscribe(rita, { lastEventId: "1" });
+    // Push the buffer past what `seen` can resume from: a reset, not a replay.
+    const events: EventsModule = await import("../src/chat/events.js");
+    for (let i = 0; i < events.RING_SIZE + 1; i++) events.emitChatEvent(nestId, { type: "presence", email: "ring@c2.test", agent: null, status: null, active: false });
+    const stale = await subscribe(rita, { lastEventId: seen!.id! });
     expect((await stale.next("reset"))?.event).toBe("reset");
+    expect(await stale.next("message.new", 200)).toBeNull();
     await stale.close();
     const junk = await subscribe(rita, { lastEventId: "not-a-number" });
     expect(junk.status).toBe(200);
@@ -1025,7 +1029,7 @@ describe("AC-C2-14: GET /nests/:id/chat/events", () => {
     for (const s of open5) await s.close();
     const events: EventsModule = await import("../src/chat/events.js");
     await vi.waitFor(() => expect(events._subscriberCount(nestId, sam.userId)).toBe(0), { timeout: 2000, interval: 20 });
-    const ro = await mintKey(rita, "ro-sse", { capability: "read" });
+    const ro = await mintKey(rita, "ro-sse", { capability: "read", nest_id: nestId });
     const res = await app.request(`/nests/${nestId}/chat/events`, { headers: { Authorization: `Bearer ${ro}`, Accept: "text/event-stream" } });
     expect(res.status).toBe(200);
     await res.body!.cancel();
@@ -1078,7 +1082,7 @@ describe("AC-C2-15: GET /me/chat/unread and the chat section of My Work", () => 
 
 describe("AC-C2-16: read-only keys read and are told plainly when they write", () => {
   it("AC-C2-16 list/read/members/preferences/presence work; create/invite/leave/set/heartbeat are refused", async () => {
-    const ro = await mintKey(rita, "ro-mcp", { capability: "read" });
+    const ro = await mintKey(rita, "ro-mcp", { capability: "read", nest_id: nestId });
     const names = await listToolNames(ro);
     expect(names).toEqual(expect.arrayContaining(["context_conversations", "context_conversation_read", "context_channel_members", "context_chat_preferences", "context_presence"]));
     const dm = (await startConversation(alice, [rita.email])).data.conversation.id;

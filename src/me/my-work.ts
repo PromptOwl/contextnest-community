@@ -27,10 +27,17 @@ import { canDecideAccessRequests, listAccessRequests } from "../governance/acces
 import { listAssignedTo } from "../nodes/assigned-service.js";
 import { listOpenMentions, mentionedNodeKeys } from "../mentions/mention-index.js";
 import { ValidationError } from "../shared/errors.js";
+import { config } from "../config.js";
+import { chatUnreadSummary } from "../chat/unread.js";
 
-/** The sections of My Work, in the order an agent reads them. */
-export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications"] as const;
+/** The sections of My Work, in the order an agent reads them. `chat` (the
+ *  team chat unread summary, C2 PO-1197) exists only while TEAM_CHAT_ENABLED
+ *  is on; `myWorkSections()` is the live list. */
+export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications", "chat"] as const;
 export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
+export function myWorkSections(): readonly MyWorkSection[] {
+  return config.TEAM_CHAT_ENABLED ? MY_WORK_SECTIONS : MY_WORK_SECTIONS.filter((s) => s !== "chat");
+}
 
 /** `sections` from a query string ("mentions,items") or an MCP argument
  *  (["mentions", "items"]); null when none was given. */
@@ -41,8 +48,8 @@ export function parseMyWorkSections(raw: unknown): MyWorkSection[] | null {
   for (const item of list) {
     const s = String(item ?? "").trim().toLowerCase();
     if (!s) continue;
-    if (!(MY_WORK_SECTIONS as readonly string[]).includes(s)) {
-      throw new ValidationError(`sections takes any of: ${MY_WORK_SECTIONS.join(", ")}.`);
+    if (!(myWorkSections() as readonly string[]).includes(s)) {
+      throw new ValidationError(`sections takes any of: ${myWorkSections().join(", ")}.`);
     }
     if (!out.includes(s as MyWorkSection)) out.push(s as MyWorkSection);
   }
@@ -385,7 +392,16 @@ export async function buildMyWork(params: {
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
     allMentions.length;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
+  // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
+  const chat =
+    config.TEAM_CHAT_ENABLED && want("chat")
+      ? await chatUnreadSummary({ userId, email: me, onlyNestId, actingAs: params.actingAs ?? null }).catch((err) => {
+          console.error("[my-work] chat unread failed", err);
+          return undefined;
+        })
+      : undefined;
   const full = {
+    ...(chat ? { chat } : {}),
     items: cap(items),
     waiting: cap(waiting),
     notifications: cap(notifications),

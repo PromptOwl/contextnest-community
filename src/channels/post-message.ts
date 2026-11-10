@@ -33,6 +33,9 @@ import { wakeForPostedMessage, type WakeOutcome } from "../stream/agent-wake.js"
 import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { isChannelNode } from "./channel-node.js";
 import { normHandle, resolveBodyMentions } from "./message-meta.js";
+// Team chat harness C2 (PO-1197): conversations, the live event, 'all' subscribers.
+import { isConversationId } from "../chat/containers.js";
+import { afterPostedMessage, indexConversationAgents } from "../chat/hooks.js";
 
 export type MentionOutcome =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
@@ -61,14 +64,21 @@ export async function fanOutPostedMessage(params: {
   baseUrl?: string;
 }): Promise<PostedMessage> {
   const { nestId, nodeId, thread, isReply, body, authorEmail, baseUrl } = params;
-  const channel = await isChannelNode(nestId, nodeId);
+  // A conversation (C2) is a channel-like container: only mentions notify.
+  const conversation = isConversationId(nodeId);
+  const channel = conversation || (await isChannelNode(nestId, nodeId));
   await notifyComment({ nestId, nodeId, body, actorEmail: authorEmail, baseUrl, channel, ...(isReply ? { thread } : {}) });
   await indexPostedMessage({ nestId, nodeId, thread, body, authorEmail });
+  // An agent member of a conversation is addressed by every message in it (C2).
+  if (conversation) await indexConversationAgents({ nestId, nodeId, thread, authorEmail });
   // Reads the index rows just written, so it runs after them.
   const wakes = await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail });
-  await syncAnnotationsNode(nestId, nodeId, authorEmail);
+  // A conversation has no node to project into.
+  if (!conversation) await syncAnnotationsNode(nestId, nodeId, authorEmail);
 
   const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions: [] };
+  // The live event and the 'all' subscribers (C2); never for a document thread.
+  if (channel) await afterPostedMessage({ nestId, nodeId, thread, isReply, authorEmail, commentId: posted.comment_id });
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 
