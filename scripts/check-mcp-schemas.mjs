@@ -78,7 +78,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 103;
+//   103->107 context_hire_catalog, context_hire_agent, context_hired_agents, context_agent_recommendations
+//   (PO-1201, src/mcp/hire-tools.ts) — twins of /nests/:id/hire and /nests/:id/agents/recommendations.
+//   Hiring composes this edition's Hootie switch, metacognition agents, agent webhooks and nest-scoped
+//   keys, and the recommendations read this edition's comment, mention and delivery tables, so the
+//   engine has no operation to import a descriptor from.
+const BASELINE = 107;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

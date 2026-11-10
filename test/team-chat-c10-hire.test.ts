@@ -189,10 +189,10 @@ describe("AC-C10-01: GET /hire/catalog lists the kinds this server can offer, wi
     expect(r.status).toBe(200);
     const by = Object.fromEntries(r.data.catalog.map((e: any) => [e.kind, e]));
     expect(by.hootie.available).toBe(false);
-    expect(by.hootie.reason).toMatch(/owner or admin/i);
+    expect(by.hootie.reason).toMatch(/owner or an admin/i);
     expect(by.watcher.available).toBe(false);
     expect(by.webhook.available).toBe(false);
-    expect(by.webhook.reason).toMatch(/owner or admin/i);
+    expect(by.webhook.reason).toMatch(/owner or an admin/i);
     expect(by.key.available).toBe(false);
     expect(by.key.reason).toMatch(/write/i);
   });
@@ -250,8 +250,9 @@ describe("AC-C10-02: hiring Hootie records it for the nest through the existing 
 
   it("AC-C10-02 a writer may not hire Hootie (403); an admin collaborator may", async () => {
     expect((await hire(writer, { kind: "hootie" })).status).toBe(403);
-    const r = await hire(admin, { kind: "hootie" }, sideNestId);
-    expect(r.status).toBe(403); // admin is not on Side
+    // Admin is not on Side: the same 404 as a nest that doesn't exist.
+    expect((await hire(admin, { kind: "hootie" }, sideNestId)).status).toBe(404);
+    expect((await hire(admin, { kind: "webhook", handle: "adm", config: { url: RUNNER } })).status).toBe(201);
   });
 
   it("AC-C10-02 with Hootie off the hire is refused and a hired Hootie reads as off", async () => {
@@ -278,7 +279,9 @@ describe("AC-C10-03: a watcher is a metacognition agent created and configured t
     const a = agents.data.agents.find((x: any) => x.node_id === "nodes/agents/ops-watcher");
     expect(a).toBeTruthy();
     expect(a.enabled).toBe(true);
-    expect(a.scope.read).toEqual(["channels/ops"]);
+    // inFolders matches by FOLDER (never a single node), so a channel watcher
+    // reads the channels folder; which channels it watches is on the hire.
+    expect(a.scope.read).toEqual(["channels"]);
     expect(a.scope.propose).toEqual([]);
     const doc = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/agents/ops-watcher`, undefined, owner.apiKey);
     expect(doc.status).toBe(200);

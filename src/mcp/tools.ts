@@ -140,6 +140,7 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isHireTool, runHireTool } from "./hire-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -493,6 +494,11 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_my_drafts",
   // My Work (PO-1180): the caller's own queue, read-only.
   "context_my_work",
+  // Hire (PO-1201): the catalog, the hired list, and the recommendations
+  // list (a read-only key is offered a list-only view; dismiss is refused).
+  "context_hire_catalog",
+  "context_hired_agents",
+  "context_agent_recommendations",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -5030,6 +5036,11 @@ async function runTool(
       // Promote a thread (PO-1181): always registered (mcp/routes.ts).
       if (isStreamTool(toolName)) {
         return runStreamTool(toolName, args, ctx);
+      }
+      // Hire agents and recommendations (PO-1201): registered while
+      // EXPERIMENTAL_AGENT_STREAM is on; runHireTool re-checks the switch.
+      if (isHireTool(toolName)) {
+        return runHireTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

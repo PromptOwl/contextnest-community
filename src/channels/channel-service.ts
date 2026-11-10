@@ -55,6 +55,7 @@ import { isMetaFile } from "../nodes/meta-files.js";
 import type { ActorLabel } from "./actor-label.js";
 import { cardsText, resolveMessageCards, type ArtifactCard } from "../stream/artifact-cards.js";
 import { promotedFromThreads, type PromotedRef } from "../stream/promote.js";
+import { recommendationCountsForChannels } from "../hire/recommend.js";
 import {
   ARCHIVED_TAG,
   CHANNEL_FOLDER,
@@ -212,6 +213,9 @@ export interface ChannelView {
    *  a composer. */
   can_post: boolean;
   post_refusal: string | null;
+  /** Open agent recommendations that point at this channel (PO-1201), for a
+   *  quiet badge. Only the list carries a count; a single read says 0. */
+  recommendations_count: number;
 }
 
 interface Stats {
@@ -266,6 +270,7 @@ function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal |
     unread: stats?.unread ?? 0,
     can_post: !post,
     post_refusal: post?.error ?? null,
+    recommendations_count: 0,
   };
 }
 
@@ -315,6 +320,14 @@ export async function listChannels(
   const refusal = await nestPostRefusal(caller.nestId, caller.userId);
   const all = readable.map((d) => toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal));
   const live = all.filter((c) => !c.archived);
+  // The recommendations badge (PO-1201): rule-based, over the channels this
+  // caller can read; never fails the list.
+  try {
+    const counts = await recommendationCountsForChannels(caller, live.map((c) => ({ id: c.id, name: c.name })));
+    for (const c of live) c.recommendations_count = counts.get(c.name) ?? 0;
+  } catch (err) {
+    console.error("[channels] recommendations badge", caller.nestId, err);
+  }
   const most = live
     .filter((c) => c.last_activity_at)
     .sort((a, b) => (a.last_activity_at! < b.last_activity_at! ? 1 : -1))[0];

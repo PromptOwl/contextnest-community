@@ -116,6 +116,7 @@ export const HISTORICAL_MIGRATIONS = [
   "085_comment_mentions",
   "086_agent_webhooks",
   "087_stream_marks",
+  "092_hired_agents",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1415,6 +1416,19 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
+  `);
+
+  // Migration 092 parity: hired agents (PO-1201) — the one row a hired Hootie
+  // has; every other hire is derived from the existing tables.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hired_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      handle TEXT NOT NULL,
+      hired_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, kind, handle)
+    );
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

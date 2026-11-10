@@ -31,6 +31,7 @@ import { config } from "../config.js";
 import { CHANNEL_TOOL_DEFINITIONS, READ_KEY_TOOL_VIEWS, READ_ONLY_KEY_REFUSAL } from "./channel-tools.js";
 import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
+import { HIRE_TOOL_DEFINITIONS, HIRE_READ_KEY_TOOL_VIEWS } from "./hire-tools.js";
 import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -77,6 +78,8 @@ function nestToolDefinitions() {
     // Channels (PO-1179): their own experimental switch, independent of the
     // workflow plane.
     ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+    // Hire agents and recommend them (PO-1201): the same switch as channels.
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? HIRE_TOOL_DEFINITIONS : []),
     // My Work (PO-1180): the caller's queue, mentions included. Not behind the
     // channels switch — document-comment mentions work without channels.
     ...MY_WORK_TOOL_DEFINITIONS,
@@ -144,7 +147,7 @@ function createMcpServerForNest(
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // A tool that also writes is offered to a read-only key as what that key
     // can do with it: a narrower schema and read-only hints (AC-AX-06).
-    const view = capability === "read" ? READ_KEY_TOOL_VIEWS[tool.name] : undefined;
+    const view = capability === "read" ? (READ_KEY_TOOL_VIEWS[tool.name] ?? HIRE_READ_KEY_TOOL_VIEWS[tool.name]) : undefined;
     // `client` is validated against the engine's own schema in handleToolCall.
     const shape = toolShape(tool.name, view?.schema ?? tool.inputSchema);
 
