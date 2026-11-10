@@ -9,7 +9,6 @@
  * total. One aggregate query per nest over the message index; the channel
  * set comes from the cached document listing, as the channel list's does.
  */
-import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { engineCache } from "../nodes/engine.js";
 import { filterAccessible } from "../governance/access-guard.js";
@@ -17,7 +16,7 @@ import { listVisibleNests } from "../nests/service.js";
 import { listOpenMentions } from "../mentions/mention-index.js";
 import { ARCHIVED_TAG, channelNameOf, hasTag, isChannelDoc, isChannelId } from "../channels/channel-node.js";
 import { channelStats, isNestMember } from "../channels/channel-service.js";
-import { isConversationId } from "./containers.js";
+import { isConversationId, memberContainers } from "./containers.js";
 import { nestChatEnabled } from "./settings.js";
 
 export interface ChatUnread {
@@ -53,7 +52,6 @@ export async function chatUnreadSummary(params: { userId: string; email: string;
     mentionsByNest.set(m.nest_id, (mentionsByNest.get(m.nest_id) ?? 0) + 1);
   }
 
-  const db = getDb();
   for (const [nestId, nestName] of nestNames) {
     const caller = { nestId, userId, userEmail: email };
     let channelIds: string[] = [];
@@ -64,10 +62,7 @@ export async function chatUnreadSummary(params: { userId: string; email: string;
     } catch {
       channelIds = [];
     }
-    const convRows = (await db.all("SELECT container FROM chat_members WHERE nest_id = ? AND user_id = ? AND container LIKE 'chat/conversations/%'", [nestId, userId])) as Array<{
-      container: string;
-    }>;
-    const convIds = convRows.map((r) => r.container);
+    const convIds = [...(await memberContainers(nestId, userId))].filter(isConversationId);
     const stats = await channelStats(caller, [...channelIds, ...convIds]);
     const channels = channelIds.map((id) => ({ id, name: channelNameOf(id) ?? id, unread: stats.get(id)?.unread ?? 0 }));
     const conversations = convIds.map((id) => ({ id, unread: stats.get(id)?.unread ?? 0 }));

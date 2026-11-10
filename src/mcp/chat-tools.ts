@@ -58,7 +58,7 @@ export const CHAT_TOOL_DEFINITIONS = [
       properties: {
         action: { type: "string", description: 'One of "list" (default), "create", "find", "leave", "add".' },
         members: { type: "array", items: { type: "string" }, description: "create/find: the other members (you are always one). Names, emails or @handles." },
-        conversation: { type: "string", description: "leave/add: the conversation id (chat/conversations/<uuid>)." },
+        conversation: { type: "string", description: "leave/add: the conversation id (nodes/conversations/<uuid>)." },
         member: { type: "string", description: "add: who to add — a name, an email or an @handle." },
       },
     },
@@ -73,7 +73,7 @@ export const CHAT_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        conversation: { type: "string", description: "The conversation id (chat/conversations/<uuid>, or the uuid)." },
+        conversation: { type: "string", description: "The conversation id (nodes/conversations/<uuid>, or the uuid)." },
         thread: { type: "string", description: "A post's id, to read that thread instead of the timeline." },
         since: { type: "string", description: "Return only messages after this: a message id (next_since) or a timestamp." },
         limit: { type: "number", description: "Posts (or new messages) per page (default 50, max 200)." },
@@ -115,7 +115,7 @@ export const CHAT_TOOL_DEFINITIONS = [
       properties: {
         action: { type: "string", description: 'One of "get" (default), "set".' },
         nest_id: { type: "string", description: "set: the nest (default: this one)." },
-        conversation: { type: "string", description: "set: a channel node id or a conversation id; leave out for the nest default." },
+        conversation: { type: "string", description: "set: a channel node id (nodes/channels/<name>) or a conversation id; leave out for the nest default." },
         level: { type: "string", description: 'set: "all", "mentions" or "none".' },
       },
     },

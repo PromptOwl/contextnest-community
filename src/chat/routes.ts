@@ -145,7 +145,7 @@ chatRoutes.get("/settings", async (c) => {
 chatRoutes.patch("/settings", async (c) => {
   const body = await jsonObject(c);
   const who = await caller(c);
-  return c.json(await setNestChat(who.nestId, who.userId, who.userEmail, { chat: body.chat }));
+  return c.json(await setNestChat(who.nestId, who.userId, { chat: body.chat }));
 });
 
 /** Members only; the same 404 as for a nest the caller can't see. */

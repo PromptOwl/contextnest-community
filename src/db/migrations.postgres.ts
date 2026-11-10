@@ -1418,44 +1418,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
   `);
 
-  // Migration 089 parity: the team chat harness, slice C2 (PO-1197) — per-nest
-  // chat setting, conversations and private channels, their members, and
-  // per-person notification preferences. Independent of 088 (C1).
+  // Migration 089 parity: the team chat harness, slice C2 (PO-1197) — the
+  // nest's own chat switch. Conversations, members, the private marker and
+  // notification levels live in existing tables (see migrations.ts).
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS chat_nest_settings (
-      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
-      chat_enabled INTEGER NOT NULL DEFAULT 1,
-      updated_by TEXT,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS chat_containers (
-      id TEXT NOT NULL,
-      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-      kind TEXT NOT NULL,
-      member_key TEXT NOT NULL DEFAULT '',
-      created_by TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      PRIMARY KEY (nest_id, id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_chat_containers_key ON chat_containers(nest_id, kind, member_key);
-    CREATE TABLE IF NOT EXISTS chat_members (
-      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-      container TEXT NOT NULL,
-      member TEXT NOT NULL,
-      user_id TEXT,
-      added_by TEXT NOT NULL,
-      added_at TEXT NOT NULL,
-      PRIMARY KEY (nest_id, container, member)
-    );
-    CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_members(user_id, nest_id);
-    CREATE TABLE IF NOT EXISTS chat_preferences (
-      user_id TEXT NOT NULL,
-      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-      ref TEXT NOT NULL DEFAULT '',
-      level TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (user_id, nest_id, ref)
-    );
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS chat_enabled INTEGER NOT NULL DEFAULT 1;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

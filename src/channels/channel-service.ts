@@ -71,7 +71,7 @@ import {
 import { bodyMentions, displayNames, knownAgents, namedActor, type KnownAgent, type MentionRef } from "./message-meta.js";
 // Team chat harness C2 (PO-1197): private channels, conversations, live events.
 import { emitChatEvent } from "../chat/events.js";
-import { isConversationId, isPrivateChannel, isContainerMember, memberContainers, privateChannelIds } from "../chat/containers.js";
+import { isConversationId, isPrivateChannel, isContainerMember, memberContainers, privateContainerIds, PRIVATE_TAG } from "../chat/containers.js";
 import { conversationPostRefusal } from "../chat/conversations.js";
 import { recordChannelCreator } from "../chat/members.js";
 
@@ -339,7 +339,7 @@ export async function listChannels(
   // the nest-level half is resolved once.
   const refusal = await nestPostRefusal(caller.nestId, caller.userId);
   // Private channels and the caller's memberships, two queries for the list (C2).
-  const [priv, mine] = await Promise.all([privateChannelIds(caller.nestId), memberContainers(caller.nestId, caller.userId)]);
+  const [priv, mine] = await Promise.all([privateContainerIds(caller.nestId), memberContainers(caller.nestId, caller.userId)]);
   const all = readable.map((d) =>
     toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal, { private: priv.has(d.id), member: mine.has(d.id) }),
   );
@@ -386,14 +386,15 @@ export async function createChannel(
       // is, so it reads sensibly in ctx / context_get.
       content: purpose || `Channel #${name}.`,
       type: "document",
-      tags: [`#${CHANNEL_TAG}`],
+      // A private channel (C2) carries #private: its shares are its members.
+      tags: [`#${CHANNEL_TAG}`, ...(input.private === true ? [`#${PRIVATE_TAG}`] : [])],
       ...(caller.client ? { client: caller.client } : {}),
     },
     caller.userEmail,
   );
-  // The creator joins their channel (C2); a private one is theirs alone
-  // until they invite someone.
-  await recordChannelCreator(caller.nestId, id, caller, input.private === true);
+  // The creator joins their channel (C2): a read share on the node. A private
+  // one is theirs alone until they invite someone.
+  await recordChannelCreator(caller.nestId, id, caller);
   emitChatEvent(caller.nestId, { type: "channel.created", conversation: id, name, private: input.private === true });
   return { channel: (await getReadableChannel(caller, name)).view };
 }

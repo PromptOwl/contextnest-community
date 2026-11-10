@@ -2600,54 +2600,16 @@ export function runMigrations(db: Database.Database): void {
   }
 
   // 089: the team chat harness, slice C2 (PO-1197). Independent of 088 (C1).
-  //   chat_nest_settings  one row per nest that turned chat OFF (no row = on).
-  //   chat_containers     a conversation (kind 'dm' | 'group'; id is
-  //     'chat/conversations/<uuid>', a container the comment-thread store
-  //     addresses like a channel node) or a PRIVATE channel (kind 'channel',
-  //     id = the channel's node id; a row exists only while it is private).
-  //     `member_key` is the sorted member set, so a dm is found by its pair.
-  //   chat_members        who is in a container: a person (member = their
-  //     lowercased email, user_id set) or an agent (member = 'agent:<handle>').
-  //   chat_preferences    per person: notification level for a nest
-  //     (ref = '') or one container (ref = its id): 'all' | 'mentions' | 'none'.
-  //   Presence and typing are in memory only, never here.
+  //   One column: `nests.chat_enabled` — the nest's own chat switch (owner/
+  //   admin; PATCH /nests/:id/chat/settings), kept like allow_self_approve.
+  //   Everything else C2 adds lives in existing stores: conversations are
+  //   nodes (nodes/conversations/<uuid>), their messages comment threads,
+  //   their members the node's `grants` rows, the private marker a tag in
+  //   `node_tag_index`, notification levels rows in `stream_marks`
+  //   (kind 'notify'); presence and typing are in memory.
   if (!hasMigration("089_team_chat_c2")) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS chat_nest_settings (
-        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
-        chat_enabled INTEGER NOT NULL DEFAULT 1,
-        updated_by TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS chat_containers (
-        id TEXT NOT NULL,
-        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-        kind TEXT NOT NULL,
-        member_key TEXT NOT NULL DEFAULT '',
-        created_by TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (nest_id, id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_chat_containers_key ON chat_containers(nest_id, kind, member_key);
-      CREATE TABLE IF NOT EXISTS chat_members (
-        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-        container TEXT NOT NULL,
-        member TEXT NOT NULL,
-        user_id TEXT,
-        added_by TEXT NOT NULL,
-        added_at TEXT NOT NULL,
-        PRIMARY KEY (nest_id, container, member)
-      );
-      CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_members(user_id, nest_id);
-      CREATE TABLE IF NOT EXISTS chat_preferences (
-        user_id TEXT NOT NULL,
-        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-        ref TEXT NOT NULL DEFAULT '',
-        level TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (user_id, nest_id, ref)
-      );
-    `);
+    const nestCols089 = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestCols089.includes("chat_enabled")) db.exec("ALTER TABLE nests ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 1");
     recordMigration("089_team_chat_c2");
   }
 }

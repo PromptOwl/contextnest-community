@@ -17,7 +17,7 @@ import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 // settings/presence/typing/events, /me/chat.
 import { channelMembershipRoutes, chatRoutes, conversationRoutes, meChatRoutes } from "./chat/routes.js";
 import { nestChatEnabled } from "./chat/settings.js";
-import { conversationIdOf, isContainerMember } from "./chat/containers.js";
+import { conversationIdOf, isContainerMember, isPrivateContainer } from "./chat/containers.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
@@ -2845,7 +2845,7 @@ export function createApp(): Hono<AuthEnv> {
     // either (except its own settings route, so chat can be turned back on).
     // Exact resource segments; channel NODES live under /nodes and stay
     // ordinary — but a CONVERSATION under /nodes exists for its members
-    // only: the thread routes on `nodes/chat/conversations/<id>` answer the
+    // only: the thread routes on `nodes/nodes/conversations/<id>` answer the
     // same 404 to everyone else (and while chat is off), so "no such
     // conversation" and "not yours" are one answer.
     {
@@ -2854,26 +2854,36 @@ export function createApp(): Hono<AuthEnv> {
         parts[1] === "agent-handles" ||
         parts[1] === "conversations" ||
         (parts[1] === "chat" && parts.length >= 3);
-      let conversationInPath: string | null = null;
+      // A node path naming a conversation (nodes/conversations/<uuid>) or a
+      // channel (nodes/channels/<name>), encoded or not.
+      let containerInPath: string | null = null;
       if (parts[1] === "nodes" && parts.length >= 3) {
-        let decoded = parts[2];
+        let decoded = parts.slice(2).join("/");
         try {
-          decoded = decodeURIComponent(parts[2]);
+          decoded = decodeURIComponent(decoded);
         } catch {
           /* keep raw */
         }
-        if (decoded === "chat" && parts.length >= 5 && parts[3] === "conversations") conversationInPath = conversationIdOf(parts[4]);
-        else if (decoded.startsWith("chat/conversations/")) conversationInPath = conversationIdOf(decoded.split("/").slice(0, 3).join("/"));
+        const m = /^nodes\/(conversations\/[^/]+|channels\/[^/]+)/.exec(decoded);
+        if (m) containerInPath = m[1].startsWith("conversations/") ? conversationIdOf(`nodes/${m[1]}`) ?? `nodes/${m[1]}` : `nodes/${m[1]}`;
       }
-      if (chatSegment || conversationInPath) {
+      if (chatSegment || (containerInPath && containerInPath.startsWith("nodes/conversations/"))) {
         if (!config.TEAM_CHAT_ENABLED) return c.json({ error: "Not found" }, 404);
         const isChatSettings = parts[1] === "chat" && parts[2] === "settings" && parts.length === 3;
         if (!isChatSettings && parts[0] !== "unsynced" && !(await nestChatEnabled(parts[0]))) {
           return c.json({ error: "Not found" }, 404);
         }
-        if (conversationInPath && !(await isContainerMember(parts[0], conversationInPath, c.get("userId")))) {
-          return c.json({ error: "Not found" }, 404);
-        }
+      }
+      // A conversation node, or a private channel node, exists for its
+      // members only — whatever the switch says for a private channel (its
+      // shares are a property of the node, not of the harness).
+      if (
+        containerInPath &&
+        parts[0] !== "unsynced" &&
+        (await isPrivateContainer(parts[0], containerInPath)) &&
+        !(await isContainerMember(parts[0], containerInPath, c.get("userId")))
+      ) {
+        return c.json({ error: "Not found" }, 404);
       }
     }
 

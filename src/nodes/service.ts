@@ -78,6 +78,7 @@ import {
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
+import { isConversationDoc } from "../chat/containers.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -2869,6 +2870,11 @@ function normalizeDescription(value: unknown): string {
  * here — the one choke point REST and MCP share — with the way that works.
  */
 function channelRetireRefusal(node: { id: string; frontmatter?: { tags?: unknown } | null }, doing: string): ConflictError | null {
+  // A conversation (team chat C2) is a node whose threads are its messages
+  // and whose shares are its members: the same rule, no archive to offer.
+  if (isConversationDoc(node)) {
+    return new ConflictError(`${node.id} is a conversation, so ${doing} would lose its messages. Leave it instead (POST /nests/:id/conversations/<id>/leave).`);
+  }
   if (!isChannelDoc(node)) return null;
   const name = node.id.split("/").pop();
   return new ConflictError(

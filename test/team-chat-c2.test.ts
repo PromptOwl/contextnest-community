@@ -351,7 +351,7 @@ describe("AC-C2-04: create or find a conversation by member set", () => {
     expect(r.status, JSON.stringify(r.data)).toBe(201);
     expect(r.data.created).toBe(true);
     const c = r.data.conversation;
-    expect(c.id).toMatch(/^chat\/conversations\/[0-9a-f-]{36}$/);
+    expect(c.id).toMatch(/^nodes\/conversations\/[0-9a-f-]{36}$/);
     expect(c.kind).toBe("dm");
     expect(c.members.map((m: any) => m.email).sort()).toEqual([alice.email, rita.email].sort());
     expect(c.title).toContain("Rita Reader");
@@ -455,7 +455,7 @@ describe("AC-C2-05: list, read, post, mark read — members of the conversation 
   });
 
   it("AC-C2-05 a nest member outside the conversation gets the same 404 everywhere as for an unknown id", async () => {
-    const unknown = "chat/conversations/00000000-0000-4000-8000-000000000000";
+    const unknown = "nodes/conversations/00000000-0000-4000-8000-000000000000";
     for (const id of [dmId, unknown]) {
       expect((await conversation(sam, id)).status, id).toBe(404);
       expect((await conversation(sam, id, `?thread=${threadId}`)).status, id).toBe(404);
@@ -907,7 +907,7 @@ describe("AC-C2-13: typing", () => {
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/chat/typing`, {}, rita.apiKey)).status).toBe(400);
     await rs.close();
     const { getDb } = await import("../src/db/client.js");
-    const tables = (await getDb().all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%typing%'")) as any[];
+    const tables = (await getDb().all("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%typing%' OR name LIKE '%presence%' OR name LIKE 'chat_%')")) as any[];
     expect(tables).toEqual([]);
   });
 });

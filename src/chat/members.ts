@@ -1,13 +1,14 @@
 /**
  * Channel membership (team chat harness C2, PO-1197): private channels, and
- * the member list of a public one.
+ * the member list of a public one — on the node's existing shares.
  *
- * A PRIVATE channel is an ordinary channel node plus a `chat_containers` row
- * (kind 'channel') and a member list. While the row exists the access guard
+ * A PRIVATE channel is an ordinary channel node carrying the `#private` tag;
+ * its member list is the node's `grants` rows (document shares, role read),
+ * so nothing is stored anywhere new. While the tag is on, the access guard
  * admits members only: non-members get the same 404 as for a channel that
- * doesn't exist, and no listing, search, feed, mention, card or promote names
- * it (containers.ts, access-guard.ts). A PUBLIC channel's member list is
- * informational — who joined — and restricts nothing.
+ * doesn't exist, and no listing, search, feed, mention, card or promote
+ * names it (containers.ts, access-guard.ts). A PUBLIC channel's member list
+ * is informational — who joined — and restricts nothing.
  *
  * WHO:
  *   create private   a nest writer (as any channel), who becomes its first member;
@@ -22,21 +23,24 @@
  *                    channel private puts the caller on its list, next to
  *                    whoever had joined.
  */
-import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { canCreateInNest } from "../governance/stewardship-service.js";
+import { normalizeTag } from "../governance/tag-index-service.js";
+import { updateNode } from "../nodes/service.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { getReadableChannel, isNestMember, type ChannelView } from "../channels/channel-service.js";
+import { tagsOf } from "../channels/channel-node.js";
 import { emitChatEvent } from "./events.js";
 import {
   addAgentMember,
   addPersonMember,
   isContainerMember,
-  isPrivateChannel,
+  isPrivateContainer,
+  listPeople,
   memberViews,
-  listMembers,
-  removeMember,
+  PRIVATE_TAG,
+  removePersonMember,
   resolveMemberSpecs,
   type MemberView,
 } from "./containers.js";
@@ -54,20 +58,9 @@ export interface ChannelMembers {
   members: MemberView[];
 }
 
-/** On create: the creator joins their channel; a private one gets its gate row too. */
-export async function recordChannelCreator(nestId: string, nodeId: string, creator: { userId: string; userEmail: string }, priv: boolean): Promise<void> {
-  if (priv) await makeChannelPrivate(nestId, nodeId, creator);
-  else await addPersonMember(nestId, nodeId, { email: creator.userEmail, userId: creator.userId }, creator.userEmail);
-}
-
-/** Turn a channel node into a private one with `creator` as its first member. */
-export async function makeChannelPrivate(nestId: string, nodeId: string, creator: { userId: string; userEmail: string }): Promise<void> {
-  const db = getDb();
-  await db.run(
-    `INSERT INTO chat_containers (id, nest_id, kind, member_key, created_by, created_at) VALUES (?, ?, 'channel', '', ?, ?)
-     ON CONFLICT (nest_id, id) DO NOTHING`,
-    [nodeId, nestId, creator.userEmail.toLowerCase(), new Date().toISOString()],
-  );
+/** On create: the creator joins their channel (a read share on the node). The
+ *  #private tag itself is written with the node (channel-service). */
+export async function recordChannelCreator(nestId: string, nodeId: string, creator: { userId: string; userEmail: string }): Promise<void> {
   await addPersonMember(nestId, nodeId, { email: creator.userEmail, userId: creator.userId }, creator.userEmail);
 }
 
@@ -86,7 +79,7 @@ async function nestMember(caller: Caller): Promise<void> {
 export async function listChannelMembers(caller: Caller, rawName: unknown): Promise<ChannelMembers> {
   await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
-  return { channel: node.id, private: await isPrivateChannel(caller.nestId, node.id), members: await memberViews(caller.nestId, node.id) };
+  return { channel: node.id, private: await isPrivateContainer(caller.nestId, node.id), members: await memberViews(caller.nestId, node.id, node) };
 }
 
 /** Invite a person added to the nest (or a known agent): a writer, or a member of the channel. */
@@ -107,7 +100,7 @@ export async function inviteChannelMember(caller: Caller, rawName: unknown, memb
 
 /** Join a public channel (a private one is not found to a non-member). */
 export async function joinChannel(caller: Caller, rawName: unknown): Promise<{ channel: ChannelView }> {
-  if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Channel not found");
+  await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   const me = caller.userEmail.toLowerCase();
   if (await addPersonMember(caller.nestId, node.id, { email: me, userId: caller.userId }, me)) {
@@ -120,13 +113,13 @@ export async function leaveChannel(caller: Caller, rawName: unknown): Promise<{ 
   await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
   const me = caller.userEmail.toLowerCase();
-  if (await isPrivateChannel(caller.nestId, node.id)) {
-    const people = (await listMembers(caller.nestId, node.id)).filter((m) => !m.member.startsWith("agent:"));
-    if (people.length <= 1 && people.some((m) => m.member === me)) {
+  if (await isPrivateContainer(caller.nestId, node.id)) {
+    const people = await listPeople(caller.nestId, node.id);
+    if (people.length <= 1 && people.some((m) => m.user_id === caller.userId)) {
       throw new ConflictError("You are the last member of this private channel. Invite someone first, or archive it.");
     }
   }
-  await removeMember(caller.nestId, node.id, me);
+  await removePersonMember(caller.nestId, node.id, caller.userId);
   emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "left", member: me, by: me });
   return { left: true, channel: node.id };
 }
@@ -138,14 +131,15 @@ export async function setChannelPrivate(caller: Caller, rawName: unknown, priv: 
   const { node } = await getReadableChannel(caller, rawName);
   if (!(await isNestAdmin(caller.nestId, caller.userId))) throw new ForbiddenError("Only the nest's owner or an admin can make a channel private or public.");
   const me = caller.userEmail.toLowerCase();
-  const db = getDb();
-  const was = await isPrivateChannel(caller.nestId, node.id);
+  const was = await isPrivateContainer(caller.nestId, node.id);
   if (priv && !was) {
-    await makeChannelPrivate(caller.nestId, node.id, caller);
+    // The caller joins first, so the channel is never nobody's; then the tag.
+    await addPersonMember(caller.nestId, node.id, { email: me, userId: caller.userId }, me);
+    await updateNode(caller.nestId, node.id, { tags: [...tagsOf(node), `#${PRIVATE_TAG}`], changeNote: "Made the channel private" }, me);
     emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "private", member: null, by: me });
   } else if (!priv && was) {
-    // Members stay listed (as on a public channel); the row that gated reads goes.
-    await db.run("DELETE FROM chat_containers WHERE nest_id = ? AND id = ? AND kind = 'channel'", [caller.nestId, node.id]);
+    // Members stay listed (as on a public channel); the tag that gated reads goes.
+    await updateNode(caller.nestId, node.id, { tags: tagsOf(node).filter((t) => normalizeTag(t) !== PRIVATE_TAG), changeNote: "Made the channel public" }, me);
     emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "public", member: null, by: me });
   }
   return { channel: (await getReadableChannel(caller, node.id)).view };

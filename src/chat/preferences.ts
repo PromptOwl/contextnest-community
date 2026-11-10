@@ -1,8 +1,13 @@
 /**
  * Mute and notification preferences (team chat harness C2, PO-1197).
  *
- * Per person: a level for a nest (the default there) and, over it, a level
- * for one container (a channel or a conversation):
+ * Kept in `stream_marks`, the existing per-person marks table (migration
+ * 087: "the things a person marks"), as kind 'notify': `ref` is '' for the
+ * nest default or a container id, `subject` is the level. No new table and
+ * no second preference system — the server has no other per-person
+ * notification preference to extend (src/notify is outbound delivery).
+ *
+ * Levels, per nest and over it per container (a channel or a conversation):
  *
  *   all       every message by someone else in the container drops an inbox
  *             row (kind 'comment', "X posted in #ops");
@@ -15,6 +20,7 @@
  * mention fan-out calls; `notifyAllSubscribers` runs after a message lands.
  */
 import { getDb } from "../db/client.js";
+import { nowMsExpr } from "../db/sql.js";
 import { config } from "../config.js";
 import { insertNotification } from "../notify/inbox.js";
 import { canOpenNode } from "../governance/mention-notify.js";
@@ -22,7 +28,6 @@ import { isChannelId, channelNameOf, isChannelNode } from "../channels/channel-n
 import { isNestMember } from "../channels/channel-service.js";
 import { displayNames, namedActor } from "../channels/message-meta.js";
 import { deserializeClient } from "../shared/client-metadata.js";
-import { listVisibleNests } from "../nests/service.js";
 import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { isConversationId, isContainerMember, containerReadVerdict } from "./containers.js";
 import { nestChatEnabled } from "./settings.js";
@@ -30,6 +35,7 @@ import { nestChatEnabled } from "./settings.js";
 export const LEVELS = ["all", "mentions", "none"] as const;
 export type NotifyLevel = (typeof LEVELS)[number];
 export const DEFAULT_LEVEL: NotifyLevel = "mentions";
+const KIND = "notify";
 
 export interface PreferenceView {
   nest_id: string;
@@ -50,7 +56,7 @@ function parseLevel(raw: unknown): NotifyLevel {
 }
 
 export async function getPreferences(userId: string, opts: { onlyNestId?: string | null } = {}): Promise<Preferences> {
-  const rows = (await getDb().all("SELECT nest_id, ref, level FROM chat_preferences WHERE user_id = ? ORDER BY nest_id, ref", [userId])) as Array<{
+  const rows = (await getDb().all("SELECT nest_id, ref, subject AS level FROM stream_marks WHERE user_id = ? AND kind = ? ORDER BY nest_id, ref", [userId, KIND])) as Array<{
     nest_id: string;
     ref: string;
     level: NotifyLevel;
@@ -83,18 +89,18 @@ export async function setPreference(
   if (input.conversation !== undefined && input.conversation !== null && input.conversation !== "") {
     if (typeof input.conversation !== "string") throw new ValidationError("conversation must be a container id");
     ref = input.conversation.trim();
-    const readable = await canReadContainer(nestId, ref, caller.userId, caller.userEmail);
-    if (!readable) throw new NotFoundError("Conversation not found");
+    if (!(await canReadContainer(nestId, ref, caller.userId, caller.userEmail))) throw new NotFoundError("Conversation not found");
   }
   const db = getDb();
-  if (level === DEFAULT_LEVEL) {
-    await db.run("DELETE FROM chat_preferences WHERE user_id = ? AND nest_id = ? AND ref = ?", [caller.userId, nestId, ref]);
-  } else {
-    await db.run(
-      `INSERT INTO chat_preferences (user_id, nest_id, ref, level, updated_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (user_id, nest_id, ref) DO UPDATE SET level = excluded.level, updated_at = excluded.updated_at`,
-      [caller.userId, nestId, ref, level, new Date().toISOString()],
-    );
+  await db.run("DELETE FROM stream_marks WHERE user_id = ? AND nest_id = ? AND kind = ? AND ref = ?", [caller.userId, nestId, KIND, ref]);
+  if (level !== DEFAULT_LEVEL) {
+    await db.run(`INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at) VALUES (?, ?, ?, ?, ?, ${nowMsExpr(db)})`, [
+      caller.userId,
+      nestId,
+      KIND,
+      ref,
+      level,
+    ]);
   }
   return { preference: { nest_id: nestId, conversation: ref || null, level } };
 }
@@ -104,8 +110,7 @@ export async function canReadContainer(nestId: string, container: string, userId
   if (isConversationId(container)) return isContainerMember(nestId, container, userId);
   if (!isChannelId(container)) return false;
   if (!(await isChannelNode(nestId, container))) return false;
-  const verdict = await containerReadVerdict(nestId, container, userId);
-  if (verdict === false) return false;
+  if ((await containerReadVerdict(nestId, container, userId)) === false) return false;
   return canOpenNode(nestId, container, userId, email).catch(() => false);
 }
 
@@ -115,8 +120,8 @@ export async function levelsFor(nestId: string, container: string, userIds: stri
   const ids = [...new Set(userIds.filter(Boolean))];
   if (ids.length === 0) return out;
   const rows = (await getDb().all(
-    `SELECT user_id, ref, level FROM chat_preferences WHERE nest_id = ? AND ref IN ('', ?) AND user_id IN (${ids.map(() => "?").join(", ")})`,
-    [nestId, container, ...ids],
+    `SELECT user_id, ref, subject AS level FROM stream_marks WHERE nest_id = ? AND kind = ? AND ref IN ('', ?) AND user_id IN (${ids.map(() => "?").join(", ")})`,
+    [nestId, KIND, container, ...ids],
   )) as Array<{ user_id: string; ref: string; level: NotifyLevel }>;
   const nest = new Map<string, NotifyLevel>();
   const own = new Map<string, NotifyLevel>();
@@ -148,20 +153,15 @@ export async function filterMentionRecipients<T extends { userId: string }>(nest
  * container), minus the writer and minus anyone who can't read the container.
  * Explicit rows only, so this costs nothing on a nest where nobody opted in.
  */
-export async function notifyAllSubscribers(params: {
-  nestId: string;
-  nodeId: string;
-  authorEmail: string;
-  authorClientJson?: string | null;
-}): Promise<number> {
+export async function notifyAllSubscribers(params: { nestId: string; nodeId: string; authorEmail: string; authorClientJson?: string | null }): Promise<number> {
   const { nestId, nodeId, authorEmail } = params;
   if (!config.TEAM_CHAT_ENABLED) return 0;
   if (!isConversationId(nodeId) && !isChannelId(nodeId)) return 0;
   try {
     const rows = (await getDb().all(
-      `SELECT p.user_id, LOWER(u.email) AS email FROM chat_preferences p JOIN users u ON u.id = p.user_id
-        WHERE p.nest_id = ? AND p.level = 'all' AND p.ref IN ('', ?)`,
-      [nestId, nodeId],
+      `SELECT m.user_id, LOWER(u.email) AS email FROM stream_marks m JOIN users u ON u.id = m.user_id
+        WHERE m.nest_id = ? AND m.kind = ? AND m.subject = 'all' AND m.ref IN ('', ?)`,
+      [nestId, KIND, nodeId],
     )) as Array<{ user_id: string; email: string }>;
     if (rows.length === 0) return 0;
     const candidates = new Map<string, string>();
@@ -169,8 +169,7 @@ export async function notifyAllSubscribers(params: {
     const levels = await levelsFor(nestId, nodeId, [...candidates.keys()]);
     const author = authorEmail.toLowerCase();
     const name = isChannelId(nodeId) ? `#${channelNameOf(nodeId)}` : "a conversation";
-    const names = await displayNames([author]);
-    const { actor } = await namedActor(author, deserializeClient(params.authorClientJson ?? null), names);
+    const { actor } = await namedActor(author, deserializeClient(params.authorClientJson ?? null), await displayNames([author]));
     let created = 0;
     for (const [userId, email] of candidates) {
       if (email === author || levels.get(userId) !== "all") continue;
@@ -186,11 +185,4 @@ export async function notifyAllSubscribers(params: {
     console.error("[chat] all-messages notification failed", nestId, nodeId, err);
     return 0;
   }
-}
-
-/** The nests a preference may be set in: the ones the caller is a person on (for the MCP default). */
-export async function memberNestIds(userId: string): Promise<string[]> {
-  const out: string[] = [];
-  for (const n of await listVisibleNests(userId)) if (await isNestMember(n.id, userId)) out.push(n.id);
-  return out;
 }

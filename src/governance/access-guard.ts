@@ -61,9 +61,10 @@ export async function canReadNode(
   // A pending Surfaces draft (a new document proposed from chat) is unseen
   // until approved, except by the nest's editors and admins (AC-JDG-13).
   if (isHidden(await hiddenSurfaceDrafts(nestId), nodeId) && !(await seesSurfaceDrafts(nestId, userId))) return false;
-  // A conversation or a private channel (C2): its members only — and still a
-  // person added to the nest, so a membership row outliving their access
-  // opens nothing. A conversation has no node, so the base rule never runs.
+  // A conversation or a private channel (C2): the node's own shares decide
+  // (its grants rows are its member list) — and the reader must still be a
+  // person added to the nest, so a share outliving their access opens
+  // nothing. A conversation's node is then readable on the share alone.
   const chat = await containerReadVerdict(nestId, nodeId, userId);
   if (chat === false) return false;
   if (chat === true) {
@@ -181,7 +182,8 @@ export async function filterAccessible<T extends { id: string }>(
     anyHidden(hidden) && nodes.some((n) => isHidden(hidden, n.id)) && !(await seesSurfaceDrafts(nestId, userId))
       ? nodes.filter((n) => !isHidden(hidden, n.id))
       : nodes;
-  // Private channels this caller is not a member of are not listed (C2).
+  // Private channels and conversations this caller is not a member of are
+  // not listed (C2): the node's shares are its member list.
   const hiddenChat = await hiddenContainersFor(nestId, userId, visible.map((n) => n.id));
   const shown = hiddenChat.size ? visible.filter((n) => !hiddenChat.has(n.id)) : visible;
   return filterAccessibleBase(nestId, userId, userEmail, shown, approvedVersions);

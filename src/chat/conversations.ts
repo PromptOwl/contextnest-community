@@ -1,19 +1,23 @@
 /**
  * Direct and group conversations (team chat harness C2, PO-1197).
  *
- * A conversation is a container (`chat/conversations/<uuid>`, containers.ts)
- * with a fixed member list of 2..N members of one nest: people, and agents by
- * handle. It has no node; its messages are comment threads filed under the
- * container id, exactly like a channel's, so the channel read
- * (`readChannel` with a resolved container) and the thread routes serve it
- * unchanged, and what C1 adds to a message applies here too.
+ * A conversation is an ORDINARY NODE, `nodes/conversations/<uuid>` (engine
+ * type document, tags #conversation, #conversation:dm | #conversation:group
+ * and #private; its body names the members), with a fixed member list of
+ * 2..N members of one nest: people as the node's `grants` rows, agents as
+ * `agent:<handle>` tags (containers.ts). Its messages are the node's comment
+ * threads, exactly like a channel's, so the channel read (`readChannel` with
+ * a resolved container) and the thread routes serve it unchanged, and what
+ * C1 adds to a message applies here too. Nothing new in the store: the node
+ * store, the thread store, the grants table.
  *
  * WHO: a person added to the nest starts one (naming other people added to
  * it, or known agents); members read, post, mark read; a member of a GROUP
  * leaves it or adds another nest member; a dm is fixed. Nobody outside the
  * member list learns it exists: every read answers NotFound for "no such
- * conversation" and "not yours" alike (`getReadableConversation`), and the
- * nest middleware answers the same 404 on the thread routes.
+ * conversation" and "not yours" alike (`getReadableConversation`), the
+ * access guard hides the node from listings, and the nest middleware answers
+ * the same 404 on the thread routes.
  *
  * An agent member reads with the key it runs on: the person behind that key
  * must be a member (containers.ts). Every message by someone else in the
@@ -21,29 +25,35 @@
  * (`indexAgentMembers`: a mention row, so My Work and the wake-up see it).
  */
 import { randomUUID } from "node:crypto";
+import type { ContextNode } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { nowMsExpr } from "../db/sql.js";
 import { config } from "../config.js";
+import { createNode } from "../nodes/service.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { channelStats, isNestMember, readChannel, timelineText, type ChannelTimeline, type ChannelView, type PostRefusal } from "../channels/channel-service.js";
+import { readChannelDoc } from "../channels/channel-node.js";
 import { normHandle } from "../channels/message-meta.js";
+import { normalizeTag } from "../governance/tag-index-service.js";
 import { emitChatEvent } from "./events.js";
 import {
   addAgentMember,
   addPersonMember,
-  agentHandlesOf,
+  agentMembers,
+  agentTag,
+  conversationDocs,
   conversationIdOf,
-  getContainer,
+  conversationMemberKeys,
+  CONVERSATION_TAG,
   isContainerMember,
-  listMembers,
+  isConversationDoc,
   memberKeyOf,
   memberViews,
   newConversationId,
-  refreshMemberKey,
-  removeMember,
+  PRIVATE_TAG,
+  removePersonMember,
   resolveMemberSpecs,
-  type ContainerRow,
   type MemberView,
 } from "./containers.js";
 
@@ -74,6 +84,11 @@ interface Caller {
 
 const NOT_FOUND = "Conversation not found";
 
+function kindOf(node: ContextNode): "dm" | "group" {
+  const tags = (Array.isArray(node.frontmatter?.tags) ? node.frontmatter.tags : []).map((t: unknown) => normalizeTag(String(t)));
+  return tags.includes(`${CONVERSATION_TAG}:group`) ? "group" : "dm";
+}
+
 async function nestRefusal(nestId: string, userId: string): Promise<PostRefusal | null> {
   if (config.AUTH_MODE === "open") return null;
   const access = await resolveNestAccess(nestId, userId);
@@ -93,36 +108,38 @@ function titleOf(members: MemberView[], me: string): string {
   return others.join(", ") || "Just you";
 }
 
-async function toView(caller: Caller, row: ContainerRow): Promise<ConversationView> {
-  const [members, stats, refusal] = await Promise.all([memberViews(caller.nestId, row.id), channelStats(caller, [row.id]), nestRefusal(caller.nestId, caller.userId)]);
-  const st = stats.get(row.id);
+async function toView(caller: Caller, node: ContextNode, members?: MemberView[], stats?: Map<string, { count: number; lastAt: string | null; lastActivityAt: string | null; unread: number }>, refusal?: PostRefusal | null): Promise<ConversationView> {
+  const list = members ?? (await memberViews(caller.nestId, node.id, node));
+  const st = (stats ?? (await channelStats(caller, [node.id]))).get(node.id);
+  const post = refusal === undefined ? await nestRefusal(caller.nestId, caller.userId) : refusal;
+  const fm = (node.frontmatter ?? {}) as { author?: unknown; created_at?: unknown };
   return {
-    id: row.id,
+    id: node.id,
     type: "conversation",
-    kind: row.kind === "group" ? "group" : "dm",
-    title: titleOf(members, caller.userEmail.toLowerCase()),
-    members,
-    created_by: row.created_by,
-    created_at: row.created_at,
+    kind: kindOf(node),
+    title: titleOf(list, caller.userEmail.toLowerCase()),
+    members: list,
+    created_by: typeof fm.author === "string" ? fm.author : "",
+    created_at: typeof fm.created_at === "string" ? fm.created_at : "",
     post_count: st?.count ?? 0,
     last_post_at: st?.lastAt ?? null,
     last_activity_at: st?.lastActivityAt ?? null,
     unread: st?.unread ?? 0,
-    can_post: !refusal,
-    post_refusal: refusal?.error ?? null,
+    can_post: !post,
+    post_refusal: post?.error ?? null,
   };
 }
 
 /** The conversation, if it exists in this nest and the caller is a member of
  *  it; NotFound otherwise — one answer, so no existence oracle. */
-export async function getReadableConversation(caller: Caller, raw: unknown): Promise<{ row: ContainerRow; view: ConversationView }> {
+export async function getReadableConversation(caller: Caller, raw: unknown): Promise<{ node: ContextNode; view: ConversationView }> {
   const id = conversationIdOf(raw);
   if (!id) throw new NotFoundError(NOT_FOUND);
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError(NOT_FOUND);
-  const row = await getContainer(caller.nestId, id);
-  if (!row || row.kind === "channel") throw new NotFoundError(NOT_FOUND);
   if (!(await isContainerMember(caller.nestId, id, caller.userId))) throw new NotFoundError(NOT_FOUND);
-  return { row, view: await toView(caller, row) };
+  const node = await readChannelDoc(caller.nestId, id);
+  if (!node || !isConversationDoc(node)) throw new NotFoundError(NOT_FOUND);
+  return { node, view: await toView(caller, node) };
 }
 
 /**
@@ -140,63 +157,61 @@ export async function findOrCreateConversation(caller: Caller, rawMembers: unkno
     people.map((p) => p.email),
     agents,
   );
-  const db = getDb();
-  const existing = (await db.get(
-    "SELECT id, nest_id, kind, member_key, created_by, created_at FROM chat_containers WHERE nest_id = ? AND kind IN ('dm', 'group') AND member_key = ? ORDER BY created_at ASC LIMIT 1",
-    [caller.nestId, key],
-  )) as ContainerRow | undefined;
-  if (existing) return { conversation: await toView(caller, existing), created: false };
+  // Found by its member set: the oldest node whose grants and agent tags
+  // make the same key.
+  const keys = await conversationMemberKeys(caller.nestId);
+  const docs = (await conversationDocs(caller.nestId))
+    .filter((d) => keys.get(d.id) === key)
+    .sort((a, b) => String(a.frontmatter?.created_at ?? "").localeCompare(String(b.frontmatter?.created_at ?? "")));
+  if (docs[0]) return { conversation: await toView(caller, docs[0]), created: false };
 
   const id = newConversationId();
   const kind = people.length + agents.length === 2 ? "dm" : "group";
-  await db.run("INSERT INTO chat_containers (id, nest_id, kind, member_key, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
-    id,
+  const names = await displayNamesOf(people.map((p) => p.email));
+  const label = [...people.map((p) => names.get(p.email) ?? p.email), ...agents.map((h) => `@${h}`)].join(", ");
+  await createNode(
     caller.nestId,
-    kind,
-    key,
+    {
+      id,
+      title: label.slice(0, 180),
+      content: `${kind === "dm" ? "Direct message" : "Group conversation"} between ${label}. Messages are its threads; members are its shares.`,
+      type: "document",
+      tags: [`#${CONVERSATION_TAG}`, `#${CONVERSATION_TAG}:${kind}`, `#${PRIVATE_TAG}`, ...agents.map((h) => `#${agentTag(h)}`)],
+    },
     me,
-    new Date().toISOString(),
-  ]);
+    { notifyMentions: false, creatorReviews: false },
+  );
   for (const p of people) await addPersonMember(caller.nestId, id, p, me);
-  for (const h of agents) await addAgentMember(caller.nestId, id, h, me);
-  const row = (await getContainer(caller.nestId, id))!;
+  const node = await readChannelDoc(caller.nestId, id);
+  if (!node) throw new NotFoundError(NOT_FOUND);
   emitChatEvent(caller.nestId, { type: "conversation.created", conversation: id, kind, by: me });
-  return { conversation: await toView(caller, row), created: true };
+  return { conversation: await toView(caller, node), created: true };
+}
+
+async function displayNamesOf(emails: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (emails.length === 0) return out;
+  const rows = (await getDb().all(`SELECT LOWER(email) AS email, name FROM users WHERE LOWER(email) IN (${emails.map(() => "?").join(", ")})`, emails)) as Array<{
+    email: string;
+    name: string | null;
+  }>;
+  for (const r of rows) if (r.name?.trim()) out.set(r.email, r.name.trim());
+  return out;
 }
 
 /** The conversations this caller is a member of, latest activity first. */
 export async function listConversations(caller: Caller): Promise<{ conversations: ConversationView[] }> {
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Nest not found");
-  const rows = (await getDb().all(
-    `SELECT c.id, c.nest_id, c.kind, c.member_key, c.created_by, c.created_at
-       FROM chat_containers c JOIN chat_members m ON m.nest_id = c.nest_id AND m.container = c.id
-      WHERE c.nest_id = ? AND c.kind IN ('dm', 'group') AND m.user_id = ?
-      ORDER BY c.created_at DESC`,
+  const mine = (await getDb().all(
+    "SELECT target FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document' AND target LIKE 'nodes/conversations/%'",
     [caller.nestId, caller.userId],
-  )) as ContainerRow[];
-  const stats = await channelStats(caller, rows.map((r) => r.id));
+  )) as Array<{ target: string }>;
+  const ids = new Set(mine.map((r) => r.target));
+  const docs = (await conversationDocs(caller.nestId)).filter((d) => ids.has(d.id));
+  const stats = await channelStats(caller, docs.map((d) => d.id));
   const refusal = await nestRefusal(caller.nestId, caller.userId);
-  const me = caller.userEmail.toLowerCase();
   const views: ConversationView[] = [];
-  for (const row of rows) {
-    const members = await memberViews(caller.nestId, row.id);
-    const st = stats.get(row.id);
-    views.push({
-      id: row.id,
-      type: "conversation",
-      kind: row.kind === "group" ? "group" : "dm",
-      title: titleOf(members, me),
-      members,
-      created_by: row.created_by,
-      created_at: row.created_at,
-      post_count: st?.count ?? 0,
-      last_post_at: st?.lastAt ?? null,
-      last_activity_at: st?.lastActivityAt ?? null,
-      unread: st?.unread ?? 0,
-      can_post: !refusal,
-      post_refusal: refusal?.error ?? null,
-    });
-  }
+  for (const node of docs) views.push(await toView(caller, node, undefined, stats, refusal));
   views.sort((a, b) => ((a.last_activity_at ?? a.created_at) < (b.last_activity_at ?? b.created_at) ? 1 : -1));
   return { conversations: views };
 }
@@ -212,9 +227,9 @@ export async function readConversation(
   caller: Caller,
   input: { conversation: unknown; thread?: unknown; since?: unknown; limit?: unknown; offset?: unknown },
 ): Promise<ConversationTimeline> {
-  const { row, view } = await getReadableConversation(caller, input.conversation);
+  const { node, view } = await getReadableConversation(caller, input.conversation);
   const asChannel = view as unknown as ChannelView;
-  const t = await readChannel(caller, { channel: row.id, thread: input.thread, since: input.since, limit: input.limit, offset: input.offset }, { node: { id: row.id }, view: asChannel });
+  const t = await readChannel(caller, { channel: node.id, thread: input.thread, since: input.since, limit: input.limit, offset: input.offset }, { node: { id: node.id }, view: asChannel });
   const { channel: _channel, ...rest } = t as ChannelTimeline & { channel: unknown };
   return { conversation: view, ...rest } as ConversationTimeline;
 }
@@ -235,44 +250,41 @@ export function conversationText(t: ConversationTimeline): string {
 }
 
 export async function markConversationRead(caller: Caller, raw: unknown): Promise<{ conversation: ConversationView }> {
-  const { row } = await getReadableConversation(caller, raw);
+  const { node } = await getReadableConversation(caller, raw);
   const db = getDb();
   await db.run(
     `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at)
      VALUES (?, ?, 'channel', ?, '', ${nowMsExpr(db)})
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
-    [caller.userId, caller.nestId, row.id],
+    [caller.userId, caller.nestId, node.id],
   );
-  emitChatEvent(caller.nestId, { type: "read.marked", conversation: row.id }, { only: caller.userId });
-  return { conversation: await toView(caller, row) };
+  emitChatEvent(caller.nestId, { type: "read.marked", conversation: node.id }, { only: caller.userId });
+  return { conversation: await toView(caller, node) };
 }
 
 /** Leave a group. A dm is fixed (409). */
 export async function leaveConversation(caller: Caller, raw: unknown): Promise<{ left: true; conversation: string }> {
-  const { row } = await getReadableConversation(caller, raw);
-  if (row.kind !== "group") throw new ConflictError("A direct message has a fixed pair of members; there is nothing to leave.");
+  const { node, view } = await getReadableConversation(caller, raw);
+  if (view.kind !== "group") throw new ConflictError("A direct message has a fixed pair of members; there is nothing to leave.");
   const me = caller.userEmail.toLowerCase();
-  await removeMember(caller.nestId, row.id, me);
-  await refreshMemberKey(caller.nestId, row.id);
-  emitChatEvent(caller.nestId, { type: "membership.changed", conversation: row.id, action: "left", member: me, by: me });
-  return { left: true, conversation: row.id };
+  await removePersonMember(caller.nestId, node.id, caller.userId);
+  emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "left", member: me, by: me });
+  return { left: true, conversation: node.id };
 }
 
 /** Add a person added to the nest (or a known agent) to a group. A dm is fixed (409). */
 export async function addConversationMember(caller: Caller, raw: unknown, member: unknown): Promise<{ conversation: ConversationView }> {
-  const { row } = await getReadableConversation(caller, raw);
-  if (row.kind !== "group") throw new ConflictError("A direct message has a fixed pair of members; start a group to add someone.");
+  const { node, view } = await getReadableConversation(caller, raw);
+  if (view.kind !== "group") throw new ConflictError("A direct message has a fixed pair of members; start a group to add someone.");
   if (typeof member !== "string" || !member.trim()) throw new ValidationError("member is required — a name, an email or an @handle.");
   const { people, agents } = await resolveMemberSpecs(caller.nestId, [member]);
   const me = caller.userEmail.toLowerCase();
   let added: string | null = null;
-  for (const p of people) if (await addPersonMember(caller.nestId, row.id, p, me)) added = p.email;
-  for (const h of agents) if (await addAgentMember(caller.nestId, row.id, h, me)) added = `@${h}`;
-  if (added) {
-    await refreshMemberKey(caller.nestId, row.id);
-    emitChatEvent(caller.nestId, { type: "membership.changed", conversation: row.id, action: "added", member: added, by: me });
-  }
-  return { conversation: await toView(caller, row) };
+  for (const p of people) if (await addPersonMember(caller.nestId, node.id, p, me)) added = p.email;
+  for (const h of agents) if (await addAgentMember(caller.nestId, node.id, h, me)) added = `@${h}`;
+  if (added) emitChatEvent(caller.nestId, { type: "membership.changed", conversation: node.id, action: "added", member: added, by: me });
+  const fresh = (await readChannelDoc(caller.nestId, node.id)) ?? node;
+  return { conversation: await toView(caller, fresh) };
 }
 
 /**
@@ -292,7 +304,7 @@ export async function indexAgentMembers(params: {
   const { nestId, nodeId, threadId, commentId } = params;
   if (!commentId) return 0;
   try {
-    const handles = agentHandlesOf(await listMembers(nestId, nodeId)).filter((h) => !params.authorHandles.includes(normHandle(h)));
+    const handles = (await agentMembers(nestId, nodeId)).filter((h) => !params.authorHandles.includes(normHandle(h)));
     if (handles.length === 0) return 0;
     const db = getDb();
     const msg = (await db.get("SELECT created_at FROM annotation_comments WHERE id = ?", [commentId])) as { created_at: string } | undefined;
