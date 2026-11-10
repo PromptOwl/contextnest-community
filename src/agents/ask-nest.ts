@@ -68,8 +68,9 @@ import { describeModelError, ModelRefusedError, ToolsRejectedError } from "../ho
 import { effectiveHootieBrand } from "../hootie/brand.js";
 import { isChannelNode } from "../channels/channel-node.js";
 import { channelNameOf } from "../channels/channel-node.js";
-import { getReadableChannel, isNestMember } from "../channels/channel-service.js";
+import { channelPostRefusal, getReadableChannel, isNestMember } from "../channels/channel-service.js";
 import { displayNames, namedActor } from "../channels/message-meta.js";
+import { ConflictError, ForbiddenError } from "../shared/errors.js";
 import { readableTime } from "../stream/promote.js";
 import { justWritten } from "../mentions/mention-index.js";
 import { HOOTIE_ALIASES, HOOTIE_HANDLE } from "./reserved.js";
@@ -90,6 +91,11 @@ const MAX_THREAD_CHARS = 8000;
 const MAX_QUESTION_CHARS = 4000;
 /** Proposal cards one turn may post. */
 export const MAX_PROPOSALS_PER_TURN = 5;
+/** Turns in flight at once, per nest and server-wide (security review r2
+ *  F12): the per-person budget bounds one asker, this bounds a team. */
+export const MAX_INFLIGHT_PER_NEST = 4;
+export const MAX_INFLIGHT_TOTAL = 16;
+const BUSY = "Hootie is busy with other questions right now — try again in a moment.";
 
 /** No model credential: the chat route's 503, as a thrown error. */
 export class NoModelKeyError extends AppError {
@@ -370,6 +376,21 @@ export function couldNotAnswer(reason: string): string {
 // ─── In flight ──────────────────────────────────────────────────────────
 
 const inFlight = new Map<Promise<unknown>, AbortController>();
+const inFlightByNest = new Map<string, number>();
+
+/** Reserve a slot for a turn in this nest, or false when the nest or the
+ *  server already has as many turns running as it may. */
+function reserveSlot(nestId: string): boolean {
+  const here = inFlightByNest.get(nestId) ?? 0;
+  if (here >= MAX_INFLIGHT_PER_NEST || inFlight.size >= MAX_INFLIGHT_TOTAL) return false;
+  inFlightByNest.set(nestId, here + 1);
+  return true;
+}
+function releaseSlot(nestId: string): void {
+  const here = (inFlightByNest.get(nestId) ?? 1) - 1;
+  if (here <= 0) inFlightByNest.delete(nestId);
+  else inFlightByNest.set(nestId, here);
+}
 
 /** Await every background turn started so far (tests; shutdown). */
 export async function settleNestAsks(): Promise<void> {
@@ -381,11 +402,16 @@ export function abortNestAsks(): void {
   for (const c of inFlight.values()) c.abort();
 }
 
-function track<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+function track<T>(nestId: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const cancel = new AbortController();
   const p = run(cancel.signal);
   inFlight.set(p, cancel);
-  void p.finally(() => inFlight.delete(p)).catch(() => {});
+  void p
+    .finally(() => {
+      inFlight.delete(p);
+      releaseSlot(nestId);
+    })
+    .catch(() => {});
   return p;
 }
 
@@ -404,10 +430,17 @@ export async function askNest(caller: AskCaller, input: AskInput): Promise<AskRe
   const question = questionOf(typeof input.question === "string" ? input.question : "");
   if (!question) throw new ValidationError("question is required");
   if (question.length > MAX_QUESTION_CHARS) throw new ValidationError(`question is too long (max ${MAX_QUESTION_CHARS} characters)`);
+  if (input.post === true) {
+    // Posting the answer is a post: the channel's rule applies (archived
+    // channel or nest, not a member) before any model call.
+    const refusal = await channelPostRefusal(caller.nestId, place.nodeId, caller.userId, caller.userEmail);
+    if (refusal) throw refusal.status === 409 ? new ConflictError(refusal.error) : new ForbiddenError(refusal.error);
+  }
   if (!tryConsume(`hootie:${caller.userId}`, CHAT_BUDGET)) {
     throw new AppError(429, "Too many questions in a short time — give it a few minutes.");
   }
-  return track((signal) => answerAndMaybePost(caller, place, question, null, input.post === true, signal));
+  if (!reserveSlot(caller.nestId)) throw new AppError(429, BUSY);
+  return track(caller.nestId, (signal) => answerAndMaybePost(caller, place, question, null, input.post === true, signal));
 }
 
 async function answerAndMaybePost(
@@ -503,18 +536,34 @@ export function triggerHootieForMessage(params: {
   if (!resolveModelCredential()) return;
   const caller: AskCaller = { nestId, userId: authorUserId, userEmail: authorEmail, baseUrl: params.baseUrl ?? config.PUBLIC_BASE_URL ?? "" };
   const place: Place = { nodeId, channel: channelNameOf(nodeId), threadId };
-  void track(async (signal) => {
+  const refuse = (reason: string) => postHootieMessage({ nestId, nodeId, threadId, askedBy: authorEmail, body: couldNotAnswer(reason) });
+  if (!reserveSlot(nestId)) {
+    void refuse(BUSY).catch(() => {});
+    return;
+  }
+  void track(nestId, async (signal) => {
     try {
       // Asked as a member who can read this channel, now: the post route
       // checked it a moment ago, and the turn re-checks on every round.
       if (!(await isNestMember(nestId, authorUserId)) || !(await canOpenNode(nestId, nodeId, authorUserId, authorEmail))) return;
+      // A person's own message only. A message a declared agent wrote
+      // (`client.agent`; a bare key label is the person, message-meta.ts)
+      // does not make Hootie answer "for" the person behind the key: an agent
+      // asks through context_ask_nest and gets the answer itself (security
+      // review r2 F1).
+      const row = (await getDb().get("SELECT client_json FROM annotation_comments WHERE id = ?", [commentId])) as { client_json: string | null } | undefined;
+      if (!row || deserializeClient(row.client_json)?.agent) return;
       const question = questionOf(body);
       if (!question) {
-        await postHootieMessage({ nestId, nodeId, threadId, askedBy: authorEmail, body: couldNotAnswer("ask me a question after @hootie.") });
+        await refuse("ask me a question after @hootie.");
+        return;
+      }
+      if (question.length > MAX_QUESTION_CHARS) {
+        await refuse(`the question is too long (at most ${MAX_QUESTION_CHARS} characters).`);
         return;
       }
       if (!tryConsume(`hootie:${authorUserId}`, CHAT_BUDGET)) {
-        await postHootieMessage({ nestId, nodeId, threadId, askedBy: authorEmail, body: couldNotAnswer("too many questions in a short time — give it a few minutes.") });
+        await refuse("too many questions in a short time — give it a few minutes.");
         return;
       }
       await answerAndMaybePost(caller, place, question, commentId, true, signal);

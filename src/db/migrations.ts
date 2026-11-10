@@ -2615,6 +2615,9 @@ export function runMigrations(db: Database.Database): void {
         PRIMARY KEY (nest_id, handle)
       );
     `);
+    // Reserved handles (hootie, nest, channel, here, everyone) can't have a
+    // runner: a row saved before the rule would be woken by every @hootie.
+    db.prepare("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')").run();
     recordMigration("091_agent_profiles");
   }
 }

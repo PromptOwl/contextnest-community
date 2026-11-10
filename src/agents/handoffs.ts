@@ -30,6 +30,7 @@ import { callerSafeClient, displayNames, knownAgents, namedActor, normHandle } f
 import { fanOutPostedMessage, type MentionOutcome } from "../channels/post-message.js";
 import { justWritten } from "../mentions/mention-index.js";
 import { isReservedHandle } from "./reserved.js";
+import { nodeWriteKey, withNodeWriteLock } from "../shared/node-write-lock.js";
 
 export const MAX_HANDOFF_NOTE = 1000;
 export type HandoffStatus = "open" | "accepted" | "done";
@@ -168,6 +169,10 @@ export async function updateHandoff(
   const messageId = typeof rawMessageId === "string" ? rawMessageId.trim() : "";
   if (!messageId) throw new ValidationError("message id is required");
   const db = getDb();
+  // Serialised per handoff message: two "accept"s at once must not both win
+  // (security review r2 F10). The status is read, checked and written under
+  // one lock, and the write is conditional on the row as read.
+  return withNodeWriteLock(nodeWriteKey(caller.nestId, `handoff:${messageId}`), async () => {
   const row = (await db.get(
     `SELECT c.id, c.thread_id, c.created_at, c.client_json, t.node_id
        FROM annotation_comments c JOIN annotation_threads t ON t.id = c.thread_id
@@ -196,10 +201,16 @@ export async function updateHandoff(
   handoff.status = status;
   handoff.updated_by = caller.userEmail;
   handoff.updated_at = now;
-  await db.run("UPDATE annotation_comments SET client_json = ? WHERE id = ?", [serializeClient({ ...client, handoff } as unknown as ClientMetadata), messageId]);
+  const written = await db.run("UPDATE annotation_comments SET client_json = ? WHERE id = ? AND client_json = ?", [
+    serializeClient({ ...client, handoff } as unknown as ClientMetadata),
+    messageId,
+    row.client_json,
+  ]);
+  if (!written.changes) throw new ConflictError("This handoff changed while you were taking it; read the thread again.");
   await syncAnnotationsNode(caller.nestId, row.node_id, caller.userEmail).catch(() => {});
   const update = justWritten(thread, caller.userEmail) ?? "";
   return { handoff: viewOf(row.node_id, row.thread_id, messageId, row.created_at, handoff), message: { id: update, thread_id: row.thread_id } };
+  });
 }
 
 export function handoffText(h: HandoffView): string {

@@ -1431,6 +1431,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
+  await db.run("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')", []);
+
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
     "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",

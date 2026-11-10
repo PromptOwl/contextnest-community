@@ -141,6 +141,7 @@ import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
 import { isAgentTool, runAgentTool } from "./agent-tools.js";
+import { dropReservedAgent } from "../agents/reserved.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -2011,7 +2012,10 @@ export async function handleToolCall(
   // never a partial write.
   let client: ClientMetadata | undefined;
   try {
-    client = mergeClient(ctx.client, parseClientMetadata(args.client));
+    // The caller's own `client` may not claim a reserved agent handle (team
+    // chat C7); the transport's part was cleaned by attributeRequest, and a
+    // server-internal caller (Hootie's reads) keeps its own attribution.
+    client = mergeClient(ctx.client, dropReservedAgent(parseClientMetadata(args.client)));
   } catch (err) {
     void logTraceEvent({
       kind: "mcp",

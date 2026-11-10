@@ -107,6 +107,7 @@ export function proposalTools(ctx: { turn: TurnContext; proposals: PendingPropos
       if (input.folder !== undefined) {
         const f = text(input.folder, MAX_FOLDER);
         if (!f || !FOLDER_RE.test(f)) return "folder is lowercase slug segments, e.g. decisions or gtm/deals.";
+        if (f === "channels" || f.startsWith("channels/")) return "folder: channels is where channels live; propose documents elsewhere.";
       }
       return null;
     },

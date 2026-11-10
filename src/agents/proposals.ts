@@ -15,6 +15,7 @@
 import { getDb } from "../db/client.js";
 import { createNode, updateNode, type SourceThread } from "../nodes/service.js";
 import { getPendingReview, submitForReview } from "../governance/review-service.js";
+import { canCreateInNest, canUserEdit } from "../governance/stewardship-service.js";
 import { getCurrentVersion, hasUnsealedDraft } from "../governance/version-service.js";
 import { AppError } from "../shared/errors.js";
 import { effectiveHootieBrand } from "../hootie/brand.js";
@@ -65,7 +66,12 @@ export async function fileProposal(params: {
   const base = { kind: pending.kind, title: String(pending.target.title ?? ""), preview: pending.preview, message_id: null, reason: null } as const;
   const failed = (reason: string, node_id: string | null = null): ProposalView => ({ ...base, node_id, version: null, review_id: null, status: "failed", reason });
   try {
+    // A proposal is filed on the ASKER's standing: a draft under review locks
+    // the document and pages every reviewer, so someone who could not write
+    // the target themselves cannot have Hootie do it for them (security
+    // review r2 F3). A reader's proposal is a card that says so.
     if (pending.kind === "create_node") {
+      if (!(await canCreateInNest(nestId, askedBy))) return failed("you can read this nest but not create in it; ask a writer to propose this.");
       const type = pending.target.type === "task" ? "task" : "document";
       const folder = typeof pending.target.folder === "string" && pending.target.folder ? pending.target.folder : undefined;
       const content = `${note}\n\n${String(pending.target.content ?? "")}`;
@@ -80,6 +86,7 @@ export async function fileProposal(params: {
     }
     const target = String(pending.target.node_id ?? "");
     if (!NODE_ID_SHAPE.test(target)) return failed("not a document.");
+    if (!(await canUserEdit(nestId, target, askedBy)).allowed) return failed("you can read this document but not propose changes to it; ask a writer.", target);
     // Only a document whose working copy IS its approved text (as the
     // metacognition agent's propose_edit): a pending review or someone's
     // unsaved draft is a person's work, and a proposal over it would replace it.

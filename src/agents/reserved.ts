@@ -36,3 +36,11 @@ export const SERVER_CLIENT_KEYS: ReadonlySet<string> = new Set([
   "handoff",
   "handoff_update",
 ]);
+
+/** A caller-supplied attribution with a reserved `agent` dropped (node writes
+ *  and MCP calls: the message paths use message-meta callerSafeClient). */
+export function dropReservedAgent<T extends { agent?: unknown } | undefined>(client: T): T {
+  if (!client || !isReservedHandle(client.agent)) return client;
+  const { agent, ...rest } = client as Record<string, unknown>;
+  return (Object.keys(rest).length ? rest : undefined) as T;
+}

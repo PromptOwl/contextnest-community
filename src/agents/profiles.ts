@@ -113,19 +113,28 @@ async function descriptions(nestId: string): Promise<Map<string, string>> {
   return new Map(rows.map((r) => [r.handle, r.description]));
 }
 
-async function summaries(caller: Caller): Promise<Map<string, AgentSummary>> {
+/** The channel nodes this caller may read: every presence or activity figure
+ *  is computed over these only (security review r2 F11). */
+async function readableChannels(caller: Caller): Promise<Set<string>> {
+  const { storage } = await engineCache.get(caller.nestId);
+  const channels = (await storage.discoverDocuments()).filter(isChannelDoc);
+  return new Set((await filterAccessible(caller.nestId, caller.userId, caller.userEmail, channels)).map((d) => d.id));
+}
+
+async function summaries(caller: Caller, readable?: Set<string>): Promise<Map<string, AgentSummary>> {
   const { nestId } = caller;
-  const [known, hooks, deliveries, acts, descs] = await Promise.all([
+  const [known, hooks, deliveries, acts, descs, ok] = await Promise.all([
     knownAgents(nestId),
     getDb().all("SELECT handle, created_by FROM agent_webhooks WHERE nest_id = ?", [nestId]) as Promise<Array<{ handle: string; created_by: string }>>,
     lastDeliveries(nestId),
     activity(nestId),
     descriptions(nestId),
+    readable ?? readableChannels(caller),
   ]);
   const hookBy = new Map(hooks.map((h) => [normHandle(h.handle), h.created_by]));
   const out = new Map<string, AgentSummary>();
   const summary = (handle: string, kind: AgentSummary["kind"], wakeable: boolean): AgentSummary => {
-    const rows = acts.get(handle) ?? [];
+    const rows = (acts.get(handle) ?? []).filter((r) => ok.has(r.node_id));
     const newest = rows[0];
     return {
       handle,
@@ -152,7 +161,8 @@ export async function listAgents(caller: Caller): Promise<{ agents: AgentSummary
 export async function getAgent(caller: Caller, rawHandle: unknown): Promise<{ agent: AgentProfile }> {
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Not found");
   const handle = normHandle(rawHandle);
-  const all = await summaries(caller);
+  const readable = await readableChannels(caller);
+  const all = await summaries(caller, readable);
   const base = all.get(handle);
   if (!base) throw new NotFoundError("Agent not found");
   const { nestId } = caller;
@@ -160,9 +170,6 @@ export async function getAgent(caller: Caller, rawHandle: unknown): Promise<{ ag
 
   // Did: messages, in channels this caller can read.
   const rows = (await activity(nestId)).get(handle) ?? [];
-  const { storage } = await engineCache.get(nestId);
-  const channels = (await storage.discoverDocuments()).filter(isChannelDoc);
-  const readable = new Set((await filterAccessible(nestId, caller.userId, caller.userEmail, channels)).map((d) => d.id));
   const messages = rows
     .filter((r) => readable.has(r.node_id))
     .slice(0, MAX_DID)
@@ -194,10 +201,10 @@ export async function getAgent(caller: Caller, rawHandle: unknown): Promise<{ ag
   // can read.
   const authored = (await db.all(
     `SELECT DISTINCT node_id FROM node_versions
-      WHERE nest_id = ? AND (LOWER(author) = ? OR client_json LIKE ?)
+      WHERE nest_id = ? AND (LOWER(author) = ? OR client_json LIKE ? ESCAPE '\\')
       ORDER BY node_id
       LIMIT ${MAX_KNOWS * 4}`,
-    [nestId, handle, `%"agent":"${handle.replace(/[%_\\]/g, "")}"%`],
+    [nestId, handle, `%"agent":"${handle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}"%`],
   )) as Array<{ node_id: string }>;
   const candidates = [...new Set([...authored.map((r) => r.node_id), ...reviews.map((r) => r.node_id)])];
   const ok = new Set((await filterAccessible(nestId, caller.userId, caller.userEmail, candidates.map((id) => ({ id })))).map((n) => n.id));
