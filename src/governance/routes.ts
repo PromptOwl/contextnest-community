@@ -1131,6 +1131,34 @@ governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
   return c.json({ request }, 201);
 });
 
+/**
+ * Who may decide an external edit (PO-1193). The nest middleware admits these
+ * two routes at read tier, like every review action, so the handler is the
+ * gate. A document the caller can't open answers like one that isn't there;
+ * one they can open but may not decide is refused with the reason the
+ * version-review routes give (externalEdits.canDecideExternalEdit).
+ */
+async function externalEditDecisionRefusal(
+  c: any,
+  nestId: string,
+  nodeId: string,
+  actor: string,
+  decision: "approve" | "reject",
+) {
+  const notFound = () => c.json({ error: `Node not found: ${nodeId}` }, 404);
+  if (!(await canReadNode(nestId, nodeId, c.get("userId"), actor))) return notFound();
+  // An id that names no document gets the same answer BEFORE the caller's
+  // rights are judged, so "hidden from you" and "not there" can't be told apart.
+  try {
+    const { storage } = await engineCache.get(nestId);
+    await storage.readDocument(assertSafeNodeId(nodeId));
+  } catch {
+    return notFound();
+  }
+  const verdict = await externalEdits.canDecideExternalEdit(nestId, nodeId, actor, decision);
+  return verdict.allowed ? null : c.json({ error: verdict.reason }, 403);
+}
+
 // External-edit approve/reject MUST be registered before the generic
 // /:nodeId{.+}/approve and /reject review routes below: the greedy `{.+}`
 // nodeId otherwise swallows `.../external-edits/:suggestionId` and matches the
@@ -1148,6 +1176,8 @@ governanceNodeRoutes.post(
       .json<{ comment?: string }>()
       .catch(() => ({}) as { comment?: string });
     const actor = await getUserEmail(c);
+    const refused = await externalEditDecisionRefusal(c, nestId, nodeId, actor, "approve");
+    if (refused) return refused;
     // A seed's admin-only folders: nest admins only (S7-R3 R2-L3).
     const adminOnly = await adminFolderRefusal(nestId, nodeId, actor);
     if (adminOnly) return c.json({ error: adminOnly }, 403);
@@ -1189,10 +1219,12 @@ governanceNodeRoutes.post(
     const body = await c.req
       .json<{ reason?: string }>()
       .catch(() => ({}) as { reason?: string });
+    const actor = await getUserEmail(c);
+    const refused = await externalEditDecisionRefusal(c, nestId, nodeId, actor, "reject");
+    if (refused) return refused;
     if (!body.reason) {
       throw new ValidationError("Rejection reason is required");
     }
-    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.rejectExternalEdit({
         nestId,
