@@ -57,7 +57,7 @@ import { cardsText, resolveMessageCards, type ArtifactCard } from "../stream/art
 import { promotedFromThreads, type PromotedRef } from "../stream/promote.js";
 import { knowledgeCounts } from "../memory/knowledge.js";
 import { relatedNodesForThreads, relatedNodesText, type RelatedNode } from "../memory/links.js";
-import { watcherFor } from "../memory/watcher.js";
+import { watchedChannels } from "../memory/watcher.js";
 import {
   ARCHIVED_TAG,
   CHANNEL_FOLDER,
@@ -282,10 +282,13 @@ function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal |
 /** Fill the memory-snowball fields of channel views (team chat C6, PO-1199). */
 async function withKnowledge(caller: Caller, views: ChannelView[]): Promise<ChannelView[]> {
   if (views.length === 0) return views;
-  const counts = await knowledgeCounts(caller, views.map((v) => v.id)).catch(() => new Map<string, number>());
+  const [counts, watched] = await Promise.all([
+    knowledgeCounts(caller, views.map((v) => v.id)).catch(() => new Map<string, number>()),
+    watchedChannels(caller.nestId).catch(() => new Set<string>()),
+  ]);
   for (const v of views) {
     v.knowledge_count = counts.get(v.id) ?? 0;
-    v.watched = !!(await watcherFor(caller.nestId, v.name).catch(() => null))?.entry.enabled;
+    v.watched = watched.has(v.name);
   }
   return views;
 }

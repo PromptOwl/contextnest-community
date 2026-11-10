@@ -114,6 +114,16 @@ export async function watcherFor(nestId: string, channelName: string): Promise<{
   return null;
 }
 
+/** The channel names with an enabled watch, in one agents read (the channel list). */
+export async function watchedChannels(nestId: string): Promise<Set<string>> {
+  if (!config.EXPERIMENTAL_AGENT_STREAM || !metacognitionEnabled()) return new Set();
+  const out = new Set<string>();
+  for (const agent of await listAgents(nestId)) {
+    for (const c of agent.config.channels ?? []) if (c.enabled && agent.enabled) out.add(c.channel);
+  }
+  return out;
+}
+
 async function credentialFor(nestId: string): Promise<ModelCredential | null> {
   if (watcherTestHooks.credential !== undefined) return watcherTestHooks.credential;
   return resolveModelCredential(await storedEnvValues(nestId));
@@ -353,6 +363,10 @@ export async function runChannelWatch(
 ): Promise<WatchRunResult> {
   const name = parseChannelName(rawName);
   const channelId = channelIdFor(name);
+  // Checked here, not only on the routes: a quiet window armed before a
+  // switch was turned off must find it off when it fires.
+  if (!config.EXPERIMENTAL_AGENT_STREAM) return silent(opts.trigger, "channels off");
+  if (!metacognitionEnabled()) return silent(opts.trigger, "metacognition off");
   const w = await watcherFor(nestId, name);
   if (!w) return silent(opts.trigger, "not_watched");
   const { agent, entry } = w;

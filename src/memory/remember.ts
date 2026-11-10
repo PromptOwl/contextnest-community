@@ -150,10 +150,13 @@ export async function rememberThread(
   }
 
   const source = one ? [one] : all;
-  const title = (typeof input.title === "string" && input.title.trim() ? input.title.trim() : deriveTitle(source[0]?.body ?? "", kind === "task" ? "task" : "decision")).slice(
-    0,
-    MAX_TITLE,
-  );
+  const derived = deriveTitle(source[0]?.body ?? "", kind === "task" ? "task" : "decision");
+  const title = (typeof input.title === "string" && input.title.trim()
+    ? input.title.trim()
+    : /^(Decision|Task) from a thread$/.test(derived)
+      ? `${LABEL[kind]} from a thread`
+      : derived
+  ).slice(0, MAX_TITLE);
   const content =
     `${LABEL[kind]} remembered from ${one ? "a message in" : ""} a thread on [[${thread.node_id}]], by ${proposer.label}.\n\n` +
     (summary ? `${summary}\n\n` : "") +

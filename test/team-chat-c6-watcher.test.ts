@@ -486,6 +486,34 @@ describe("SEC-C6-01: message bodies are untrusted data to the watcher", () => {
     expect(notes.data.node?.content ?? notes.data.content).toContain("Confidential");
   });
 
+  it("SEC-C6-04 a quiet window armed before the switch is turned off does not run", async () => {
+    watcher.watcherTestHooks.quietMs = 40;
+    const on = await setWatch(owner, { enabled: true, mode: "quiet", quiet_minutes: 1 });
+    expect(on.status).toBe(200);
+    const beforeRun = (await getWatch(owner)).data.watch.last_run;
+    await open(alice, "This batch would be long enough to run: the standby database now lives in the second region and fails over on its own.");
+    process.env.EXPERIMENTAL_AGENT_STREAM = "false";
+    try {
+      await new Promise((r) => setTimeout(r, 120));
+      await watcher.waitForChannelWatchRuns();
+    } finally {
+      process.env.EXPERIMENTAL_AGENT_STREAM = "true";
+    }
+    expect(requests).toHaveLength(0);
+    expect((await getWatch(owner)).data.watch.last_run).toEqual(beforeRun);
+    // The same for the metacognition flag: a pending run finds it off and stays silent.
+    await open(alice, "Another long enough line: the standby database now lives in the second region and fails over on its own, as agreed.");
+    process.env.FEATURE_METACOGNITION = "false";
+    try {
+      await new Promise((r) => setTimeout(r, 120));
+      await watcher.waitForChannelWatchRuns();
+    } finally {
+      process.env.FEATURE_METACOGNITION = "true";
+    }
+    expect(requests).toHaveLength(0);
+    expect((await getWatch(owner)).data.watch.last_run).toEqual(beforeRun);
+  });
+
   it("a verdict that is not an object, or items that are not objects, is an error_schema run with no write", async () => {
     await open(alice, "Another message long enough to pass the short-batch rule for this security case: the deploy window moved to Thursday afternoons after the change board met.");
     script = [verdict({ verdict: "propose", items: "all of them" })];
