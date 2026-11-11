@@ -31,6 +31,9 @@ const READ_ONLY = [
   "context_channel_read",
   // My Work (PO-1180): the caller's own queue.
   "context_my_work",
+  // Hire (PO-1201): the catalog and the hired list are derived views.
+  "context_hire_catalog",
+  "context_hired_agents",
   "context_relations",
   "context_boards",
   "context_board_items",
@@ -100,6 +103,8 @@ const DESTRUCTIVE = [
   "context_channels",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Hire (PO-1201): let_go deletes a webhook, a key or a metacognition config.
+  "context_hire_agent",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -136,6 +141,8 @@ const OPEN_WORLD = [
   "context_promote_thread",
   // Points a nest's mention events at an outside URL.
   "context_agent_webhooks",
+  // Hire (PO-1201): a webhook hire points events at an outside URL.
+  "context_hire_agent",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -191,8 +198,10 @@ async function allDefinedNames(): Promise<string[]> {
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { HIRE_TOOL_DEFINITIONS } = await import("../src/mcp/hire-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...HIRE_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
