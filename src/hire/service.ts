@@ -97,6 +97,9 @@ export interface HireResult {
   /** key: the plaintext key, only when minted. */
   api_key?: string;
   announced: Array<{ channel: string; thread_id: string }>;
+  /** The hire took but a welcome post failed (the channel changed under it):
+   *  the credential above is still the only copy, so it is returned anyway. */
+  announce_error?: string;
 }
 
 export const HOOTIE_HANDLE = "hootie";
@@ -441,37 +444,39 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
         created = true;
       } catch (err) {
         // Two admins hiring the same handle at once: the second insert hits
-        // the (nest, handle) key — that is "already hired", not a failure.
-        if (!/unique|constraint|duplicate/i.test(String((err as Error)?.message ?? ""))) throw err;
+        // the (nest, handle) key — "already hired", not a failure. Decided by
+        // re-reading the row, not by the driver's wording.
+        if (err instanceof AppError) throw err;
+        if (!(await listAgentWebhooks(nestId)).some((w) => w.handle === handle)) throw err;
       }
     }
   } else {
-    // key: the marker row first (its primary key serialises two hires of one
-    // handle — the loser sees "already hired" and mints nothing), then the key.
+    // key: the marker and the key in ONE transaction, the marker carrying the
+    // key's id from the start. The marker's primary key serialises two hires
+    // of one handle (the loser sees "already hired" and mints nothing), and
+    // a crash can't leave a marker without a key.
     const db = getDb();
     const check = await verifyKeyRequest(db, caller.userId, { action: "generate", label: handle });
     const stale = (await db.get("SELECT ref FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle])) as
       | { ref: string | null }
       | undefined;
-    // A marker whose key was revoked through /auth/keys is spent: clear it.
-    if (stale?.ref && !(await db.get("SELECT 1 AS ok FROM api_keys WHERE id = ?", [stale.ref]))) {
+    // A marker without a key (an older write that died halfway) or whose key
+    // was revoked through /auth/keys is spent: clear it, it blocks nothing.
+    if (stale && (!stale.ref || !(await db.get("SELECT 1 AS ok FROM api_keys WHERE id = ?", [stale.ref])))) {
       await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
     }
-    const marker = await db.run(
-      insertOrIgnore(db, "INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, ?, ?, ?, ?, NULL)"),
-      [nestId, "key", handle, caller.userEmail, new Date().toISOString()],
-    );
-    if (marker.changes > 0) {
-      const keyId = uuid();
-      try {
-        if (!check.ok) throw new AppError(check.status, check.error);
-        const minted = await insertApiKey(db, { id: keyId, userId: caller.userId, nestId, label: check.label, capability: "write", origin: "manual" });
-        apiKey = minted.apiKey;
-      } catch (err) {
-        await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
-        throw err;
-      }
-      await db.run("UPDATE hired_agents SET ref = ? WHERE nest_id = ? AND kind = 'key' AND handle = ?", [keyId, nestId, handle]);
+    const keyId = uuid();
+    const minted = await db.transaction(async (tx) => {
+      const marker = await tx.run(
+        insertOrIgnore(db, "INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, ?, ?, ?, ?, ?)"),
+        [nestId, "key", handle, caller.userEmail, new Date().toISOString(), keyId],
+      );
+      if (!marker.changes) return null; // already hired
+      if (!check.ok) throw new AppError(check.status, check.error); // rolls the marker back
+      return insertApiKey(tx, { id: keyId, userId: caller.userId, nestId, label: check.label, capability: "write", origin: "manual" });
+    });
+    if (minted) {
+      apiKey = minted.apiKey;
       created = true;
     }
   }
@@ -479,15 +484,32 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
   const hired = await findHired(nestId, kind, handle);
   if (!hired) throw new NotFoundError("The hire did not take."); // unreachable in practice
   const announced: HireResult["announced"] = [];
+  let announceError: string | undefined;
   if (announce && created) {
     const line = `Hired @${handle}: ${catalogEntry(kind).in_channel}.`;
     for (const n of nodes) {
-      const thread = await createThread(nestId, n.id, { body: line, anchor: null }, caller.userEmail, caller.client);
-      await fanOutPostedMessage({ nestId, nodeId: n.id, thread, isReply: false, body: line, authorEmail: caller.userEmail, authorUserId: caller.userId });
-      announced.push({ channel: n.name, thread_id: thread.id });
+      // The hire is committed and the credential below is its only copy: a
+      // welcome post that fails (the channel archived between the check and
+      // the post) is reported, never allowed to lose it.
+      try {
+        const thread = await createThread(nestId, n.id, { body: line, anchor: null }, caller.userEmail, caller.client);
+        await fanOutPostedMessage({ nestId, nodeId: n.id, thread, isReply: false, body: line, authorEmail: caller.userEmail, authorUserId: caller.userId });
+        announced.push({ channel: n.name, thread_id: thread.id });
+      } catch (err) {
+        console.error("[hire] announce failed", nestId, n.id, err);
+        announceError = `The welcome post in #${n.name} failed; the agent is hired and its credential is in this response.`;
+        break;
+      }
     }
   }
-  return { hired, created, ...(secret ? { secret } : {}), ...(apiKey ? { api_key: apiKey } : {}), announced };
+  return {
+    hired,
+    created,
+    ...(secret ? { secret } : {}),
+    ...(apiKey ? { api_key: apiKey } : {}),
+    announced,
+    ...(announceError ? { announce_error: announceError } : {}),
+  };
 }
 
 // ─── Let go ──────────────────────────────────────────────────────────────

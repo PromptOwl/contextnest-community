@@ -891,6 +891,28 @@ describe("SEC-C10: hire is never a way up, inputs are validated, and nothing lea
     expect((await dismiss(owner, "key-idle:ci")).status).toBe(404);
   });
 
+  it("BOT-C10-01 a key-hire marker left without a key (a crash between the two writes) never blocks the handle", async () => {
+    await db.run(
+      "INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, 'key', 'orphaned', ?, ?, NULL)",
+      [nestId, owner.email, new Date().toISOString()],
+    );
+    expect((await hired(owner)).data.hired.map((h: any) => h.handle)).not.toContain("orphaned");
+    const r = await hire(owner, { kind: "key", handle: "orphaned" });
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.api_key).toMatch(/^cnst_/);
+    expect((await hired(owner)).data.hired.find((h: any) => h.handle === "orphaned").hired_by).toBe(owner.email);
+    expect((await letGo(owner, "key", "orphaned")).status).toBe(200);
+    const left = await db.get("SELECT COUNT(*) AS n FROM hired_agents WHERE nest_id = ? AND handle = 'orphaned'", [nestId]);
+    expect(Number(left.n)).toBe(0);
+  });
+
+  it("BOT-C10-02 a successful hire with an announcement carries no announce_error", async () => {
+    const r = await hire(owner, { kind: "key", handle: "announced-bot", channels: ["general"], announce: true });
+    expect(r.status).toBe(201);
+    expect(r.data.announce_error).toBeUndefined();
+    expect(r.data.announced).toHaveLength(1);
+  });
+
   it("SEC-C10-04 announce text is the hirer's own: a handle can't inject markdown or a second line", async () => {
     const r = await hire(owner, { kind: "key", handle: "plain-bot", channels: ["general"], announce: true });
     expect(r.status).toBe(201);
