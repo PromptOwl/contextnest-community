@@ -307,7 +307,7 @@ export interface ChannelList {
 
 export async function listChannels(
   caller: Caller,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; recommendations?: boolean } = {},
 ): Promise<ChannelList> {
   const { storage } = await engineCache.get(caller.nestId);
   const docs = (await storage.discoverDocuments()).filter(isChannelDoc);
@@ -322,11 +322,15 @@ export async function listChannels(
   const live = all.filter((c) => !c.archived);
   // The recommendations badge (PO-1201): rule-based, over the channels this
   // caller can read; never fails the list.
-  try {
-    const counts = await recommendationCountsForChannels(caller, live.map((c) => ({ id: c.id, name: c.name })));
-    for (const c of live) c.recommendations_count = counts.get(c.name) ?? 0;
-  } catch (err) {
-    console.error("[channels] recommendations badge", caller.nestId, err);
+  // `recommendations: false` is for the recommendations read itself, which
+  // computes them once over this list rather than twice.
+  if (opts.recommendations !== false && live.length > 0) {
+    try {
+      const counts = await recommendationCountsForChannels(caller, live.map((c) => ({ id: c.id, name: c.name })));
+      for (const c of live) c.recommendations_count = counts.get(c.name) ?? 0;
+    } catch (err) {
+      console.error("[channels] recommendations badge", caller.nestId, err);
+    }
   }
   const most = live
     .filter((c) => c.last_activity_at)

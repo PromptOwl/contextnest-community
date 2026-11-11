@@ -63,7 +63,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       "A metacognition agent that reads a channel (or the whole nest) on a schedule or when run, and comments when a thread has settled into a decision or a task the nest does not record yet, or contradicts an approved document. It proposes nothing and edits nothing: comments only.",
     in_channel: "reads the channel and points out what is settled but not yet recorded",
     needs: ["the workflow plane and metacognition switched on", "a model key or gateway on the server"],
-    permissions: ["reads the channels in its scope as its own persona", "comments only — no edits, no proposals"],
+    permissions: ["reads the channels folder (the channels it is told to watch) as its own persona", "comments only — no edits, no proposals"],
     cost: "model usage per run, capped by the agent's own limits",
     hire_by: "owner or admin",
     config_fields: [],

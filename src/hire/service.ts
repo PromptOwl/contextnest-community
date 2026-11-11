@@ -14,12 +14,18 @@
  *              URL fence (public https only), the secret returned once;
  *   key      → auth/keys insertApiKey: a WRITE key scoped to this nest,
  *              labelled with the handle, owned by the hirer and returned
- *              once. The underlying route lets any member mint one; hiring
- *              asks for a writer (stricter, never looser).
+ *              once, plus a `hired_agents` marker row carrying the key's id.
+ *              A key agent is one that was HIRED: a member's personal key is
+ *              never inferred from its label (security review). The
+ *              underlying route lets any member mint one; hiring asks for a
+ *              writer (stricter, never looser).
  *
  * The hired list is DERIVED from those rows (agent_webhooks, api_keys,
- * metacognition_agents, hired_agents) — nothing is copied. Letting go goes
- * through the same delete paths.
+ * metacognition_agents, hired_agents) — nothing is copied. What a member
+ * sees of it follows the existing rules: who hired (an email) only for a
+ * caller who may see the roster (`canSeeRoster`); delivery outcomes and the
+ * `failing` status only for the nest owner or an admin, as the agent-webhooks
+ * panel itself. Letting go goes through the same delete paths.
  *
  * Idempotent on (kind, handle): hiring what exists returns it with
  * `created: false` and no secret or key. `announce` posts one welcome line
@@ -53,6 +59,7 @@ import {
   putAgentWebhook,
 } from "../stream/agent-webhooks.js";
 import { assertCanManageMetacognition, configureAgent, metacognitionEnabled, removeAgent } from "../metacognition/manage.js";
+import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { getAgent, listAgents } from "../metacognition/store.js";
 import { CATALOG, KINDS, catalogEntry, serverUnavailableReason, type CatalogView, type HireKind } from "./catalog.js";
 
@@ -70,7 +77,8 @@ export type HiredStatus = "active" | "failing" | "no_key" | "off";
 export interface HiredAgentView {
   kind: HireKind;
   handle: string;
-  hired_by: string;
+  /** Who hired it (an email); null for a caller who may not see the roster. */
+  hired_by: string | null;
   hired_at: string;
   status: HiredStatus;
   /** One line explaining a status other than active. */
@@ -147,20 +155,22 @@ export async function hireCatalog(caller: HireCaller): Promise<{ catalog: Catalo
 
 // ─── The hired list (derived) ────────────────────────────────────────────
 
-interface HootieRow {
+interface HireRow {
   nest_id: string;
   kind: string;
   handle: string;
   hired_by: string;
   created_at: string;
+  /** The api_keys id for a key agent; null otherwise. */
+  ref: string | null;
 }
 
-async function hootieRow(nestId: string): Promise<HootieRow | null> {
-  const row = (await getDb().get("SELECT * FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId])) as HootieRow | undefined;
+async function hootieRow(nestId: string): Promise<HireRow | null> {
+  const row = (await getDb().get("SELECT * FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId])) as HireRow | undefined;
   return row ?? null;
 }
 
-function hootieView(row: HootieRow): HiredAgentView {
+function hootieView(row: HireRow): HiredAgentView {
   const reason = serverUnavailableReason("hootie");
   return {
     kind: "hootie",
@@ -176,7 +186,7 @@ function hootieView(row: HootieRow): HiredAgentView {
 
 /** `nodes/agents/<handle>` ↔ handle. */
 export const watcherNodeId = (handle: string) => `nodes/${WATCHER_FOLDER}/${handle}`;
-const watcherHandleOf = (nodeId: string): string | null => {
+export const watcherHandleOf = (nodeId: string): string | null => {
   const m = /^nodes\/agents\/([a-z0-9][a-z0-9._-]{0,62})$/.exec(nodeId);
   return m ? m[1] : null;
 };
@@ -234,40 +244,34 @@ async function webhookViews(nestId: string): Promise<HiredAgentView[]> {
   }));
 }
 
-interface KeyRow {
+export interface KeyAgentRow {
+  handle: string;
+  /** The api_keys id. */
   id: string;
+  /** The key's owner (the hirer). */
   user_id: string;
-  label: string;
+  hired_by: string;
   created_at: string;
   last_used_at: string | null;
-  email: string | null;
 }
 
-/** The nest's key agents: write keys scoped to this nest whose label is an agent handle. */
-export async function keyAgentRows(nestId: string): Promise<Array<KeyRow & { handle: string }>> {
-  const rows = (await getDb().all(
-    `SELECT k.id, k.user_id, k.label, k.created_at, k.last_used_at, u.email
-       FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
-      WHERE k.nest_id = ? AND k.label IS NOT NULL AND k.capability = 'write' AND k.origin = 'manual'
-      ORDER BY k.created_at ASC`,
+/** The nest's key agents: the hire markers joined to the keys they minted.
+ *  A marker whose key was revoked elsewhere (DELETE /auth/keys) is dropped. */
+export async function keyAgentRows(nestId: string): Promise<KeyAgentRow[]> {
+  return (await getDb().all(
+    `SELECT h.handle, k.id, k.user_id, h.hired_by, h.created_at, k.last_used_at
+       FROM hired_agents h JOIN api_keys k ON k.id = h.ref AND k.nest_id = h.nest_id
+      WHERE h.nest_id = ? AND h.kind = 'key'
+      ORDER BY h.created_at ASC`,
     [nestId],
-  )) as KeyRow[];
-  const out: Array<KeyRow & { handle: string }> = [];
-  for (const r of rows) {
-    try {
-      out.push({ ...r, handle: parseAgentHandle(r.label) });
-    } catch {
-      /* a key named for a laptop, not an agent */
-    }
-  }
-  return out;
+  )) as KeyAgentRow[];
 }
 
-function keyView(r: KeyRow & { handle: string }): HiredAgentView {
+function keyView(r: KeyAgentRow): HiredAgentView {
   return {
     kind: "key",
     handle: r.handle,
-    hired_by: r.email ?? r.user_id,
+    hired_by: r.hired_by,
     hired_at: r.created_at,
     status: "active",
     detail: null,
@@ -277,16 +281,20 @@ function keyView(r: KeyRow & { handle: string }): HiredAgentView {
 }
 
 export async function listHiredAgents(caller: HireCaller): Promise<{ hired: HiredAgentView[] }> {
-  await memberAccess(caller);
-  const nestId = caller.nestId;
-  const hootie = await hootieRow(nestId);
-  const hired = [
-    ...(hootie ? [hootieView(hootie)] : []),
-    ...(await watcherViews(nestId)),
-    ...(await webhookViews(nestId)),
-    ...(await keyAgentRows(nestId)).map(keyView),
-  ];
-  return { hired };
+  const access = await memberAccess(caller);
+  const { hired } = await listHiredAgentsUnchecked(caller.nestId);
+  if (isAdminLike(access)) return { hired };
+  // A member: the handles and kinds, but not what the admin surfaces hold —
+  // who hired only with the roster, no delivery outcomes.
+  const roster = await canSeeRoster(caller.nestId, caller.userId, caller.userEmail, await listNestPeople(caller.nestId)).catch(() => false);
+  return {
+    hired: hired.map((h) => ({
+      ...h,
+      hired_by: roster ? h.hired_by : null,
+      status: h.kind === "webhook" ? "active" : h.status,
+      detail: h.kind === "webhook" ? null : h.detail,
+    })),
+  };
 }
 
 async function findHired(nestId: string, kind: HireKind, handle: string): Promise<HiredAgentView | null> {
@@ -427,26 +435,43 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
     await assertCanManageAgentWebhooks(nestId, caller.userId, { write: true });
     const existing = (await listAgentWebhooks(nestId)).find((w) => w.handle === handle);
     if (!existing) {
-      const r = await putAgentWebhook(nestId, handle, { url: cfg.url }, caller.userEmail);
-      secret = r.secret;
-      created = true;
+      try {
+        const r = await putAgentWebhook(nestId, handle, { url: cfg.url }, caller.userEmail);
+        secret = r.secret;
+        created = true;
+      } catch (err) {
+        // Two admins hiring the same handle at once: the second insert hits
+        // the (nest, handle) key — that is "already hired", not a failure.
+        if (!/unique|constraint|duplicate/i.test(String((err as Error)?.message ?? ""))) throw err;
+      }
     }
   } else {
-    // key
+    // key: the marker row first (its primary key serialises two hires of one
+    // handle — the loser sees "already hired" and mints nothing), then the key.
     const db = getDb();
-    const existing = (await keyAgentRows(nestId)).find((k) => k.handle === handle);
-    if (!existing) {
-      const check = await verifyKeyRequest(db, caller.userId, { action: "generate", label: handle });
-      if (!check.ok) throw new AppError(check.status, check.error);
-      const minted = await insertApiKey(db, {
-        id: uuid(),
-        userId: caller.userId,
-        nestId,
-        label: check.label,
-        capability: "write",
-        origin: "manual",
-      });
-      apiKey = minted.apiKey;
+    const check = await verifyKeyRequest(db, caller.userId, { action: "generate", label: handle });
+    const stale = (await db.get("SELECT ref FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle])) as
+      | { ref: string | null }
+      | undefined;
+    // A marker whose key was revoked through /auth/keys is spent: clear it.
+    if (stale?.ref && !(await db.get("SELECT 1 AS ok FROM api_keys WHERE id = ?", [stale.ref]))) {
+      await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
+    }
+    const marker = await db.run(
+      insertOrIgnore(db, "INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, ?, ?, ?, ?, NULL)"),
+      [nestId, "key", handle, caller.userEmail, new Date().toISOString()],
+    );
+    if (marker.changes > 0) {
+      const keyId = uuid();
+      try {
+        if (!check.ok) throw new AppError(check.status, check.error);
+        const minted = await insertApiKey(db, { id: keyId, userId: caller.userId, nestId, label: check.label, capability: "write", origin: "manual" });
+        apiKey = minted.apiKey;
+      } catch (err) {
+        await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
+        throw err;
+      }
+      await db.run("UPDATE hired_agents SET ref = ? WHERE nest_id = ? AND kind = 'key' AND handle = ?", [keyId, nestId, handle]);
       created = true;
     }
   }
@@ -488,11 +513,17 @@ export async function letAgentGo(caller: HireCaller, rawKind: unknown, rawHandle
     const row = (await keyAgentRows(nestId)).find((k) => k.handle === handle);
     if (!row) throw new NotFoundError("No key agent with that handle.");
     // The key's own route lets only its owner revoke it; the nest's owner or
-    // an admin may too — the key is fenced to the nest they administer.
+    // an admin may too — the key is fenced to the nest they administer. An
+    // admin still can't touch the nest OWNER's credentials.
     if (row.user_id !== caller.userId && !isAdminLike(access)) {
       throw new ForbiddenError("Only the person who hired this agent, or a nest owner or admin, can let it go.");
     }
-    await getDb().run("DELETE FROM api_keys WHERE id = ?", [row.id]);
+    if (row.user_id !== caller.userId && row.user_id === access.ownerId && config.AUTH_MODE !== "open") {
+      throw new ForbiddenError("Only the nest owner can let go an agent the owner hired.");
+    }
+    const db = getDb();
+    await db.run("DELETE FROM api_keys WHERE id = ?", [row.id]);
+    await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
   }
   return { deleted: true };
 }

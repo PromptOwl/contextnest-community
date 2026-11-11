@@ -2603,9 +2603,12 @@ export function runMigrations(db: Database.Database): void {
   //   thing underneath — a metacognition agent, an agent webhook, a nest-scoped
   //   key — and the hired list is derived from those rows. Hootie is a server
   //   switch with no per-nest row, so a nest that hired it gets ONE row here;
-  //   nothing else is stored. Dismissed recommendations are the caller's own
-  //   `stream_marks` rows (kind 'recommendation'), no table of their own.
-  //   Numbered after the parallel team-chat slices (088–091).
+  //   A key agent gets a row too, with `ref` = the api_keys id it minted: a
+  //   key agent is one that was HIRED, never a personal key inferred from its
+  //   label (security review). Nothing else is stored. Dismissed
+  //   recommendations are the caller's own `stream_marks` rows (kind
+  //   'recommendation'), no table of their own. Numbered after the parallel
+  //   team-chat slices (088–091).
   if (!hasMigration("092_hired_agents")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS hired_agents (
@@ -2614,6 +2617,7 @@ export function runMigrations(db: Database.Database): void {
         handle TEXT NOT NULL,
         hired_by TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        ref TEXT,
         PRIMARY KEY (nest_id, kind, handle)
       );
     `);

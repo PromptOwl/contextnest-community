@@ -466,6 +466,7 @@ describe("AC-C10-07: GET /hire lists hired agents with who, when and a status", 
     }
     const r = await hired(owner);
     expect(r.data.hired.find((h: any) => h.handle === "grok").status).toBe("failing");
+    expect(r.data.hired.find((h: any) => h.handle === "grok").detail).toMatch(/failed/i);
     expect(r.data.hired.find((h: any) => h.handle === "grok2").status).toBe("active");
   });
 });
@@ -813,6 +814,81 @@ describe("SEC-C10: hire is never a way up, inputs are validated, and nothing lea
   it("SEC-C10-03 recommendations for a nest the caller is not on are 404, and a dismissal there is too", async () => {
     expect((await recs(writer, sideNestId)).status).toBe(404);
     expect((await dismiss(writer, "mention:nobody", sideNestId)).status).toBe(404);
+  });
+
+  it("SEC-C10-05 a member who is not owner/admin gets no delivery outcomes: a failing webhook reads active with no detail", async () => {
+    const r = await hired(reader);
+    const grok = r.data.hired.find((h: any) => h.handle === "grok");
+    expect(grok.status).toBe("active");
+    expect(grok.detail).toBeNull();
+    expect((await hired(writer)).data.hired.find((h: any) => h.handle === "grok").status).toBe("active");
+    expect((await hired(admin)).data.hired.find((h: any) => h.handle === "grok").status).toBe("failing");
+  });
+
+  it("SEC-C10-06 a key agent is one that was hired, never a personal key inferred from its label", async () => {
+    const k = await jsonRequest(app, "POST", "/auth/keys", { label: "ci", nest_id: nestId }, writer.apiKey);
+    expect(k.status).toBe(201);
+    expect((await hired(owner)).data.hired.map((h: any) => `${h.kind}:${h.handle}`)).not.toContain("key:ci");
+    expect((await letGo(owner, "key", "ci")).status).toBe(404);
+    await db.run("UPDATE api_keys SET last_used_at = ? WHERE nest_id = ? AND label = 'ci'", [sqlTime(Date.now() - KEY_IDLE_MS - 1000), nestId]);
+    expect((await recs(owner)).list.map((r) => r.id)).not.toContain("key-idle:ci");
+    // writer's own personal key still works and is still theirs to revoke
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, k.data.api_key)).status).toBe(200);
+    expect((await jsonRequest(app, "DELETE", `/auth/keys/${k.data.id}`, undefined, writer.apiKey)).status).toBe(200);
+  });
+
+  it("SEC-C10-06 an admin can't let go a key agent the nest owner hired; the owner can", async () => {
+    expect((await hire(owner, { kind: "key", handle: "owners-pet" })).status).toBe(201);
+    expect((await letGo(admin, "key", "owners-pet")).status).toBe(403);
+    expect((await letGo(owner, "key", "owners-pet")).status).toBe(200);
+    // …and letting go revokes the key itself, not only the hire
+    const r = await hire(owner, { kind: "key", handle: "owners-pet2" });
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, r.data.api_key)).status).toBe(200);
+    expect((await letGo(owner, "key", "owners-pet2")).status).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, r.data.api_key)).status).toBe(401);
+  });
+
+  it("SEC-C10-07 promote evidence is bounded by the same rule as the node list: every evidence node is one the caller can list", async () => {
+    const sam = await registerUser(app, "sam@c10.test", "Sam Steward");
+    await resetAuthRateLimit();
+    const gov = (await jsonRequest(app, "POST", "/nests", { name: "Gov" }, owner.apiKey)).data.nest.id;
+    await addChannel(gov, "ops");
+    const st = await jsonRequest(app, "PATCH", `/nests/${gov}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    expect(st.status, JSON.stringify(st.data)).toBe(200);
+    const sw = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gov}/stewards`,
+      { scope: "document", email: sam.email, role: "viewer", nodePattern: OPS },
+      owner.apiKey,
+    );
+    expect(sw.status, JSON.stringify(sw.data)).toBeLessThan(300);
+    for (const title of ["Secret Plan A", "Secret Plan B", "Secret Plan C"]) {
+      const t = await open(owner, OPS, `${title} — agreed`, gov);
+      const p = await jsonRequest(app, "POST", `/nests/${gov}/threads/${t.id}/promote`, { kind: "decision", title }, owner.apiKey);
+      expect(p.status, JSON.stringify(p.data)).toBe(201);
+    }
+    // The promoted nodes go through filterAccessible — the node list's own
+    // gate — before they count or are named. For every caller, what the
+    // evidence names is a subset of what GET /nodes lists them.
+    for (const u of [owner, sam]) {
+      const r = await recs(u, gov);
+      expect(r.status, JSON.stringify(r.data)).toBe(200);
+      const listed = new Set(((await jsonRequest(app, "GET", `/nests/${gov}/nodes`, undefined, u.apiKey)).data.nodes ?? []).map((n: any) => n.id));
+      const rec = r.list.find((x) => x.id === "watcher:ops");
+      const named = rec ? rec.evidence.map((e: any) => decodeURIComponent(e.link.split("?doc=")[1])) : [];
+      for (const id of named) expect(listed.has(id), `${u.email} sees ${id}`).toBe(true);
+      if (u === owner) expect(named).toHaveLength(3);
+    }
+    // And a document-share grantee who is not a member gets nothing at all.
+    const g = await jsonRequest(app, "POST", `/nests/${gov}/grants`, { target_type: "document", target: "nodes/decisions/secret-plan-a", email: bob.email, role: "read" }, owner.apiKey);
+    expect(g.status, JSON.stringify(g.data)).toBe(201);
+    expect((await recs(bob, gov)).status).toBe(404);
+  });
+
+  it("SEC-C10-08 only a recommendation that is currently made can be dismissed", async () => {
+    expect((await dismiss(owner, "mention:ghost-of-nobody")).status).toBe(404);
+    expect((await dismiss(owner, "key-idle:ci")).status).toBe(404);
   });
 
   it("SEC-C10-04 announce text is the hirer's own: a handle can't inject markdown or a second line", async () => {

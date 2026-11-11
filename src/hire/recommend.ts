@@ -19,7 +19,9 @@
  */
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { ValidationError } from "../shared/errors.js";
+import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { isSystemUser } from "../auth/systems.js";
+import { filterAccessible } from "../governance/access-guard.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { safeJson } from "../shared/json.js";
 import { channelNameOf } from "../channels/channel-node.js";
@@ -27,7 +29,7 @@ import { knownAgents } from "../channels/message-meta.js";
 import { listAgents } from "../metacognition/store.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { inFolders } from "../metacognition/config.js";
-import { HOOTIE_HANDLE, keyAgentRows, memberAccess, type HireCaller } from "./service.js";
+import { HOOTIE_HANDLE, keyAgentRows, memberAccess, watcherHandleOf, type HireCaller } from "./service.js";
 import {
   MAX_RECOMMENDATIONS,
   FAILING_WINDOW,
@@ -81,7 +83,8 @@ async function questionThreads(nestId: string, channels: ChannelRef[]): Promise<
   return rows.map((r) => ({ thread_id: r.id, channel: nameOf.get(r.node_id)!, body: r.body, created_at: r.created_at, replies: 0, status: r.status }));
 }
 
-async function promotes(nestId: string, channels: ChannelRef[]): Promise<PromoteRow[]> {
+async function promotes(caller: HireCaller, channels: ChannelRef[]): Promise<PromoteRow[]> {
+  const nestId = caller.nestId;
   if (channels.length === 0) return [];
   const nameOf = new Map(channels.map((c) => [c.id, c.name]));
   const db = getDb();
@@ -90,15 +93,19 @@ async function promotes(nestId: string, channels: ChannelRef[]): Promise<Promote
       WHERE nest_id = ? AND frontmatter_json LIKE '%"source_thread"%' ORDER BY updated_at DESC LIMIT ${SCAN}`,
     [nestId],
   )) as Array<{ node_id: string; title: string; updated_at: string | null; frontmatter_json: string }>;
-  const parsed = nodes
+  const candidates = nodes
     .map((r) => {
       const fm = safeJson(r.frontmatter_json) as any;
       const threadId = fm?.metadata?.source_thread?.thread_id;
       return typeof threadId === "string"
-        ? { node_id: r.node_id, title: r.title || r.node_id, threadId, at: String(fm?.created_at ?? fm?.updated_at ?? r.updated_at ?? "") }
+        ? { id: r.node_id, node_id: r.node_id, title: r.title || r.node_id, threadId, at: String(fm?.created_at ?? fm?.updated_at ?? r.updated_at ?? "") }
         : null;
     })
     .filter((x): x is NonNullable<typeof x> => !!x);
+  // Only the promoted nodes this caller can open count, and only they are
+  // named: a steward who reads the channel but not the decisions folder
+  // learns nothing about it here.
+  const parsed = await filterAccessible(nestId, caller.userId, caller.userEmail, candidates);
   if (parsed.length === 0) return [];
   const threadIds = [...new Set(parsed.map((p) => p.threadId))];
   const threads = (await db.all(
@@ -131,8 +138,8 @@ async function knownHandles(nestId: string): Promise<Set<string>> {
   const hootie = await getDb().get("SELECT 1 AS ok FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId]);
   if (hootie) known.add(HOOTIE_HANDLE);
   for (const a of await listAgents(nestId)) {
-    const m = /^nodes\/agents\/(.+)$/.exec(a.node_id);
-    if (m) known.add(m[1]);
+    const h = watcherHandleOf(a.node_id);
+    if (h) known.add(h);
   }
   return known;
 }
@@ -170,7 +177,9 @@ export async function computeRecommendations(caller: HireCaller, channels: Chann
   const nestId = caller.nestId;
   const now = Date.now();
   const access = await resolveNestAccess(nestId, caller.userId);
-  const adminLike = config.AUTH_MODE === "open" || access.rawPermission === "owner" || access.rawPermission === "admin";
+  // A named system key never reads the admin surfaces (delivery outcomes,
+  // other people's keys), whatever its collaborator standing.
+  const adminLike = !(await isSystemUser(caller.userId)) && (config.AUTH_MODE === "open" || access.rawPermission === "owner" || access.rawPermission === "admin");
   const dismissed = await dismissedIds(caller);
   const hootieHired = !!(await getDb().get("SELECT 1 AS ok FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId]));
 
@@ -179,7 +188,7 @@ export async function computeRecommendations(caller: HireCaller, channels: Chann
     const q = ruleUnansweredQuestions(await questionThreads(nestId, channels), { now, nestId, hootieHired });
     if (q) out.push(q);
   }
-  out.push(...rulePromoteHotspots(await promotes(nestId, channels), { now, nestId, watched: await watchedChannels(nestId) }));
+  out.push(...rulePromoteHotspots(await promotes(caller, channels), { now, nestId, watched: await watchedChannels(nestId) }));
   out.push(...ruleUnmatchedMentions(await unmatchedMentions(nestId, channels), { nestId, known: await knownHandles(nestId) }));
   if (adminLike) out.push(...ruleFailingWebhooks(await webhookHealth(nestId), { nestId }));
   const keys = (await keyAgentRows(nestId)).filter((k) => adminLike || k.user_id === caller.userId);
@@ -196,12 +205,20 @@ export async function recommendationCountsForChannels(caller: HireCaller, channe
   return counts;
 }
 
-export async function listRecommendations(caller: HireCaller): Promise<{ recommendations: Recommendation[] }> {
-  await memberAccess(caller);
-  // Loaded on use: channel-service imports this module for the badge.
+const SYSTEM_DENIED = "A system key can't manage this nest's people, settings, publishing, keys or automation.";
+
+async function readableChannels(caller: HireCaller): Promise<ChannelRef[]> {
+  // Loaded on use: channel-service imports this module for the badge. The
+  // list is read without its badge — this IS the computation.
   const { listChannels } = await import("../channels/channel-service.js");
-  const { channels } = await listChannels(caller);
-  return { recommendations: await computeRecommendations(caller, channels.map((c) => ({ id: c.id, name: channelNameOf(c.id) ?? c.name }))) };
+  const { channels } = await listChannels(caller, { recommendations: false });
+  return channels.map((c) => ({ id: c.id, name: channelNameOf(c.id) ?? c.name }));
+}
+
+export async function listRecommendations(caller: HireCaller): Promise<{ recommendations: Recommendation[] }> {
+  if (await isSystemUser(caller.userId)) throw new ForbiddenError(SYSTEM_DENIED);
+  await memberAccess(caller);
+  return { recommendations: await computeRecommendations(caller, await readableChannels(caller)) };
 }
 
 export function parseRecommendationId(raw: unknown): string {
@@ -212,7 +229,12 @@ export function parseRecommendationId(raw: unknown): string {
 
 export async function dismissRecommendation(caller: HireCaller, rawId: unknown): Promise<{ dismissed: string }> {
   const id = parseRecommendationId(rawId);
+  if (await isSystemUser(caller.userId)) throw new ForbiddenError(SYSTEM_DENIED);
   await memberAccess(caller);
+  // Only what is actually recommended to this caller right now: the mark
+  // store can't be filled with ids nobody was shown.
+  const current = await computeRecommendations(caller, await readableChannels(caller));
+  if (!current.some((r) => r.id === id)) throw new NotFoundError("That is not a recommendation made to you right now.");
   await getDb().run(
     `INSERT INTO stream_marks (user_id, nest_id, kind, ref, subject, at) VALUES (?, ?, ?, ?, '', ?)
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,

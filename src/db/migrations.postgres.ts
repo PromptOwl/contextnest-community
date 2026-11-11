@@ -1418,8 +1418,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
   `);
 
-  // Migration 092 parity: hired agents (PO-1201) — the one row a hired Hootie
-  // has; every other hire is derived from the existing tables.
+  // Migration 092 parity: hired agents (PO-1201) — the row a hired Hootie
+  // has, and a key agent's marker (ref = its api_keys id); every other hire
+  // is derived from the existing tables.
   await db.exec(`
     CREATE TABLE IF NOT EXISTS hired_agents (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -1427,6 +1428,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       handle TEXT NOT NULL,
       hired_by TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      ref TEXT,
       PRIMARY KEY (nest_id, kind, handle)
     );
   `);
