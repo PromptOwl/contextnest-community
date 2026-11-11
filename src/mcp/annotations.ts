@@ -55,6 +55,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_export: read("Export whole nest", "Returns the readable documents as one text; it sends nothing anywhere."),
   context_comments: read("Read comments", "Returns a document's comment threads."),
   context_channel_read: read("Read channel", "Returns a channel's posts or one thread."),
+  context_decisions: read("View decision ledger", "Returns the decisions promoted or remembered from conversations."),
+  context_channel_knowledge: read("View channel knowledge", "Returns the nodes a channel produced and their review status."),
   context_relations: read("List task relations", "Returns a task's relations."),
   context_boards: read("List boards", "Lists saved boards."),
   context_board_items: read("List board items", "Returns a board's items."),
@@ -82,6 +84,9 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Comments and relations ─────────────────────────────────────────────
   context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
   context_agent_webhooks: overwriteOutside("Manage agent webhooks", "Lists, sets or removes where an agent's @mentions are POSTed; set replaces a target and the server then sends events to that outside URL."),
+  context_remember: addOutside("Remember as node", "Creates a node from a message or thread as your own draft (review queue on a governed nest) and replies in the thread. On a nest with a docs site, a published one can change a public page."),
+  context_correct: overwriteOutside("Propose a correction", "Drafts a new version of a node with a correction block and submits it for review; replies in the thread. Where your own edit would publish, this publishes."),
+  context_channel_watch: overwriteOutside("Watch channel", "Saves which metacognition agent watches a channel and runs it; the agent then proposes drafts for review from the conversation (it never posts)."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),

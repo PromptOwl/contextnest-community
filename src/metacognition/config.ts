@@ -52,6 +52,40 @@ export interface MetacognitionConfig {
   model: string | null;
   /** Who the agent may notify, and how. Empty recipients = notify is off. */
   notify: NotifyConfig;
+  /**
+   * Channels this agent watches (team chat C6, PO-1199): the channel
+   * trigger of the same agent, set through PUT /channels/:name/watch. At
+   * most one agent watches a channel. Absent = none.
+   */
+  channels?: ChannelWatchConfig[];
+}
+
+export interface ChannelWatchConfig {
+  /** The channel's name ("ops"). */
+  channel: string;
+  enabled: boolean;
+  /** quiet: run after a quiet window with no new message; asks: only on "@nest remember this". */
+  mode: "quiet" | "asks";
+  quiet_minutes: number;
+}
+
+export const CHANNEL_WATCH_MODES = ["quiet", "asks"] as const;
+export const QUIET_MINUTES = { min: 1, max: 1440, default: 10 } as const;
+/** Most channels one agent watches. */
+export const MAX_WATCHED_CHANNELS = 50;
+
+/** One channel watch entry, or a ValidationError. */
+export function parseChannelWatch(raw: unknown, label = "channels[]"): ChannelWatchConfig {
+  const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  if (typeof b.channel !== "string" || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(b.channel)) throw new ValidationError(`${label}.channel must be a channel name`);
+  if (b.enabled !== undefined && typeof b.enabled !== "boolean") throw new ValidationError(`${label}.enabled must be true or false`);
+  const mode = b.mode === undefined ? "quiet" : b.mode;
+  if (!(CHANNEL_WATCH_MODES as readonly unknown[]).includes(mode)) throw new ValidationError(`${label}.mode must be "quiet" or "asks"`);
+  const q = b.quiet_minutes === undefined || b.quiet_minutes === null ? QUIET_MINUTES.default : Number(b.quiet_minutes);
+  if (!Number.isInteger(q) || q < QUIET_MINUTES.min || q > QUIET_MINUTES.max) {
+    throw new ValidationError(`${label}.quiet_minutes must be a whole number from ${QUIET_MINUTES.min} to ${QUIET_MINUTES.max}`);
+  }
+  return { channel: b.channel, enabled: b.enabled !== false, mode: mode as "quiet" | "asks", quiet_minutes: q };
 }
 
 /**
@@ -299,6 +333,16 @@ export function parseConfig(input: unknown, opts: { members?: Set<string> } = {}
             return m;
           })(),
     notify: parseNotify(b.notify, opts.members),
+    ...(Array.isArray(b.channels) && b.channels.length
+      ? {
+          channels: (() => {
+            if (b.channels.length > MAX_WATCHED_CHANNELS) throw new ValidationError(`channels: at most ${MAX_WATCHED_CHANNELS}`);
+            const list = b.channels.map((c: unknown, i: number) => parseChannelWatch(c, `channels[${i}]`));
+            if (new Set(list.map((c) => c.channel)).size !== list.length) throw new ValidationError("channels: each channel once");
+            return list;
+          })(),
+        }
+      : {}),
   };
 }
 

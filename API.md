@@ -1424,7 +1424,7 @@ Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_
 - `POST` (write) body `{ type, node }` → `201 { relation, relations }`. `400` for a self-relation, an unknown type, or a cross-nest target (`contextnest://…` — edges carry one `nest_id`); `404` when either end doesn't exist in this nest or the caller can't read it; `409` for a duplicate (either direction for `relates_to`) or a `blocks` relation that would close a loop.
 - `DELETE` (write) → the fresh `GET` shape. `404` unless the relation touches `:nodeId`.
 
-Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
+The `GET` shape also carries `discussed_in` — the conversation threads that touched the node (team chat C6; see *Memory snowball* below). Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
 
 ---
 
@@ -3090,6 +3090,111 @@ Body: `{ "kind"?: "decision" | "task", "title"?: string, "summary"?: string, "fo
 **Promoting the same thread to the same kind again creates nothing**: it answers `200` with the node that exists, `"existing": true`, `reply.comment_id: null`, and posts no second reply (the `title` and `summary` sent are ignored). The other kind is a separate record. A channel post that has been promoted carries it in `promoted` on the timeline and thread reads.
 
 Needs read access to the thread's node (else `404`, the same as a thread that doesn't exist or is in another nest), write access to the nest (`403`; read collaborators and read-only keys can't), and on a channel the right to post there (`409` when archived). A different thread's node already has that title → `409`; bad `kind`, or a `title` / `summary` that isn't a string → `400`. MCP twin: `context_promote_thread` (`thread`, `kind`, `title`, `summary`, `folder`; write tier; `structuredContent` is the REST body).
+
+### Memory snowball — remember this, corrections, thread ↔ node relations, channel knowledge, channel watcher, decision ledger (team chat C6)
+
+Every conversation can grow the nest's memory, and only through the paths the nest already has: a person's own draft and the review queue (remember, correct), the metacognition agent's proposals-only path (the watcher), the relations store (thread ↔ node), and the governance display status (the views). Nothing here writes as anyone but a person, except the metacognition persona, which only proposes drafts. No new tables.
+
+What follows the channels switch: the knowledge view, `knowledge_count` / `watched`, and the watcher (`404` while `EXPERIMENTAL_AGENT_STREAM` is off, like every `/channels` route and tool). Remember, correct and the ledger are not behind it — a document comment thread can be remembered like it can be promoted.
+
+#### Remember this — `POST /nests/:nestId/threads/:threadId/remember`
+
+Body: `{ "message_id"?: string, "kind"?: "note" | "decision" | "task" | "fact", "title"?: string, "summary"?: string, "folder"?: string }` → `201`:
+
+```json
+{ "node": { "id": "nodes/facts/api-rate-limit", "title": "API rate limit", "type": "document", "status": "pending_review", "version": 1,
+            "url": "/nest/<id>?doc=…", "review": { "id": "…" } },
+  "kind": "fact",
+  "source_thread": { "node_id": "nodes/channels/ops", "thread_id": "…" },
+  "source_message_id": "…",
+  "proposer": { "human": "Alice Example", "agent": null, "label": "Alice Example" },
+  "reply": { "thread_id": "…", "comment_id": "…" },
+  "existing": false }
+```
+
+One message (`message_id`, which must be in that thread, else `404`) or the whole thread becomes a node **the way the caller's own `POST /nodes` would land**: on a governed nest a draft, then submitted for review by the caller (`status: "pending_review"`, `review.id` the request in `GET /review-queue`); on an ungoverned nest, or with a self-approve bypass, published (`status: "published"`, `review: null`). No rule of its own: `createNode` decides. `kind` picks the folder and tag — `note` → `nodes/notes/`, `decision` → `nodes/decisions/` tagged `#decision`, `task` → a `task` node under `nodes/tasks/` (the task rules apply), `fact` → `nodes/facts/` tagged `#fact`; `folder` overrides the folder. `title` (≤200) as given, else derived from the source's first line (≤80, as promote does); `summary` (≤1,000) sits above the quoted source. The body names the node the thread lives on, who remembered it, then `## Source` quoting the message(s) with display names and readable times — the thread id is never body text. `source_thread` is stored as for promote; the thread gets a reply from the caller linking `[[<node id>]]` (a resolved thread stays resolved; the reply notifies nobody and wakes no agent).
+
+**Idempotent per (thread, message, kind)**: the same call again answers `200` with the node that exists, `"existing": true`, `reply.comment_id: null`, nothing created. A different message of the thread, or a different kind, is a new record.
+
+**Attribution** is the caller, a person. A caller that declared an agent (`client.agent` in the body, or the MCP handshake's client name — an API key's label alone is not an agent, the message-row rule) creates the node and the review request under the person's login, with the agent recorded as proposer: `proposer` reads `{ "human": "Alice Example", "agent": "grok", "label": "grok, on behalf of Alice Example" }`, and the body and the reply carry that label. Needs the thread's node to be readable (`404` otherwise, the same as a thread that doesn't exist or is in another nest), the nest not archived (`403`), write access to the nest, and on a channel the right to post there (`409` archived). A member without write access gets `403` with the line *"This needs write access to the nest. Ask a writer to do it, or @mention one in the thread so they can."* (the route is admitted at read tier for that reason; the service holds the gate). A non-member → `404`. Bad `kind`, a non-string `title` / `summary` / `folder` / `message_id` → `400`.
+
+MCP twin: `context_remember` (`thread`, `message_id`, `kind`, `title`, `summary`, `folder`; write tier; `structuredContent` is the REST body).
+
+#### Corrections — `POST /nests/:nestId/threads/:threadId/correct`
+
+Body: `{ "message_id": string, "node_id": string, "replacement"?: string, "note"?: string }` → `201 { node, source_thread, source_message_id, proposer, reply, existing: false }` (`node` as above, `node.id` = the corrected node, `node.version` the new draft's).
+
+A member marks a message as a correction of a node, and the server makes the edit proposal **a person's own edit would**: `updateNode` as the caller — a new draft version on a governed nest, then submitted for review by them; published where their own `PATCH` publishes. The draft body is the node's current body with the correction appended as a marked block:
+
+```
+## Correction from #ops (10 Nov 2026), by Alice Example
+
+> **Alice Example** · 10 Nov 2026, 11:03 UTC
+> Actually we launch on Tuesday, not Monday.
+```
+
+With `replacement` (≤500,000 characters) the draft body is the replacement text followed by the heading and a line naming the source. `note` (≤2,000) goes into the change note and the review request. The approved text is untouched until a reviewer approves. The thread gets a reply from the caller linking the node; the relation thread → node is recorded (kind `corrected`, below).
+
+Needs edit access to the node (`canUserEdit`, the `context_update` rule; a member without it gets `403` with the ask-a-writer line), a readable node (`404` otherwise, the same for a node in another nest or none), a message in that thread (`404`), the nest not archived (`403`), and on a channel the right to post (`409` archived). A node with a review already pending is locked, as it is for any edit: `409`; so is a node whose working copy is someone else's unsaved draft (`409`, "has a draft someone else is working on") — a correction never folds another person's draft in under the caller's name, and the write checks the head it read inside the node's lock, so a save landing in between is refused rather than overwritten. The caller's own draft is continued, as their `PATCH` would. The thread's own node can't be corrected from it (`400`). The same message against the same node again answers `200 { "existing": true }` with the node's current head and no second draft. MCP twin: `context_correct` (`thread`, `message_id`, `node_id`, `replacement`, `note`; write tier).
+
+#### Thread ↔ node relations — `discussed_in` and `related_nodes`
+
+A thread is related to a node automatically, in the relations store (`edges`, reserved type `task:discussed-in`: `node —discussed-in→ <the node the thread lives on>`, the thread and the rest in the edge's metadata) whenever:
+
+| kind | when |
+|---|---|
+| `mentioned` | a message names the node — a `[[wikilink]]`, a document link or a node URL, exactly the links artifact cards resolve; resolved **for the author**, so a link they can't read, a link into another nest, a link to nothing and a link inside a code span record nothing. Once per (thread, node). |
+| `promoted` | the thread was promoted to the node (`memory_kind` `decision` / `task`) |
+| `remembered` | a message or the thread was remembered as the node (`memory_kind` `note` / `decision` / `task` / `fact`, `message_id` the message or null) |
+| `corrected` | a message of the thread was marked as a correction of the node |
+| `proposed` | the channel watcher proposed the node or an edit to it (`proposer` the persona) |
+| `linked` | the channel watcher suggested the thread is about the node (a link, no content; at most 3 per run; never counted as something the channel produced) |
+
+`GET /nests/:nestId/nodes/:nodeId/relations` (and `context_relations`) gains `discussed_in`: `[{ id, thread_id, node_id, channel, kind, memory_kind, message_id, created_by, proposer, created_at, excerpt }]` — newest first, at most 50, **only threads on a node the caller can open** (so a visibility-only reader of a public nest, who may never read a channel, sees none); `channel` is the channel's name or `null` for a document thread; `excerpt` the thread's first line (≤160). The task-relation views (`relations`, `hidden`, `open_blockers`) leave this type out. A channel post (timeline and thread reads, REST and `context_channel_read`) and the thread object gain `related_nodes`: `[{ node_id, title, type, kind, memory_kind, proposer, created_at }]`, one per (node, kind), at most 50, **only nodes the reader can open** (the listing gate) — a node they can't read is left out, never named. These edges are purged with the node and follow a move, like every relation; `DELETE …/relations/:id` removes one like any other.
+
+#### Channel knowledge — `GET /nests/:nestId/channels/:name/knowledge`
+
+What a channel taught the nest, for a member (`404` otherwise and for an unknown channel):
+
+```json
+{ "channel": { … },
+  "nodes": [{ "node_id": "nodes/decisions/use-8px-spacing", "title": "Use 8px spacing", "type": "document", "status": "draft",
+              "kind": "promoted", "memory_kind": "decision", "thread_id": "…", "message_id": null,
+              "by": "alice@acme.com", "by_name": "Alice Example", "proposer": "Alice Example", "at": "2026-11-10T11:03:12.000Z", "url": "/nest/<id>?doc=…" }],
+  "open_proposals": [{ "review_id": "…", "node_id": "…", "title": "…", "requested_by": "alice@acme.com", "requested_at": "…", "note": "…" }],
+  "counts": { "total": 3, "pending_review": 2, "draft": 1 } }
+```
+
+A query, not a store: the `discussed-in` edges of kinds `promoted`, `remembered`, `corrected`, `proposed` on the channel node, plus nodes carrying `source_thread` on this channel (promotions older than the edge). `status` is the governance display status (`draft`, `pending_review`, `approved`, `published`, `rejected`); `open_proposals` the pending review requests on those nodes; `counts` by distinct node and status. Only nodes the caller can read. `GET /channels` carries `knowledge_count` (distinct readable produced nodes) and `watched` on every channel. MCP twin: `context_channel_knowledge` (`channel`; read tier).
+
+#### Channel watcher — `/nests/:nestId/channels/:name/watch` (`FEATURE_METACOGNITION` + `FEATURE_WORKFLOW_PLANE`)
+
+The nest's **existing metacognition agent** with a channel trigger — the same persona, config, scope, caps, model key and proposals-only path (`PUT /metacognition/:node`; the agent's `config` gains `channels: [{ channel, enabled, mode, quiet_minutes }]`, kept across settings saves). It proposes drafts for review in the persona's name; it never posts in the channel and never publishes.
+
+- **PUT** `{ "enabled"?: true, "mode"?: "quiet" | "asks", "quiet_minutes"?: 1–1440 (default 10), "agent"?: "<agent node id>" }` → `{ "watch" }` (nest owner or admin, `403` otherwise; named system keys refused). `agent` is needed only when the nest has more than one agent (`400` says so; `400` for a node that isn't a metacognition agent, a bad mode or a non-integer window). One agent watches a channel: naming another moves the watch. The setting saves whether or not it can run: `active` and `inactive_reason` say — the watch is off, the agent is switched off, its owner lost write access, or **no model key** (add one under Settings or the nest's env). `{ "enabled": false }` keeps the setting and stops runs.
+- **GET** → `{ "watch": { "channel", "channel_id", "enabled", "mode", "quiet_minutes", "agent": { "node_id", "name" }, "active", "inactive_reason", "last_run": { "at", "trigger": "quiet" | "ask" | "manual", "ran", "verdict", "reason", "proposals", "relations", "refused", "messages" } | null } | null }` (members). The owner and admins see the full `inactive_reason` (the key state, the configuring person's standing); a member sees only that it can't run right now and who can see why.
+- **POST** `…/watch/run` → `{ "result": { "ran", "trigger": "manual", "reason", "verdict", "proposals": [{ "kind": "new" | "edit", "node_id", "review_id" }], "relations", "refused", "messages", "run_id" } }` (owner/admin): run it now over everything since the cursor.
+
+**Trigger, not polling.** A member's message in a watched channel either carries an ask — `@nest remember this`, `@hootie remember`, `@<persona> remember` — and starts a run over that thread at once, or (quiet mode) restarts the channel's quiet window; when `quiet_minutes` pass with no newer message, one run over everything since the cursor, in a batch of at most 50 messages (4,000 characters each). Asks mode never runs on silence. A quiet or manual run that ends in a verdict moves the cursor; a silent one does not (a short message waits for company), and an ask run, which read one thread, leaves it for the next quiet run.
+
+**Judgement, in order.** R1 nothing new → `no_new_messages`. R2 asks mode and no ask → `no_ask`. R3 under 80 meaningful characters in the batch (emoji, links and punctuation don't count) → `too_short` (an ask bypasses it). R4 past the agent's hourly start cap (`METACOGNITION_STARTS_PER_HOUR`, one budget for every way the agent starts; silent runs don't count) → `rate_limited`. R5 the model: one bounded judge call on the metacognition model path (`createTurn`, the nest's credential, temperature 0, ≤4 turns, ≤3 read tools per turn, read results capped, the agent's read scope enforced by the same tools as any run) ending in `submit_channel_verdict { verdict: "no_op" | "propose", reason, items }`. The prompt says to stay silent on chatter, questions, opinions nobody agreed with, things on record and anything sensitive. The verdict is validated field by field (a malformed one is `error_schema`, nothing written); each item must name a document inside the agent's propose scope, an existing document for an edit or relation, and message ids from the batch; an item that doesn't is counted in `refused`. Every run — silent after R3 included — is a `runs` row (`triggered_by: "channel:<name>"`, trace with counts, codes, usage and cost estimate; never message text), shown as `last_run`.
+
+**Chat is untrusted data.** Messages reach the model inside `<untrusted_channel_<12 random hex>>` with angle brackets neutralised, author names as display names, synthetic ids (`m1`, `m2` …) and no thread ids, after a line telling the model not to follow instructions in them; read-tool results are fenced by the tools themselves. The model's text lands only as a draft under review requested by the persona (`…@agents.invalid`): an edit through `proposeEditDraft` (a node with a pending review or someone's draft is refused), a new document through `proposeNewDraft` whose body ends with *"Proposed by <persona> from a conversation in [[nodes/channels/<name>]]; a reviewer approves it."*, the reviewer note prefixed *"From #<name> (channel watcher)"*. A relation item records a `linked` edge (no text; the node must exist in its read scope and not be a hidden chat draft; at most 3 per run). Every run records its steps like any metacognition run, so the review requests point back at it. Nothing is posted in the channel, nobody is notified, no agent is woken.
+
+MCP twin: `context_channel_watch` — `action: "get"` (default; members), `"set"` (`enabled`, `mode`, `quiet_minutes`, `agent`), `"run"`; an admin tool (advertised to the nest's owner and admins). Off while `FEATURE_METACOGNITION` is off (`404`), like every metacognition route.
+
+#### Decision ledger — `GET /nests/:nestId/decisions`
+
+`?limit=` (≤200, default 50), `?offset=` → for a member (`404` otherwise):
+
+```json
+{ "decisions": [{ "node_id": "nodes/decisions/no-friday-deploys", "title": "No Friday deploys", "status": "pending_review", "kind": "remembered",
+                  "decided_by": "owner@acme.com", "decided_by_name": "Owner", "proposer": "Owner", "decided_at": "…",
+                  "source_thread": { "node_id": "nodes/channels/ops", "thread_id": "…", "channel": "ops" }, "url": "/nest/<id>?doc=…" }],
+  "pagination": { "total": 2, "limit": 50, "offset": 0, "has_more": false } }
+```
+
+A view over existing nodes: every node carrying `source_thread` and the `#decision` tag (promote and remember both set both), newest first by when it was decided — the `promoted` / `remembered` edge's time and person (the login the write is attributed to; `proposer` the label, an agent on behalf of a person where one was declared), or the node's first version for promotions older than the edge. Only nodes the caller can read; `source_thread` is `null` when the caller can't open the thread's node. There was no decisions board or view to reuse. MCP twin: `context_decisions` (`limit`, `offset`; read tier).
 
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
