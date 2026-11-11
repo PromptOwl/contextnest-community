@@ -78,7 +78,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 103;
+//   103->106 team chat C7 (PO-1198, src/mcp/agent-tools.ts): context_ask_nest, context_agents, context_handoff —
+//   twins of POST /nests/:id/ask, /agents, /threads/:id/handoff + /handoffs/:id/{accept,done}; Community-only
+//   (the comment-thread store, agent webhooks, Hootie) and experimental (EXPERIMENTAL_AGENT_STREAM), so the engine
+//   has no operation to import a descriptor from. Proposals ride the existing context_approve / context_reject.
+const BASELINE = 106;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

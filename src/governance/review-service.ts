@@ -647,7 +647,9 @@ async function notifyApproved(p: {
   );
 
   // Email the submitter their verdict, unless they approved it themselves.
-  if (p.pending.requested_by?.toLowerCase() !== p.approvedBy.toLowerCase()) {
+  // …and only a submitter with an address: an agent (hootie, team chat C7)
+  // submits under its handle.
+  if (p.pending.requested_by?.includes("@") && p.pending.requested_by.toLowerCase() !== p.approvedBy.toLowerCase()) {
     void sendEmailToRecipient(p.pending.requested_by, {
       status: "approved",
       docTitle: ctx.docTitle,
@@ -738,7 +740,7 @@ export async function reject(params: {
   );
 
   // Email the submitter their verdict, unless they rejected it themselves.
-  if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
+  if (pending.requested_by?.includes("@") && pending.requested_by.toLowerCase() !== params.rejectedBy.toLowerCase()) {
     void sendEmailToRecipient(pending.requested_by, {
       status: "rejected",
       docTitle: rejectCtx.docTitle,

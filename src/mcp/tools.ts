@@ -140,6 +140,8 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isAgentTool, runAgentTool } from "./agent-tools.js";
+import { dropReservedAgent } from "../agents/reserved.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -488,6 +490,9 @@ export const MCP_READ_TOOLS = new Set<string>([
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
   "context_channels",
+  // Agent profiles (team chat C7): a read; setting a description is refused
+  // for a read-only key inside the tool.
+  "context_agents",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -2007,7 +2012,10 @@ export async function handleToolCall(
   // never a partial write.
   let client: ClientMetadata | undefined;
   try {
-    client = mergeClient(ctx.client, parseClientMetadata(args.client));
+    // The caller's own `client` may not claim a reserved agent handle (team
+    // chat C7); the transport's part was cleaned by attributeRequest, and a
+    // server-internal caller (Hootie's reads) keeps its own attribution.
+    client = mergeClient(ctx.client, dropReservedAgent(parseClientMetadata(args.client)));
   } catch (err) {
     void logTraceEvent({
       kind: "mcp",
@@ -5030,6 +5038,11 @@ async function runTool(
       // Promote a thread (PO-1181): always registered (mcp/routes.ts).
       if (isStreamTool(toolName)) {
         return runStreamTool(toolName, args, ctx);
+      }
+      // The nest in the conversation (team chat C7): registered with the
+      // channel tools (mcp/routes.ts); runAgentTool re-checks the switch.
+      if (isAgentTool(toolName)) {
+        return runAgentTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

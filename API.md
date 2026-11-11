@@ -2479,6 +2479,8 @@ Response: `text/event-stream`.
 
 **Grounding.** The retrieved documents are placed in the system prompt with the instruction to answer from them alone — verbatim, except that an HTML page (a `type: artifact` document, or a body that starts with `<!doctype`/`<html>`) is reduced to its visible text first: script, style, template and noscript content, comments and tags are dropped, entities decoded and whitespace collapsed. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
 
+**In a conversation.** With channels on, `@hootie` in a channel thread runs this same turn as the asker and answers in the thread as a message from Hootie — see "The nest in the conversation" under Admin / operator.
+
 **Mentions.** A message naming people (`@alice@acme.com`) posts the exchange — question and answer, under the asker's name — as a comment on the anchor document (the open one, else the first document the answer cites) and notifies them through the comment-mention path: inbox row, and email / Slack / Teams where configured. `mention` is `{ status: "posted", node_id, node_title, thread_id, notified }` or `{ status: "undeliverable", reason: "no_anchor" | "post_failed" }`. Nothing is posted when nobody is named.
 
 ### POST `/nests/:nestId/query`
@@ -3090,6 +3092,76 @@ Body: `{ "kind"?: "decision" | "task", "title"?: string, "summary"?: string, "fo
 **Promoting the same thread to the same kind again creates nothing**: it answers `200` with the node that exists, `"existing": true`, `reply.comment_id: null`, and posts no second reply (the `title` and `summary` sent are ignored). The other kind is a separate record. A channel post that has been promoted carries it in `promoted` on the timeline and thread reads.
 
 Needs read access to the thread's node (else `404`, the same as a thread that doesn't exist or is in another nest), write access to the nest (`403`; read collaborators and read-only keys can't), and on a channel the right to post there (`409` when archived). A different thread's node already has that title → `409`; bad `kind`, or a `title` / `summary` that isn't a string → `400`. MCP twin: `context_promote_thread` (`thread`, `kind`, `title`, `summary`, `folder`; write tier; `structuredContent` is the REST body).
+
+### The nest in the conversation — ask, proposal cards, agent profiles, handoffs (team chat C7, `EXPERIMENTAL_AGENT_STREAM`)
+
+Behind the channels switch like the channel routes (`404` for everyone while it is off; the MCP tools are not listed). Members only: every route answers `404` to a caller who is not a person added to the nest, the same as for a thread or channel they can't read.
+
+#### Hootie as a member — `@hootie` in a thread, `POST /nests/:nestId/ask`
+
+With `HOOTIE_ENABLED` on and a model credential configured (as for `POST /chat`), a member's channel post or reply that mentions `@hootie` (or `@nest`) runs **one Hootie turn as that person** — the same retrieval, read tools, citations and budget as the panel (`/chat`), so the answer can only draw on, and cite, what the asker may read — and posts the answer into the thread as a message **authored `hootie`**:
+
+```json
+{ "id": "…", "author": "hootie", "author_name": "Hootie",
+  "actor": { "human": "Alice Example", "agent": "hootie", "label": "Hootie, for Alice Example" },
+  "body": "We decided on three tiers … [[Pricing plan]]", "created_at": "…", "cards": [ … ], "mentions": [],
+  "model_answer": true, "asked_by": "alice@acme.com",
+  "citations": [{ "id": "nodes/pricing-plan", "title": "Pricing plan" }] }
+```
+
+`model_answer: true` marks model text: a client renders it with the untrusted-text renderer (links as text, never fetched) and shows a citation chip only for an id in `citations` — the nodes the server resolved from what it retrieved for the asker. The body is already inert (URLs replaced by `[link removed]`, markdown link syntax escaped, `[[wiki links]]` kept, cut at 4,000 characters). The thread's earlier messages (the newest 30, each cut to 1,000 characters, 8,000 in all) are given to the model only inside the turn's random data fence, marked as quoted, untrusted text; an instruction written in a message is not followed, and a document named in one is not readable unless the turn retrieved it. The answer is attributed to the agent, never to a person: it fans out to nobody (no notification, no mention row, no wake-up, no further Hootie turn), and an `@name` inside it is not a mention (`mentions: []`). `@hootie` is answered only for a message a **person** posted (a message a declared agent wrote — `client.agent` — does not trigger it: an agent asks through `context_ask_nest` and gets the answer itself); model text never triggers it. Rate-limited per asker with the Hootie chat budget (30 questions per 5 minutes across nests), and at most 4 turns in flight per nest (16 server-wide); over either, the model failing, the question missing or over 4,000 characters, the reply is a short `hootie` message `I couldn't answer: <reason>` rather than silence. Nothing is posted when `HOOTIE_ENABLED` is off, no credential is configured, or the asker was removed from the nest while the model answered. The asker's own post is accepted (`201`) whatever Hootie does; the answer arrives in the thread a moment later (poll `?since=`).
+
+**POST** `/nests/:nestId/ask` `{ "question", "thread"? | "channel"?, "post"?: false }` → `200`:
+
+```json
+{ "answer": "…", "cited": [{ "id", "title" }],
+  "proposals": [{ "kind": "create_node", "node_id": "nodes/tasks/follow-up-with-acme", "version": 1, "review_id": "…", "title": "Follow up with Acme",
+                  "preview": "Create task \"Follow up with Acme\" in nodes/tasks:\nCall Acme …", "status": "pending", "reason": null, "message_id": "…" }],
+  "posted": { "node_id": "nodes/channels/ops", "channel": "ops", "thread_id": "…", "message_id": "…", "proposal_message_ids": ["…"] } | null,
+  "trail": { "searches": 0, "reads": 1, "stopped": false } }
+```
+
+The same turn, on demand: `thread` (a post id; its channel must be readable) or `channel` (a name). Without `post`, nothing is posted and nothing is filed — `proposals` lists what would be proposed with `status: "unfiled"`. With `post: true` the answer is posted as above (a reply in the thread, or a new post in the channel), for the caller, and each proposal is filed and carded. `404` switch or Hootie off, not a member, unreadable place; `503 { reason: "no_api_key" }` no credential; `429` over budget or too many turns in flight; `400` no question (≤4,000 characters); with `post: true`, the channel posting rule (`409` archived, `403` not a member). Unlike `/chat`, an API key or MCP agent may ask here — the answer is attributed to Hootie, never posted in a person's name. Admitted at read tier (a read-only collaborator may); a read-only API key is refused (`403`: it spends model credits, as `/chat`). MCP twin: `context_ask_nest` (`question`, `thread` | `channel`, `post`; `structuredContent` is this body; a read-only key can't call it).
+
+**Proposal cards.** Hootie never writes. When the model wants to create a document or task, or add to a document, it calls a `propose_create_node` / `propose_edit_node` tool that only records the proposal (bounded input; a document may be named only by an id or exact title the turn was handed); at most 5 per turn. A proposal is filed on the **asker's standing**: a draft under review locks the document and pages its reviewers, so someone who could not create in the nest, or edit that document, themselves gets a card that says so (`status: "failed"`) rather than a draft. Otherwise each proposal is filed **the way this server already files a write that waits on a person**: a draft **authored `hootie`**, never published (`alwaysDraft`), submitted to the review queue — `createNode` for a new node (with `source_thread` and a first line naming the thread and the asker), `updateNode` appending to an existing one (refused, like a metacognition agent's proposal, when the document has a pending review or someone's unsealed draft) — and a card is posted in the thread, a `hootie` message with `model_answer: true` and:
+
+```json
+"proposal": { "kind": "create_node" | "edit_node", "node_id": "…", "version": 2, "review_id": "…", "title": "…", "preview": "…",
+              "status": "pending" | "approved" | "rejected" | "cancelled" | "failed", "reason": null, "decided_by": null, "decided_at": null }
+```
+
+`status`, `decided_by` and `decided_at` are read **live** from the review request on every thread read, so the card follows the decision. A reviewer decides it with the ordinary review routes — `POST /nests/:id/nodes/<node_id>/approve` · `/reject` (MCP `context_approve` / `context_reject`), the review queue lists it under `requestedBy: "hootie"` — and the approval publishes it as the approver's own decision. A proposal that could not be filed (the asker couldn't write it, a locked document, a conflict, the `channels` folder) is still a card, `status: "failed"` with a fixed `reason`. There is no separate proposal store or route: the review request is the record.
+
+#### Agent profiles — `GET /nests/:nestId/agents`, `GET|PATCH /nests/:nestId/agents/:handle`
+
+A profile is a query over what the server already keeps: the handles the nest knows (`/agent-handles`), the webhook map, message attribution in channels, the review queue and node versions — plus one stored field, the description.
+
+**GET** `/nests/:nestId/agents` → `{ "agents": [{ "handle": "grok", "name": "grok", "kind": "webhook" | "key" | "hootie", "owner": "olivia@acme.com" | null, "description": "…" | null, "last_seen_at": "2026-11-09 13:41:44.927" | null, "message_count": 12, "wake": { "wakeable": true, "last_delivery": { … } | null } }] }` — Hootie first (listed while `HOOTIE_ENABLED`; `owner: null`, never wakeable), then by handle. `kind` is `webhook` for a handle with a wake-up target (`owner` = who saved it), `key` for a declared `client.agent` seen on a channel message (`owner` = the person it last wrote on behalf of). `last_seen_at` is its newest channel message. `last_delivery` is the webhooks panel's object (status, reason, attempts, event), never the target.
+
+**GET** `/nests/:nestId/agents/:handle` → `{ "agent": { …the row above, "did": { "messages": [{ "id", "thread_id", "node_id", "channel", "created_at", "excerpt" }], "proposals": [{ "review_id", "node_id", "title", "version", "status", "requested_at" }], "promotes": [{ "id", "title" }] }, "knows": [{ "id", "title", "type", "status" }] } }`. `did.messages` are its last 20 channel messages, in channels the caller can read (excerpt ≤140 characters); `did.proposals` the review requests it filed; `did.promotes` the nodes it authored from a thread. `knows` is the nodes it authored (as the version author, or declared on the version's attribution) or proposed, at most 50, **only the ones the caller can read** (`filterAccessible`). Unknown handle → `404`.
+
+**PATCH** `/nests/:nestId/agents/:handle` `{ "description": "…" }` (nest owner or admin; `403` otherwise; ≤500 characters, empty clears) → `{ "agent" }`. Stored in `agent_profiles` (migration 091), the one table this feature adds.
+
+MCP twin: `context_agents` — no arguments → the list; `handle` → the profile; `handle` + `description` → set it (owner/admin). A read-only key may list and read.
+
+#### Handoffs — `POST /nests/:nestId/threads/:threadId/handoff`, `POST /nests/:nestId/handoffs/:messageId/accept` · `/done`
+
+A handoff is an **ordinary message** in the thread, by the caller, whose body mentions the target — `Handoff to @grok: Draft the renewal proposal.` — through the ordinary fan-out, so the target hears about it as about any mention: a person gets a My Work row and a notification, an agent with a webhook is woken (`agent.mention`), one without finds it in `context_my_work`. The message's stored attribution carries:
+
+```json
+"handoff": { "handoff_id": "<this message's id>", "from": "Alice Example", "from_email": "alice@acme.com", "to": "grok", "to_kind": "agent" | "person",
+             "note": "Draft the renewal proposal.", "status": "open" | "accepted" | "done", "updated_by": null, "updated_at": null }
+```
+
+**POST** `/nests/:nestId/threads/:threadId/handoff` `{ "to": "grok" | "alice@acme.com" | "Alice", "note"?: "…" }` → `201 { "handoff": { …above, "node_id", "channel", "thread_id", "created_at" }, "message": { "id", "thread_id" }, "mentions": [ … ] }` (`mentions` as a post returns them). `to` must be a person on the nest (name or email) or a known agent handle (`400` otherwise; a reserved handle is refused); `note` ≤1,000 characters. `from` is the caller's label (an agent "on behalf of" a person when it declared itself; a bare key label is not an agent). Members only, the channel posting rule (`403` not a member, `409` archived); a thread the caller can't read, or that is not in a channel, → `404`.
+
+**POST** `/nests/:nestId/handoffs/:messageId/accept` · `/done` `{ "note"? }` → `{ "handoff", "message" }`. Posts a reply by the caller (`Handoff accepted` / `Handoff done`, with the note) carrying `handoff_update: { handoff_id, status, note }`, and moves the original message's `handoff.status` (with `updated_by`, `updated_at`), so a thread read shows the current state on the handoff itself. `open → accepted → done`, or `open → done`; a second accept, or anything after done, → `409` (two concurrent accepts: exactly one wins). A message id that is not a handoff, another nest's, or one the caller can't read → the same `404`. Members only. No table: the message is the record.
+
+MCP twin: `context_handoff` — `action: "create"` (default; `thread`, `to`, `note`), `"accept"` / `"done"` (`message_id`, `note`); `structuredContent` is the REST body; a read-only key can't call it.
+
+#### Reserved handles
+
+`hootie`, `nest`, `channel`, `here` and `everyone` cannot be claimed: saving a webhook for one is `400` (REST and `context_agent_webhooks`), `/agent-handles` never lists one as a declared agent, and a message that declares one as `client.agent` is stored and shown as the person's own. Likewise the marks only the server writes into a message's attribution — `model_answer`, `for`, `citations`, `proposal`, `proposal_outcome`, `handoff`, `handoff_update` — are dropped from any caller-supplied `client` on every comment path (REST and MCP), so nobody can post text that renders as Hootie's answer, a proposal card or a handoff.
 
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.

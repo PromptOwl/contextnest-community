@@ -28,6 +28,8 @@ import { listNestPeople, findDirectoryPerson, type NestPerson } from "../nests/p
 import { extractMentions, resolveMention } from "../shared/mentions.js";
 import { deserializeClient, parseClientMetadata, type ClientMetadata } from "../shared/client-metadata.js";
 import { resolveActorLabel, type ActorLabel } from "./actor-label.js";
+import { HOOTIE_HANDLE, isReservedHandle, SERVER_CLIENT_KEYS } from "../agents/reserved.js";
+import { effectiveHootieBrand } from "../hootie/brand.js";
 
 // ─── Display names ──────────────────────────────────────────────────────
 
@@ -52,6 +54,19 @@ export async function namedActor(
   client: ClientMetadata | undefined,
   names: Map<string, string>,
 ): Promise<{ actor: ActorLabel; name: string }> {
+  // Hootie's answer in a thread (C7, src/agents/ask-nest.ts): authored by the
+  // agent, attributed to nobody's write — the person it answered FOR is named,
+  // not credited. Only the server sets `model_answer` (messageClient strips it
+  // from every caller-supplied client).
+  if ((client as Record<string, unknown> | undefined)?.model_answer === true) {
+    const asker = String((client as Record<string, unknown>).for ?? "");
+    const askerName = names.get(asker.toLowerCase()) ?? asker;
+    const brand = effectiveHootieBrand().name;
+    return {
+      actor: { human: askerName, agent: HOOTIE_HANDLE, label: `${brand}, for ${askerName}` },
+      name: brand,
+    };
+  }
   const actor = await resolveActorLabel({ email, client });
   const name = names.get(String(email ?? "").toLowerCase()) ?? email;
   // Only when the seam answered with the email: an identity layer that already
@@ -79,6 +94,7 @@ export function messageClient(
   supplied: unknown,
   keyLabel: string | null | undefined,
 ): ClientMetadata | undefined {
+  merged = callerSafeClient(merged);
   if (!merged?.agent || !keyLabel) return merged;
   let declared: string | undefined;
   try {
@@ -90,6 +106,25 @@ export function messageClient(
   if (!String(keyLabel).startsWith(merged.agent)) return merged; // the handshake's name, or the server's own
   const { agent, ...rest } = merged;
   return { ...rest, key_label: agent } as ClientMetadata;
+}
+
+/**
+ * What a CALLER may put in a message's stored attribution (C7, PO-1198): no
+ * key the server reserves for its own marks (`model_answer`, `proposal`,
+ * `handoff`, … — src/agents/reserved.ts), and no reserved agent handle. A
+ * person declaring `client.agent: "hootie"` is stored as themselves; a
+ * client carrying `model_answer: true` is stored without it. Nothing is
+ * refused: the message is theirs, only the claim is dropped.
+ */
+export function callerSafeClient(client: ClientMetadata | undefined): ClientMetadata | undefined {
+  if (!client) return client;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(client as Record<string, unknown>)) {
+    if (SERVER_CLIENT_KEYS.has(k)) continue;
+    if (k === "agent" && isReservedHandle(v)) continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length ? (out as ClientMetadata) : undefined;
 }
 
 /** The handles a message's writer answers to: the declared agent and the key
@@ -141,8 +176,11 @@ export async function knownAgents(nestId: string): Promise<KnownAgent[]> {
   const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
   for (const r of seen) {
     const h = normHandle(deserializeClient(r.client_json)?.agent);
-    if (AGENT_HANDLE_RE.test(h)) handles.add(h);
+    // A reserved handle is never an agent someone declared (C7): Hootie's own
+    // answers carry `agent: "hootie"` and are addressed through ask-nest.
+    if (AGENT_HANDLE_RE.test(h) && !isReservedHandle(h)) handles.add(h);
   }
+  for (const h of [...handles]) if (isReservedHandle(h)) handles.delete(h);
   const { agentWakeTarget } = await import("../stream/agent-wake.js");
   const list = [...handles].filter(Boolean).slice(0, MAX_KNOWN_AGENTS).sort();
   return Promise.all(list.map(async (handle) => ({ handle, wakeable: (await agentWakeTarget(nestId, handle)) !== null })));

@@ -16,6 +16,7 @@ import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
+import { agentRoutes } from "./agents/routes.js";
 import { buildMyWork, parseMyWorkPaging, parseMyWorkSections } from "./me/my-work.js";
 import { actingAgentHandle, markMentionDone } from "./mentions/mention-index.js";
 import { readClient } from "./shared/client-metadata.js";
@@ -2831,6 +2832,17 @@ export function createApp(): Hono<AuthEnv> {
     if ((parts[1] === "channels" || parts[1] === "agent-handles") && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
+    // The nest in the conversation (team chat C7, PO-1198): ask, agent
+    // profiles, handoffs — the same rule. Exact segments; `/threads/:id/promote`
+    // stays (it works on document threads too).
+    const isConversationRoute =
+      parts[1] === "ask" ||
+      parts[1] === "agents" ||
+      parts[1] === "handoffs" ||
+      (parts[1] === "threads" && parts.length === 4 && parts[3] === "handoff");
+    if (isConversationRoute && !config.EXPERIMENTAL_AGENT_STREAM) {
+      return c.json({ error: "Not found" }, 404);
+    }
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
@@ -3247,6 +3259,16 @@ export function createApp(): Hono<AuthEnv> {
     //   POST /nests/:id/channels/:name/read
     const isChannelReadMark =
       parts.length === 4 && parts[1] === "channels" && parts[3] === "read" && c.req.method === "POST";
+    // Asking the nest from a thread and handing a thread off (team chat C7,
+    // PO-1198) are member actions like posting: a read-only collaborator may.
+    // The handlers check membership and channel access; a read-only API key
+    // is already refused above (not a pure read). Exact segments.
+    //   POST /nests/:id/ask · /threads/:threadId/handoff · /handoffs/:id/{accept,done}
+    const isConversationMemberAction =
+      c.req.method === "POST" &&
+      ((parts.length === 2 && parts[1] === "ask") ||
+        (parts.length === 4 && parts[1] === "threads" && parts[3] === "handoff") ||
+        (parts.length === 4 && parts[1] === "handoffs" && (parts[3] === "accept" || parts[3] === "done")));
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3391,6 +3413,7 @@ export function createApp(): Hono<AuthEnv> {
       !isDocPinsPath &&
       !isAnnotationAction &&
       !isChannelReadMark &&
+      !isConversationMemberAction &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3749,6 +3772,9 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/cards", cardRoutes);
   nestsApp.route("/:nestId/agent-webhooks", agentWebhookRoutes);
   nestsApp.route("/:nestId/threads", promoteRoutes);
+  // The nest in the conversation (team chat C7, PO-1198): ask, agent
+  // profiles, handoffs. Behind the channels switch (middleware above).
+  nestsApp.route("/:nestId", agentRoutes);
   nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);

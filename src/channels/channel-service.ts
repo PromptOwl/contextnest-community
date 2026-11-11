@@ -69,6 +69,7 @@ import {
   tagsOf,
 } from "./channel-node.js";
 import { bodyMentions, displayNames, knownAgents, namedActor, type KnownAgent, type MentionRef } from "./message-meta.js";
+import { proposalStatuses } from "../agents/proposals.js";
 
 export { ARCHIVED_TAG, CHANNEL_FOLDER, CHANNEL_TAG, isChannelDoc, isChannelId, isChannelNode } from "./channel-node.js";
 
@@ -435,6 +436,42 @@ export interface ChannelMessage {
   /** Every `@name` in the body, in order: a person, a known agent, or nobody
    *  — so a client can style what landed and what didn't. */
   mentions: MentionRef[];
+  // ── The nest in the conversation (C7, PO-1198; src/agents) ──
+  /** True when the body is text a model wrote (a Hootie answer or a proposal
+   *  card): render it with the untrusted-text renderer (links as plain text,
+   *  chips only for `citations`). Never set on a person's message. */
+  model_answer?: true;
+  /** The login Hootie answered FOR (the asker); only with `model_answer`. */
+  asked_by?: string;
+  /** The nodes the server verified the answer cites; only with `model_answer`. */
+  citations?: Array<{ id: string; title: string }>;
+  /** A proposal card: a write Hootie wanted to make, waiting for a writer. */
+  proposal?: Record<string, unknown>;
+  /** The outcome of a proposal (approved / rejected), posted by the decider. */
+  proposal_outcome?: Record<string, unknown>;
+  /** A handoff: this message hands the thread to a person or an agent. */
+  handoff?: Record<string, unknown>;
+  /** An accept / done on a handoff, posted by whoever took it. */
+  handoff_update?: Record<string, unknown>;
+}
+
+/** The C7 marks a message's stored attribution carries, as the timeline shows
+ *  them. Only the server writes these keys (message-meta callerSafeClient). */
+export function conversationMarks(client: Record<string, unknown> | undefined): Partial<ChannelMessage> {
+  if (!client) return {};
+  const out: Partial<ChannelMessage> = {};
+  if (client.model_answer === true) {
+    out.model_answer = true;
+    if (typeof client.for === "string") out.asked_by = client.for;
+    out.citations = Array.isArray(client.citations)
+      ? client.citations.filter((c): c is { id: string; title: string } => !!c && typeof c === "object" && typeof (c as any).id === "string")
+      : [];
+  }
+  for (const key of ["proposal", "proposal_outcome", "handoff", "handoff_update"] as const) {
+    const v = client[key];
+    if (v && typeof v === "object" && !Array.isArray(v)) out[key] = v as Record<string, unknown>;
+  }
+  return out;
 }
 
 export interface ChannelPost extends ChannelMessage {
@@ -508,14 +545,24 @@ async function commentsFor(threadIds: string[]): Promise<Map<string, CommentRow[
 async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMessage[]> {
   if (rows.length === 0) return [];
   const bodies = rows.map((r) => r.body);
-  const [names, mentions, cards] = await Promise.all([
-    displayNames(rows.map((r) => r.author)),
+  const clients = rows.map((r) => deserializeClient(r.client_json) as Record<string, unknown> | undefined);
+  // A Hootie answer names the person it answered FOR; their display name is
+  // needed too (C7). A card's status is read live from its review request.
+  const askedFor = clients.map((c) => (c?.model_answer === true && typeof c.for === "string" ? c.for : "")).filter(Boolean);
+  const reviewIds = clients.map((c) => String((c?.proposal as { review_id?: unknown } | undefined)?.review_id ?? "")).filter(Boolean);
+  const [names, mentions, cards, statuses] = await Promise.all([
+    displayNames([...rows.map((r) => r.author), ...askedFor]),
     bodyMentions(caller.nestId, bodies),
     resolveMessageCards(caller, bodies),
+    proposalStatuses(caller.nestId, reviewIds),
   ]);
   return Promise.all(
     rows.map(async (row, i) => {
-      const { actor, name } = await namedActor(row.author, deserializeClient(row.client_json), names);
+      const client = clients[i] as ClientMetadata | undefined;
+      const { actor, name } = await namedActor(row.author, client, names);
+      const marks = conversationMarks(client as Record<string, unknown> | undefined);
+      const live = marks.proposal && statuses.get(String(marks.proposal.review_id ?? ""));
+      if (marks.proposal && live) marks.proposal = { ...marks.proposal, status: live.status, decided_by: live.decided_by, decided_at: live.decided_at };
       return {
         id: row.id,
         author: row.author,
@@ -524,7 +571,10 @@ async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMe
         body: row.body,
         created_at: row.created_at,
         cards: cards[i],
-        mentions: mentions[i],
+        // Model text names nobody: an @name in an answer is not a mention
+        // (nothing was notified or woken for it), so it isn't styled as one.
+        mentions: marks.model_answer ? [] : mentions[i],
+        ...marks,
       };
     }),
   );

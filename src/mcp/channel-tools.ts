@@ -107,6 +107,15 @@ export const READ_KEY_TOOL_VIEWS: Record<
     schema: { type: "object", properties: LIST_ONLY_PROPERTIES },
     annotations: { title: "List channels", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
+  // Agent profiles (team chat C7): a read-only key lists and reads; only an
+  // owner or admin on a full credential may describe an agent.
+  context_agents: {
+    description:
+      "The agents this nest knows (Hootie, webhook agents, declared agents) with kind, owner, description, last seen and wake-up status; pass `handle` for one agent's profile (what it did, what it knows, only what you can read). " +
+      "This key is read-only: it cannot set a description.",
+    schema: { type: "object", properties: { handle: { type: "string", description: 'An agent\'s @name, e.g. "grok" or "hootie" (profile).' } } },
+    annotations: { title: "Agent profiles", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
 };
 
 const NAMES = new Set(CHANNEL_TOOL_DEFINITIONS.map((t) => t.name));
