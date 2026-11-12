@@ -764,6 +764,16 @@ export async function withComputedFields<T extends NodeResponse>(
   return addComputedFields(nodes, await listFieldDefinitions(nestId));
 }
 
+/**
+ * May this caller see who edited a document (`last_edit`)? Not a public
+ * reader — like `collaborators`, it names the nest's people — and not a
+ * headless access key, which reads content, never people (po-1213 AC-NH-08).
+ * One rule for the list, the census feed, the node detail and the MCP reads.
+ */
+export async function canSeeEditors(nestId: string, userId: string): Promise<boolean> {
+  return !(await isPublicReader(nestId, userId)) && !(await isHeadlessIdentity(userId));
+}
+
 export interface NodeAuthorship {
   author: string | null;
   collaborators: string[];
@@ -1264,10 +1274,9 @@ export async function listNodesForCaller(
   // Who last edited each row — the human and the agent — for the Documents
   // rows and context_list (po-1213). One query for the list. Same gate as the
   // roster, plus headless keys: an access key reads content, not people.
-  const lastEdits =
-    publicReader || (await isHeadlessIdentity(userId))
-      ? null
-      : await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id));
+  const lastEdits = (await canSeeEditors(nestId, userId))
+    ? await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id))
+    : null;
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
@@ -1660,10 +1669,9 @@ export async function nestCensus(
     .slice(0, RECENT_LIMIT);
   // Same gate as the list's last_edit: no editor identity for a public
   // reader or a headless key.
-  const recentEdits =
-    (await isPublicReader(nestId, userId)) || (await isHeadlessIdentity(userId))
-      ? null
-      : await versions.getLatestVersionAttributions(nestId, recentDocs.map((d) => d.id));
+  const recentEdits = (await canSeeEditors(nestId, userId))
+    ? await versions.getLatestVersionAttributions(nestId, recentDocs.map((d) => d.id))
+    : null;
   const recent = recentDocs.map((d) => {
     const last = recentEdits?.get(d.id);
     return {

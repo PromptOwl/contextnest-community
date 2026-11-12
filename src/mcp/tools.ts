@@ -96,6 +96,7 @@ import {
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
+  canSeeEditors,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import { agentSummaryProse } from "../views/deps.js";
@@ -3045,9 +3046,12 @@ async function runTool(
       // people, which the REST node detail withholds from them too.
       const servedVersion = ctx.servedVersions?.get(node.id);
       const lastEdit =
-        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+        servedVersion === undefined || !(await canSeeEditors(nestId, ctx.userId))
           ? null
-          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch(() => null);
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("[context_get] last-edit attribution failed:", node.id, err);
+              return null;
+            });
       const lastEditLine = lastEdit
         ? `**Last edited by:** ${lastEditorProse(versions.toLastEdit(lastEdit))} (v${lastEdit.version})`
         : null;

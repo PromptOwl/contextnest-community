@@ -73,6 +73,7 @@ import {
   withComputedFields,
   fieldsOfRaw,
   setStoredFields,
+  canSeeEditors,
 } from "./service.js";
 import {
   addRelation,
@@ -653,8 +654,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       response.author = people.author;
       response.collaborators = people.collaborators;
     }
-    // The latest version's two writers — the human and the agent — for the
-    // document byline. Same gate as the roster above.
+  }
+
+  // The latest version's two writers — the human and the agent — for the
+  // document byline. Not for a public reader or a headless key (AC-NH-08).
+  if (await canSeeEditors(nestId, userId)) {
     const last = await versions.getVersionAttribution(nestId, nodeId);
     if (last) response.last_edit = versions.toLastEdit(last);
   }

@@ -146,6 +146,18 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 99`, [nestId, row.id]);
   });
 
+  it("Given a document whose only version rows are auto-publish bumps, then it has no last_edit", async () => {
+    await getDb().run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nestId, "nodes/bump-only", 1, "bump", "system:auto-publish:owner@home.test", "published"],
+    );
+    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+    const map = await getLatestVersionAttributions(nestId, ["nodes/bump-only"]);
+    expect(map.has("nodes/bump-only")).toBe(false);
+    await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?`, [nestId, "nodes/bump-only"]);
+  });
+
   it("Given the census feed, then each item's version time is the same write as the updated_at it is sorted on", async () => {
     const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey);
     for (const r of data.census.recent as any[]) {
@@ -219,5 +231,10 @@ describe("AC-NH-08: no editor identity for public readers or headless keys", () 
     expect(res.isError).toBeFalsy();
     for (const d of res.structuredContent.documents) expect(d.last_edit).toBeUndefined();
     expect(res.content[0].text).not.toContain("edited by");
+
+    // The node detail follows the same rule.
+    const detail = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${rows[0].id}`, undefined, key);
+    expect(detail.status).toBe(200);
+    expect(detail.data.node.last_edit).toBeUndefined();
   });
 });
