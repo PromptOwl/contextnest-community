@@ -331,7 +331,10 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
                   ),
                 )
               }
-              onReviewed={(status) => patch(item.id, (i) => ({ ...i, status, review: null }))}
+              onReviewed={(status) =>
+                // Say what just happened, as the server will on the next read.
+                patch(item.id, (i) => ({ ...i, status, kind: status === "rejected" ? "rejected" : "approved", review: null }))
+              }
             />
           ))}
         </ol>
