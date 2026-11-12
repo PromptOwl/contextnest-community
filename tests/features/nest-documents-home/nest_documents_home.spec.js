@@ -66,11 +66,11 @@ test.describe('Nest documents home', () => {
   }) => {
     const { nest, page } = await arrange(primary_user, commonFunction, 'nesthome-landing');
     await page.gotoNest(nest.id);
-    await expect(page.selectedTab).toHaveText('Documents', WRITE);
+    await expect(page.tab('Documents')).toHaveAttribute('aria-selected', 'true', WRITE);
     await expect(page.tab('Overview')).toHaveCount(0);
 
     await page.gotoNest(nest.id, 'overview');
-    await expect(page.selectedTab).toHaveText('Documents', WRITE);
+    await expect(page.tab('Documents')).toHaveAttribute('aria-selected', 'true', WRITE);
   });
 
   test('CN-NH-002: Verify that the summary line and the Recently edited feed sit above the list', async ({
@@ -132,7 +132,7 @@ test.describe('Nest documents home', () => {
     const { nest, page } = await arrange(primary_user, commonFunction, 'nesthome-fields-link');
     await page.page.goto(`/nest/${nest.id}?tab=fields`);
     await expect(page.fieldsDialog).toBeVisible(WRITE);
-    await expect(page.selectedTab).toHaveText('Documents');
+    await expect(page.tab('Documents')).toHaveAttribute('aria-selected', 'true');
   });
 
   test('CN-NH-006: Verify that at phone width the page does not scroll sideways and the feed names the editor', async ({

@@ -12,7 +12,8 @@ let cached;
 export async function nestHomeShipped(api, commonFunction) {
   if (cached !== undefined) return cached;
   const probe = await api.createNest(commonFunction.generateEntityName('nesthome-probe'), 'po-1213 probe (safe to delete)');
-  await api.createTypedDocument(probe.id, { title: 'Probe' });
+  // Plain REST through expectOk, which every nest API helper class has.
+  await api.expectOk('POST', `/nests/${probe.id}/nodes`, { title: 'Probe', content: '# Probe\n' });
   const data = await api.expectOk('GET', `/nests/${probe.id}/nodes`);
   cached = (data.nodes ?? []).some((r) => !!r.last_edit);
   return cached;

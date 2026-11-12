@@ -24,10 +24,6 @@ class NestHomePage {
     return this.page.getByRole('tab', { name, exact: true });
   }
 
-  get selectedTab() {
-    return this.page.locator('[role="tab"][aria-selected="true"]');
-  }
-
   feedItem(nodeId) {
     return this.page.getByTestId(`recent-item-${nodeId}`);
   }
