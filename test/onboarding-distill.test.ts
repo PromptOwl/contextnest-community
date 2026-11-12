@@ -103,6 +103,21 @@ describe("fetchSource", () => {
     expect(seen).toEqual(["https://acme.test/", "https://acme.test/pricing"]);
     expect(doc.sections.map((s) => s.locator)).toEqual(["https://acme.test/", "https://acme.test/pricing"]);
   });
+
+  it("never follows a same-site link to another port (port 443 only holds for every page)", async () => {
+    const seen: string[] = [];
+    const fetchImpl = async (u: string) => {
+      seen.push(String(u));
+      if (String(u) === "https://acme.test/") {
+        return page(`<html><head><title>Acme</title></head><body><p>${"We make widgets. ".repeat(20)}</p>
+          <a href="https://acme.test:8443/admin">a</a><a href="https://acme.test:443/team">t</a><a href="/pricing">p</a></body></html>`);
+      }
+      return page(`<main><p>${"Plans start at ten dollars. ".repeat(20)}</p></main>`);
+    };
+    await fetchSource(new URL("https://acme.test/"), fetchImpl as any);
+    expect(seen.some((u) => u.includes(":8443"))).toBe(false);
+    expect(seen).toEqual(["https://acme.test/", "https://acme.test/team", "https://acme.test/pricing"]);
+  });
 });
 
 describe("htmlToText", () => {

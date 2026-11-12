@@ -133,6 +133,18 @@ describe("AC2: Create my nest", () => {
     expect(list.data.nests.filter((n: any) => n.is_owner !== false && n.user_id === newbie.userId).length).toBe(1);
   });
 
+  it("is idempotent under a real double click: concurrent calls make one nest and never 500", async () => {
+    const racer = await registerUser(app, "racer@onboarding.test", "Rae");
+    const calls = await Promise.all([1, 2, 3, 4].map(() => jsonRequest(app, "POST", "/onboarding/nest", {}, racer.apiKey)));
+    for (const c of calls) expect(c.status, JSON.stringify(c.data)).toBeLessThan(300);
+    const ids = new Set(calls.map((c) => c.data.nest.id));
+    expect(ids.size).toBe(1);
+    expect(calls.filter((c) => c.status === 201).length).toBe(1);
+    const { getDb } = await import("../src/db/client.js");
+    const owned = (await getDb().all("SELECT id FROM nests WHERE user_id = ? AND archived_at IS NULL", [racer.userId])) as { id: string }[];
+    expect(owned.map((n) => n.id)).toEqual([...ids]);
+  });
+
   it("keeps the screen open after the nest exists, so the user can connect and fill it", async () => {
     const r = await jsonRequest(app, "GET", "/onboarding", undefined, newbie.apiKey);
     expect(r.data.show).toBe(true);

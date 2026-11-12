@@ -76,14 +76,13 @@ async function row(userId: string): Promise<OnboardingRow | null> {
 
 async function upsert(userId: string, patch: Partial<Omit<OnboardingRow, "user_id">>): Promise<void> {
   const db = getDb();
-  const existing = await row(userId);
-  if (!existing) {
-    await db.run(
-      "INSERT INTO user_onboarding (user_id, nest_id, dismissed_at, reopened, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [userId, patch.nest_id ?? null, patch.dismissed_at ?? null, patch.reopened ?? 0, iso(), iso()],
-    );
-    return;
-  }
+  // Insert-if-absent is atomic (the primary key decides), so two concurrent
+  // first writes never collide into a 500; the patch is then applied to the row.
+  await db.run(
+    "INSERT INTO user_onboarding (user_id, nest_id, dismissed_at, reopened, created_at, updated_at) VALUES (?, NULL, NULL, 0, ?, ?) ON CONFLICT (user_id) DO NOTHING",
+    [userId, iso(), iso()],
+  );
+  const existing = (await row(userId))!;
   const next = { ...existing, ...patch };
   await db.run("UPDATE user_onboarding SET nest_id = ?, dismissed_at = ?, reopened = ?, updated_at = ? WHERE user_id = ?", [
     next.nest_id,
@@ -203,7 +202,27 @@ export async function reopenOnboarding(userId: string): Promise<void> {
  * seat check included). Idempotent: a second call returns the nest the first
  * one made, so a double click cannot make two.
  */
-export async function createMyNest(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
+/**
+ * One "Create my nest" at a time per person. The check-then-create below spans
+ * several awaits, so a double click (or two tabs) would otherwise both see no
+ * nest and make two. In-process is enough: the server is single-process, the
+ * same assumption as the node write lock.
+ */
+const createMyNestChains = new Map<string, Promise<unknown>>();
+
+export function createMyNest(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
+  const prev = (createMyNestChains.get(userId) ?? Promise.resolve()).catch(() => {});
+  const run = prev.then(() => createMyNestOnce(userId, name));
+  createMyNestChains.set(userId, run);
+  void run
+    .catch(() => {})
+    .finally(() => {
+      if (createMyNestChains.get(userId) === run) createMyNestChains.delete(userId);
+    });
+  return run;
+}
+
+async function createMyNestOnce(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
   if (userId === ANON_USER_ID) throw new ForbiddenError("Sign in to create a nest of your own.");
   const r = await row(userId);
   if (r?.nest_id) {

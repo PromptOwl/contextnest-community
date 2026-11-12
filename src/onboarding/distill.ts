@@ -230,7 +230,9 @@ async function fetchSite(fetchImpl: FetchLike, start: URL): Promise<SourceDoc> {
       continue;
     }
     next.hash = "";
-    if (next.protocol !== "https:" || next.hostname !== url.hostname) continue;
+    // `host` carries the port: a same-name link on another port is another
+    // site, and only port 443 may be distilled.
+    if (next.protocol !== "https:" || next.host !== url.host) continue;
     if (/\.(png|jpe?g|gif|svg|webp|pdf|zip|mp4|mp3|css|js|ico|xml|json)$/i.test(next.pathname)) continue;
     if (seen.has(next.toString())) continue;
     seen.add(next.toString());
