@@ -196,6 +196,58 @@ export async function getVersionAttribution(
   return row ? rowToVersion(row) : null;
 }
 
+/**
+ * getVersionAttribution's latest row for every node of one nest, in one
+ * query — the Documents list, the "Recently edited" feed and context_list
+ * name the same two writers the node detail does, without a read per row.
+ * `nodeIds` narrows the result; a node with no version row is absent.
+ */
+export async function getLatestVersionAttributions(
+  nestId: string,
+  nodeIds?: string[],
+): Promise<Map<string, DocumentVersion>> {
+  const out = new Map<string, DocumentVersion>();
+  if (nodeIds && nodeIds.length === 0) return out;
+  const rows = (await getDb().all(
+    `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
+            nv.client_json, sa.name AS system_name
+       FROM node_versions nv
+       JOIN (SELECT node_id, MAX(version) AS v
+               FROM node_versions
+              WHERE nest_id = ?
+              GROUP BY node_id) latest
+         ON latest.node_id = nv.node_id AND latest.v = nv.version
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ?`,
+    [nestId, nestId],
+  )) as any[];
+  const wanted = nodeIds ? new Set(nodeIds) : null;
+  for (const row of rows) {
+    if (wanted && !wanted.has(row.node_id)) continue;
+    out.set(row.node_id, rowToVersion(row));
+  }
+  return out;
+}
+
+/** The `last_edit` block a read serves: the version's human and agent. Same
+ *  shape on the node detail, the list, the census feed and context_list. */
+export function toLastEdit(v: DocumentVersion): {
+  version: number;
+  edited_by: string;
+  edited_by_system?: string;
+  edited_at: string;
+  client?: ClientMetadata;
+} {
+  return {
+    version: v.version,
+    edited_by: v.editedBy,
+    ...(v.editedBySystem ? { edited_by_system: v.editedBySystem } : {}),
+    edited_at: v.editedAt,
+    ...(v.client ? { client: v.client } : {}),
+  };
+}
+
 /** getCurrentVersion for many nodes of one nest, in one query. Missing → 0. */
 export async function getCurrentVersions(
   nestId: string,

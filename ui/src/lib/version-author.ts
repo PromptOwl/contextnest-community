@@ -69,3 +69,20 @@ export function lastEditParts(
   const human = last.edited_by_system || displayNameFor(last.edited_by, people);
   return { human, agent: versionAgent(last) };
 }
+
+/**
+ * What a Documents row and a "Recently edited" item show about the last
+ * edit: when, and who as one string — "<human> via <agent>", the human
+ * first (po-1213). `at` falls back to the document's updated_at; `editor`
+ * is null when the read withheld `last_edit` (a public reader, a headless
+ * key), so nobody is named. Null when there is nothing to show at all.
+ */
+export function rowLastEdit(
+  node: { updated_at?: string | null; last_edit?: LastEdit | null },
+  people: Array<{ email: string; name?: string | null }> = [],
+): { at: string | null; editor: string | null } | null {
+  const parts = lastEditParts(node.last_edit, people);
+  const at = node.last_edit?.edited_at || node.updated_at || null;
+  if (!at && !parts) return null;
+  return { at, editor: parts ? (parts.agent ? `${parts.human} via ${parts.agent}` : parts.human) : null };
+}

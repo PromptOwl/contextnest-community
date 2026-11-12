@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import type { LastEdit } from "./version-author";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
 import {
   ACCESS_OFFER_EVENT,
@@ -1970,7 +1971,9 @@ export interface NestCensus {
   aiReady?: number;
   authors: string[];
   editedLast7d: number;
-  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+  /** Newest first, capped at 5: the "Recently edited" feed on Documents.
+   *  `last_edit` names the human and agent; absent for a public reader. */
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string; last_edit?: LastEdit }>;
 }
 
 /**

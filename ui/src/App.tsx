@@ -32,7 +32,7 @@ import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
-import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
+import { DEFAULT_NEST_TAB, NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
@@ -107,7 +107,7 @@ type View =
       initialTags?: string[];
       initialFolder?: string;
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
-       *  to the Review Queue lands on the Review Queue. Absent = overview. */
+       *  to the Review Queue lands on the Review Queue. Absent = Documents. */
       tab?: string;
       /** Open the nest settings dialog on arrival (a document's "turn on
        *  self-approve" link). Not mirrored to the URL. */
@@ -655,9 +655,9 @@ export default function App() {
       else params.delete("doc");
       params.delete("thread");
       params.delete("view");
-      // Overview is the default, so it stays out of the URL — a plain ?nest
-      // link keeps working and doesn't grow a redundant &tab=overview.
-      if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
+      // Documents is the default, so it stays out of the URL — a plain ?nest
+      // link keeps working and doesn't grow a redundant &tab=documents.
+      if (view.tab && view.tab !== DEFAULT_NEST_TAB) params.set("tab", view.tab);
       else params.delete("tab");
       // ?review= (the change open in the review pane) only means something
       // on the Review tab; NestView writes it, App drops it everywhere else.
@@ -839,13 +839,13 @@ export default function App() {
             nestName: view.nestName,
             isOwner: view.isOwner,
             isAnonOwned: view.isAnonOwned,
-            tab: "overview",
+            tab: DEFAULT_NEST_TAB,
           }),
       };
       if (pageTail.length) return [home, nest, ...pageTail];
       const leaf =
         view.page === "nest"
-          ? NEST_TAB_LABELS[view.tab ?? "overview"] ?? "Overview"
+          ? NEST_TAB_LABELS[view.tab ?? DEFAULT_NEST_TAB] ?? NEST_TAB_LABELS[DEFAULT_NEST_TAB]
           : view.page === "document" ? "Document"
           : view.page === "nest-trace" ? "Trace"
           : nestPageForView(view.page)?.label ?? "";
@@ -1248,7 +1248,7 @@ export default function App() {
                     cur.page === "nest"
                       ? cur.tab === "review"
                         ? "review"
-                        : "overview"
+                        : "documents"
                       : nestPageForView(cur.page)?.id ?? null
                   }
                   onCollapse={() =>

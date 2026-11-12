@@ -2553,6 +2553,20 @@ async function proposeOverMcp(
  * stewards/sharing/sync. A mutating case without its own check ships a
  * privilege escalation.
  */
+/** "owner@x.com via deal-desk" — the human first (the system account's name
+ *  when it is one), then the agent its write named. One wording for
+ *  context_get's byline and context_list's rows. */
+function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
+  const human = last.edited_by_system ? `${last.edited_by_system} (${last.edited_by})` : last.edited_by;
+  return last.client?.agent ? `${human} via ${last.client.agent}` : human;
+}
+
+/** context_list's row suffix: " · edited by <human> via <agent>, <date>". */
+function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
+  if (!last) return "";
+  return ` · edited by ${lastEditorProse(last)}, ${last.edited_at.slice(0, 10)}`;
+}
+
 async function runTool(
   toolName: string,
   args: Record<string, any>,
@@ -3035,9 +3049,7 @@ async function runTool(
           ? null
           : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch(() => null);
       const lastEditLine = lastEdit
-        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
-            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
-          } (v${lastEdit.version})`
+        ? `**Last edited by:** ${lastEditorProse(versions.toLastEdit(lastEdit))} (v${lastEdit.version})`
         : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
@@ -3167,13 +3179,17 @@ async function runTool(
         // Custom field values ride in the catalog's optional `frontmatter`,
         // where they are stored (metadata.fields).
         ...(valuesOf(n) ? { frontmatter: { title: n.title, metadata: { fields: valuesOf(n) } } } : {}),
+        // Who last edited it: the human, then the agent (po-1213) — the same
+        // block the REST list carries. listNodesForCaller withholds it from a
+        // public reader and a headless key, so it is absent for them here too.
+        ...(n.last_edit ? { last_edit: n.last_edit } : {}),
       }));
       if (!nodes.length)
         return { text: "No nodes found with the given filters.", data: { documents } };
       const list = nodes
         .map((n, i) => {
           const f = describeFields(valuesOf(n), listDefs);
-          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
+          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}${lastEditProse(n.last_edit)}`;
         })
         .join("\n");
       return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };

@@ -179,14 +179,14 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
 
   it("gives an editor every view, workflows only when the plane is on", () => {
     expect(ids(nestSidebarViews(full, governed))).toEqual([
-      "overview", "review", "board", "graph", "definitions", "workflows", "structure",
+      "documents", "review", "board", "graph", "definitions", "workflows", "structure",
     ]);
     expect(ids(nestSidebarViews(full, { ...governed, workflowPlaneEnabled: false }))).not.toContain("workflows");
   });
 
   it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
     // Same rule as NestView's showReviewTab — an editor on an ungoverned nest
-    // with nothing waiting would otherwise get a row that lands on the overview.
+    // with nothing waiting would otherwise get a row that lands on Documents.
     expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true }))).not.toContain("review");
     expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, hasPending: true }))).toContain("review");
     expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, stewardshipEnabled: true }))).toContain("review");
@@ -194,19 +194,19 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
 
   it("hides the review queue and workflows from a read-only caller", () => {
     const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, governed));
-    expect(v).toEqual(["overview", "board", "graph", "definitions", "structure"]);
+    expect(v).toEqual(["documents", "board", "graph", "definitions", "structure"]);
   });
 
-  it("leaves a public reader in reader mode with the overview only", () => {
+  it("leaves a public reader in reader mode with Documents only", () => {
     // Same set App hides via isReaderHiddenView — the sidebar must not be a
     // back door into the board / graph / definitions for a docs-site reader.
     const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, governed));
-    expect(v).toEqual(["overview"]);
+    expect(v).toEqual(["documents"]);
   });
 
-  it("keeps overview and the review queue at the top and folds the rest under Views", () => {
+  it("keeps Documents and the review queue at the top and folds the rest under Views", () => {
     const v = nestSidebarViews(full, governed);
-    expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["overview", "review"]);
+    expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["documents", "review"]);
     expect(v.filter((x) => x.group === "views").map((x) => x.id)).toEqual([
       "board", "graph", "definitions", "workflows", "structure",
     ]);

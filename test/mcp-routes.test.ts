@@ -494,11 +494,13 @@ describe("MCP tools/call — structuredContent", () => {
     expect(seeded.status).toBe(201);
   });
 
-  it("context_list: prose unchanged, documents[] alongside it", async () => {
+  it("context_list: prose names the last editor, documents[] alongside it", async () => {
     const r = await callToolRaw("context_list", {}, 710, sid);
-    expect(r.content).toEqual([
-      { type: "text", text: "1 node(s):\n\n1. **Pricing Sheet** [document]" },
-    ]);
+    expect(r.content).toHaveLength(1);
+    // po-1213: each row ends with who last edited it, human first.
+    expect(r.content[0].text).toMatch(
+      /^1 node\(s\):\n\n1\. \*\*Pricing Sheet\*\* \[document\] · edited by \S+@\S+( via \S+)?, \d{4}-\d{2}-\d{2}$/,
+    );
     expect(r.structuredContent).toEqual({
       documents: [
         {
@@ -507,6 +509,7 @@ describe("MCP tools/call — structuredContent", () => {
           type: "document",
           status: expect.any(String),
           tags: ["#pricing"],
+          last_edit: expect.objectContaining({ version: 1, edited_by: expect.any(String), edited_at: expect.any(String) }),
         },
       ],
     });
