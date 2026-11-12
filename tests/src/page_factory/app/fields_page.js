@@ -204,10 +204,25 @@ class FieldsPage {
     return this.page.getByRole('menuitem', { name: item, exact: true });
   }
 
+  /**
+   * Open the Add field menu. Right after a field is added the list is still
+   * refreshing, and on a slow server (CI) a click then can be lost or the
+   * menu closed again at once, so try again until the menu shows.
+   */
+  async openAddFieldMenu() {
+    const deadline = Date.now() + 60_000;
+    while (!(await this.newFieldItem.isVisible())) {
+      if (Date.now() > deadline) throw new Error('The Add field menu never opened');
+      await this.addFieldButton.click();
+      const open = await this.newFieldItem.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true, () => false);
+      if (!open) await this.page.keyboard.press('Escape');
+    }
+  }
+
   /** Open Add field → New field. */
   async openNewField() {
     this._log('Opening Add field → New field');
-    await this.addFieldButton.click();
+    await this.openAddFieldMenu();
     await this.newFieldItem.click();
     await this.labelInput.waitFor({ state: 'visible' });
   }

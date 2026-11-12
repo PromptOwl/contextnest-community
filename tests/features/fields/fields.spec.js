@@ -564,32 +564,46 @@ test.describe('Fields', () => {
   test('CN-FIELD-013: Verify that Add field offers New field, Estimate · points, Estimate · hours and Time in status, and that adding an Estimate preset disables both Estimate presets while adding Time in status disables it', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'fields-presets');
     const { page, api, nest } = owner;
-    const disabled = (item) => expect(item).toHaveAttribute('aria-disabled', 'true');
-    const enabled = (item) => expect(item).not.toHaveAttribute('aria-disabled', 'true');
+    const SHORT = { timeout: 5_000 };
+    const disabled = (item) => expect(item).toHaveAttribute('aria-disabled', 'true', SHORT);
+    const enabled = async (item) => {
+      await expect(item).toBeVisible(SHORT);
+      await expect(item).not.toHaveAttribute('aria-disabled', 'true', SHORT);
+    };
+    // Open Add field and check its items. If the menu closes under the checks
+    // (the list still refreshing after an add, on a slow server), open it
+    // again and check again.
+    const menuShows = (checks) =>
+      expect(async () => {
+        await page.openAddFieldMenu();
+        await checks();
+      }).toPass(WRITE);
 
     await page.goto(nest.id);
     await expect(page.emptyFields).toBeVisible();
-    await page.addFieldButton.click();
-    for (const item of [page.newFieldItem, page.estimatePointsItem, page.estimateHoursItem, page.timeInStatusItem]) {
-      await expect(item).toBeVisible();
-      await enabled(item);
-    }
+    await menuShows(async () => {
+      for (const item of [page.newFieldItem, page.estimatePointsItem, page.estimateHoursItem, page.timeInStatusItem]) {
+        await enabled(item);
+      }
+    });
 
     await page.estimatePointsItem.click();
     await expectToast(page, 'Estimate added');
     await expect(page.row('Estimate')).toContainText('points', WRITE);
 
-    await page.addFieldButton.click();
-    await disabled(page.estimatePointsItem);
-    await disabled(page.estimateHoursItem);
-    await enabled(page.timeInStatusItem);
+    await menuShows(async () => {
+      await disabled(page.estimatePointsItem);
+      await disabled(page.estimateHoursItem);
+      await enabled(page.timeInStatusItem);
+    });
     await page.timeInStatusItem.click();
     await expectToast(page, 'Time in status added');
     await expect(page.row('Time in status')).toBeVisible(WRITE);
 
-    await page.addFieldButton.click();
-    await disabled(page.timeInStatusItem);
-    await enabled(page.newFieldItem);
+    await menuShows(async () => {
+      await disabled(page.timeInStatusItem);
+      await enabled(page.newFieldItem);
+    });
     await page.page.keyboard.press('Escape');
     expect((await api.fieldDef(nest.id, 'estimate'))).toMatchObject({ type: 'number', unit: 'points' });
     expect((await api.fieldDefs(nest.id)).some((f) => f.type === 'time_in_status')).toBe(true);
@@ -597,17 +611,19 @@ test.describe('Fields', () => {
     // Removing Estimate frees both presets; Estimate · hours then disables both again.
     await page.removeField('Estimate');
     await expect(page.row('Estimate')).toHaveCount(0, WRITE);
-    await page.addFieldButton.click();
-    await enabled(page.estimatePointsItem);
-    await enabled(page.estimateHoursItem);
+    await menuShows(async () => {
+      await enabled(page.estimatePointsItem);
+      await enabled(page.estimateHoursItem);
+    });
     await page.estimateHoursItem.click();
     await expect(page.row('Estimate')).toContainText('hours', WRITE);
 
-    await page.addFieldButton.click();
-    await disabled(page.estimatePointsItem);
-    await disabled(page.estimateHoursItem);
-    await disabled(page.timeInStatusItem);
-    await enabled(page.newFieldItem);
+    await menuShows(async () => {
+      await disabled(page.estimatePointsItem);
+      await disabled(page.estimateHoursItem);
+      await disabled(page.timeInStatusItem);
+      await enabled(page.newFieldItem);
+    });
     await page.page.keyboard.press('Escape');
     await expect.poll(async () => (await api.fieldDef(nest.id, 'estimate'))?.unit ?? null, WRITE).toBe('hours');
   });
