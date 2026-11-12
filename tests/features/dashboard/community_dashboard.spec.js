@@ -166,41 +166,42 @@ test.describe('Community Dashboard', () => {
       primary_user,
       commonFunction,
     }) => {
-      const { nestsPage, api } = await openDashboard(primary_user);
+      const { page, nestsPage, api } = await openDashboard(primary_user);
       // A nest with a known document count of 0 guarantees at least one row.
       await api.createNest(commonFunction.generateEntityName('counts'), 'Count check');
 
-      // The banner counts every nest the grid knows about — pending invites
-      // live in their own card and are excluded from both numbers.
-      const totals = async () => {
-        const nests = await gridNests(api);
-        return {
+      // The banner is derived from the page's own GET /nests response (each
+      // nest carries document_count), minus pending invites, which live in
+      // their own card. Other suites add and remove nests on this account the
+      // whole time — on a slow server, enough to move between any two separate
+      // reads — so the banner is held to the very responses the page drew it
+      // from, not to reads taken before or after it.
+      const pending = await api.pendingInviteNestIds();
+      const lists = [];
+      page.on('response', (r) => {
+        const u = new URL(r.url());
+        if (r.request().method() === 'GET' && u.pathname === '/nests' && !u.search) lists.push(r);
+      });
+      await nestsPage.goto();
+      await expect(nestsPage.countSkeletons).toHaveCount(0);
+      await expect.poll(() => lists.length).toBeGreaterThan(0);
+      const shown = {
+        nests: (await nestsPage.bannerNestCount.innerText()).trim(),
+        docs: (await nestsPage.bannerDocumentCount.innerText()).trim(),
+      };
+      const received = [];
+      for (const r of lists) {
+        const nests = ((await r.json().catch(() => null))?.nests ?? []).filter((n) => !pending.has(n.id));
+        received.push({
           nests: String(nests.length),
           docs: String(nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)),
-        };
-      };
-
-      // Other suites add nests and documents on this account while this one
-      // reads, so the banner is held to the totals read just before the page
-      // loaded or just after it was read — and re-read if both moved on.
-      let shown;
-      let before;
-      let after;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        before = await totals();
-        if (attempt === 0) await nestsPage.goto();
-        else await nestsPage.reload();
-        await expect(nestsPage.countSkeletons).toHaveCount(0);
-        shown = {
-          nests: (await nestsPage.bannerNestCount.innerText()).trim(),
-          docs: (await nestsPage.bannerDocumentCount.innerText()).trim(),
-        };
-        after = await totals();
-        const ok = (k) => shown[k] === before[k] || shown[k] === after[k];
-        if (ok('nests') && ok('docs')) break;
+        });
       }
-      expect([before.nests, after.nests], 'banner Nest count').toContain(shown.nests);
-      expect([before.docs, after.docs], 'banner Document count').toContain(shown.docs);
+      // The banner matches what the page received (the latest read, or the one
+      // before it when a refetch landed just as the banner was read).
+      expect(received.map((t) => `${t.nests}/${t.docs}`), 'banner Nest/Document counts').toContain(
+        `${shown.nests}/${shown.docs}`
+      );
     });
 
     test('CN-DASH-006: the whole-brain bar appears only when the user has at least one nest', async ({
