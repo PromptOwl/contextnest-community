@@ -266,6 +266,14 @@ const testRun = [
     enabled: true,
     independent: true, // Reads only; writes nothing to the server
   },
+  {
+    // Nest page → Collaborators tab (CN-COLLAB-001 … CN-COLLAB-031). Serial:
+    // each case works in a nest it arranges and then deletes.
+    file: 'collaborators/collaborators.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests and teams; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -349,7 +357,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'control-room'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'control-room', 'collaborators'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -719,6 +727,17 @@ export default defineConfig({
           name: 'review-queue',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/review-queue/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'collaborators',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/collaborators/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
