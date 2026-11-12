@@ -373,6 +373,62 @@ describe("AC-CR-04: cold start", () => {
   });
 });
 
+// ═══ AC-CR-04 (review): exact seed-own filter, bounded all-nests read ═══════
+
+describe("AC-CR-04 (review): cold start", () => {
+  const applied = NOW - 3 * DAY;
+
+  it("a CONTEXT document a person writes and approves in a seed folder counts as cover; only the seed's own recorded documents are excluded", async () => {
+    const Z = (await jsonRequest(app, "POST", "/nests", { name: "Ctx" }, root.apiKey)).data.nest.id;
+    const a = await req("POST", "/surfaces/seeds/apply", { nest_id: Z, seed_id: "generic-team" }, root.apiKey);
+    expect(a.status, JSON.stringify(a.data)).toBe(200);
+    await run("UPDATE surface_seed_applications SET applied_at = ? WHERE nest_id = ?", [iso(applied), Z]);
+    const r = await jsonRequest(app, "POST", `/nests/${Z}/nodes`, { title: "CONTEXT", content: "# CONTEXT\n\nHow we decide.", folder: "decisions" }, root.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    const id = r.data.node?.id ?? r.data.id;
+    expect(id).toMatch(/decisions\/context$/i);
+    await run("UPDATE node_versions SET status = 'published', created_at = ? WHERE nest_id = ? AND node_id = ?", [iso(applied + DAY), Z, id]);
+    await run("UPDATE approved_versions SET approved_at = ? WHERE nest_id = ? AND node_id = ?", [iso(applied + DAY), Z, id]);
+    const cs = (await req("GET", `/surfaces/cold-start?nest_id=${Z}`, undefined, root.apiKey)).data.nests[0];
+    expect(cs.folders.find((f: any) => f.path === "decisions/").approved).toBe(1);
+    expect(cs.first_approved.after_seed_ms).toBe(DAY);
+  });
+
+  it("listing every seeded nest costs a fixed number of queries, not a per-nest scan", async () => {
+    const dbi = (await db()) as any;
+    const count = async (fn: () => Promise<unknown>) => {
+      let n = 0;
+      const orig = { get: dbi.get, all: dbi.all };
+      dbi.get = function (q: string, p?: unknown[]) {
+        n++;
+        return orig.get.call(this, q, p);
+      };
+      dbi.all = function (q: string, p?: unknown[]) {
+        n++;
+        return orig.all.call(this, q, p);
+      };
+      try {
+        await fn();
+      } finally {
+        dbi.get = orig.get;
+        dbi.all = orig.all;
+      }
+      return n;
+    };
+    const list = () => req("GET", "/surfaces/cold-start", undefined, root.apiKey);
+    const before = await count(list);
+    const n0 = (await list()).data.nests.length;
+    for (let i = 0; i < 4; i++) {
+      const id = (await jsonRequest(app, "POST", "/nests", { name: `Bulk ${i}` }, root.apiKey)).data.nest.id;
+      expect((await req("POST", "/surfaces/seeds/apply", { nest_id: id, seed_id: "generic-team" }, root.apiKey)).status).toBe(200);
+    }
+    const res = await list();
+    expect(res.data.nests.length).toBe(n0 + 4);
+    const after = await count(list);
+    expect(after - before).toBeLessThanOrEqual(2);
+  });
+});
+
 // ═══ AC-CR-07c: private-nest wording ════════════════════════════════════════
 
 describe("AC-CR-07c: private-nest rows", () => {
