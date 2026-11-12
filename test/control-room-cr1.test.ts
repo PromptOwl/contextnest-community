@@ -177,8 +177,9 @@ async function seedRun(o: {
 }) {
   const id = `run_${randomUUID()}`;
   await run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code)
-     VALUES (?, ?, ?, 'agent@x.test', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    // est_cost_micros / tokens: what closing the run stores from its trace.
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code, est_cost_micros, tokens)
+     VALUES (?, ?, ?, 'agent@x.test', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       o.nestId,
@@ -191,6 +192,8 @@ async function seedRun(o: {
       o.source,
       o.verdict ?? null,
       o.verdict ? "seeded" : null,
+      Math.round((o.costUsd ?? 0) * 1_000_000),
+      o.tokens ?? 0,
     ],
   );
   for (const st of o.reviews ?? []) {

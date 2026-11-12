@@ -1,7 +1,8 @@
 /**
  * Rollups (po-1186 CR1): the decision ledger grouped by day or ISO week and
  * by agent, nest or binding. Computed on read over exactly the rows the
- * ledger serves — same predicate builder, same tally — so every bucket equals
+ * ledger serves — same predicate builder, same SQL tally (the database groups
+ * by day; this folds days into weeks and keys) — so every bucket equals
  * the ledger `totals` for that bucket's range and filters, and the buckets
  * sum to the range total (AC-CR-10). No cache: research §5 defers one until
  * the read is measured slow, and then only as a rebuildable derivative.
@@ -62,7 +63,8 @@ export async function rollups(
   const total = emptyTally();
   for (const r of rows) {
     const key = by === "agent" ? r.agent_node ?? "(none)" : by === "nest" ? r.nest_id : by === "binding" ? r.binding_id ?? "(none)" : "all";
-    const bucket = bucketOf(r.at, grain);
+    // r is already a SQL aggregate (one UTC day × nest × agent × binding × source).
+    const bucket = bucketOf(r.day, grain);
     const id = `${bucket}\u0000${by === "agent" || by === "binding" ? `${r.nest_id}\u0000${key}` : key}`;
     let g = groups.get(id);
     if (!g) groups.set(id, (g = { bucket, key, nestId: r.nest_id, tally: emptyTally() }));

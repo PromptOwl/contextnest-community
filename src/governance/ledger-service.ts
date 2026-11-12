@@ -134,8 +134,12 @@ const REVIEW_COUNTS = `
     FROM review_requests WHERE run_id IS NOT NULL
    GROUP BY run_id`;
 
-/** Every ledger row, both families, one column shape. */
-const LEDGER_UNION = `(
+/**
+ * Every ledger row, both families, one column shape. The page and the trace
+ * need the run's trace (its outcome); the totals and rollups never read it,
+ * so their variant leaves the column out.
+ */
+const ledgerUnion = (withTrace: boolean) => `(
   SELECT 'win_' || w.id AS entry_id,
          w.judged_at AS at,
          w.nest_id AS nest_id,
@@ -150,9 +154,9 @@ const LEDGER_UNION = `(
               ELSE w.verdict END AS verdict,
          w.reason_code AS reason_code,
          w.run_id AS run_id,
-         lr.status AS run_status,
-         lr.trace AS run_trace,
-         w.cost_micros AS cost_micros,
+         lr.status AS run_status,${withTrace ? "\n         lr.trace AS run_trace," : ""}
+         COALESCE(w.cost_micros, 0) AS cost_micros,
+         0 AS tokens,
          w.binding_id AS binding_id,
          w.id AS window_id,
          w.kinds AS kinds,
@@ -186,9 +190,10 @@ const LEDGER_UNION = `(
               ELSE NULL END AS verdict,
          r.reason_code AS reason_code,
          r.id AS run_id,
-         r.status AS run_status,
-         r.trace AS run_trace,
-         0 AS cost_micros,
+         r.status AS run_status,${withTrace ? "\n         r.trace AS run_trace," : ""}
+         -- Denormalised onto the run at close (run-totals.ts).
+         COALESCE(r.est_cost_micros, 0) AS cost_micros,
+         COALESCE(r.tokens, 0) AS tokens,
          CAST(NULL AS TEXT) AS binding_id,
          CAST(NULL AS TEXT) AS window_id,
          CAST(NULL AS TEXT) AS kinds,
@@ -207,6 +212,8 @@ const LEDGER_UNION = `(
     LEFT JOIN (${REVIEW_COUNTS}) rc ON rc.rid = r.id
    WHERE r.source <> 'server:surfaces' AND r.triggered_by <> 'surfaces:window'
 ) l`;
+const LEDGER_UNION = ledgerUnion(true);
+const LEDGER_UNION_AGG = ledgerUnion(false);
 
 const STATE_COLUMN: Record<string, string> = {
   pending: "n_pend",
@@ -255,23 +262,36 @@ export function ledgerWhere(
 
 // ─── Tally (shared with the rollups) ───────────────────────────────────────
 
+/**
+ * One aggregate group: the tally of every ledger row with this UTC day, nest,
+ * agent, binding and source. Totals and rollups sum these; SQL does the
+ * per-row work (`TALLY_SQL`).
+ */
 export interface AggRow {
-  at: string;
+  day: string;
+  /** The latest row in the group. */
+  last_at: string;
   nest_id: string;
   agent_node: string | null;
   binding_id: string | null;
   source: string;
-  verdict: string | null;
-  run_status: string | null;
-  run_trace: string | null;
+  entries: number | string;
+  failed: number | string | null;
+  no_op: number | string | null;
+  propose: number | string | null;
+  act: number | string | null;
+  escalate: number | string | null;
+  error: number | string | null;
+  none: number | string | null;
+  proposals: number | string | null;
+  approved: number | string | null;
+  edited: number | string | null;
+  rejected: number | string | null;
+  expired: number | string | null;
+  pending: number | string | null;
+  withdrawn: number | string | null;
   cost_micros: number | string | null;
-  n_prop: number | string;
-  n_app: number | string;
-  n_edit: number | string;
-  n_rej: number | string;
-  n_exp: number | string;
-  n_pend: number | string;
-  n_wd: number | string;
+  tokens: number | string | null;
 }
 
 export interface Tally {
@@ -317,53 +337,39 @@ export const emptyTally = (): Tally & { cost_micros: number } => ({
   cost_micros: 0,
 });
 
-function usageTotal(u: unknown): number {
-  if (typeof u === "number" && Number.isFinite(u)) return u;
-  if (!u || typeof u !== "object") return 0;
-  let n = 0;
-  for (const v of Object.values(u as Record<string, unknown>)) if (typeof v === "number" && Number.isFinite(v)) n += v;
-  return n;
-}
+const VERDICTS = ["no_op", "propose", "act", "escalate", "error"] as const;
 
-/** A row's cost in micro-dollars: the window's own meter, else the run trace's estimate. */
-function rowCostMicros(r: { source: string; cost_micros: unknown; run_trace: string | null }): number {
-  if (r.source === "surfaces") return Number(r.cost_micros) || 0;
-  const t = safeJson(r.run_trace) as { est_cost_usd?: unknown } | null;
-  const usd = Number(t?.est_cost_usd);
-  return Number.isFinite(usd) && usd > 0 ? Math.round(usd * 1_000_000) : 0;
-}
+/**
+ * THE tally, in SQL: one row's contribution, summed. Every row is one entry
+ * and one run; a failed run or an error verdict is a failure; a verdict
+ * outside the five (or none) counts as `none`.
+ */
+const TALLY_SQL = `COUNT(*) AS entries,
+       SUM(CASE WHEN l.run_status = 'failed' OR l.verdict = 'error' THEN 1 ELSE 0 END) AS failed,
+       ${VERDICTS.map((v) => `SUM(CASE WHEN l.verdict = '${v}' THEN 1 ELSE 0 END) AS ${v}`).join(",\n       ")},
+       SUM(CASE WHEN l.verdict IN (${VERDICTS.map((v) => `'${v}'`).join(", ")}) THEN 0 ELSE 1 END) AS none,
+       SUM(l.n_prop) AS proposals, SUM(l.n_app) AS approved, SUM(l.n_edit) AS edited, SUM(l.n_rej) AS rejected,
+       SUM(l.n_exp) AS expired, SUM(l.n_pend) AS pending, SUM(l.n_wd) AS withdrawn,
+       SUM(l.cost_micros) AS cost_micros, SUM(l.tokens) AS tokens`;
 
-function rowTokens(r: { source: string; run_trace: string | null }): number {
-  if (r.source === "surfaces") return 0;
-  const t = safeJson(r.run_trace) as { usage?: unknown } | null;
-  return usageTotal(t?.usage);
-}
+const num = (v: unknown) => Number(v) || 0;
 
-/** Add one row into a tally (mutates). */
-export function addToTally(t: Tally & { cost_micros: number }, r: AggRow): void {
-  t.entries += 1;
-  t.runs += 1;
-  if (r.run_status === "failed" || r.verdict === "error") t.failed += 1;
-  switch (r.verdict) {
-    case "no_op":
-    case "propose":
-    case "act":
-    case "escalate":
-    case "error":
-      t[r.verdict] += 1;
-      break;
-    default:
-      t.none += 1;
-  }
-  t.proposals += Number(r.n_prop) || 0;
-  t.approved += Number(r.n_app) || 0;
-  t.edited += Number(r.n_edit) || 0;
-  t.rejected += Number(r.n_rej) || 0;
-  t.expired += Number(r.n_exp) || 0;
-  t.pending += Number(r.n_pend) || 0;
-  t.withdrawn += Number(r.n_wd) || 0;
-  t.cost_micros += rowCostMicros(r);
-  t.tokens += rowTokens(r);
+/** Add one aggregate group into a tally (mutates). */
+export function addToTally(t: Tally & { cost_micros: number }, r: Omit<AggRow, "day" | "last_at" | "nest_id" | "agent_node" | "binding_id" | "source">): void {
+  t.entries += num(r.entries);
+  t.runs += num(r.entries);
+  t.failed += num(r.failed);
+  for (const v of VERDICTS) t[v] += num(r[v]);
+  t.none += num(r.none);
+  t.proposals += num(r.proposals);
+  t.approved += num(r.approved);
+  t.edited += num(r.edited);
+  t.rejected += num(r.rejected);
+  t.expired += num(r.expired);
+  t.pending += num(r.pending);
+  t.withdrawn += num(r.withdrawn);
+  t.cost_micros += num(r.cost_micros);
+  t.tokens += num(r.tokens);
 }
 
 export function finishTally(t: Tally & { cost_micros: number }): Tally {
@@ -371,33 +377,62 @@ export function finishTally(t: Tally & { cost_micros: number }): Tally {
   return { ...rest, cost_usd: cost_micros / 1_000_000 };
 }
 
-/** Every row matching the filters, aggregate columns only (totals + rollups). */
+/**
+ * The rows matching the filters, aggregated in SQL by UTC day × nest × agent
+ * × binding × source (totals + rollups). Bounded by days × groups, never by
+ * the number of rows, and never reads a run's trace.
+ */
 export async function aggregateRows(scope: LedgerScope, f: LedgerFilters): Promise<{ rows: AggRow[]; range: { from: string; to: string } }> {
   const range = ledgerRange(f);
   const owners = await personalOwners(scope.nestIds);
   const redacted = new Set(scope.nestIds.filter((id) => n1Redacts(owners, id, scope.viewerUserId)));
   const { sql, args } = ledgerWhere(scope, f, range, redacted);
   const rows = (await getDb().all(
-    `SELECT l.at, l.nest_id, l.agent_node, l.binding_id, l.source, l.verdict, l.run_status, l.run_trace, l.cost_micros,
-            l.n_prop, l.n_app, l.n_edit, l.n_rej, l.n_exp, l.n_pend, l.n_wd
-       FROM ${LEDGER_UNION} ${sql}`,
+    `SELECT substr(l.at, 1, 10) AS day, MAX(l.at) AS last_at, l.nest_id, l.agent_node, l.binding_id, l.source,
+            ${TALLY_SQL}
+       FROM ${LEDGER_UNION_AGG} ${sql}
+      GROUP BY substr(l.at, 1, 10), l.nest_id, l.agent_node, l.binding_id, l.source`,
     args as any,
   )) as AggRow[];
   return { rows, range };
 }
 
+/** The whole range's tally, one SQL aggregate. */
+async function totalsFor(sql: string, args: unknown[]): Promise<Tally> {
+  const row = (await getDb().get(`SELECT ${TALLY_SQL} FROM ${LEDGER_UNION_AGG} ${sql}`, args as any)) as AggRow | undefined;
+  const t = emptyTally();
+  if (row) addToTally(t, row);
+  return finishTally(t);
+}
+
 // ─── Page ──────────────────────────────────────────────────────────────────
 
-interface LedgerRow extends AggRow {
+interface LedgerRow {
   entry_id: string;
+  at: string;
+  nest_id: string;
+  agent_node: string | null;
+  binding_id: string | null;
+  source: string;
+  verdict: string | null;
   reason_code: string | null;
   run_id: string | null;
+  run_status: string | null;
+  run_trace: string | null;
+  cost_micros: number | string | null;
   window_id: string | null;
   kinds: string | null;
   message_count: number | string | null;
   external_ref: string | null;
   title: string | null;
   proposal_id: string | null;
+  n_prop: number | string;
+  n_app: number | string;
+  n_edit: number | string;
+  n_rej: number | string;
+  n_exp: number | string;
+  n_pend: number | string;
+  n_wd: number | string;
 }
 
 function encodeCursor(at: string, id: string): string {
@@ -414,49 +449,57 @@ function decodeCursor(c: string): [string, string] {
   throw new CodedError(422, "cursor: not a cursor this API returned", "invalid_field", { field: "cursor" });
 }
 
-/** Labels for nests, agents, bindings and people, batched per page. */
-async function labelsFor(rows: Array<{ nest_id: string; agent_node: string | null; binding_id?: string | null }>) {
-  const db = getDb();
-  const nestIds = [...new Set(rows.map((r) => r.nest_id))];
-  const nests = new Map<string, string>();
-  for (let i = 0; i < nestIds.length; i += 500) {
-    const chunk = nestIds.slice(i, i + 500);
-    for (const n of (await db.all(`SELECT id, name FROM nests WHERE id IN (${chunk.map(() => "?").join(",")})`, chunk)) as Array<{
-      id: string;
-      name: string;
-    }>)
-      nests.set(n.id, n.name);
+const CHUNK = 500;
+
+/** `SELECT … WHERE <col> IN (…)`, chunked so a long list stays under the bind limits. */
+async function allIn<T>(sql: (ph: string) => string, ids: string[]): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    out.push(...((await getDb().all(sql(chunk.map(() => "?").join(",")), chunk as any)) as T[]));
   }
-  const agents = new Map<string, string>();
-  const pairs = [...new Set(rows.filter((r) => r.agent_node).map((r) => `${r.nest_id}\u0000${r.agent_node}`))];
-  for (const p of pairs) {
-    const [nestId, nodeId] = p.split("\u0000");
-    const row = (await db.get("SELECT title FROM node_index WHERE nest_id = ? AND node_id = ?", [nestId, nodeId])) as
-      | { title: string }
-      | undefined;
-    agents.set(p, row?.title || nodeId.split("/").pop() || nodeId);
-  }
-  const bindingIds = [...new Set(rows.map((r) => r.binding_id).filter((b): b is string => !!b))];
-  const bindings = new Map<string, { conversation_name: string | null; conversation_id: string; surface: string | null; team: string | null }>();
-  for (const id of bindingIds) {
-    const b = (await db.get(
-      `SELECT b.conversation_name, b.conversation_id, i.surface, COALESCE(i.team_id, i.tenant_key) AS team
-         FROM surface_bindings b LEFT JOIN surface_installs i ON i.id = b.install_id WHERE b.id = ?`,
-      [id],
-    )) as { conversation_name: string | null; conversation_id: string; surface: string | null; team: string | null } | undefined;
-    if (b) bindings.set(id, b);
-  }
-  return {
-    nest: (id: string) => nests.get(id) ?? id,
-    agent: (nestId: string, nodeId: string | null) => (nodeId ? agents.get(`${nestId}\u0000${nodeId}`) ?? nodeId : null),
-    binding: (id: string | null) => (id ? bindings.get(id) ?? null : null),
-  };
+  return out;
 }
 
-async function emailOf(userId: string | null): Promise<string | null> {
-  if (!userId) return null;
-  const row = (await getDb().get("SELECT email FROM users WHERE id = ?", [userId])) as { email: string } | undefined;
-  return row?.email ?? null;
+const uniq = (xs: Array<string | null | undefined>) => [...new Set(xs.filter((x): x is string => !!x))];
+
+type BindingLabel = { conversation_name: string | null; conversation_id: string; surface: string | null; team: string | null };
+
+/** Labels for nests, agents and bindings: one query each per page, never one per row. */
+async function labelsFor(rows: Array<{ nest_id: string; agent_node: string | null; binding_id?: string | null }>) {
+  const nestIds = uniq(rows.map((r) => r.nest_id));
+  const nests = new Map<string, string>();
+  for (const n of await allIn<{ id: string; name: string }>((ph) => `SELECT id, name FROM nests WHERE id IN (${ph})`, nestIds)) nests.set(n.id, n.name);
+  const agents = new Map<string, string>();
+  const nodeIds = uniq(rows.map((r) => r.agent_node));
+  if (nodeIds.length) {
+    // node_ids across the page's nests, then keep the (nest, node) pairs asked for.
+    const wanted = new Set(rows.filter((r) => r.agent_node).map((r) => `${r.nest_id}\u0000${r.agent_node}`));
+    for (let i = 0; i < nodeIds.length; i += CHUNK) {
+      const chunk = nodeIds.slice(i, i + CHUNK);
+      const found = (await getDb().all(
+        `SELECT nest_id, node_id, title FROM node_index WHERE nest_id IN (${nestIds.map(() => "?").join(",")}) AND node_id IN (${chunk.map(() => "?").join(",")})`,
+        [...nestIds, ...chunk] as any,
+      )) as Array<{ nest_id: string; node_id: string; title: string | null }>;
+      for (const a of found) {
+        const k = `${a.nest_id}\u0000${a.node_id}`;
+        if (wanted.has(k) && a.title) agents.set(k, a.title);
+      }
+    }
+  }
+  const bindings = new Map<string, BindingLabel>();
+  for (const b of await allIn<BindingLabel & { id: string }>(
+    (ph) => `SELECT b.id, b.conversation_name, b.conversation_id, i.surface, COALESCE(i.team_id, i.tenant_key) AS team
+               FROM surface_bindings b LEFT JOIN surface_installs i ON i.id = b.install_id WHERE b.id IN (${ph})`,
+    uniq(rows.map((r) => r.binding_id)),
+  ))
+    bindings.set(b.id, b);
+  return {
+    nest: (id: string) => nests.get(id) ?? id,
+    agent: (nestId: string, nodeId: string | null) =>
+      nodeId ? agents.get(`${nestId}\u0000${nodeId}`) || nodeId.split("/").pop() || nodeId : null,
+    binding: (id: string | null) => (id ? bindings.get(id) ?? null : null),
+  };
 }
 
 /** Slack (or other) conversation link derived at read time; never stored. */
@@ -470,13 +513,74 @@ function sourceOf(b: { conversation_name: string | null; conversation_id: string
   return { kind: surface, label: b.conversation_name ? `#${b.conversation_name}` : b.conversation_id, url };
 }
 
-/** The last decision step of a run (the one the agent concluded with). */
-async function lastDecision(runId: string): Promise<Record<string, any> | null> {
-  const row = (await getDb().get(
-    "SELECT detail FROM run_steps WHERE run_id = ? AND action = 'decision' ORDER BY seq DESC LIMIT 1",
-    [runId],
-  )) as { detail: string | null } | undefined;
-  return (safeJson(row?.detail ?? null) as Record<string, any> | null) ?? null;
+/**
+ * Everything a page of rows links to — the last decision of each run, the
+ * first reviewer decision and latest commit of each window, the review of
+ * each run, and the reviewers' emails — in a handful of queries per page.
+ */
+async function hydrate(rows: LedgerRow[]) {
+  const windowIds = uniq(rows.filter((r) => r.source === "surfaces").map((r) => r.window_id));
+  const runIds = uniq(rows.filter((r) => r.source !== "surfaces").map((r) => r.run_id));
+
+  // The last decision step of a run (the one the agent concluded with).
+  const decisions = new Map<string, { seq: number; detail: Record<string, any> | null }>();
+  for (const d of await allIn<{ run_id: string; seq: number | string; detail: string | null }>(
+    (ph) => `SELECT run_id, seq, detail FROM run_steps WHERE action = 'decision' AND run_id IN (${ph})`,
+    runIds,
+  )) {
+    const seq = Number(d.seq);
+    const prev = decisions.get(d.run_id);
+    if (!prev || seq > prev.seq) decisions.set(d.run_id, { seq, detail: (safeJson(d.detail) as Record<string, any> | null) ?? null });
+  }
+
+  // A window's first decided item, by decided_at.
+  const decided = new Map<string, { decided_by_user_id: string | null; decided_at: string; reason: string | null }>();
+  for (const d of await allIn<{ window_id: string; decided_by_user_id: string | null; decided_at: string; reason: string | null }>(
+    (ph) => `SELECT p.window_id, i.decided_by_user_id, i.decided_at, i.reason
+               FROM surface_proposal_items i JOIN surface_proposals p ON p.id = i.proposal_id
+              WHERE p.window_id IN (${ph}) AND i.decided_at IS NOT NULL`,
+    windowIds,
+  )) {
+    const prev = decided.get(d.window_id);
+    if (!prev || d.decided_at < prev.decided_at) decided.set(d.window_id, d);
+  }
+
+  // A window's latest commit.
+  const commits = new Map<string, { node_id: string; version: number | null; created_at: string }>();
+  for (const c of await allIn<{ window_id: string; node_id: string; version: number | null; created_at: string }>(
+    (ph) => `SELECT window_id, node_id, version, created_at FROM surface_commits WHERE window_id IN (${ph})`,
+    windowIds,
+  )) {
+    const prev = commits.get(c.window_id);
+    if (!prev || c.created_at > prev.created_at) commits.set(c.window_id, c);
+  }
+
+  // A run's review: the latest resolved one, else an open one.
+  type Rr = { run_id: string; resolved_by: string | null; resolved_at: string | null; resolution_note: string | null; status: string; node_id: string; version: number };
+  const reviews = new Map<string, Rr>();
+  for (const rr of await allIn<Rr>(
+    (ph) => `SELECT run_id, resolved_by, resolved_at, resolution_note, status, node_id, version FROM review_requests WHERE run_id IN (${ph})`,
+    runIds,
+  )) {
+    const prev = reviews.get(rr.run_id);
+    const better = !prev || (prev.resolved_at === null ? rr.resolved_at !== null : rr.resolved_at !== null && rr.resolved_at > prev.resolved_at);
+    if (better) reviews.set(rr.run_id, rr);
+  }
+
+  const emails = new Map<string, string>();
+  for (const u of await allIn<{ id: string; email: string }>(
+    (ph) => `SELECT id, email FROM users WHERE id IN (${ph})`,
+    uniq([...decided.values()].map((d) => d.decided_by_user_id)),
+  ))
+    emails.set(u.id, u.email);
+
+  return {
+    decision: (runId: string) => decisions.get(runId)?.detail ?? null,
+    decided: (windowId: string) => decided.get(windowId) ?? null,
+    commit: (windowId: string) => commits.get(windowId) ?? null,
+    review: (runId: string) => reviews.get(runId) ?? null,
+    email: (userId: string | null) => (userId ? emails.get(userId) ?? null : null),
+  };
 }
 
 function proposalState(r: { n_prop: unknown; n_app: unknown; n_edit: unknown; n_rej: unknown; n_exp: unknown; n_pend: unknown; n_wd: unknown }): string | null {
@@ -491,15 +595,15 @@ function proposalState(r: { n_prop: unknown; n_app: unknown; n_edit: unknown; n_
 }
 
 /** One ledger row, serialised and redacted for this viewer. */
-async function serialise(
+function serialise(
   r: LedgerRow,
   labels: Awaited<ReturnType<typeof labelsFor>>,
+  links: Awaited<ReturnType<typeof hydrate>>,
   opts: { detail: boolean; n1: boolean },
-): Promise<Record<string, unknown>> {
-  const db = getDb();
+): Record<string, unknown> {
   const isWindow = r.source === "surfaces";
   const trace = safeJson(r.run_trace) as Record<string, unknown> | null;
-  const costMicros = rowCostMicros(r);
+  const costMicros = Number(r.cost_micros) || 0;
   const entry: Record<string, any> = {
     entry_id: r.entry_id,
     at: r.at,
@@ -527,7 +631,7 @@ async function serialise(
     redacted: opts.n1 ? "n1" : null,
   };
   if (!isWindow && r.run_id) {
-    const d = await lastDecision(r.run_id);
+    const d = links.decision(r.run_id);
     if (d) {
       entry.decision = {
         verdict: d.verdict ?? null,
@@ -557,24 +661,13 @@ async function serialise(
     };
   }
   if (isWindow && r.window_id) {
-    const decided = (await db.get(
-      `SELECT i.decided_by_user_id, i.decided_at, i.reason FROM surface_proposal_items i JOIN surface_proposals p ON p.id = i.proposal_id
-        WHERE p.window_id = ? AND i.decided_at IS NOT NULL ORDER BY i.decided_at LIMIT 1`,
-      [r.window_id],
-    )) as { decided_by_user_id: string | null; decided_at: string; reason: string | null } | undefined;
-    if (decided) entry.review = { by: await emailOf(decided.decided_by_user_id), reason: decided.reason ?? null, at: decided.decided_at };
-    const commit = (await db.get(
-      "SELECT node_id, version FROM surface_commits WHERE window_id = ? ORDER BY created_at DESC LIMIT 1",
-      [r.window_id],
-    )) as { node_id: string; version: number | null } | undefined;
+    const decided = links.decided(r.window_id);
+    if (decided) entry.review = { by: links.email(decided.decided_by_user_id), reason: decided.reason ?? null, at: decided.decided_at };
+    const commit = links.commit(r.window_id);
     if (commit) entry.commit = { node_id: commit.node_id, version: commit.version == null ? null : Number(commit.version) };
     entry.source = sourceOf(labels.binding(r.binding_id));
   } else if (r.run_id) {
-    const rr = (await db.get(
-      `SELECT resolved_by, resolved_at, resolution_note, status, node_id, version FROM review_requests
-        WHERE run_id = ? ORDER BY (CASE WHEN resolved_at IS NULL THEN 1 ELSE 0 END), resolved_at DESC LIMIT 1`,
-      [r.run_id],
-    )) as { resolved_by: string | null; resolved_at: string | null; resolution_note: string | null; status: string; node_id: string; version: number } | undefined;
+    const rr = links.review(r.run_id);
     if (rr?.resolved_at) entry.review = { by: rr.resolved_by, reason: rr.resolution_note ?? null, at: rr.resolved_at };
     if (rr?.status === "approved") entry.commit = { node_id: rr.node_id, version: Number(rr.version) };
     entry.source = r.source === "external" ? { kind: "agent", label: r.external_ref, url: null } : { kind: r.source, label: null, url: null };
@@ -631,22 +724,9 @@ export async function listLedger(
   )) as LedgerRow[];
   const page = rows.slice(0, limit);
   const labels = await labelsFor(page);
-  const entries = [];
-  for (const r of page) {
-    entries.push(await serialise(r, labels, { detail: scope.detailNests.has(r.nest_id), n1: redacted.has(r.nest_id) }));
-  }
-  let totals = finishTally(emptyTally());
-  if (opts.totals !== false) {
-    const agg = (await getDb().all(
-      `SELECT l.at, l.nest_id, l.agent_node, l.binding_id, l.source, l.verdict, l.run_status, l.run_trace, l.cost_micros,
-              l.n_prop, l.n_app, l.n_edit, l.n_rej, l.n_exp, l.n_pend, l.n_wd
-         FROM ${LEDGER_UNION} ${sql}`,
-      args as any,
-    )) as AggRow[];
-    const t = emptyTally();
-    for (const a of agg) addToTally(t, a);
-    totals = finishTally(t);
-  }
+  const links = await hydrate(page);
+  const entries = page.map((r) => serialise(r, labels, links, { detail: scope.detailNests.has(r.nest_id), n1: redacted.has(r.nest_id) }));
+  const totals = opts.totals !== false ? await totalsFor(sql, args) : finishTally(emptyTally());
   const last = page[page.length - 1];
   return {
     api_version: AGENT_API_VERSION,
@@ -655,6 +735,12 @@ export async function listLedger(
     next_cursor: rows.length > limit && last ? encodeCursor(last.at, last.entry_id) : null,
     totals,
   };
+}
+
+async function emailOf(userId: string | null): Promise<string | null> {
+  if (!userId) return null;
+  const row = (await getDb().get("SELECT email FROM users WHERE id = ?", [userId])) as { email: string } | undefined;
+  return row?.email ?? null;
 }
 
 // ─── Trace ─────────────────────────────────────────────────────────────────
@@ -695,7 +781,7 @@ export async function ledgerTrace(scope: LedgerScope, entryId: string): Promise<
     | undefined;
   if (!row) throw new NotFoundError("Ledger entry not found");
   const labels = await labelsFor([row]);
-  const entry = await serialise(row, labels, { detail, n1 });
+  const entry = serialise(row, labels, await hydrate([row]), { detail, n1 });
 
   const chain: Record<string, any> = { run: null, verdict: null, proposal: null, review: null, version: null, source: null };
   const expected = new Set<string>(["verdict"]);

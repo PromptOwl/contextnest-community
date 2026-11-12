@@ -5,6 +5,7 @@ import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -114,10 +115,11 @@ export const HISTORICAL_MIGRATIONS = [
   "082_surfaces_seeds",
   "083_view_summaries",
   "086_control_room_ledger",
+  "090_control_room_run_totals",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
-const ONE_TIME_BACKFILLS = ["086_control_room_ledger"];
+const ONE_TIME_BACKFILLS = ["086_control_room_ledger", "090_control_room_run_totals"];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
   await db.exec(`
@@ -1375,6 +1377,28 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   // window to an unrelated, newer listener run.
   if (pendingOnce.has("086_control_room_ledger")) {
     await db.exec(controlRoomLedgerIndexesAndBackfill("postgres"));
+  }
+
+  // Migration 090 parity: a run's cost and tokens on the run (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS est_cost_micros BIGINT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS tokens BIGINT;
+  `);
+  if (pendingOnce.has("090_control_room_run_totals")) {
+    // Keyset pages, so a large runs table is never held in memory at once.
+    let after = "";
+    for (;;) {
+      const page = (await db.all(
+        "SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL AND id > ? ORDER BY id LIMIT 500",
+        [after],
+      )) as Array<{ id: string; trace: string }>;
+      if (!page.length) break;
+      for (const r of page) {
+        const t = runTotals(r.trace);
+        await db.run("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?", [t.costMicros, t.tokens, r.id]);
+      }
+      after = page[page.length - 1].id;
+    }
   }
 
   // Migration 005 parity: anon-owned nests default to public visibility.

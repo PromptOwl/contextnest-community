@@ -23,6 +23,7 @@ import { safeJson } from "../shared/json.js";
 import { standingBlockFor, standingRefs, type StandingRef } from "../governance/always-include-service.js";
 import { CodedError } from "../shared/errors.js";
 import { parseStepDetail } from "./agent-event-schema.js";
+import { runTotals } from "./run-totals.js";
 import { idempotencyConflict, isUniqueViolation, VERDICT_RANK } from "./agent-event-schema.js";
 
 export const RUNNABLE_TYPES = ["agent", "skill"];
@@ -629,13 +630,19 @@ export async function closeRun(
     throw new ValidationError("status must be running | succeeded | failed | cancelled");
   }
   const terminal = status !== "running";
+  // The trace's cost and tokens go on the run too (po-1186), like the verdict,
+  // so the ledger sums them in SQL. No trace: keep what is stored.
+  const totals = input.trace === undefined ? null : runTotals(input.trace);
   const res = await getDb().run(
-    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
+    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?,
+            est_cost_micros = COALESCE(?, est_cost_micros), tokens = COALESCE(?, tokens)
       WHERE id = ? AND status = 'running'`,
     [
       status,
       input.trace === undefined ? null : JSON.stringify(input.trace),
       terminal ? new Date().toISOString() : null,
+      totals ? totals.costMicros : null,
+      totals ? totals.tokens : null,
       runId,
     ],
   );
