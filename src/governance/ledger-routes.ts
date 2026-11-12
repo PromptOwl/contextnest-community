@@ -65,21 +65,34 @@ nestLedgerRoutes.get("/", requireWorkflowPlane, async (c) => {
 });
 
 nestLedgerRoutes.get("/export", requireWorkflowPlane, async (c) => {
-  consumeAgentRate("export", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const nestId = c.req.param("nestId")!;
+  // Validate first: a malformed request is a 422 that spends none of the
+  // caller's hourly exports.
   const q = parseOr422(LedgerExportQuery, c.req.query());
+  consumeAgentRate("export", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const format = q.format ?? "ndjson";
-  const { body, rows } = await exportLedger(nestScope(nestId, c.get("userId"), canSeeDetail(c)), q, format);
-  // The export shows in the nest's activity log (AC-CR-12).
-  recordNodeAccess({
-    nestId,
-    wholeNest: true,
-    action: "export",
-    surface: "api",
-    userId: c.get("userId"),
-    userEmail: await resolveCallerEmail(c.get("userId")),
-    detail: `decision ledger export (${rows} rows, ${format})`,
-  });
+  // The export shows in the nest's activity log (AC-CR-12) — a failed one
+  // too, as a failure, so an attempt is never invisible.
+  const audit = async (detail: string) =>
+    recordNodeAccess({
+      nestId,
+      wholeNest: true,
+      action: "export",
+      surface: "api",
+      unthrottled: true,
+      userId: c.get("userId"),
+      userEmail: await resolveCallerEmail(c.get("userId")),
+      detail,
+    });
+  let out: { body: string; rows: number };
+  try {
+    out = await exportLedger(nestScope(nestId, c.get("userId"), canSeeDetail(c)), q, format);
+  } catch (err) {
+    await audit(`decision ledger export failed (${format})`).catch(() => {});
+    throw err;
+  }
+  const { body, rows } = out;
+  await audit(`decision ledger export (${rows} rows, ${format})`);
   const stamp = new Date().toISOString().slice(0, 10);
   return c.body(body, 200, {
     "Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "application/x-ndjson; charset=utf-8",

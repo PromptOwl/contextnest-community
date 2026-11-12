@@ -234,19 +234,29 @@ export async function runAgentTool(toolName: string, args: Record<string, any>, 
     }
     case "context_agent_ledger_export": {
       requireTier(perm, "read");
-      consumeAgentRate("export", who);
+      // Validate before spending an export (as REST does); audit a failure too.
       const q = parseOr422(AGENT_MCP_INPUTS.context_agent_ledger_export, stripClient(args));
-      const page = await listLedger(nestScope(ctx.nestId, ctx.userId, detail), { ...q, limit: q.limit ?? 200 }, { totals: false });
-      recordNodeAccess({
-        nestId: ctx.nestId,
-        wholeNest: true,
-        action: "export",
-        surface: "mcp",
-        userId: ctx.userId,
-        userEmail: ctx.userEmail,
-        client: ctx.client,
-        detail: `decision ledger export (${page.entries.length} rows, ndjson)`,
-      });
+      consumeAgentRate("export", who);
+      const audit = (detail: string) =>
+        recordNodeAccess({
+          nestId: ctx.nestId,
+          wholeNest: true,
+          action: "export",
+          surface: "mcp",
+          unthrottled: true,
+          userId: ctx.userId,
+          userEmail: ctx.userEmail,
+          client: ctx.client,
+          detail,
+        });
+      let page;
+      try {
+        page = await listLedger(nestScope(ctx.nestId, ctx.userId, detail), { ...q, limit: q.limit ?? 200 }, { totals: false });
+      } catch (err) {
+        audit("decision ledger export failed (ndjson)");
+        throw err;
+      }
+      audit(`decision ledger export (${page.entries.length} rows, ndjson)`);
       return json({
         api_version: page.api_version,
         rows: page.entries.length,

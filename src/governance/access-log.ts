@@ -82,6 +82,9 @@ export interface AccessEvent {
   /** How it was accessed ("search", "markdown export (12 documents)").
    *  Never the caller's query or prompt text. */
   detail?: string;
+  /** Record every call, skipping the re-read throttle: each one is a
+   *  separate fact (a decision-ledger export, and a failed one). */
+  unthrottled?: boolean;
 }
 
 /** Agent name as stored: the caller's self-reported `client.agent`, bounded. */
@@ -118,6 +121,7 @@ function admit(
   e: AccessEvent,
   now: number,
 ) {
+  if (e.unthrottled) return true;
   const key = throttleKey(actor, { ...e, nestId }, nodeId);
   const prev = lastSeen.get(key);
   if (prev !== undefined && now - prev < THROTTLE_MS) return false;

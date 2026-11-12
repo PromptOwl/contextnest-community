@@ -936,6 +936,9 @@ export async function ledgerTrace(scope: LedgerScope, entryId: string): Promise<
 
 const EXPORT_MAX_ROWS = 50_000;
 
+/** Test seam: make the next export fail mid-way (the failure is audited). */
+export const ledgerTestHooks: { failExport?: boolean } = {};
+
 /** Flatten a ledger row for CSV. */
 function flat(e: Record<string, any>): Record<string, unknown> {
   return {
@@ -976,13 +979,16 @@ function csvCell(v: unknown): string {
 
 /**
  * Every row the filters match, serialised exactly as the ledger API serves
- * them (same redaction), as NDJSON or CSV. Capped at 50 000 rows.
+ * them (same redaction), as NDJSON or CSV. Capped at 50 000 rows. Read in
+ * 200-row keyset pages whose links are batched (`hydrate`), so the query count
+ * grows per page, not per row.
  */
 export async function exportLedger(scope: LedgerScope, f: LedgerFilters, format: "csv" | "ndjson"): Promise<{ body: string; rows: number }> {
   const out: Array<Record<string, unknown>> = [];
   let cursor: string | undefined;
   do {
     const page = await listLedger(scope, { ...f, cursor, limit: 200 }, { totals: false });
+    if (ledgerTestHooks.failExport) throw new Error("injected export failure");
     out.push(...page.entries);
     cursor = page.next_cursor ?? undefined;
   } while (cursor && out.length < EXPORT_MAX_ROWS);
