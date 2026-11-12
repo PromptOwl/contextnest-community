@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decide, GATE_STEP } from "../tests/scripts/e2e-turnstile.mjs";
+import { decide, GATE_STEP, aheadInLine, rateLimitWaitMs } from "../tests/scripts/e2e-turnstile.mjs";
 
 describe("e2e turnstile (one run at a time on the shared server, none dropped)", () => {
   it("goes when no other run is in progress", () => {
@@ -27,5 +27,20 @@ describe("e2e turnstile (one run at a time on the shared server, none dropped)",
 
   it("names the step it looks for in other runs", () => {
     expect(GATE_STEP).toBe("Wait for the shared e2e server");
+  });
+
+  it("knows it must wait from the run list alone when an older run is in progress (no per-run jobs calls)", () => {
+    expect(aheadInLine(10, [12, 9])).toBe(true);
+    expect(aheadInLine(10, [12, 14])).toBe(false);
+    expect(aheadInLine(10, [])).toBe(false);
+  });
+
+  it("backs off until the rate-limit reset on a 403/429, at least the normal poll", () => {
+    const now = 1_000_000_000_000;
+    const reset = String(Math.floor(now / 1000) + 300);
+    expect(rateLimitWaitMs({ status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset } }, now, 60_000)).toBe(300_000);
+    expect(rateLimitWaitMs({ status: 429, headers: { "retry-after": "120" } }, now, 60_000)).toBe(120_000);
+    expect(rateLimitWaitMs({ status: 429, headers: {} }, now, 60_000)).toBe(60_000);
+    expect(rateLimitWaitMs({ status: 500, headers: {} }, now, 60_000)).toBe(60_000);
   });
 });

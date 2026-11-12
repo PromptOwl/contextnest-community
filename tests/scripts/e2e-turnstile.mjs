@@ -17,8 +17,15 @@
  *
  * Needs `actions: read` and GITHUB_TOKEN. Pure Node 20, no dependencies.
  *
+ * API budget: GITHUB_TOKEN has about 1,000 requests an hour per repo, shared
+ * with every workflow. A waiting run costs one list call a poll while any older
+ * run is in progress (it is not first in line, nothing else to ask). Only the
+ * run at the front of the line reads other runs' jobs, and it stops at the
+ * first one past the gate. Polls are 60s by default; a 403/429 waits for the
+ * rate-limit reset (or Retry-After) before asking again.
+ *
  * Env: GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID (set by Actions),
- *      E2E_TURNSTILE_MAX_MINUTES (default 120), E2E_TURNSTILE_POLL_SECONDS (default 20).
+ *      E2E_TURNSTILE_MAX_MINUTES (default 120), E2E_TURNSTILE_POLL_SECONDS (default 60).
  */
 
 /** Name of the workflow step that runs this script; other runs are read by it. */
@@ -35,6 +42,32 @@ export function decide(selfId, others) {
   return "go";
 }
 
+/** An older run is in progress: this one is not first in line. */
+export function aheadInLine(selfId, otherIds) {
+  return otherIds.some((id) => id < selfId);
+}
+
+/**
+ * How long to wait after a failed API call: until the rate-limit reset on a
+ * 403/429 that says so (or Retry-After), never less than the normal poll.
+ * @param {{ status: number, headers: Record<string, string | undefined> }} res
+ */
+export function rateLimitWaitMs(res, now, pollMs) {
+  if (res.status !== 403 && res.status !== 429) return pollMs;
+  const retryAfter = Number(res.headers["retry-after"]);
+  if (retryAfter > 0) return Math.max(pollMs, retryAfter * 1000);
+  const reset = Number(res.headers["x-ratelimit-reset"]);
+  if (res.headers["x-ratelimit-remaining"] === "0" && reset > 0) return Math.max(pollMs, reset * 1000 - now);
+  return pollMs;
+}
+
+class ApiError extends Error {
+  constructor(path, res) {
+    super(`GitHub API ${path} answered ${res.status}`);
+    this.res = { status: res.status, headers: Object.fromEntries(res.headers.entries()) };
+  }
+}
+
 async function gh(path) {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: {
@@ -43,21 +76,26 @@ async function gh(path) {
       "X-GitHub-Api-Version": "2022-11-28",
     },
   });
-  if (!res.ok) throw new Error(`GitHub API ${path} answered ${res.status}`);
+  if (!res.ok) throw new ApiError(path, res);
   return res.json();
 }
 
-/** Other in-progress runs of this workflow, and whether each is past the gate. */
+/**
+ * Other in-progress runs of this workflow. Jobs are read only when this run is
+ * first in line, and only until one run is found past the gate.
+ */
 async function otherRuns(repo, selfId, workflowId) {
   const { workflow_runs: runs = [] } = await gh(`/repos/${repo}/actions/workflows/${workflowId}/runs?status=in_progress&per_page=100`);
+  const ids = runs.map((r) => r.id).filter((id) => id !== selfId);
+  if (aheadInLine(selfId, ids)) return ids.map((id) => ({ id, gatePassed: false }));
   const out = [];
-  for (const run of runs) {
-    if (run.id === selfId) continue;
-    const { jobs = [] } = await gh(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`);
+  for (const id of ids) {
+    const { jobs = [] } = await gh(`/repos/${repo}/actions/runs/${id}/jobs?per_page=100`);
     const gatePassed = jobs.some((j) =>
       (j.steps ?? []).some((s) => s.name === GATE_STEP && s.status === "completed" && s.conclusion === "success"),
     );
-    out.push({ id: run.id, gatePassed });
+    out.push({ id, gatePassed });
+    if (gatePassed) break;
   }
   return out;
 }
@@ -67,17 +105,20 @@ async function main() {
   const selfId = Number(process.env.GITHUB_RUN_ID);
   if (!repo || !selfId || !process.env.GITHUB_TOKEN) throw new Error("GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_TOKEN are required");
   const maxMs = Number(process.env.E2E_TURNSTILE_MAX_MINUTES ?? 120) * 60_000;
-  const pollMs = Number(process.env.E2E_TURNSTILE_POLL_SECONDS ?? 20) * 1000;
+  const pollMs = Number(process.env.E2E_TURNSTILE_POLL_SECONDS ?? 60) * 1000;
   const { workflow_id: workflowId } = await gh(`/repos/${repo}/actions/runs/${selfId}`);
   const started = Date.now();
   let last = "";
   for (;;) {
     let others;
+    let waitMs = pollMs;
     try {
       others = await otherRuns(repo, selfId, workflowId);
     } catch (err) {
-      // A transient API error must not let a run through: wait and ask again.
-      console.log(`turnstile: ${err.message}; retrying`);
+      // An API error must not let a run through: wait (past a rate-limit
+      // reset if that is the cause) and ask again.
+      waitMs = err instanceof ApiError ? rateLimitWaitMs(err.res, Date.now(), pollMs) : pollMs;
+      console.log(`turnstile: ${err.message}; retrying in ${Math.round(waitMs / 1000)}s`);
       others = null;
     }
     if (others && decide(selfId, others) === "go") {
@@ -90,7 +131,7 @@ async function main() {
     if (line !== last) console.log(`turnstile: run ${selfId} ${line}`);
     last = line;
     if (Date.now() - started > maxMs) throw new Error(`turnstile: waited more than ${maxMs / 60_000} minutes for the shared e2e server`);
-    await new Promise((r) => setTimeout(r, pollMs));
+    await new Promise((r) => setTimeout(r, waitMs));
   }
 }
 

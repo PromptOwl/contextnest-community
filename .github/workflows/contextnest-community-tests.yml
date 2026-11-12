@@ -65,12 +65,14 @@ permissions:
 # pending run per group and cancels the older pending run when a new one
 # arrives, so with several PRs pushing, most runs were cancelled before they
 # started. Instead:
-#   - this group is per PR (or per branch for pushes / manual runs), and a new
+#   - this group is per PR (per run for pushes / manual runs), and a new
 #     commit on a PR cancels that PR's older run, which is superseded anyway;
 #   - the "Wait for the shared e2e server" step (tests/scripts/e2e-turnstile.mjs)
 #     lets one run at a time past it, first come first served, and drops none.
 concurrency:
-  group: e2e-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  # Pushes and manual runs get their own group each (run_id), so a burst of
+  # pushes to one ref can't drop a pending run either; the turnstile orders them.
+  group: e2e-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
