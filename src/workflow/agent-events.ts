@@ -175,7 +175,15 @@ export async function startReportRun(opts: {
   try {
     await db.transaction(async (tx) => {
       // Report-only runs count against the same flood cap as runner roots:
-      // an agent that never closes its runs can't pile up unbounded.
+      // an agent that never closes its runs can't pile up unbounded. The
+      // count + INSERT must be one atomic unit, or a burst of starts all read
+      // the same pre-insert count and all pass. SQLite serialises writers
+      // (BEGIN IMMEDIATE); on Postgres, lock the nest row first so concurrent
+      // starts in one nest queue behind each other (as run-service does for
+      // a parent's children).
+      if (db.dialect === "postgres") {
+        await tx.get("SELECT id FROM nests WHERE id = ? FOR UPDATE", [opts.nestId]);
+      }
       const { n } = (await tx.get(
         `SELECT COUNT(*) AS n FROM runs WHERE nest_id = ? AND parent_run_id IS NULL AND status = 'running'`,
         [opts.nestId],

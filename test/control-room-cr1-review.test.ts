@@ -163,7 +163,8 @@ describe("ledger aggregates and the page", () => {
     const id = start.data.run_id;
     const close = await req("PATCH", `/runs/${id}`, { status: "succeeded", usage: { input_tokens: 1000, output_tokens: 234 }, est_cost_usd: 0.0123 }, writeKey);
     expect(close.status).toBe(200);
-    expect(await one("SELECT est_cost_micros, tokens FROM runs WHERE id = ?", [id])).toEqual({ est_cost_micros: 12300, tokens: 1234 });
+    const r1 = await one("SELECT est_cost_micros, tokens FROM runs WHERE id = ?", [id]);
+    expect([Number(r1.est_cost_micros), Number(r1.tokens)]).toEqual([12300, 1234]); // BIGINT is a string on Postgres
     // A close without a trace keeps what is there.
     const s2 = await req("POST", `/nests/${N}/run/nodes/agents/claude-code-rv`, { report_only: true }, writeKey);
     await req("PATCH", `/runs/${s2.data.run_id}`, { status: "succeeded" }, writeKey);
