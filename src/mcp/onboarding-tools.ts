@@ -131,6 +131,7 @@ export async function handleOnboardingTool(name: string, args: Record<string, an
       return json(`Welcome screen: ${state.show ? "shown" : "not shown"}.`, state);
     }
     if (name === "context_distill") {
+      if (!ctx.contributorCredential) return "Distilling needs your own full credential (a session, an OAuth grant or a read-write personal key).";
       const ref = await ctx.resolveNest(String(args.nest ?? ""));
       if (!ref) return `Nest not found or not accessible: "${args.nest}".`;
       const out = await startDistill({ nestId: ref.id, userId: ctx.userId, userEmail: ctx.userEmail, url: args.url });

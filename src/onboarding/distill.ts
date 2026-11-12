@@ -104,10 +104,30 @@ export function validateDistillUrl(raw: unknown): URL {
     throw new ValidationError("That address is private or local. Only public sites can be distilled.");
   }
   url.hash = "";
+  parseGithubRepo(url); // refuses an unsafe branch or tag before anything runs
   return url;
 }
 
-/** github.com/<owner>/<repo>[/tree/<ref>…] → its parts; anything else null. */
+/**
+ * One segment of a branch or tag name, by git's ref rules narrowed to a safe
+ * set: no `.`/`..` (or `..` anywhere), no leading dot, no `.lock` suffix, no
+ * trailing dot, no encoded characters. Every segment is used in a GitHub path,
+ * so this is what keeps a ref from walking to another path.
+ */
+const REF_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+function refSegmentOk(s: string): boolean {
+  return REF_SEGMENT.test(s) && !s.includes("..") && !s.endsWith(".") && !s.endsWith(".lock");
+}
+const MAX_REF_SEGMENTS = 8;
+
+/**
+ * github.com/<owner>/<repo>[/tree/<ref>[/<path>…]] → its parts; anything else
+ * null. A branch may contain slashes (`feature/x`), and GitHub's own URL does
+ * not say where the branch ends and the path begins, so `ref` carries every
+ * segment after `tree/` (up to 8) and fetchGithub resolves the longest one
+ * that is a real branch or tag. A segment that is not a safe ref segment is
+ * refused (ValidationError) — the first one outright, a later one ends the ref.
+ */
 export function parseGithubRepo(url: URL): { owner: string; repo: string; ref: string | null } | null {
   if (url.hostname.toLowerCase() !== "github.com" && url.hostname.toLowerCase() !== "www.github.com") return null;
   const parts = url.pathname.split("/").filter(Boolean);
@@ -116,8 +136,16 @@ export function parseGithubRepo(url: URL): { owner: string; repo: string; ref: s
   const owner = parts[0]!;
   const repo = parts[1]!.replace(/\.git$/, "");
   if (!ok(owner) || !ok(repo)) return null;
-  const ref = parts[2] === "tree" && parts[3] && /^[A-Za-z0-9_./-]{1,200}$/.test(parts[3]) ? parts[3] : null;
-  return { owner, repo, ref };
+  if (parts[2] !== "tree" || !parts[3]) return { owner, repo, ref: null };
+  const segments: string[] = [];
+  for (const seg of parts.slice(3, 3 + MAX_REF_SEGMENTS)) {
+    if (!refSegmentOk(seg)) {
+      if (!segments.length) throw new ValidationError("That GitHub URL does not name a valid branch or tag.");
+      break;
+    }
+    segments.push(seg);
+  }
+  return { owner, repo, ref: segments.join("/") };
 }
 
 // ─── HTML → text ─────────────────────────────────────────────────────────────
@@ -255,6 +283,44 @@ async function fetchSite(fetchImpl: FetchLike, start: URL): Promise<SourceDoc> {
   return { title: first.title || url.hostname, kind: "site", url: url.toString(), sections };
 }
 
+/**
+ * `tree/<a>/<b>/<c>` → the longest of `a/b/c`, `a/b`, `a` that is a branch
+ * (then a tag) of the repo, with its commit. One matching-refs call per kind,
+ * on the first segment. Nothing matched: the first segment (a commit id, or a
+ * name GitHub will answer 404 for).
+ */
+async function resolveGithubRef(fetchImpl: FetchLike, api: string, ref: string): Promise<{ name: string; sha: string | null }> {
+  const segments = ref.split("/");
+  if (segments.length === 1) return { name: ref, sha: null };
+  for (const kind of ["heads", "tags"] as const) {
+    const got = await getFollowing(fetchImpl, new URL(`${api}/git/matching-refs/${kind}/${encodeURIComponent(segments[0]!)}`), {
+      accept: "application/vnd.github+json",
+    });
+    if (!got.res.ok) {
+      await got.res.body?.cancel().catch(() => {});
+      continue;
+    }
+    let refs: Array<{ ref?: string; object?: { sha?: string; type?: string } }> = [];
+    try {
+      const parsed = JSON.parse(await textOf(got.res));
+      if (Array.isArray(parsed)) refs = parsed;
+    } catch {
+      /* not JSON: no match */
+    }
+    const names = new Map<string, string | null>();
+    for (const r of refs) {
+      const name = typeof r.ref === "string" ? r.ref.replace(`refs/${kind}/`, "") : "";
+      const sha = typeof r.object?.sha === "string" && /^[0-9a-f]{40}$/.test(r.object.sha) && r.object.type !== "tag" ? r.object.sha : null;
+      if (name) names.set(name, sha);
+    }
+    for (let n = segments.length; n >= 1; n--) {
+      const candidate = segments.slice(0, n).join("/");
+      if (names.has(candidate)) return { name: candidate, sha: names.get(candidate) ?? null };
+    }
+  }
+  return { name: segments[0]!, sha: null };
+}
+
 async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string; repo: string; ref: string | null }): Promise<SourceDoc> {
   const api = `https://api.github.com/repos/${repo.owner}/${repo.repo}`;
   const gh = { accept: "application/vnd.github+json" };
@@ -263,7 +329,11 @@ async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string
   if (!meta.res.ok) throw new ValidationError(`GitHub answered ${meta.res.status}.`);
   const info = JSON.parse(await textOf(meta.res)) as { full_name?: string; description?: string; default_branch?: string; private?: boolean };
   if (info.private) throw new ValidationError("Only public GitHub repos can be distilled.");
-  const ref = repo.ref ?? info.default_branch ?? "HEAD";
+  const resolved = repo.ref ? await resolveGithubRef(fetchImpl, api, repo.ref) : null;
+  const ref = resolved?.name ?? info.default_branch ?? "HEAD";
+  // Paths use the commit when the ref resolved (a slash branch has no safe
+  // single-segment form); otherwise the name, which is a single safe segment.
+  const at = encodeURIComponent(resolved?.sha ?? ref);
   const sections: SourceSection[] = [];
   const name = info.full_name ?? `${repo.owner}/${repo.repo}`;
   if (info.description) sections.push({ locator: url.toString(), text: `# ${name}\n\n${info.description}` });
@@ -272,7 +342,7 @@ async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string
   if (readme.res.ok) sections.push({ locator: `${name}@${ref}:README`, text: await textOf(readme.res) });
   else await readme.res.body?.cancel().catch(() => {});
 
-  const tree = await getFollowing(fetchImpl, new URL(`${api}/git/trees/${encodeURIComponent(ref)}?recursive=1`), gh);
+  const tree = await getFollowing(fetchImpl, new URL(`${api}/git/trees/${at}?recursive=1`), gh);
   let paths: string[] = [];
   if (tree.res.ok) {
     const t = JSON.parse(await textOf(tree.res)) as { tree?: Array<{ path?: string; type?: string }> };
@@ -285,7 +355,7 @@ async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string
 
   const manifests = ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "Gemfile"].filter((m) => paths.includes(m)).slice(0, 3);
   for (const m of manifests) {
-    const raw = await getFollowing(fetchImpl, new URL(`https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${encodeURIComponent(ref)}/${m}`));
+    const raw = await getFollowing(fetchImpl, new URL(`https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${at}/${m}`));
     if (raw.res.ok) sections.push({ locator: `${name}@${ref}:${m}`, text: (await textOf(raw.res)).slice(0, 8_000) });
     else await raw.res.body?.cancel().catch(() => {});
   }
@@ -412,6 +482,35 @@ const cleanTag = (t: unknown): string | null => {
 };
 
 /** The model's final document list, bounded and typed. Exactly one overview. */
+/**
+ * Model output on an untrusted page can carry a tracking image or raw HTML that
+ * would fire when a reviewer opens the draft. Outside code (fences and inline
+ * spans, which render as text) this drops HTML comments and tags, and turns
+ * images (inline and reference style) into their alt text. Links stay.
+ */
+export function stripActiveMarkdown(md: string): string {
+  return md
+    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/)
+    .map((block, i) =>
+      i % 2 === 1
+        ? block
+        : block
+            .split(/(`[^`\n]*`)/)
+            .map((part, j) =>
+              j % 2 === 1
+                ? part
+                : part
+                    .replace(/<!--[\s\S]*?(-->|$)/g, "")
+                    .replace(/!\[([^\]]*)\]\([^)]*\)?/g, "$1")
+                    .replace(/!\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+                    .replace(/<\/?[A-Za-z!][^>]*>?/g, "")
+                    .replace(/[ \t]{2,}/g, " "),
+            )
+            .join(""),
+    )
+    .join("");
+}
+
 export function boundNodes(raw: Record<string, unknown> | null, provenance: string): DistilledNode[] {
   const list = Array.isArray(raw?.nodes) ? (raw!.nodes as unknown[]) : [];
   const out: DistilledNode[] = [];
@@ -421,7 +520,7 @@ export function boundNodes(raw: Record<string, unknown> | null, provenance: stri
     if (!item || typeof item !== "object") continue;
     const n = item as Record<string, unknown>;
     const title = typeof n.title === "string" ? n.title.replace(/[\r\n]+/g, " ").replace(/[#[\]<>]/g, "").replace(/\s+/g, " ").trim().slice(0, MAX_TITLE) : "";
-    const body = typeof n.body === "string" ? n.body.trim().slice(0, MAX_BODY) : "";
+    const body = typeof n.body === "string" ? stripActiveMarkdown(n.body).trim().slice(0, MAX_BODY) : "";
     if (!title || !body || titles.has(title.toLowerCase())) continue;
     let type = typeof n.type === "string" ? n.type.toLowerCase().trim() : "component";
     if (!NODE_TYPES.has(type)) type = "component";
@@ -579,6 +678,33 @@ export async function startDistill(opts: {
       ontology_id: ontology.id,
     };
   }
+  return withDistillStartLock(opts.userId, () => claimAndRun(opts, url, credential, ontology.text));
+}
+
+/**
+ * One start at a time per person: the "already running" check and the job
+ * INSERT span awaits, so two parallel starts could both pass the check.
+ * In-process is enough (single-process server, as the node write lock).
+ */
+const distillStartChains = new Map<string, Promise<unknown>>();
+function withDistillStartLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = (distillStartChains.get(userId) ?? Promise.resolve()).catch(() => {});
+  const run = prev.then(fn);
+  distillStartChains.set(userId, run);
+  void run
+    .catch(() => {})
+    .finally(() => {
+      if (distillStartChains.get(userId) === run) distillStartChains.delete(userId);
+    });
+  return run;
+}
+
+async function claimAndRun(
+  opts: { nestId: string; userId: string; userEmail: string; fetchImpl?: FetchLike },
+  url: URL,
+  credential: ModelCredential,
+  ontologyText: string,
+): Promise<StartDistillResult> {
   const running = await getDb().get("SELECT id, updated_at FROM distill_jobs WHERE user_id = ? AND status = 'running'", [opts.userId]) as
     | { id: string; updated_at: string }
     | undefined;
@@ -597,7 +723,7 @@ export async function startDistill(opts: {
     [id, opts.nestId, opts.userId, url.toString(), iso(), iso()],
   );
   runningJobs++;
-  const work = runJob(id, url, opts, credential, ontology.text).finally(() => {
+  const work = runJob(id, url, opts, credential, ontologyText).finally(() => {
     runningJobs--;
   });
   inFlight.set(id, work);

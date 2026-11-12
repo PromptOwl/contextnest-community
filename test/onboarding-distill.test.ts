@@ -53,6 +53,50 @@ describe("validateDistillUrl (SSRF fence on the typed URL)", () => {
     expect(parseGithubRepo(new URL("https://github.com/acme"))).toBeNull();
     expect(parseGithubRepo(new URL("https://example.com/acme/widgets"))).toBeNull();
   });
+
+  it("keeps every segment of a slash branch name (resolved against the repo's refs at fetch time)", () => {
+    expect(parseGithubRepo(new URL("https://github.com/acme/widgets/tree/feature/new-ui"))).toEqual({ owner: "acme", repo: "widgets", ref: "feature/new-ui" });
+  });
+
+  it.each([
+    ["https://github.com/acme/widgets/tree/a..b", "a `..`"],
+    ["https://github.com/acme/widgets/tree/.hidden", "a leading dot"],
+    ["https://github.com/acme/widgets/tree/main.lock", "a .lock ref"],
+    ["https://github.com/acme/widgets/tree/%2e%2e%2fsecrets", "an encoded traversal"],
+    ["https://github.com/acme/widgets/tree/ma%20in", "an encoded space"],
+  ])("refuses %s (%s) before any fetch", (raw) => {
+    expect(() => parseGithubRepo(new URL(raw))).toThrow(/branch or tag/);
+    expect(() => validateDistillUrl(raw)).toThrow(/branch or tag/);
+  });
+});
+
+describe("fetchSource on a GitHub repo", () => {
+  const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+
+  it("resolves a slash branch to the longest matching branch and reads at its commit", async () => {
+    const seen: string[] = [];
+    const fetchImpl = async (u: string) => {
+      const s = String(u);
+      seen.push(s);
+      if (s === "https://api.github.com/repos/acme/widgets") return json({ full_name: "acme/widgets", default_branch: "main" });
+      if (s === "https://api.github.com/repos/acme/widgets/git/matching-refs/heads/feature") {
+        return json([
+          { ref: "refs/heads/feature", object: { sha: "a".repeat(40) } },
+          { ref: "refs/heads/feature/new-ui", object: { sha: "b".repeat(40) } },
+          { ref: "refs/heads/feature/new-ui-old", object: { sha: "c".repeat(40) } },
+        ]);
+      }
+      if (s.startsWith("https://api.github.com/repos/acme/widgets/readme")) return new Response("# Widgets\n" + "Readme text. ".repeat(20), { status: 200 });
+      if (s.startsWith("https://api.github.com/repos/acme/widgets/git/trees/")) return json({ tree: [{ path: "package.json", type: "blob" }] });
+      if (s.startsWith("https://raw.githubusercontent.com/")) return new Response('{"name":"widgets"}', { status: 200 });
+      return new Response("nope", { status: 404 });
+    };
+    const doc = await fetchSource(new URL("https://github.com/acme/widgets/tree/feature/new-ui/src/lib"), fetchImpl as any);
+    expect(seen).toContain("https://api.github.com/repos/acme/widgets/readme?ref=feature%2Fnew-ui");
+    expect(seen).toContain(`https://api.github.com/repos/acme/widgets/git/trees/${"b".repeat(40)}?recursive=1`);
+    expect(seen).toContain(`https://raw.githubusercontent.com/acme/widgets/${"b".repeat(40)}/package.json`);
+    expect(doc.sections.map((x) => x.locator)).toContain("acme/widgets@feature/new-ui:README");
+  });
 });
 
 describe("fetchSource", () => {
@@ -134,6 +178,30 @@ describe("htmlToText", () => {
   });
 });
 
+describe("boundNodes strips images and raw HTML from model output", () => {
+  it("drops tracking images and HTML outside code, keeps code and plain links", () => {
+    const body = [
+      "Acme makes widgets. ![pixel](https://evil.test/p.gif?u=1) More text.",
+      "Ref image: ![logo][1]",
+      '<img src="https://evil.test/t.gif"> <iframe src="https://evil.test"></iframe><!-- hidden -->',
+      "<b>bold</b> and a [docs link](https://acme.test/docs).",
+      "Inline `<img src=x>` stays.",
+      "```html",
+      '<img src="https://example.com/a.png">',
+      "```",
+    ].join("\n");
+    const [n] = boundNodes({ nodes: [{ title: "Acme", type: "overview", tags: [], body }] }, "https://acme.test/");
+    const outside = n!.body.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`/g, "");
+    expect(outside).not.toMatch(/!\[/);
+    expect(outside).not.toMatch(/<\/?[a-z!]/i);
+    expect(outside).not.toMatch(/evil\.test/);
+    expect(n!.body).toMatch(/Acme makes widgets\. pixel More text\./);
+    expect(n!.body).toMatch(/bold and a \[docs link\]\(https:\/\/acme\.test\/docs\)/);
+    expect(n!.body).toContain("Inline `<img src=x>` stays.");
+    expect(n!.body).toContain('```html\n<img src="https://example.com/a.png">\n```');
+  });
+});
+
 describe("chunkSource and boundNodes", () => {
   it("caps the chunks so the model never sees the whole source", () => {
     const chunks = chunkSource({ title: "t", kind: "site", url: "https://x.test/", sections: [{ locator: "a", text: "x".repeat(CHUNK_CHARS * 20) }] });
@@ -174,6 +242,8 @@ describe("chunkSource and boundNodes", () => {
 // ─── integration ─────────────────────────────────────────────────────────────
 
 const modelRequests: any[] = [];
+/** When set, the mocked fetch waits on it, so a job stays "running". */
+let hold: Promise<void> | null = null;
 const fetched: string[] = [];
 const SITE = `<html><head><title>Acme Widgets</title></head><body>
   <h1>Acme Widgets</h1><p>${"Acme makes blue widgets for bakeries. ".repeat(10)}</p>
@@ -187,6 +257,7 @@ beforeAll(() => {
       ...actual,
       guardedFetch: () => async (u: string) => {
         fetched.push(String(u));
+        if (hold) await hold;
         return new Response(SITE, { status: 200, headers: { "content-type": "text/html" } });
       },
     };
@@ -323,6 +394,44 @@ describe("AC8: distill with the defaults", () => {
     await settleDistills();
     const peek = await jsonRequest(app, "GET", `/onboarding/distill/${r.data.job.id}`, undefined, owner.apiKey);
     expect(peek.status).toBe(404);
+  });
+
+  it("starts one distill per person even when two starts race (the second gets 429)", async () => {
+    const rae = await registerUser(app, "rae@distill.test", "Rae");
+    const raeNest = (await jsonRequest(app, "POST", "/onboarding/nest", {}, rae.apiKey)).data.nest.id;
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    try {
+      const { startDistill } = await import("../src/onboarding/distill.js");
+      const settled = await Promise.allSettled(
+        ["a", "b", "c"].map((p) => startDistill({ nestId: raeNest, userId: rae.userId, userEmail: rae.email, url: `https://acme.test/${p}` })),
+      );
+      expect(settled.filter((x) => x.status === "fulfilled").length).toBe(1);
+      for (const x of settled) if (x.status === "rejected") expect(String(x.reason?.message)).toMatch(/already running/);
+    } finally {
+      release();
+      hold = null;
+      const { settleDistills } = await import("../src/onboarding/distill.js");
+      await settleDistills();
+    }
+  });
+
+  it("refuses a credential that is not the person's own (a named system key), on REST and MCP", async () => {
+    const sys = await jsonRequest(app, "POST", "/systems", { name: "Sync bot", capability: "write", nest_ids: [nestId] }, owner.apiKey);
+    expect(sys.status).toBe(201);
+    const key = sys.data.api_key;
+    const r = await jsonRequest(app, "POST", "/onboarding/distill", { nest_id: nestId, url: "https://acme.test/" }, key);
+    expect(r.status).toBe(403);
+    // Today the system-key gate refuses it first; the route's own check is the
+    // backstop for any other credential that is not the person's own.
+    expect(r.data.error).toMatch(/system key|your own full credential/);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...authed(key) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "context_distill", arguments: { nest: nestId, url: "https://acme.test/" } } }),
+    });
+    const text = await res.text();
+    expect(text).not.toMatch(/Distill started|your own agent runs the distill/);
   });
 
   it("hands the same ontology to the user's agent when the superadmin turns server distill off", async () => {

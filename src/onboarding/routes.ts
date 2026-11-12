@@ -112,6 +112,9 @@ onboardingRoutes.get("/connection", async (c) => {
 
 onboardingRoutes.post("/distill", async (c) => {
   try {
+    // Writes into a nest and spends the nest's or the server's model key: the
+    // person's own full credential only, as for Create my nest.
+    if (!credentialMayContribute(c)) return c.json({ error: "Distilling needs your own full credential (a browser session or a read-write key)." }, 403);
     const b = (await c.req.json().catch(() => ({}))) as { nest_id?: unknown; url?: unknown };
     if (typeof b.nest_id !== "string" || !b.nest_id) return c.json({ error: "nest_id is required" }, 400);
     const out = await startDistill({ nestId: b.nest_id, userId: c.get("userId"), userEmail: await callerEmail(c), url: b.url });
