@@ -37,8 +37,10 @@ const canSeeDetail = (c: any) => permissionLevel(c.get("nestPermission")) >= per
 export const agentRegisterRoutes = new Hono<AuthEnv>();
 agentRegisterRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
-  // Registering creates a governed document, and an agent must not be able to
-  // mint other agents: owner/admin only, whatever the key's write tier.
+  // Registering creates a governed document: owner/admin only. The check is on
+  // the credential's resolved permission, so an owner's or admin's nest-scoped
+  // write key can register (AC-CR-08: an agent registers itself with the key
+  // it was given); a key whose user only has write (or read) access can't.
   if (permissionLevel(c.get("nestPermission")) < permissionLevel("admin")) {
     throw new ForbiddenError("Only an owner or admin of this nest can register an agent.");
   }

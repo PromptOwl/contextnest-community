@@ -269,7 +269,9 @@ export function agentNodeId(nodeId: string | undefined, name: string): string {
  * `metadata.agent = {executes, runtime, owner}`. The node goes through normal
  * governance (stewardship applies). An existing agent node with that id is a
  * no-op `created: false`; any other node there is a 409. Owner/admin only —
- * the caller checks; an agent can't mint other agents.
+ * the caller checks the credential's resolved permission, so a nest-scoped
+ * key minted by an owner/admin can register (AC-CR-08); a key whose user has
+ * only write or read access on the nest can't.
  */
 export async function registerAgent(opts: {
   nestId: string;
