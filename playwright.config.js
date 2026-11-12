@@ -255,6 +255,14 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges and deletes its own nests and teams; needs secondary_user
   },
+  {
+    // Nest page → Fields tab (CN-FIELD-001 … CN-FIELD-018). Serial: each case
+    // works in a nest it arranges and then deletes.
+    file: 'fields/fields.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -338,7 +346,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators', 'fields'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -708,6 +716,17 @@ export default defineConfig({
           name: 'collaborators',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/collaborators/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'fields',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/fields/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
