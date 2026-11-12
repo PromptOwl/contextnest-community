@@ -168,27 +168,96 @@ function decodeEntities(s: string): string {
   });
 }
 
-/** Readable text from an HTML page: headings as markdown, no scripts or chrome. */
+/** Elements dropped with everything inside them (to the end if never closed). */
+const DROP_BLOCKS = new Set(["script", "style", "noscript", "svg", "template", "iframe", "canvas", "head", "form", "nav", "footer"]);
+const BLOCK_ENDS = new Set(["p", "div", "section", "article", "ul", "ol", "tr", "table", "blockquote", "pre", "main", "header"]);
+/** Attributes are read from at most this much of one tag, so a giant tag stays cheap. */
+const MAX_TAG_SCAN = 4096;
+
+/** Index of `</name` (any case) at or after `from`, followed by whitespace or `>`; -1 if none. */
+function closingTagAt(html: string, name: string, from: number): number {
+  const re = new RegExp(`</${name}[\\s>]`, "gi");
+  re.lastIndex = from;
+  return re.exec(html)?.index ?? -1;
+}
+
+/**
+ * Readable text from an HTML page: headings as markdown, no scripts or chrome.
+ *
+ * One left-to-right pass with indexOf and literal-prefix searches, so the work
+ * is linear in the page: an opener that is never closed (`<form`, `<!--`,
+ * `<h1>`, a `<` with no `>`) drops the rest of the page instead of making
+ * every later match scan to the end again. The old regex version was
+ * quadratic on such pages and could pin the event loop.
+ */
 export function htmlToText(html: string): { title: string; text: string; links: string[] } {
-  const title = decodeEntities((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim());
+  html = html.slice(0, MAX_PAGE_BYTES);
+  let title = "";
+  const titleOpen = /<title\b/i.exec(html);
+  if (titleOpen) {
+    const gt = html.indexOf(">", titleOpen.index);
+    const close = gt < 0 ? -1 : closingTagAt(html, "title", gt + 1);
+    if (close >= 0) title = decodeEntities(html.slice(gt + 1, close).replace(/<[^<>]*>/g, " ")).replace(/\s+/g, " ").trim();
+  }
   const links: string[] = [];
-  for (const m of html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"'#]+)["']/gi)) links.push(decodeEntities(m[1]!));
-  let s = html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(script|style|noscript|svg|template|iframe|canvas|head|form)\b[\s\S]*?<\/\1\s*>/gi, " ")
-    .replace(/<(nav|footer)\b[\s\S]*?<\/\1\s*>/gi, " ");
-  s = s
-    .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi, (_m, n: string, inner: string) => `\n\n${"#".repeat(Number(n))} ${inner}\n\n`)
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<(br|hr)\b[^>]*>/gi, "\n")
-    .replace(/<\/(p|div|section|article|ul|ol|tr|table|blockquote|pre|main|header)\s*>/gi, "\n")
-    .replace(/<[^>]+>/g, " ");
-  s = decodeEntities(s)
+  const out: string[] = [];
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0) {
+      out.push(html.slice(i));
+      break;
+    }
+    out.push(html.slice(i, lt));
+    if (html.startsWith("<!--", lt)) {
+      const end = html.indexOf("-->", lt + 4);
+      if (end < 0) break;
+      out.push(" ");
+      i = end + 3;
+      continue;
+    }
+    const gt = html.indexOf(">", lt + 1);
+    if (gt < 0) break; // a tag that never closes: nothing readable follows
+    const tag = html.slice(lt + 1, Math.min(gt, lt + 1 + MAX_TAG_SCAN));
+    const m = /^(\/?)([A-Za-z][A-Za-z0-9-]{0,31})/.exec(tag);
+    i = gt + 1;
+    if (!m) {
+      out.push(" ");
+      continue;
+    }
+    const closing = m[1] === "/";
+    const name = m[2]!.toLowerCase();
+    if (!closing && DROP_BLOCKS.has(name)) {
+      const end = closingTagAt(html, name, i);
+      if (end < 0) break;
+      const after = html.indexOf(">", end);
+      if (after < 0) break;
+      out.push(" ");
+      i = after + 1;
+      continue;
+    }
+    if (/^h[1-6]$/.test(name)) {
+      out.push(closing ? "\n\n" : `\n\n${"#".repeat(Number(name[1]))} `);
+    } else if (name === "li" && !closing) {
+      out.push("\n- ");
+    } else if ((name === "br" || name === "hr") && !closing) {
+      out.push("\n");
+    } else if (closing && BLOCK_ENDS.has(name)) {
+      out.push("\n");
+    } else {
+      if (name === "a" && !closing) {
+        const href = /\bhref\s*=\s*["']([^"'#]+)/i.exec(tag); // up to a #fragment or the closing quote
+        if (href) links.push(decodeEntities(href[1]!));
+      }
+      out.push(" ");
+    }
+  }
+  const text = decodeEntities(out.join(""))
     .replace(/[ \t\f\v\r]+/g, " ")
-    .replace(/ *\n */g, "\n")
+    .replace(/ ?\n ?/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return { title, text: s, links };
+  return { title, text, links };
 }
 
 // ─── fetching ────────────────────────────────────────────────────────────────

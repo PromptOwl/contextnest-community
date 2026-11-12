@@ -176,6 +176,36 @@ describe("htmlToText", () => {
     expect(out.text).toMatch(/- One\n- Two/);
     expect(out.text).toMatch(/Fish <3 chips!/);
   });
+
+  it("keeps links, drops an unclosed block to the end, and reads the title from <head>", () => {
+    const out = htmlToText(
+      `<HTML><HEAD><TITLE>Big</TITLE></HEAD><body><a class="x" href="/a">A</a> <A HREF='https://acme.test/b#frag'>B</A>
+       <h1>One</h1><p>Keep me.</p><!-- gone --><footer>Foot</footer><form action="/x">Never closed <input name=q>`,
+    );
+    expect(out.title).toBe("Big");
+    expect(out.links).toEqual(["/a", "https://acme.test/b"]);
+    expect(out.text).toMatch(/# One/);
+    expect(out.text).toMatch(/Keep me\./);
+    expect(out.text).not.toMatch(/gone|Foot|Never closed/);
+  });
+
+  // A hostile page of ~2 MB of unclosed openers: every pattern must stay
+  // linear, or one distill pins the event loop for everyone.
+  it.each([
+    ["<form ", "unclosed block"],
+    ["<!--", "unclosed comment"],
+    ["<h1>", "unclosed heading"],
+    ["<nav ", "unclosed nav"],
+    ["<title", "unclosed title"],
+    ["<a href=\"x ", "unclosed link"],
+    ["<x ", "unclosed tag"],
+    ["<li ", "unclosed list item"],
+  ])("stays fast on ~2 MB of %s (%s)", (unit) => {
+    const html = unit.repeat(Math.floor(2_000_000 / unit.length));
+    const t0 = performance.now();
+    htmlToText(html);
+    expect(performance.now() - t0).toBeLessThan(3_000); // the regex version took minutes
+  }, 30_000);
 });
 
 describe("boundNodes strips images and raw HTML from model output", () => {
