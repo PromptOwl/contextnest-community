@@ -54,19 +54,30 @@ env:
 
 permissions:
   contents: read
+  actions: read # the turnstile reads this workflow's other runs
 
 # Every run drives the same shared test accounts on the same deployed server,
 # so two runs at once collide: rate limits (429), 500s, and each deleting the
 # other's data (the orphan sweep at the start of one run removed the live nests
-# of another). Queue them instead: one e2e run per target server at a time,
-# never cancelling a run in progress.
+# of another). So only one run may use the server at a time.
+#
+# That is NOT done with one repo-wide concurrency group: GitHub keeps only one
+# pending run per group and cancels the older pending run when a new one
+# arrives, so with several PRs pushing, most runs were cancelled before they
+# started. Instead:
+#   - this group is per PR (or per branch for pushes / manual runs), and a new
+#     commit on a PR cancels that PR's older run, which is superseded anyway;
+#   - the "Wait for the shared e2e server" step (tests/scripts/e2e-turnstile.mjs)
+#     lets one run at a time past it, first come first served, and drops none.
 concurrency:
-  group: e2e-${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
-  cancel-in-progress: false
+  group: e2e-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    # Includes time waiting at the turnstile (it gives up after 120 minutes).
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -90,6 +101,14 @@ jobs:
       # Chromium only — every project uses Desktop Chrome
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
+
+      # Holds this run here until no other run is using the shared server.
+      # The step name is read by other runs; keep it in sync with GATE_STEP.
+      - name: Wait for the shared e2e server
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          E2E_TURNSTILE_MAX_MINUTES: '120'
+        run: node tests/scripts/e2e-turnstile.mjs
 
       - name: Run Playwright tests
         env:
