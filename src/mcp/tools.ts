@@ -1517,9 +1517,9 @@ export const TOOL_DEFINITIONS = [
       properties: {
         since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
         source: { type: "string", description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
-        author: { type: "string", description: "Only versions by this email." },
-        tag: { type: "string", description: "Only documents carrying this tag." },
-        type: { type: "string", description: "Only documents of this type." },
+        author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
+        tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
+        type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },
         limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
         offset: { type: "number", description: "Skip this many posts (paging)." },
       },

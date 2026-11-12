@@ -234,6 +234,30 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(eve.structuredContent?.items ?? []).toEqual([]);
   });
 
+  it("AC-ST-08: Given bad limit/offset or a comma list, Then context_stream refuses or ORs like REST", async () => {
+    const path = `/nests/${nest}/mcp`;
+    for (const bad of [{ limit: 0 }, { limit: 1.5 }, { offset: -1 }, { source: "robots" }, { since: "not a date" }]) {
+      const res = await callTool(app, path, alice.apiKey, "context_stream", bad);
+      expect(res.isError, JSON.stringify(bad)).toBe(true);
+    }
+    const both = await callTool(app, path, alice.apiKey, "context_stream", { author: "dana@acme.com, alice@acme.com" });
+    const rest = await stream("?author=dana@acme.com,alice@acme.com");
+    expect(both.structuredContent.items.length).toBe(rest.data.items.length);
+  });
+
+  // Last: it adds a version, which the counts above do not expect.
+  it("AC-ST-04: Given a person's write whose client has a key or value containing \"agent\", Then it is still a human post", async () => {
+    const doc = await asPerson(app, "POST", `/nests/${nest}/nodes`, {
+      title: "Lookalike", content: "# Lookalike\n\nbody",
+      client: { agent_version: "2", note: 'said "agent":"x"' },
+    }, alice.cookie);
+    expect(doc.status).toBe(201);
+    const human = await stream("?source=human");
+    expect(human.data.items.some((i: any) => i.nodeId === doc.data.node.id)).toBe(true);
+    const agents = await stream("?source=agent");
+    expect(agents.data.items.some((i: any) => i.nodeId === doc.data.node.id)).toBe(false);
+  });
+
   it("AC-ST-08: Given the switch is off, Then context_stream is not advertised and refuses a call", async () => {
     delete process.env.EXPERIMENTAL_DOC_STREAM;
     try {

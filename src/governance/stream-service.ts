@@ -164,10 +164,12 @@ export function summarize(body: string, title?: string): string {
 
 /**
  * SQL for "this version's write named an agent". `client_json` is
- * JSON.stringify output (serializeClient), so a top-level `agent` key is the
- * literal `"agent":` — a key or value that merely contains the word is
- * escaped or prefixed and does not match. Text matching keeps it one
- * predicate on both drivers (no json_extract / ->> split).
+ * JSON.stringify output (serializeClient) of a FLAT block: the engine's
+ * clientMetadataSchema allows only scalar values, so there is no nested
+ * object to carry an inner `"agent":` key, and no null to store. A top-level
+ * `agent` key is therefore the literal `"agent":`; a key or value that merely
+ * contains the word is prefixed or escaped and does not match (tested). Text
+ * matching keeps it one predicate on both drivers (no json_extract / ->>).
  */
 const AGENT_SQL = `(v.client_json LIKE '%"agent":%' AND v.client_json NOT LIKE '%"agent":""%')`;
 
@@ -349,6 +351,9 @@ export async function getDocStream(params: {
               v.tags_json, v.client_json, v.change_note, ni.title, ni.type,
               u.name AS author_name, sa.name AS system_name
          ${FROM}
+         -- The same join getVersionAttribution uses: users.email is UNIQUE and
+         -- stored lowercased, as is node_versions.author; system_accounts is
+         -- keyed by user_id. At most one row each, so paging is unchanged.
          LEFT JOIN users u ON u.email = v.author
          LEFT JOIN system_accounts sa ON sa.user_id = u.id
         WHERE ${whereSql}

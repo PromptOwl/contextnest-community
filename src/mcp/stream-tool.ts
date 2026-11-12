@@ -6,7 +6,7 @@
  */
 import { config } from "../config.js";
 import { streamForCaller } from "../governance/stream-read.js";
-import type { StreamItem } from "../governance/stream-service.js";
+import { STREAM_MAX_LIMIT, STREAM_MAX_OFFSET, type StreamItem } from "../governance/stream-service.js";
 import type { ToolResult } from "./tools.js";
 
 export const STREAM_TOOL = "context_stream";
@@ -40,7 +40,23 @@ function sinceArg(raw: unknown): string | undefined | null {
   return new Date(t).toISOString().slice(0, 19).replace("T", " ");
 }
 
-const one = (v: unknown) => (typeof v === "string" && v.trim() ? [v.trim()] : []);
+/** A filter value as REST takes it: one value, a comma-separated list, or an
+ *  array; OR within the filter. */
+const list = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : typeof v === "string" ? v.split(",") : [])
+    .filter((x): x is string => typeof x === "string")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+
+const invalid = (message: string): ToolResult => ({ text: message, data: { code: "INVALID_INPUT", message }, isError: true });
+
+/** A whole number inside [min, max], undefined when absent, null when bad. */
+function intArg(raw: unknown, min: number, max: number): number | undefined | null {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
 
 export async function streamToolResult(
   userId: string,
@@ -50,20 +66,20 @@ export async function streamToolResult(
   onlyNest?: string,
 ): Promise<ToolResult> {
   const since = sinceArg(args.since);
-  if (since === null) {
-    return { text: "since must be a date, e.g. 2026-11-01T09:00:00Z", data: { code: "INVALID_INPUT", message: "since must be a date" }, isError: true };
-  }
+  if (since === null) return invalid("since must be a date, e.g. 2026-11-01T09:00:00Z");
   const source = args.source === "agent" || args.source === "human" ? args.source : undefined;
-  if (args.source && !source) {
-    return { text: 'source must be "agent" or "human"', data: { code: "INVALID_INPUT", message: "source must be agent or human" }, isError: true };
-  }
+  if (args.source && !source) return invalid('source must be "agent" or "human"');
+  const limit = intArg(args.limit, 1, STREAM_MAX_LIMIT);
+  if (limit === null) return invalid(`limit must be a whole number from 1 to ${STREAM_MAX_LIMIT}`);
+  const offset = intArg(args.offset, 0, STREAM_MAX_OFFSET);
+  if (offset === null) return invalid(`offset must be a whole number from 0 to ${STREAM_MAX_OFFSET}`);
   const page = await streamForCaller({
     userId,
     userEmail,
     onlyNest,
-    filters: { author: one(args.author), tag: one(args.tag), type: one(args.type), since, source },
-    limit: typeof args.limit === "number" ? args.limit : 25,
-    offset: typeof args.offset === "number" ? args.offset : 0,
+    filters: { author: list(args.author), tag: list(args.tag), type: list(args.type), since, source },
+    limit: limit ?? 25,
+    offset: offset ?? 0,
     facets: false,
   });
   if (page.items.length === 0) {

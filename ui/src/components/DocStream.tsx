@@ -403,7 +403,7 @@ function ActionButton({
   );
 }
 
-function StreamPost({
+export function StreamPost({
   item,
   showNest,
   expanded,
