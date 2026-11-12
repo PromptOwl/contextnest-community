@@ -260,6 +260,11 @@ const slugify = (s: string) =>
  * confirm modal labels a staged document New vs Update with it, and the
  * structure check names the file a title will be saved as.
  */
+
+/** The change note the server writes when it publishes a write itself
+ *  ("Auto-published on create (<reason>)"). The document stream reads the
+ *  prefix to tell this stamp from a note a person wrote (po-1214). */
+export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
 export function derivedNodeId(title: string, folder = ""): string | null {
   const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
   return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
@@ -2296,7 +2301,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `Auto-published on create (${publishReason})`;
+          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -3290,7 +3295,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `Auto-published on edit (${publishReason})`;
+          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

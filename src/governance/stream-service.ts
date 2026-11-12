@@ -40,6 +40,7 @@ import { ensureNodeIndex } from "../nodes/node-index.js";
 import { normalizeTag } from "./tag-index-service.js";
 import { canUserApproveMany } from "./stewardship-service.js";
 import { deserializeClient } from "../shared/client-metadata.js";
+import { AUTO_PUBLISH_NOTE_PREFIX } from "../nodes/service.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export type StreamKind = "created" | "updated" | "published" | "approved" | "rejected";
@@ -507,11 +508,11 @@ export async function getDocStream(params: {
 }
 
 /** A change note a person (or their agent) wrote. The server's own
- *  "Auto-published on create/edit (<reason>)" stamp (nodes/service.ts) says
+ *  "Auto-published on create/edit (<reason>)" stamp (AUTO_PUBLISH_NOTE_PREFIX) says
  *  nothing about the change, so a post shows no note for it. */
 function personNote(raw: string | null): string | null {
   const note = raw?.trim();
-  if (!note || /^Auto-published on (create|edit) \(/.test(note)) return null;
+  if (!note || note.startsWith(AUTO_PUBLISH_NOTE_PREFIX)) return null;
   return note;
 }
 

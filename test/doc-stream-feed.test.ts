@@ -245,6 +245,27 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(both.structuredContent.items.length).toBe(rest.data.items.length);
   });
 
+  it("AC-ST-09: Given a headless access key, Then context_stream is neither offered nor served (per-nest and server-level)", async () => {
+    const { createHeadlessKey, setNestHeadless } = await import("../src/auth/headless.js");
+    await setNestHeadless(nest, true);
+    const made = (await createHeadlessKey(nest, "Buyer", alice.userId)) as any;
+    const key = made.apiKey ?? made.value?.apiKey;
+    expect(key).toBeTruthy();
+    for (const path of [`/nests/${nest}/mcp`, "/mcp"]) {
+      expect(await toolNames(app, path, key)).not.toContain("context_stream");
+      const res = await callTool(app, path, key, "context_stream", {});
+      expect(JSON.stringify(res ?? {})).not.toContain("Dana Okafor");
+      expect(res?.structuredContent?.items ?? []).toEqual([]);
+    }
+  });
+
+  it("AC-ST-04 canary: Given the engine's client schema, Then it stays flat — a nested value is refused (AGENT_SQL relies on it)", async () => {
+    const { clientMetadataSchema } = await import("@promptowl/contextnest-engine/api");
+    expect(clientMetadataSchema.safeParse({ agent: "a" }).success).toBe(true);
+    expect(clientMetadataSchema.safeParse({ x: { agent: "a" } }).success).toBe(false);
+    expect(clientMetadataSchema.safeParse({ agent: null }).success).toBe(false);
+  });
+
   // Last: it adds a version, which the counts above do not expect.
   it("AC-ST-04: Given a person's write whose client has a key or value containing \"agent\", Then it is still a human post", async () => {
     const doc = await asPerson(app, "POST", `/nests/${nest}/nodes`, {
