@@ -173,8 +173,9 @@ export async function getVersion(
 /**
  * Who sealed one version — the human (`editedBy`, with the system account's
  * name when it is one) and the call's `client` block — without its body.
- * `version` omitted means the latest row that is an edit (an auto-publish
- * bump row is skipped, as in getCurrentVersion). Backs the "last edited by" line on
+ * `version` omitted means the latest row that is an edit; with `version`,
+ * the edit that produced it — that row, or the edit beneath it when it is an
+ * auto-publish bump (bump rows are skipped, as in getCurrentVersion). Backs the "last edited by" line on
  * the node detail and on context_get, so both name the same two writers the
  * version list does.
  */
@@ -189,10 +190,12 @@ export async function getVersionAttribution(
        FROM node_versions nv
        LEFT JOIN users u ON u.email = nv.author
        LEFT JOIN system_accounts sa ON sa.user_id = u.id
-      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? " AND nv.author NOT LIKE ?" : " AND nv.version = ?"}
+      WHERE nv.nest_id = ? AND nv.node_id = ? AND nv.author NOT LIKE ?${version === undefined ? "" : " AND nv.version <= ?"}
       ORDER BY nv.version DESC
       LIMIT 1`,
-    version === undefined ? [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`] : [nestId, nodeId, version],
+    version === undefined
+      ? [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`]
+      : [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`, version],
   )) as any;
   return row ? rowToVersion(row) : null;
 }

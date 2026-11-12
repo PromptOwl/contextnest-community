@@ -1278,7 +1278,8 @@ export async function listNodesForCaller(
   // live document and its live status, so the draft's author is the honest
   // editor here. context_get differs because it serves the approved body to
   // agents under stewardship, so it names that version's editor.
-  const lastEdits = (await canSeeEditors(nestId, userId))
+  // publicReader is already known here; only the headless check is new.
+  const lastEdits = !publicReader && !(await isHeadlessIdentity(userId))
     ? await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id))
     : null;
 

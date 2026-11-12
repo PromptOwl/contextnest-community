@@ -146,6 +146,19 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 99`, [nestId, row.id]);
   });
 
+  it("Given a served version that is an auto-publish bump, then attribution names the edit beneath it", async () => {
+    const { getVersionAttribution } = await import("../src/governance/version-service.js");
+    const id = rowFor(await listRows(owner.apiKey), "Agent Doc").id;
+    await getDb().run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nestId, id, 3, "bump", "system:auto-publish:owner@home.test", "published"],
+    );
+    const v = await getVersionAttribution(nestId, id, 3);
+    expect(v).toMatchObject({ version: 2, editedBy: "owner@home.test", client: { agent: "deal-desk" } });
+    await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 3`, [nestId, id]);
+  });
+
   it("Given a document whose only version rows are auto-publish bumps, then it has no last_edit", async () => {
     await getDb().run(
       `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status)
