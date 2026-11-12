@@ -357,13 +357,14 @@ describe("MCP parity", () => {
     expect((await jsonRequest(app, "GET", "/onboarding", undefined, newbie.apiKey)).data.show).toBe(true);
   });
 
-  it("lists the four onboarding tools on the server-level endpoint", async () => {
+  it("lists the three onboarding tools on the server-level endpoint (job progress is folded into context_onboarding)", async () => {
     const res = await app.request("/mcp", {
       method: "POST",
       headers: { ...MCP_HEADERS, ...authed(newbie.apiKey) },
       body: JSON.stringify({ jsonrpc: "2.0", id: rpc++, method: "tools/list", params: {} }),
     });
     const text = await res.text();
-    for (const t of ["context_onboarding", "context_onboarding_update", "context_distill", "context_distill_status"]) expect(text).toContain(`"${t}"`);
+    for (const t of ["context_onboarding", "context_onboarding_update", "context_distill"]) expect(text).toContain(`"${t}"`);
+    expect(text).not.toContain('"context_distill_status"');
   });
 });

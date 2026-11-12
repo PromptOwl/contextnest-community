@@ -57,11 +57,18 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->102 (2026-11-08, PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts): context_onboarding,
-//   context_onboarding_update, context_distill, context_distill_status — twins of GET /onboarding,
-//   POST /onboarding/{dismiss,reopen,nest}, POST /onboarding/distill and GET /onboarding/distill/:id. Community-only
-//   tables (user_onboarding, distill_jobs) the engine does not model, so no engine op exists.
-const BASELINE = 102;
+//   98->101 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
+//   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
+//     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
+//       folds the job progress in; no separate status tool). Per-person welcome state (user_onboarding table) and the
+//       distill job row (distill_jobs) are Community server state the engine does not model.
+//     context_onboarding_update — twin of POST /onboarding/{dismiss,reopen,nest}. Flips the per-person welcome flag
+//       (user_onboarding) and creates the caller's own nest idempotently; the engine has no users or onboarding state.
+//     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
+//       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
+//       concerns outside the engine's vault-operation catalog, so there is no op to consume.
+const BASELINE = 101;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

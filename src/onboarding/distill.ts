@@ -12,7 +12,9 @@
  *                 the SSRF fence in metacognition/net.ts;
  *   2. extract  — pass 1, one model call per chunk: candidate notes;
  *   3. organize — pass 2, one model call: the final documents, one overview;
- *   4. write    — each document through the normal createNode path.
+ *   4. write    — each document through the normal createNode path, always as
+ *                 a draft (alwaysDraft), so a person approves model output
+ *                 from an untrusted page before agents read it.
  *
  * SAFETY
  *   - SSRF: https only, port 443 only, no credentials in the URL, no literal
@@ -25,7 +27,8 @@
  *     <untrusted_source> tags (defanged so it cannot close them), the system
  *     prompt says so, and the model's reply is parsed as bounded JSON — titles,
  *     tags and bodies are length-capped, only `document` nodes are written, no
- *     prime / always-include, mentions do not notify.
+ *     prime / always-include, mentions do not notify, and every document lands
+ *     as a draft for review.
  *   - Cost: per-person rate limit and one running job per person, plus a
  *     server-wide concurrency cap; at most MAX_CHUNKS + 1 model calls a job.
  */
@@ -639,7 +642,9 @@ async function runJob(
           opts.nestId,
           { title: n.title, content: n.body, tags: n.tags, folder, client: { agent: "distill" } },
           opts.userEmail,
-          { notifyMentions: false },
+          // Model output from an untrusted page: always a draft, whatever the
+          // nest's posture, so a person approves it before agents read it.
+          { alwaysDraft: true, notifyMentions: false },
         );
         written.push({ id: res.node.id, title: n.title });
       } catch (err) {

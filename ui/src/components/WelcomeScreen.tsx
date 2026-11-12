@@ -220,7 +220,7 @@ function DistillCard({ state, onOpenNest }: { state: OnboardingState; onOpenNest
           <Sparkles className="h-4 w-4 text-muted-foreground" aria-hidden /> Distill a site or repo
         </CardTitle>
         <CardDescription>
-          Give a public site or a public GitHub repo. {state.distill.mode === "server" ? "This server writes a first set of linked documents into your nest." : "You get a prompt to give your connected agent."}
+          Give a public site or a public GitHub repo. {state.distill.mode === "server" ? "This server writes a first set of linked documents into your nest as drafts. You review them before your agents can use them." : "You get a prompt to give your connected agent."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -243,7 +243,7 @@ function DistillCard({ state, onOpenNest }: { state: OnboardingState; onOpenNest
             <p className={cn("text-xs", job.data?.job.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{progress.label || "Starting"}</p>
             {job.data?.job.status === "done" && nest && (
               <Button variant="outline" size="sm" onClick={() => onOpenNest(nest)}>
-                See the documents <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                Review the drafts <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
               </Button>
             )}
           </div>

@@ -116,7 +116,8 @@ describe("distill progress (AC8)", () => {
     const mid = distillProgress({ status: "running", phase: "extracting", done_steps: 2, total_steps: 5, nodes: [], error: null });
     expect(mid.percent).toBe(40);
     expect(mid.label).toBe("Extracting (2 of 4 parts)");
-    expect(distillProgress({ status: "done", phase: "done", done_steps: 9, total_steps: 9, nodes: [1, 2], error: null })).toEqual({ percent: 100, label: "Done. 2 documents added." });
+    expect(distillProgress({ status: "done", phase: "done", done_steps: 9, total_steps: 9, nodes: [1, 2], error: null })).toEqual({ percent: 100, label: "Done. 2 drafts are waiting for your review." });
+    expect(distillProgress({ status: "done", phase: "done", done_steps: 9, total_steps: 9, nodes: [1], error: null }).label).toBe("Done. 1 draft is waiting for your review.");
     expect(distillProgress({ status: "failed", phase: "failed", done_steps: 1, total_steps: 9, nodes: [], error: "No." }).label).toBe("No.");
   });
 });

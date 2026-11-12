@@ -293,7 +293,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 
 ## 1a. First-run onboarding (PO-1185)
 
-The Getting started screen. Every route acts on the caller; nest routes check access to the nest. A nest-scoped key gets `403`. MCP twins on the server-level `/mcp`: `context_onboarding`, `context_onboarding_update`, `context_distill`, `context_distill_status`.
+The Getting started screen. Every route acts on the caller; nest routes check access to the nest. A nest-scoped key gets `403`. MCP twins on the server-level `/mcp`: `context_onboarding` (`GET /onboarding`, `/onboarding/connection` and, with `job_id`, `/onboarding/distill/:jobId`), `context_onboarding_update` (dismiss, reopen, nest) and `context_distill`.
 
 ### GET `/onboarding`
 The welcome screen's state: `show`, `first_run` (owns no nest), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
@@ -308,7 +308,7 @@ Body `{ name? }`. Creates the caller's nest ("<Name>'s nest" by default) through
 The connect proof: `{ connected, at, via: "mcp" | "api" | "hootie", client, tool }`. True only when the activity trace holds a read of that nest by the caller at or after `since`: an MCP read tool, a REST read with an agent's key, or a Hootie answer. A write does not count.
 
 ### POST `/onboarding/distill`
-Body `{ nest_id, url }`. `https` only, port 443, public hosts only (checked again at connect time and on every redirect). `202 { mode: "server", job }` starts a job; `200 { mode: "agent", reason, prompt }` when server distill is off or there is no model key. `429` past 3 runs an hour, or while one of yours runs. Needs edit access to the nest.
+Body `{ nest_id, url }`. `https` only, port 443, public hosts only (checked again at connect time and on every redirect). `202 { mode: "server", job }` starts a job; `200 { mode: "agent", reason, prompt }` when server distill is off or there is no model key. `429` past 3 runs an hour, or while one of yours runs. Needs edit access to the nest. Every distilled document is written as a **draft** (never auto-published, whatever the nest's posture), because its text is model output from an untrusted page; a person reviews and publishes it. The nest's ontology document is the server's bundled text and is created normally.
 
 ### GET `/onboarding/distill/:jobId`
 `{ job: { status, phase, done_steps, total_steps, nodes, error } }`. Your own jobs only.

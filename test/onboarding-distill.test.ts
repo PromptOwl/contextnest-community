@@ -208,6 +208,7 @@ describe("AC8: distill with the defaults", () => {
   let other: Awaited<ReturnType<typeof registerUser>>;
   let root: Awaited<ReturnType<typeof registerUser>>;
   let nestId = "";
+  let firstJobId = "";
 
   beforeAll(async () => {
     env = setupTestEnv();
@@ -232,6 +233,7 @@ describe("AC8: distill with the defaults", () => {
     expect(start.status).toBe(202);
     expect(start.data.mode).toBe("server");
     const jobId = start.data.job.id;
+    firstJobId = jobId;
     expect(start.data.job.status).toBe("running");
     const { settleDistills } = await import("../src/onboarding/distill.js");
     await settleDistills();
@@ -244,6 +246,16 @@ describe("AC8: distill with the defaults", () => {
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, owner.apiKey);
     const titles = (list.data.nodes ?? list.data).map((n: any) => n.title ?? n.frontmatter?.title);
     expect(titles).toEqual(expect.arrayContaining(["Acme Widgets", "Acme pricing", "Distill ontology (default)"]));
+  });
+
+  it("Given model-written documents from an untrusted page, When the distill writes them, Then they land as drafts for the person to approve", async () => {
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, owner.apiKey);
+    const nodes = (list.data.nodes ?? list.data) as any[];
+    const byTitle = (t: string) => nodes.find((n: any) => (n.title ?? n.frontmatter?.title) === t);
+    // Nothing the model wrote is published, even in the person's own ungoverned nest.
+    for (const t of ["Acme Widgets", "Acme pricing"]) expect(byTitle(t)?.status, t).toBe("draft");
+    // The bundled default ontology is the server's own text, not model output.
+    expect(byTitle("Distill ontology (default)")?.status).toBe("published");
   });
 
   it("reads the ontology from the nest (a versioned document), and wraps the page as untrusted data", async () => {
@@ -311,7 +323,7 @@ describe("AC8: distill with the defaults", () => {
     await jsonRequest(app, "PATCH", "/admin/settings", { distill_enabled: true }, root.apiKey);
   });
 
-  it("MCP parity: context_distill and context_distill_status", async () => {
+  it("MCP parity: context_distill, and context_onboarding with job_id reads the job", async () => {
     await jsonRequest(app, "PATCH", "/admin/settings", { distill_enabled: false }, root.apiKey);
     const res = await app.request("/mcp", {
       method: "POST",
@@ -323,9 +335,26 @@ describe("AC8: distill with the defaults", () => {
     const st = await app.request("/mcp", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...authed(owner.apiKey) },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "context_distill_status", arguments: { job_id: "nope" } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "context_onboarding", arguments: { job_id: "nope" } } }),
     });
     expect(await st.text()).toMatch(/No distill job with that id is yours/);
+    // A real job of the caller's: the same progress GET /onboarding/distill/:id shows.
+    await jsonRequest(app, "PATCH", "/admin/settings", { distill_enabled: true }, root.apiKey);
+    const row = { id: firstJobId };
+    const ok = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...authed(owner.apiKey) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "context_onboarding", arguments: { job_id: row.id } } }),
+    });
+    const okText = await ok.text();
+    expect(okText).toMatch(/Distill done: done, \d+\/\d+ steps, 2 documents written as drafts/);
+    // Another person's job id reads as not found.
+    const peek = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...authed(other.apiKey) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "context_onboarding", arguments: { job_id: row.id } } }),
+    });
+    expect(await peek.text()).toMatch(/No distill job with that id is yours/);
     await jsonRequest(app, "PATCH", "/admin/settings", { distill_enabled: true }, root.apiKey);
   });
 });

@@ -248,7 +248,7 @@ export function distillProgress(job: { status: string; phase: string; done_steps
 } {
   if (!job) return { percent: 0, label: "" };
   if (job.status === "failed") return { percent: 0, label: job.error ?? "The distill failed." };
-  if (job.status === "done") return { percent: 100, label: `Done. ${job.nodes.length} document${job.nodes.length === 1 ? "" : "s"} added.` };
+  if (job.status === "done") return { percent: 100, label: `Done. ${job.nodes.length} draft${job.nodes.length === 1 ? " is" : "s are"} waiting for your review.` };
   const pct = job.total_steps > 0 ? Math.min(99, Math.round((job.done_steps / job.total_steps) * 100)) : 2;
   const label =
     job.phase === "fetching"
@@ -257,7 +257,7 @@ export function distillProgress(job: { status: string; phase: string; done_steps
         ? `Extracting (${job.done_steps} of ${Math.max(job.total_steps - 1, 1)} parts)`
         : job.phase === "organizing"
           ? "Organizing into documents"
-          : `Writing documents (${job.nodes.length} so far)`;
+          : `Writing drafts (${job.nodes.length} so far)`;
   return { percent: Math.max(pct, 2), label };
 }
 

@@ -18,7 +18,6 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 const READ_ONLY = [
   "nest_index",
   "context_onboarding",
-  "context_distill_status",
   "context_init",
   "context_instructions_history",
   "context_overview",
