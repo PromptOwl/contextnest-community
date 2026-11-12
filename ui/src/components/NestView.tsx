@@ -449,8 +449,13 @@ export function NestView({
   };
   // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
   useEffect(() => {
-    if (initialTab === "fields") setFieldsOpen(true);
-    else if (initialTab) setActiveTabState(initialTab);
+    if (initialTab === "fields") {
+      // Open the dialog over Documents, and put the URL and breadcrumb back
+      // on Documents so closing it leaves no stale ?tab=fields.
+      setFieldsOpen(true);
+      setActiveTabState(DEFAULT_NEST_TAB);
+      onTabChange?.(DEFAULT_NEST_TAB);
+    } else if (initialTab) setActiveTabState(initialTab);
   }, [initialTab]);
   // List or grid for Documents, persisted per browser (a reading preference,
   // not a nest setting). The switch is in the ⋯ menu.
@@ -1623,6 +1628,8 @@ export function NestView({
               testId: "nest-reader-mode",
               onSelect: () => setReaderDialogOpen(true),
             });
+          // How this page shows (above) apart from managing the nest (below).
+          const viewItems = actions.length;
           if (!isReadOnly && canManageGovernance)
             actions.push({
               label: "Nest settings",
@@ -1686,6 +1693,8 @@ export function NestView({
               onSelect: () =>
                 canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
             });
+          if (viewItems > 0 && actions[viewItems] && !actions[viewItems].separatorBefore)
+            actions[viewItems] = { ...actions[viewItems], separatorBefore: true };
           return (
             <OverflowMenu
               actions={actions}

@@ -137,7 +137,7 @@ function FeedItem({
           </span>
           {edit && (
             <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground sm:shrink-0">
-              {where && <span className="truncate sm:hidden">{where}</span>}
+              {where && <span className="max-w-[40%] shrink-0 truncate sm:hidden">{where}</span>}
               {where && (edit.editor || edit.at) && <span aria-hidden className="sm:hidden">·</span>}
               {edit.editor && (
                 <span className="truncate" data-testid="last-editor">

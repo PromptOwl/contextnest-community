@@ -105,7 +105,8 @@ describe("folder-scoped node listing", () => {
     expect(census.types).toEqual({ document: 6 });
     expect(census.authors).toEqual(["owner@folders.test"]);
     expect(census.editedLast7d).toBe(6);
-    expect(census.recent.length).toBe(3);
+    // The Documents page's "Recently edited" feed: capped at 5 (po-1213).
+    expect(census.recent.length).toBe(5);
     expect(Object.values(census.statuses).reduce((a: any, b: any) => a + b, 0)).toBe(6);
   });
 });

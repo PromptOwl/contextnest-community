@@ -240,6 +240,15 @@ const testRun = [
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
   {
+    // Nest page → Documents home (CN-NH-001 … CN-NH-006, po-1213): Overview
+    // merged into Documents, last editor on every row, ⋯ menu. Skips until
+    // the server under test ships it.
+    file: 'nest-documents-home/nest_documents_home.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests
+  },
+  {
     // Nest page → Review Queue tab (RQ-001 … RQ-035). Serial: each case works
     // in a nest it arranges and then deletes.
     file: 'review-queue/review_queue.spec.js',
@@ -338,7 +347,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'nest-documents-home', 'review-queue', 'collaborators'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -675,6 +684,17 @@ export default defineConfig({
           name: 'nest-overview',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/nest-overview/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-documents-home',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-documents-home/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

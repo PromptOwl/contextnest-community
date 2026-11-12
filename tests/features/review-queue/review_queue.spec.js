@@ -271,7 +271,7 @@ test.describe('Review Queue', () => {
     // The link only falls back to Overview once the queue has loaded, so the
     // tab can't be absent here just because it hasn't appeared yet.
     await expect(viewer.page.page).not.toHaveURL(/tab=review/);
-    await expect(viewer.page.page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(viewer.page.page.locator('[role="tab"][aria-selected="true"]')).toHaveText(/^(Overview|Documents)$/); // Documents since po-1213
     await expect(viewer.page.reviewTab).toHaveCount(0);
     await expect(viewer.page.rows).toHaveCount(0);
   });

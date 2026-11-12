@@ -1342,7 +1342,7 @@ export function DocumentsTab({
                       {!cards && selectBox}
                       {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
                       <div className="flex-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <div className="flex items-center gap-2">
                           {cards && selectBox}
                           {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                           <span
@@ -1470,11 +1470,13 @@ export function DocumentsTab({
                               withheld last_edit (a public reader). */}
                           {(() => {
                             const edit = rowLastEdit(node, roster?.people);
-                            if (!edit) return null;
+                            if (!edit || cards) return null;
                             return (
                               <>
-                                <span aria-hidden>·</span>
-                                <span className="inline-flex min-w-0 items-center gap-1" data-testid={`last-edit-${node.id}`}>
+                                {/* The dot travels with the editor, so a wrapped
+                                    line never ends on a separator. */}
+                                <span className="inline-flex min-w-0 max-w-full items-center gap-1" data-testid={`last-edit-${node.id}`}>
+                                  <span aria-hidden className="mr-1">·</span>
                                   {edit.editor && <span className="truncate">{edit.editor}</span>}
                                   {edit.editor && edit.at && <span aria-hidden>·</span>}
                                   {edit.at && (
@@ -1491,10 +1493,30 @@ export function DocumentsTab({
                             );
                           })()}
                         </div>
+                        {/* Cards: the last edit gets its own line. */}
+                        {cards && (() => {
+                          const edit = rowLastEdit(node, roster?.people);
+                          if (!edit) return null;
+                          return (
+                            <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground" data-testid={`last-edit-${node.id}`}>
+                              {edit.editor && <span className="truncate">{edit.editor}</span>}
+                              {edit.editor && edit.at && <span aria-hidden>·</span>}
+                              {edit.at && (
+                                <time dateTime={edit.at} title={formatServerDate(edit.at, SHORT_DATE_TIME)} className="shrink-0 tabular-nums">
+                                  {relTime(edit.at)}
+                                </time>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
+                      {/* On a phone there is no hover, and the hidden buttons
+                          still took the row's width and squeezed the title to
+                          nothing: list rows get the cards' ⋮ menu instead. */}
+                      {!cards && <div className="shrink-0 sm:hidden">{actionMenu}</div>}
                       {!cards && (
                         <div
-                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
+                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100 max-sm:hidden"
                           onClick={(e) => e.stopPropagation()}
                         >
                           {canSubmit && (
