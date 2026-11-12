@@ -123,7 +123,13 @@ describe("AC-NH-03/04: rowLastEdit (Documents rows and the feed)", () => {
       },
       people,
     );
-    expect(r).toEqual({ at: "2026-11-02T00:00:00Z", editor: "Priya Raman via mkt-amplifier" });
+    // The time is updated_at: the key the list and the feed sort on.
+    expect(r).toEqual({ at: "2026-11-01T00:00:00Z", editor: "Priya Raman via mkt-amplifier" });
+  });
+
+  it("Given no updated_at, then the time falls back to the version's edited_at", () => {
+    const r = rowLastEdit({ last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-02T00:00:00Z" } }, people);
+    expect(r?.at).toBe("2026-11-02T00:00:00Z");
   });
 
   it("Given no agent, then it reads as the human alone", () => {

@@ -18,6 +18,7 @@ import {
   authed,
   resetAuthRateLimit,
 } from "./helpers";
+import { getDb } from "../src/db/client.js";
 
 type User = { apiKey: string; userId: string; email: string };
 
@@ -124,6 +125,32 @@ describe("AC-NH-02/07: the census feed carries the editor", () => {
     expect([...times].sort().reverse()).toEqual(times);
     for (const r of recent) {
       expect(r.last_edit?.edited_by).toBe("owner@home.test");
+    }
+  });
+});
+
+describe("review: the editor is a real edit, and the feed's time agrees with its order", () => {
+  it("Given an auto-publish bump row is the newest version, then last_edit still names the last real edit", async () => {
+    const rows = await listRows(owner.apiKey);
+    const row = rowFor(rows, "Agent Doc");
+    // A legacy bump row on top: not an edit (SYSTEM_AUTHOR_PREFIX).
+    await getDb().run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nestId, row.id, 99, "bump", "system:auto-publish:owner@home.test", "published"],
+    );
+    const after = rowFor(await listRows(owner.apiKey), "Agent Doc");
+    expect(after.last_edit).toMatchObject({ version: 2, edited_by: "owner@home.test", client: { agent: "deal-desk" } });
+    const detail = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${row.id}`, undefined, owner.apiKey);
+    expect(detail.data.node.last_edit.edited_by).toBe("owner@home.test");
+    await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 99`, [nestId, row.id]);
+  });
+
+  it("Given the census feed, then each item's version time is the same write as the updated_at it is sorted on", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey);
+    for (const r of data.census.recent as any[]) {
+      const gap = Math.abs(Date.parse(r.updated_at) - Date.parse(String(r.last_edit.edited_at).replace(" ", "T").replace(/(\d)$/, "$1Z")));
+      expect(gap).toBeLessThan(60_000);
     }
   });
 });

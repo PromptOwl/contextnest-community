@@ -173,7 +173,8 @@ export async function getVersion(
 /**
  * Who sealed one version — the human (`editedBy`, with the system account's
  * name when it is one) and the call's `client` block — without its body.
- * `version` omitted means the latest row. Backs the "last edited by" line on
+ * `version` omitted means the latest row that is an edit (an auto-publish
+ * bump row is skipped, as in getCurrentVersion). Backs the "last edited by" line on
  * the node detail and on context_get, so both name the same two writers the
  * version list does.
  */
@@ -188,44 +189,46 @@ export async function getVersionAttribution(
        FROM node_versions nv
        LEFT JOIN users u ON u.email = nv.author
        LEFT JOIN system_accounts sa ON sa.user_id = u.id
-      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? "" : " AND nv.version = ?"}
+      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? " AND nv.author NOT LIKE ?" : " AND nv.version = ?"}
       ORDER BY nv.version DESC
       LIMIT 1`,
-    version === undefined ? [nestId, nodeId] : [nestId, nodeId, version],
+    version === undefined ? [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`] : [nestId, nodeId, version],
   )) as any;
   return row ? rowToVersion(row) : null;
 }
 
 /**
- * getVersionAttribution's latest row for every node of one nest, in one
- * query — the Documents list, the "Recently edited" feed and context_list
+ * getVersionAttribution's latest row for each of `nodeIds`, in one query per
+ * 500 ids — the Documents list, the "Recently edited" feed and context_list
  * name the same two writers the node detail does, without a read per row.
- * `nodeIds` narrows the result; a node with no version row is absent.
+ * Auto-publish bump rows (SYSTEM_AUTHOR_PREFIX) are skipped, as in
+ * getCurrentVersions: they are not an edit. A node with no row is absent.
  */
 export async function getLatestVersionAttributions(
   nestId: string,
-  nodeIds?: string[],
+  nodeIds: string[],
 ): Promise<Map<string, DocumentVersion>> {
   const out = new Map<string, DocumentVersion>();
-  if (nodeIds && nodeIds.length === 0) return out;
-  const rows = (await getDb().all(
-    `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
-            nv.client_json, sa.name AS system_name
-       FROM node_versions nv
-       JOIN (SELECT node_id, MAX(version) AS v
-               FROM node_versions
-              WHERE nest_id = ?
-              GROUP BY node_id) latest
-         ON latest.node_id = nv.node_id AND latest.v = nv.version
-       LEFT JOIN users u ON u.email = nv.author
-       LEFT JOIN system_accounts sa ON sa.user_id = u.id
-      WHERE nv.nest_id = ?`,
-    [nestId, nestId],
-  )) as any[];
-  const wanted = nodeIds ? new Set(nodeIds) : null;
-  for (const row of rows) {
-    if (wanted && !wanted.has(row.node_id)) continue;
-    out.set(row.node_id, rowToVersion(row));
+  const CHUNK = 500;
+  for (let i = 0; i < nodeIds.length; i += CHUNK) {
+    const ids = nodeIds.slice(i, i + CHUNK);
+    const marks = ids.map(() => "?").join(",");
+    const rows = (await getDb().all(
+      `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
+              nv.client_json, sa.name AS system_name
+         FROM node_versions nv
+         JOIN (SELECT node_id, MAX(version) AS v
+                 FROM node_versions
+                WHERE nest_id = ? AND node_id IN (${marks})
+                  AND author NOT LIKE ?
+                GROUP BY node_id) latest
+           ON latest.node_id = nv.node_id AND latest.v = nv.version
+         LEFT JOIN users u ON u.email = nv.author
+         LEFT JOIN system_accounts sa ON sa.user_id = u.id
+        WHERE nv.nest_id = ?`,
+      [nestId, ...ids, `${SYSTEM_AUTHOR_PREFIX}%`, nestId],
+    )) as any[];
+    for (const row of rows) out.set(row.node_id, rowToVersion(row));
   }
   return out;
 }
