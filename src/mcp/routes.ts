@@ -18,6 +18,7 @@ import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { STREAM_TOOL, streamToolEnabled } from "./stream-tool.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { SURFACES_TOOL_DEFINITIONS } from "./surfaces-tools.js";
@@ -100,6 +101,8 @@ function createMcpServerForNest(
     // the agent the truth. runTool still refuses a write tool on its own
     // (the SDK answers an unregistered name with an error before that).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    // The document stream exists only while its experimental switch is on.
+    if (tool.name === STREAM_TOOL && !streamToolEnabled()) continue;
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // `client` is validated against the engine's own schema in handleToolCall.

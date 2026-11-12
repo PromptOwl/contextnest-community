@@ -141,6 +141,7 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
+import { streamToolEnabled, streamToolResult } from "./stream-tool.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -472,6 +473,7 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -1501,6 +1503,25 @@ export const TOOL_DEFINITIONS = [
             "Read one of YOUR drafts: returns its unapproved working copy (by node id) so you can fix it. Omit to list.",
         },
         title: { type: "string", description: "Same as id, by title." },
+      },
+    },
+  },
+  {
+    // po-1214: the document stream a person sees on /stream, for agents.
+    // Only advertised while EXPERIMENTAL_DOC_STREAM is on (streamToolEnabled).
+    name: "context_stream",
+    description:
+      "Read the document stream: recent versions, newest first — who changed what (the person, and the agent they wrote through), the change note, an excerpt, open comment count, and whether you may review it. Reply to a post with context_comment (its id), approve or reject one in review with context_approve / context_reject. Pass `since` (the newest `at` you have seen) to get only what is new.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
+        source: { type: "string", description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
+        author: { type: "string", description: "Only versions by this email." },
+        tag: { type: "string", description: "Only documents carrying this tag." },
+        type: { type: "string", description: "Only documents of this type." },
+        limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
+        offset: { type: "number", description: "Skip this many posts (paging)." },
       },
     },
   },
@@ -4578,6 +4599,13 @@ async function runTool(
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
       return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
+    }
+
+    case "context_stream": {
+      if (!streamToolEnabled()) {
+        return toolError("The document stream is not enabled on this server (EXPERIMENTAL_DOC_STREAM).", "UNAUTHORIZED_ACTION");
+      }
+      return streamToolResult(ctx.userId, userEmail, args, ctx.nestId);
     }
 
     case "context_submit_review": {

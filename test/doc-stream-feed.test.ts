@@ -41,6 +41,17 @@ const callTool = (app: any, path: string, apiKey: string, name: string, args: Re
 const toolNames = async (app: any, path: string, apiKey: string) =>
   ((await mcp(app, path, apiKey, "tools/list", {}))?.tools ?? []).map((t: { name: string }) => t.name);
 
+/** A browser-session request: no API key, so no key label is derived as the
+ *  agent — the write is a person's own (spec §9.4.2). */
+async function asPerson(app: any, method: string, path: string, body: unknown, cookie: string) {
+  const res = await app.request(path, {
+    method,
+    headers: { "Content-Type": "application/json", "X-Confirm-Billing": "true", Cookie: cookie },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, data: await res.json() };
+}
+
 async function db() {
   return (await import("../src/db/client.js")).getDb();
 }
@@ -48,8 +59,8 @@ async function db() {
 describe("doc stream as a feed (po-1214)", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
-  let alice: { apiKey: string; userId: string; email: string };
-  let dana: { apiKey: string; userId: string; email: string };
+  let alice: { apiKey: string; userId: string; email: string; cookie: string };
+  let dana: { apiKey: string; userId: string; email: string; cookie: string };
   let rory: { apiKey: string; userId: string; email: string };
   let stranger: { apiKey: string; userId: string; email: string };
   let nest: string;
@@ -87,17 +98,19 @@ describe("doc stream as a feed (po-1214)", () => {
       client: { agent: "mkt-amplifier" },
     }, dana.apiKey);
     expect(edit.status).toBe(200);
-    humanDoc = (await jsonRequest(app, "POST", `/nests/${nest}/nodes`, {
+    humanDoc = (await asPerson(app, "POST", `/nests/${nest}/nodes`, {
       title: "Q4 discount ceiling",
       content: "# Q4 discount ceiling\n\nStays at 18%.",
-    }, alice.apiKey)).data.node.id;
+    }, alice.cookie)).data.node.id;
 
     // Governed from here: Dana's next document goes to review.
-    await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true }, alice.apiKey);
-    reviewDoc = (await jsonRequest(app, "POST", `/nests/${nest}/nodes`, {
+    // Self-approve on: the owner may approve (decideApproval path 2); Dana,
+    // a writer with no steward role, may not.
+    await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true, allow_self_approve: true }, alice.apiKey);
+    reviewDoc = (await asPerson(app, "POST", `/nests/${nest}/nodes`, {
       title: "Globex sponsor", content: "# Globex sponsor\n\nTheir VP left.",
-    }, dana.apiKey)).data.node.id;
-    const submit = await jsonRequest(app, "POST", `/nests/${nest}/nodes/${reviewDoc}/submit-review`, { note: "ready" }, dana.apiKey);
+    }, dana.cookie)).data.node.id;
+    const submit = await asPerson(app, "POST", `/nests/${nest}/nodes/${reviewDoc}/submit-review`, { note: "ready" }, dana.cookie);
     expect(submit.status).toBeLessThan(300);
 
     const d = await db();
@@ -136,6 +149,8 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(v2.changeNote).toBe("Log the call the same day");
     expect(v2.summary.startsWith("Renewal checklist")).toBe(false);
     expect(v2.summary).toContain("Confirm the decision maker");
+    // The server's own "Auto-published on create (…)" note is not a change
+    // note a person wrote: the post shows none.
     const v1 = data.items.find((i: any) => i.nodeId === agentDoc && i.version === 1);
     expect(v1.changeNote ?? null).toBeNull();
   });
