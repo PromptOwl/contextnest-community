@@ -146,7 +146,7 @@ test.describe('Collaborators', () => {
     // tab can't be missing here just because it hasn't appeared yet.
     await expect(viewer.page.page).not.toHaveURL(/tab=collaborators/, WRITE);
     // The nest's home tab: Overview before po-1213, Documents after.
-    await expect(viewer.page.page.getByRole('tab', { name: /^(Overview|Documents)$/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(viewer.page.page.getByRole('tab', { name: /^(Overview|Documents)$/, selected: true })).toHaveCount(1);
     await expect(viewer.page.collaboratorsTab).toHaveCount(0);
   });
 
