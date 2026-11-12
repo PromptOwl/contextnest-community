@@ -35,6 +35,7 @@ import { engineCache } from "../nodes/engine.js";
 import { resolveExportBody, agentInstructionsBody } from "../nodes/readable-body.js";
 import { discardDraft } from "../nodes/service.js";
 import { appendRunStep, closeRun } from "../workflow/run-service.js";
+import { runTotals } from "../workflow/run-totals.js";
 import { storedEnvValues } from "../workflow/env-routes.js";
 import { getAgent, SERVER_CLAIM, type MetacognitionAgent } from "./store.js";
 import { createTurn, estimateCostUsd, type Usage } from "./model.js";
@@ -240,8 +241,12 @@ async function recordCancelledUsage(runId: string, trace: Record<string, unknown
   const row = (await db.get("SELECT trace FROM runs WHERE id = ? AND status = 'cancelled'", [runId])) as { trace: string | null } | undefined;
   if (!row) return;
   const prior = (safeJson(row.trace) as Record<string, unknown> | null) ?? {};
-  await db.run("UPDATE runs SET trace = ? WHERE id = ? AND status = 'cancelled'", [
-    JSON.stringify({ ...prior, ...trace, stopped_by: "cancelled" }),
+  const merged = { ...prior, ...trace, stopped_by: "cancelled" };
+  const totals = runTotals(merged);
+  await db.run("UPDATE runs SET trace = ?, est_cost_micros = ?, tokens = ? WHERE id = ? AND status = 'cancelled'", [
+    JSON.stringify(merged),
+    totals.costMicros,
+    totals.tokens,
     runId,
   ]);
 }

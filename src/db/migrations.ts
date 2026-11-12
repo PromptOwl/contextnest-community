@@ -5,6 +5,7 @@ import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2506,8 +2507,25 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("086_control_room_ledger");
   }
-}
 
+  // 090: a run's cost and tokens on the run (po-1186 CR1 review). Written
+  //   with the trace at close (run-service closeRun), like `verdict`, so the
+  //   ledger's totals and rollups aggregate in SQL instead of parsing every
+  //   run's trace. Backfilled from the traces already stored.
+  if (!hasMigration("090_control_room_run_totals")) {
+    db.transaction(() => {
+      const runCols = new Set((db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+      if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
+      if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
+      const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
+      for (const r of db.prepare("SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").iterate() as Iterable<{ id: string; trace: string }>) {
+        const t = runTotals(r.trace);
+        set.run(t.costMicros, t.tokens, r.id);
+      }
+    })();
+    recordMigration("090_control_room_run_totals");
+  }
+}
 
 /**
  * `foreign_key_check` violations, counted per (child table, parent table,

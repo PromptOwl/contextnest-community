@@ -139,8 +139,9 @@ async function seedWindow(o: { nestId: string; bindingId: string; at: number; ve
 async function seedRun(nestId: string, agent: string, at: number, source: "external" | "server:metacognition", verdict: string, reason: string) {
   const id = `run_${randomUUID()}`;
   await run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code)
-     VALUES (?, ?, ?, 'agent@x.test', 'succeeded', '{"est_cost_usd":0.05}', ?, ?, ?, ?, ?, ?)`,
+    // est_cost_micros: what closing the run stores from its trace.
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code, est_cost_micros)
+     VALUES (?, ?, ?, 'agent@x.test', 'succeeded', '{"est_cost_usd":0.05}', ?, ?, ?, ?, ?, ?, 50000)`,
     [id, nestId, agent, iso(at), iso(at), source === "server:metacognition" ? "server:metacognition" : null, source, verdict, reason],
   );
   return id;

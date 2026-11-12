@@ -177,8 +177,9 @@ async function seedRun(o: {
 }) {
   const id = `run_${randomUUID()}`;
   await run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code)
-     VALUES (?, ?, ?, 'agent@x.test', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    // est_cost_micros / tokens: what closing the run stores from its trace.
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at, finished_at, claimed_by, source, verdict, reason_code, est_cost_micros, tokens)
+     VALUES (?, ?, ?, 'agent@x.test', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       o.nestId,
@@ -191,6 +192,8 @@ async function seedRun(o: {
       o.source,
       o.verdict ?? null,
       o.verdict ? "seeded" : null,
+      Math.round((o.costUsd ?? 0) * 1_000_000),
+      o.tokens ?? 0,
     ],
   );
   for (const st of o.reviews ?? []) {
@@ -803,7 +806,7 @@ describe("AC-CR-09: MCP parity, API.md, lint and migrations", () => {
   it("AC-CR-09: the Postgres set carries 086 (columns altered in, shared index DDL, seeded id)", () => {
     const pg = readFileSync(join(__dirname, "..", "src", "db", "migrations.postgres.ts"), "utf8");
     for (const c of ["runs ADD COLUMN IF NOT EXISTS idempotency_key", "runs ADD COLUMN IF NOT EXISTS source", "run_steps ADD COLUMN IF NOT EXISTS client_key", "surface_windows ADD COLUMN IF NOT EXISTS run_id"]) expect(pg).toContain(c);
-    expect(pg).toContain("controlRoomLedgerIndexesAndBackfill()");
+    expect(pg).toMatch(/controlRoomLedgerIndexesAndBackfill\("postgres"\)/);
     expect(pg).toContain('"086_control_room_ledger"');
   });
 });
