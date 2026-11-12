@@ -803,7 +803,7 @@ describe("AC-CR-09: MCP parity, API.md, lint and migrations", () => {
   it("AC-CR-09: the Postgres set carries 086 (columns altered in, shared index DDL, seeded id)", () => {
     const pg = readFileSync(join(__dirname, "..", "src", "db", "migrations.postgres.ts"), "utf8");
     for (const c of ["runs ADD COLUMN IF NOT EXISTS idempotency_key", "runs ADD COLUMN IF NOT EXISTS source", "run_steps ADD COLUMN IF NOT EXISTS client_key", "surface_windows ADD COLUMN IF NOT EXISTS run_id"]) expect(pg).toContain(c);
-    expect(pg).toContain("controlRoomLedgerIndexesAndBackfill()");
+    expect(pg).toMatch(/controlRoomLedgerIndexesAndBackfill\("postgres"\)/);
     expect(pg).toContain('"086_control_room_ledger"');
   });
 });

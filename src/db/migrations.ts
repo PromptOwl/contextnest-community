@@ -2508,7 +2508,6 @@ export function runMigrations(db: Database.Database): void {
   }
 }
 
-
 /**
  * `foreign_key_check` violations, counted per (child table, parent table,
  * constraint) — deliberately WITHOUT rowid, because the rebuild reassigns

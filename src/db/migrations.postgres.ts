@@ -116,6 +116,9 @@ export const HISTORICAL_MIGRATIONS = [
   "086_control_room_ledger",
 ];
 
+/** Migration ids whose Postgres backfill must run once, not on every boot. */
+const ONE_TIME_BACKFILLS = ["086_control_room_ledger"];
+
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -879,6 +882,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
+  // One-time backfills run under their migration id. The ids are in
+  // HISTORICAL_MIGRATIONS (seeded just below), so read what was pending first.
+  const pendingOnce = new Set<string>();
+  for (const id of ONE_TIME_BACKFILLS) {
+    if (!(await db.get("SELECT id FROM schema_migrations WHERE id = ?", [id]))) pendingOnce.add(id);
+  }
+
   // Seed historical migration ids as already-applied (idempotent).
   for (const id of HISTORICAL_MIGRATIONS) {
     await db.run(
@@ -1361,7 +1371,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE run_steps ADD COLUMN IF NOT EXISTS client_key TEXT;
     ALTER TABLE surface_windows ADD COLUMN IF NOT EXISTS run_id TEXT;
   `);
-  await db.exec(controlRoomLedgerIndexesAndBackfill());
+  // Once, like SQLite: a re-run on a later boot would attach an old run-less
+  // window to an unrelated, newer listener run.
+  if (pendingOnce.has("086_control_room_ledger")) {
+    await db.exec(controlRoomLedgerIndexesAndBackfill("postgres"));
+  }
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
