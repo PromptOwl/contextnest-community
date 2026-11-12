@@ -169,12 +169,6 @@ const CASES: Case[] = [
         "behind the API, awaiting reconciliation) and already reports through " +
         "REST and the UI. Outside the engine's STATUSES enum. GENUINE " +
         "DISAGREEMENT — needs an upstream decision, not a test suppression.",
-      [`unknown_key at documents[].last_edit`]:
-        "who last edited each document — the human, then the agent its write " +
-        "named (spec §9.4 `client`) — so an agent sees the same feed the " +
-        "Documents page shows (po-1213). The engine's nodeSummary has no " +
-        "provenance field yet; same block the REST list and node detail " +
-        "carry, withheld from public readers and headless keys.",
     },
     // No `body` on the listed documents, and that is deliberate:
     // listNodesForCaller gates WHICH documents come back but not the text they

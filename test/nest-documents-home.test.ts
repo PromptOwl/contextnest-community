@@ -158,6 +158,16 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?`, [nestId, "nodes/bump-only"]);
   });
 
+  it("Given more than 500 ids, then every chunk is read and a real id past the boundary is found", async () => {
+    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+    const real = rowFor(await listRows(owner.apiKey), "Hand Doc").id;
+    const ids = [...Array.from({ length: 600 }, (_, i) => `nodes/missing-${i}`), real];
+    const map = await getLatestVersionAttributions(nestId, ids);
+    expect(map.size).toBe(1);
+    expect(map.get(real)?.editedBy).toBe("owner@home.test");
+    expect((await getLatestVersionAttributions(nestId, [])).size).toBe(0);
+  });
+
   it("Given the census feed, then each item's version time is the same write as the updated_at it is sorted on", async () => {
     const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey);
     for (const r of data.census.recent as any[]) {
@@ -168,15 +178,13 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
 });
 
 describe("AC-NH-07: MCP context_list has parity with the REST list", () => {
-  it("Given an agent's latest write, then structuredContent and prose both name the human, then the agent", async () => {
+  it("Given an agent's latest write, then the prose names the human, then the agent, with the date", async () => {
     const res = await callTool(owner.apiKey, "context_list", {});
     expect(res.isError).toBeFalsy();
+    // Prose only: the engine catalog has no provenance field yet, so the
+    // structured documents[] stays catalog-shaped.
     const doc = res.structuredContent.documents.find((d: any) => d.title === "Agent Doc");
-    expect(doc.last_edit).toMatchObject({
-      version: 2,
-      edited_by: "owner@home.test",
-      client: { agent: "deal-desk" },
-    });
+    expect(doc.last_edit).toBeUndefined();
     expect(res.content[0].text).toMatch(/\*\*Agent Doc\*\*[^\n]* · edited by owner@home\.test via deal-desk, \d{4}-\d{2}-\d{2}/);
   });
 

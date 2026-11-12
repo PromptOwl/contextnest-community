@@ -657,7 +657,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   }
 
   // The latest version's two writers — the human and the agent — for the
-  // document byline. Not for a public reader or a headless key (AC-NH-08).
+  // document byline. The latest edit, draft included: a member reads the
+  // live document here (context_get, which serves agents the approved body,
+  // names that version instead). Not for a public reader or a headless key
+  // (AC-NH-08), who would be served the approved version.
   if (await canSeeEditors(nestId, userId)) {
     const last = await versions.getVersionAttribution(nestId, nodeId);
     if (last) response.last_edit = versions.toLastEdit(last);
