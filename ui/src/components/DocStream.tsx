@@ -361,7 +361,7 @@ function PostAvatar({ name, agent }: { name: string; agent: string | null }) {
       </div>
       {agent && (
         <span
-          className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background ring-1 ring-border"
+          className="absolute -bottom-1 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-background ring-1 ring-border"
           title={`Written through ${agent}`}
           data-testid="stream-post-agent-mark"
         >
@@ -392,7 +392,7 @@ function ActionButton({
       aria-label={label}
       title={label}
       onClick={onClick}
-      className={`inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full px-2 text-xs transition-colors disabled:opacity-50 sm:h-7 sm:min-w-7 ${
+      className={`inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-full px-2 text-xs transition-colors disabled:opacity-50 sm:h-6 sm:min-w-6 ${
         active ? "text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"
       }`}
       {...rest}
@@ -465,11 +465,11 @@ function StreamPost({
   };
 
   return (
-    <li className="flex gap-3 px-2 pb-1 pt-2.5 transition-colors hover:bg-muted/30 sm:px-3" data-testid="stream-post">
+    <li className="flex gap-3 px-2 pb-0.5 pt-2 transition-colors hover:bg-muted/30 sm:px-3" data-testid="stream-post">
       <PostAvatar name={name} agent={agent} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-baseline gap-1 text-sm leading-5">
-          <span className="truncate font-medium" title={item.author ?? undefined}>
+          <span className="max-w-[60%] shrink-0 truncate font-medium" title={item.author ?? undefined}>
             {name}
           </span>
           {agent && (
@@ -478,11 +478,13 @@ function StreamPost({
             </span>
           )}
           {showNest && (
+            // Phones keep the line for the name and the agent; the nest
+            // moves to the end of the next line there.
             <>
-              <span className="text-muted-foreground" aria-hidden>
+              <span className="hidden text-muted-foreground sm:inline" aria-hidden>
                 ·
               </span>
-              <span className="min-w-0 shrink truncate text-muted-foreground">{item.nestName}</span>
+              <span className="hidden min-w-0 shrink truncate text-muted-foreground sm:inline">{item.nestName}</span>
             </>
           )}
           <span className="text-muted-foreground" aria-hidden>
@@ -501,17 +503,18 @@ function StreamPost({
             </span>
           )}
         </div>
-        <div className="truncate text-sm leading-5">
+        <div className="line-clamp-2 break-words text-sm leading-5 sm:line-clamp-1">
           <span className="text-muted-foreground">{postAction(item)} </span>
           <button
             type="button"
-            className="font-medium hover:underline"
+            className="inline text-left font-medium hover:underline"
             onClick={() => onOpen(item)}
             data-testid="stream-post-title"
           >
             {item.title}
           </button>
           {item.changeNote && <span className="text-muted-foreground"> — {item.changeNote}</span>}
+          {showNest && <span className="text-muted-foreground sm:hidden"> · {item.nestName}</span>}
         </div>
         {item.summary && (
           <p className="line-clamp-2 text-[13px] leading-5 text-muted-foreground sm:line-clamp-1">{item.summary}</p>
@@ -664,16 +667,18 @@ function StreamReplies({
         ))
       )}
       <div className="flex items-end gap-2">
-        <MentionTextarea
-          formatting
-          members={members}
-          value={text}
-          onValueChange={setText}
-          placeholder={target ? "Reply… use @ to tag someone" : "Start a thread on this document… use @ to tag someone"}
-          rows={1}
-          className="min-h-9 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm"
-          data-testid="stream-composer"
-        />
+        <div className="min-w-0 flex-1">
+          <MentionTextarea
+            formatting
+            members={members}
+            value={text}
+            onValueChange={setText}
+            placeholder={target ? "Reply, @ to mention" : "Start a thread, @ to mention"}
+            rows={1}
+            className="min-h-9 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm"
+            data-testid="stream-composer"
+          />
+        </div>
         <Button size="sm" className="h-9 shrink-0" disabled={busy || !text.trim()} onClick={() => void post()}>
           {busy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
           {target ? "Reply" : "Post"}
