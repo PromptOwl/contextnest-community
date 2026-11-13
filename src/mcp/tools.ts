@@ -481,8 +481,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_fields",
   "context_access_requests",
   "context_verify",
-  // server-level read tool
+  // server-level read tools
   "nest_index",
+  // first-run onboarding reads (PO-1185)
+  "context_onboarding",
   // workflow-plane read tools (only advertised when the feature flag is on)
   "workflow_run_get",
   "workflow_runs_list",

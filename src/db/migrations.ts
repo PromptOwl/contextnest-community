@@ -4,6 +4,7 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2474,6 +2475,20 @@ export function runMigrations(db: Database.Database): void {
       )
     `);
     recordMigration("083_view_summaries");
+  }
+
+  // 084: first-run onboarding (PO-1185): the welcome screen state per person,
+  //   server-side distill jobs, and where a self-serve Slack install returns.
+  //   Shared DDL with Postgres (src/onboarding/schema-ddl.ts).
+  if (!hasMigration("084_onboarding")) {
+    db.transaction(() => {
+      db.exec(onboardingDdl("(datetime('now'))"));
+      const cols = db.prepare("PRAGMA table_info(surface_oauth_states)").all() as Array<{ name: string }>;
+      if (cols.length && !cols.some((c) => c.name === "return_to")) {
+        db.exec("ALTER TABLE surface_oauth_states ADD COLUMN return_to TEXT");
+      }
+    })();
+    recordMigration("084_onboarding");
   }
 }
 

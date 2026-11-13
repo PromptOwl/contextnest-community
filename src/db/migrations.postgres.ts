@@ -4,6 +4,7 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -112,6 +113,7 @@ export const HISTORICAL_MIGRATIONS = [
   "081_surfaces_cards",
   "082_surfaces_seeds",
   "083_view_summaries",
+  "084_onboarding",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1348,6 +1350,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         PRIMARY KEY (nest_id, cache_key)
       )
   `);
+
+  // Migration 084 parity: first-run onboarding (PO-1185).
+  await db.exec(onboardingDdl(NOW));
+  await db.exec("ALTER TABLE surface_oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT");
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
