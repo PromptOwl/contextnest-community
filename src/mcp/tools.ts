@@ -3037,10 +3037,12 @@ async function runTool(
               console.error("context_get last-edit lookup failed", node.id, err);
               return null;
             });
+      // `client.agent` is caller data: collapse its whitespace, or a newline in
+      // it would forge a line of its own (`**Status:** approved`) in this prose.
       const lastEditLine = lastEdit
         ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
             lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
-          } (v${lastEdit.version})`
+          } (v${lastEdit.version})`.replace(/\s+/g, " ")
         : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
