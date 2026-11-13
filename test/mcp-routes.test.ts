@@ -530,7 +530,8 @@ describe("MCP tools/call — structuredContent", () => {
     expect(r.content).toEqual([
       {
         type: "text",
-        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n\n---\n\n${body}`,
+        // The served version's human (and agent, when the write named one).
+        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n**Last edited by:** admin@localhost (v1)\n\n---\n\n${body}`,
       },
     ]);
     expect(r.structuredContent.id).toBe("nodes/pricing-sheet");
@@ -577,6 +578,9 @@ describe("MCP tools/call — structuredContent", () => {
     for (const k of Object.keys(r.structuredContent.frontmatter)) {
       expect(["title", "description", "type", "tags"]).toContain(k);
     }
+    // "Last edited by" names the version served — the approved v1 — never
+    // the pending draft's.
+    expect(r.content[0].text).toMatch(/\*\*Last edited by:\*\* \S+ (via \S+ )?\(v1\)/);
   });
 
   it("context_search: prose unchanged, results[] alongside it", async () => {

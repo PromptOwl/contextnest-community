@@ -3014,7 +3014,8 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isHeadlessIdentity(ctx.userId))
+      const headless = await isHeadlessIdentity(ctx.userId);
+      const relations = headless
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {
@@ -3027,6 +3028,27 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      // Who sealed the version being served: the human first, then the agent
+      // its write named (spec §9.4) — the same two names the UI byline shows.
+      // The served version, not the latest row: under stewardship the body is
+      // the approved snapshot, and a draft's author would misdescribe it.
+      // Not for a headless key or a public/org reader: it names the nest's
+      // people, which the REST node detail withholds from them too.
+      const servedVersion = ctx.servedVersions?.get(node.id);
+      const lastEdit =
+        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+          ? null
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("context_get last-edit lookup failed", node.id, err);
+              return null;
+            });
+      // `client.agent` is caller data: collapse its whitespace, or a newline in
+      // it would forge a line of its own (`**Status:** approved`) in this prose.
+      const lastEditLine = lastEdit
+        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
+            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
+          } (v${lastEdit.version})`.replace(/\s+/g, " ")
+        : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -3047,6 +3069,10 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        // Prose only: the catalog's context_get payload has no provenance
+        // field yet, and test/mcp-catalog-conformance.test.ts refuses an
+        // added key. A structured field needs the engine catalog first.
+        lastEditLine,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
