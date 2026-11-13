@@ -338,6 +338,22 @@ describe("agent event API", () => {
     expect(trace.status).toBe(403);
   });
 
+  it("a read-only key on this nest can read a run but not add a step, close it or fetch its bundle (403)", async () => {
+    const start = await req("POST", `/nests/${N}/run/nodes/agents/claude-code-laptop`, { report_only: true }, writeKey, { "Idempotency-Key": "ro-guard-1" });
+    expect(start.status).toBe(201);
+    const id = start.data.run_id;
+    const step = await req("POST", `/runs/${id}/steps`, { action: "decision", detail: { verdict: "escalate", reason_code: "ro_key" } }, readKey);
+    expect(step.status).toBe(403);
+    expect(step.data.error).toMatch(/read-only/);
+    expect((await req("PATCH", `/runs/${id}`, { status: "failed" }, readKey)).status).toBe(403);
+    expect((await req("GET", `/runs/${id}/bundle`, undefined, readKey)).status).toBe(403);
+    const run = await req("GET", `/runs/${id}`, undefined, readKey);
+    expect(run.status).toBe(200);
+    expect(run.data.run.status).toBe("running");
+    expect(run.data.run.verdict ?? null).toBeNull();
+    expect((await req("PATCH", `/runs/${id}`, { status: "cancelled" }, writeKey)).status).toBe(200);
+  });
+
   it("AC-CR-08c: more than AGENT_EVENTS_RATE_PER_MIN step posts in a minute from one key → 429 with Retry-After", async () => {
     const start = await req("POST", `/nests/${N}/run/nodes/agents/claude-code-laptop`, { report_only: true }, writeKey);
     expect(start.status).toBe(201);

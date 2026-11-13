@@ -89,11 +89,11 @@ describe("086 backfill of surface_windows.run_id", () => {
 // ─── 2. Run totals stay inside a BIGINT ────────────────────────────────────
 
 describe("runTotals bounds a caller-written trace", () => {
-  it("clamps huge values and drops negative ones", async () => {
-    const { runTotals } = await import("../src/workflow/run-totals.js");
+  it("caps huge values per run and drops negative ones", async () => {
+    const { runTotals, MAX_RUN_TOKENS, MAX_RUN_COST_MICROS } = await import("../src/workflow/run-totals.js");
     const huge = runTotals({ est_cost_usd: 1e300, usage: { input_tokens: 1e300, output_tokens: 1e21 } });
-    expect(huge.costMicros).toBe(Number.MAX_SAFE_INTEGER);
-    expect(huge.tokens).toBe(Number.MAX_SAFE_INTEGER);
+    expect(huge.costMicros).toBe(MAX_RUN_COST_MICROS);
+    expect(huge.tokens).toBe(MAX_RUN_TOKENS);
     expect(runTotals({ est_cost_usd: -5, usage: { input_tokens: -100, output_tokens: 40 } })).toEqual({ costMicros: 0, tokens: 40 });
     expect(runTotals(JSON.stringify({ est_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } }))).toEqual({ costMicros: 250_000, tokens: 15 });
   });
