@@ -512,6 +512,34 @@ describe("an approval seals its own version, with its own client", () => {
       agent: "author-agent",
     });
   });
+
+  it("an approved-only read names the approved version's writers, not the draft's", async () => {
+    const nodeId = await submitted("Approved Byline");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/approve`,
+      { note: "ok", client: { agent: "approving-agent" } },
+      reviewer.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${govNest}/nodes/${nodeId}`,
+      { content: "draft", client: { agent: "draft-agent", session_id: "secret" } },
+      author.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${govNest}/nodes/${nodeId}?approved_only=1`,
+      undefined,
+      apiKey,
+    );
+    expect(data.node.last_edit.version).toBe(data.node.version);
+    expect(data.node.last_edit.edited_by).toBe(reviewer.email);
+    expect(data.node.last_edit.client).toEqual({ agent: "approving-agent" });
+  });
 });
 
 describe("MCP", () => {

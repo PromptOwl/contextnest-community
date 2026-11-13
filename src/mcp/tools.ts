@@ -3033,7 +3033,10 @@ async function runTool(
       const lastEdit =
         headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
           ? null
-          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch(() => null);
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("context_get last-edit lookup failed", node.id, err);
+              return null;
+            });
       const lastEditLine = lastEdit
         ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
             lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""

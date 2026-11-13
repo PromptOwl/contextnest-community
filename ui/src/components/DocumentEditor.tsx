@@ -1285,8 +1285,9 @@ export function DocumentEditor({
       .then((r) => {
         if (!cancelled) setLastEdit((r?.node?.last_edit ?? null) as LastEdit | null);
       })
-      .catch(() => {
+      .catch((err) => {
         // The byline keeps its last value; the save itself already succeeded.
+        console.warn("last-edit refresh failed", err);
       });
     return () => {
       cancelled = true;
