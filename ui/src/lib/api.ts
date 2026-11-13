@@ -283,6 +283,9 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
+    /** Surfaces (Slack → nest; never in open mode). Off → /surfaces/* 404s
+     *  and the Control room page hides. */
+    surfaces_enabled?: boolean;
     /** Experimental features, one key each (default off; superadmin switches
      *  under Settings → Features). Off → the routes 404 and the UI hides it. */
     experimental?: {
@@ -4779,3 +4782,239 @@ export async function backfillTickets(nestId: string, body: { limit?: number; dr
     results: { id: string; ticket?: string; outcome: string; reason?: string }[];
   }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }
+
+// ═══ Control room: Surfaces setup (po-1186 CR3) ═══════════════════════════
+// Kept in one block on purpose: the setup wizard's reads and writes over the
+// existing /surfaces routes, plus the channel list CR3 adds. Credential values
+// only ever go out (PUT); the server answers with set/unset booleans.
+
+export interface SurfacesInstallRef {
+  id: string;
+  surface: string;
+  mode: "manifest" | "hosted" | "selfhosted";
+  status: "pending" | "active" | "revoked" | "disconnected";
+  home_nest_id: string | null;
+}
+
+export interface SurfacesStatus {
+  enabled: true;
+  installs: SurfacesInstallRef[];
+  bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
+  org_name: string | null;
+  slack_hosted: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesBinding {
+  id: string;
+  install_id: string;
+  nest_id: string;
+  conversation_id: string;
+  conversation_name?: string | null;
+  status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  [k: string]: unknown;
+}
+
+export interface SurfacesGuardDetail {
+  readers_total: number;
+  readers_absent: number;
+  members_total: number;
+  members_not_readers: number;
+  guests: number;
+  externals: number;
+  non_user_principals: string[];
+  universe: boolean;
+  org_wide: boolean;
+  ext_shared: boolean;
+}
+
+export interface SurfacesBindingPreview {
+  no_seed: boolean;
+  would_bind: boolean;
+  guard: { capture_ok: boolean; surface_ok: boolean; members_known: boolean; detail: SurfacesGuardDetail };
+  conversation_kind: string | null;
+  is_ext_shared: boolean | null;
+  ext_capture_enabled: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesChannel {
+  id: string;
+  name: string | null;
+  is_private: boolean;
+  is_ext_shared: boolean;
+  num_members: number | null;
+  binding: { id: string; nest_id: string; status: string } | null;
+}
+
+export interface SurfacesSeedRef {
+  id: string;
+  version: number;
+  title: string;
+  source: "bundled" | "library";
+  library_nest_id: string | null;
+}
+
+export interface SurfacesSeedItem {
+  kind: "folder" | "node" | "context" | "definition";
+  target: string;
+  action: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface SurfacesSeedResult {
+  status: string;
+  nest_id: string;
+  seed: { id: string; version: number };
+  items: SurfacesSeedItem[];
+  listener: { propose_folders: string[] };
+}
+
+export interface SurfacesSettingsView {
+  quiet_minutes: number;
+  buffer_ttl_hours: number;
+  reviewer_daily_cards: number;
+  conversation_daily_cards: number;
+  dm_capture: boolean;
+  [k: string]: unknown;
+}
+
+const surfacesJson = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
+
+export const getSurfacesStatus = () => request<SurfacesStatus>("/surfaces/status");
+export const getSurfacesSettings = () => request<{ settings: SurfacesSettingsView }>("/surfaces/settings").then((r) => r.settings);
+export const listSurfacesBindings = () => request<{ bindings: SurfacesBinding[] }>("/surfaces/bindings").then((r) => r.bindings);
+export const createSlackInstall = (homeNestId: string) =>
+  request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
+export const getSlackInstall = (id: string) =>
+  request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** Write-only: values go to the server and never come back. */
+export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
+  request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
+    method: "PUT",
+    body: JSON.stringify(creds),
+  });
+/** Browser navigations (the server answers with a redirect to Slack). */
+export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
+export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
+export const listSlackChannels = (installId: string) =>
+  request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
+export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<{ binding: SurfacesBinding }>("/surfaces/bindings", surfacesJson(b));
+export const listSurfacesSeeds = (nestId: string) =>
+  request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);
+export const getSurfacesSeedStatus = (nestId: string) =>
+  request<{ nest_id: string; no_seed: boolean; applied: Array<{ seed_id: string; version: number }> }>(`/surfaces/seeds/status?nest_id=${encodeURIComponent(nestId)}`);
+export const applySurfacesSeed = (b: { nest_id: string; seed_id: string; library_nest_id?: string | null; dry_run?: boolean }) =>
+  request<SurfacesSeedResult>("/surfaces/seeds/apply", surfacesJson(b));
+// ═══ end Control room (po-1186 CR3) ═══════════════════════════════════════
+
+// ═══ Control room: dashboard, decision ledger, agents (po-1186 CR2) ════════
+// Kept in one block on purpose (CR3's setup block sits above). Reads over the
+// CR1 ledger/rollups routes and the CR2 cold-start route; one write: register
+// an agent. Shapes live in lib/control-room-overview.ts.
+
+import type {
+  LedgerEntry as CrLedgerEntry,
+  LedgerTotals as CrLedgerTotals,
+  RollupRow as CrRollupRow,
+  BudgetLite as CrBudget,
+} from "./control-room-overview";
+
+export interface CrLedgerQuery {
+  from: string;
+  to: string;
+  agent?: string;
+  verdict?: string;
+  state?: string;
+  source?: string;
+  binding?: string;
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface CrLedgerPage {
+  api_version: string;
+  range: { from: string; to: string };
+  entries: CrLedgerEntry[];
+  next_cursor: string | null;
+  totals: CrLedgerTotals;
+}
+
+export interface CrRollups {
+  api_version: string;
+  grain: "day" | "week";
+  by: "agent" | "nest" | "binding" | "reason" | "none";
+  range: { from: string; to: string };
+  rows: CrRollupRow[];
+  totals: CrLedgerTotals;
+  reconciles_with: string;
+}
+
+export interface CrTrace {
+  api_version: string;
+  entry: CrLedgerEntry;
+  chain: {
+    run: { id: string; agent_node: string | null; status: string; outcome: string | null; started_at: string; finished_at: string | null; cost_usd: number; external_ref?: string | null; triggered_by?: string } | null;
+    verdict: (CrLedgerEntry["verdict"] & { decision?: CrLedgerEntry["decision"]; model?: string | null; prompt_version?: string | null }) | null;
+    proposal: Record<string, any> | null;
+    review: { state: string; by?: string | null; reason?: string | null; at: string } | null;
+    version: { node_id?: string; version: number | null; edited?: boolean; at: string; saved_by?: string | null; author?: string | null } | null;
+    source: { kind: string; label: string | null; url?: string | null; triggered_by?: string | null } | null;
+  };
+  steps: Array<{ seq: number; action: string; node_id: string | null; edge_id: string | null; detail: Record<string, any> | null; at: string }>;
+  gaps: string[];
+}
+
+export interface CrColdStart {
+  nest_id: string;
+  nest_label: string;
+  redacted: "n1" | null;
+  no_seed: boolean;
+  seed: { id: string; version: number; applied_at: string } | null;
+  folders: Array<{ path: string; approved: number; first_approved_at: string | null }>;
+  coverage: { covered: number; total: number };
+  first_approved: { node_id: string | null; at: string; after_seed_ms: number } | null;
+  mirror: { people: { proposed: number; accepted: number }; areas: { proposed: number; accepted: number } };
+  cumulative: Array<{ day: string; approved: number }>;
+}
+
+const crQs = (o: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== "") p.set(k, String(v));
+  return p.toString();
+};
+const crBase = (nestId: string | null, what: "ledger" | "rollups") => (nestId ? `/nests/${encodeURIComponent(nestId)}/${what}` : `/${what}`);
+
+/** One page of the decision ledger, for one nest or every nest the caller administers. */
+export const getLedger = (nestId: string | null, q: CrLedgerQuery) =>
+  request<CrLedgerPage>(`${crBase(nestId, "ledger")}?${crQs({ ...q })}`);
+
+export const getRollups = (
+  nestId: string | null,
+  q: Omit<CrLedgerQuery, "cursor" | "limit" | "q"> & { grain: "day" | "week"; by: CrRollups["by"] },
+) => request<CrRollups>(`${crBase(nestId, "rollups")}?${crQs({ ...q })}`);
+
+export const getLedgerTrace = (entryId: string) => request<CrTrace>(`/ledger/${encodeURIComponent(entryId)}`);
+
+export const getColdStart = (nestId: string | null) =>
+  request<{ api_version: string; nests: CrColdStart[] }>(`/surfaces/cold-start${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`).then((r) => r.nests);
+
+export const getSurfacesBudget = (nestId: string) =>
+  request<{ budget: CrBudget }>(`/surfaces/nests/${encodeURIComponent(nestId)}/budget`).then((r) => r.budget);
+
+/** The ledger export URL (CSV); the browser downloads it with the session cookie. Each export is logged in the nest's activity. */
+export const ledgerExportUrl = (nestId: string, q: Pick<CrLedgerQuery, "from" | "to" | "agent" | "verdict" | "q">, format: "csv" | "ndjson" = "csv") =>
+  `/nests/${encodeURIComponent(nestId)}/ledger/export?${crQs({ ...q, format })}`;
+
+/** Register (upsert) an outside agent as an agent document in the nest. Owner/admin. */
+export const registerAgent = (nestId: string, body: { name: string; runtime?: string; description?: string }) =>
+  request<{ node_id: string; created: boolean; api_version: string }>(`/nests/${encodeURIComponent(nestId)}/agents`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+// ═══ end Control room (po-1186 CR2) ═══════════════════════════════════════

@@ -248,6 +248,25 @@ const testRun = [
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
   {
+    // Workspace → Control room → Setup / How it works (CN-CR-001 … CN-CR-007,
+    // po-1186 CR3). Serial: one fake Slack workspace per case, stubbed in the
+    // browser; the primary account must be a server admin.
+    file: 'control-room/control_room_setup.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Fakes Slack in the browser; creates and deletes at most one nest
+  },
+  {
+    // Workspace → Control room → Overview / Decision ledger / Agents
+    // (CN-CR-008 … CN-CR-014, po-1186 CR2). Serial: one account. CN-CR-008
+    // reads the real server (skips with no listener activity); the rest answer
+    // the page's reads in the browser.
+    file: 'control-room/control_room_dashboard.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads only; writes nothing to the server
+  },
+  {
     // Nest page → Collaborators tab (CN-COLLAB-001 … CN-COLLAB-031). Serial:
     // each case works in a nest it arranges and then deletes.
     file: 'collaborators/collaborators.spec.js',
@@ -362,7 +381,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators', 'fields', 'stewards', 'nest-settings'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'control-room', 'collaborators', 'fields', 'stewards', 'nest-settings'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -710,6 +729,17 @@ export default defineConfig({
           name: 'nest-documents',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/nest-documents/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'control-room',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/control-room/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

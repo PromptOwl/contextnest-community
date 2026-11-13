@@ -35,6 +35,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { useAdministersNest } from "./lib/administers-nest";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
@@ -252,12 +253,18 @@ export default function App() {
     subagentRunsEnabled,
     mcpOauthEnabled,
     docStreamEnabled,
+    surfacesEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // Does the person administer any nest (the Control room, po-1186 CR2)?
+  // Only asked while Surfaces is on; unknown counts as yes here so a
+  // /control-room link isn't bounced before the nest list arrives — the rail
+  // (DocumentSidebar) waits for the answer instead.
+  const administersNest = useAdministersNest(authenticated && surfacesEnabled && !isAdmin);
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest: administersNest ?? true };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -853,7 +860,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled, surfacesEnabled]);
 
   // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
   const pageTabTitle = tabTitle(crumbs);

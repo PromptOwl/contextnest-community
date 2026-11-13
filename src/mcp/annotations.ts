@@ -127,6 +127,18 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   workflow_edge_type_upsert: overwrite("Save edge type", "Overwrites an edge type of the same name."),
   workflow_edge_type_delete: overwrite("Delete edge type", "Deletes an edge type."),
 
+  // ─── Agent control room (po-1186) ───────────────────────────────────────
+  context_agent_register: add("Register agent", "Creates an agent node if none has that id; an existing agent is left as it is."),
+  context_agent_run_start: add("Start agent run", "Records a new run (report-only by default); a repeated idempotency key replays, never duplicates."),
+  context_agent_run_step: add("Record agent step", "Appends a decision, proposal, outcome or other step to an open run."),
+  context_agent_run_close: overwrite("Close agent run", "Closes a run; the trace sent here replaces the stored one."),
+  context_agent_ledger: read("View decision ledger", "Lists agent decisions with their chain to the saved version."),
+  context_agent_ledger_trace: read("Trace ledger entry", "Returns one decision's chain, steps and gaps."),
+  context_agent_ledger_export: read("Export decision ledger", "Returns ledger rows as NDJSON; it sends nothing anywhere (the export is logged)."),
+  context_agent_rollups: read("View agent rollups", "Counts the ledger by day or week and by agent, nest or channel."),
+  context_agent_ledger_org: read("View org ledger", "The decision ledger across the nests the caller administers."),
+  context_agent_rollups_org: read("View org rollups", "Rollups across the nests the caller administers."),
+
   // ─── Surfaces: reads ────────────────────────────────────────────────────
   context_surfaces_status: read("Show Surfaces status", "Counts bindings from the server's own tables."),
   context_surfaces_bindings_list: read("List conversation bindings", "Lists bindings from the server's own tables."),
@@ -141,6 +153,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_budget_get: read("View Surfaces budget", "Returns the nest's spend budget."),
   context_surfaces_seed_list: read("List available seeds", "Lists available seeds."),
   context_surfaces_seed_status: read("View applied seeds", "Lists applied seeds."),
+  context_surfaces_cold_start: read("View cold start", "Counts approved documents per seed folder from the server's own tables."),
+  context_surfaces_slack_channels_list: readOutside("List Slack channels", "Saves nothing, but asks the third-party workspace which channels the bot is in."),
 
   // ─── Surfaces: writes ───────────────────────────────────────────────────
   context_surfaces_binding_create: addOutside("Bind conversation", "Binds a conversation: reads its members from the workspace and posts a notice there."),

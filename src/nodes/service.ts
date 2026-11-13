@@ -1713,6 +1713,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
+  /** An agent registered through the agent event API (po-1186): where it
+   *  executes, its runtime label and its accountable owner, stored as
+   *  `metadata.agent`. Agent nodes only. */
+  agent?: { executes: string; runtime: string | null; owner: string };
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -2214,6 +2218,7 @@ async function createNodeOnce(
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
+      ...(input.agent && input.type === "agent" ? { agent: input.agent } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));

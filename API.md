@@ -2642,6 +2642,65 @@ Only the approved version is ever served — a document with no approved snapsho
 
 > The `/runs/:id*` family mounts outside the per-nest gate, so it re-checks nest-scope keys, suspension and license itself before any write — the same guarantees the `/nests/:nestId/*` gate provides.
 
+### Agent event API and decision ledger (po-1186, `FEATURE_WORKFLOW_PLANE`)
+
+An outside agent (Claude Code, a script, a fleet member) reports what it decided — including deciding to do nothing — so its runs sit in the same **decision ledger** as the Slack listener and metacognition agents. The write side extends the Runs API above; the read side is a view over runs, run steps, reviews and the Surfaces tables (no new log). Every response carries `api_version: "2026-11"`; changes within a version are additive, so clients ignore unknown fields.
+
+**Credentials.** External writes need a **nest-scoped key** with write capability, minted per agent (`POST /auth/keys { label, nest_id }`); the label is the agent attribution. An unscoped personal key or an OAuth grant can't start a `report_only` run or step/close an external run (`403`). A person in the app (session) may still cancel one. `triggered_by` is always the credential's user; `external_ref` is a label, never trusted. Org-wide routes are read-only.
+
+**Idempotency.** `Idempotency-Key` header (MCP: `idempotency_key`), 1–128 chars of `A-Za-z0-9._:-`. Run start is unique per (nest, key), a step per (run, key): a repeat returns the original body with `idempotent_replay: true` (`200`) and writes nothing; the same key with a different body → `409 { code: "idempotency_conflict" }`. A second identical close → `200 { idempotent_replay: true }`; a different status keeps the `409`. Concurrent duplicates are settled by a unique index, so exactly one row lands.
+
+**Rate limits** (per API key, or per user for sessions; `429 { code: "rate_limited", limit, window_s }` + `Retry-After`): run starts `AGENT_RUNS_RATE_PER_MIN` (default 60/min), steps `AGENT_EVENTS_RATE_PER_MIN` (default 600/min, all runs incl. `workflow_run_step`), ledger/rollup reads 120/min, export 6/hour per user. `RUN_MAX_STEPS` and `RUN_MAX_CONCURRENT_ROOTS` still apply (report-only runs count as roots).
+
+**Errors.** `422 { code: "invalid_field", field, error }` names the first bad field (`detail.summary`, `detail.quote: unknown field`, `started_at`…); `403` tier or key scope; `404` unknown run/entry or one in a nest you can't read (no oracle); `409` terminal run / idempotency conflict / caps; `429` rate limited; `404` while the workflow plane is off.
+
+| Route | Tier | MCP |
+|---|---|---|
+| `POST /nests/:nestId/agents` | owner/admin (incl. their nest-scoped key) | `context_agent_register` |
+| `POST /nests/:nestId/run/:agent` (`report_only`) | write, nest-scoped key | `context_agent_run_start` |
+| `POST /runs/:id/steps` (typed steps) | write | `context_agent_run_step` |
+| `PATCH /runs/:id` (usage, cost, summary) | write | `context_agent_run_close` |
+| `GET /nests/:nestId/ledger` | read | `context_agent_ledger` |
+| `GET /ledger/:entryId` | read on the entry's nest | `context_agent_ledger_trace` |
+| `GET /nests/:nestId/ledger/export` | read | `context_agent_ledger_export` |
+| `GET /nests/:nestId/rollups` | read | `context_agent_rollups` |
+| `GET /ledger` | org: see below | `context_agent_ledger_org` (server-level `/mcp`) |
+| `GET /rollups` | org: see below | `context_agent_rollups_org` (server-level `/mcp`) |
+
+- `POST /nests/:nestId/agents` (owner/admin) — register (upsert) an agent node. Body: `{ name, node_id?, description?, runtime?, owner?, executes?: external|runner|server }`. `node_id` defaults to `nodes/agents/<slug of name>`; `owner` must be on the nest (default the caller). Creates a `type: agent` node with `metadata.agent = { executes, runtime, owner }` through normal governance. `201 { node_id, created: true }`, or `200 { created: false }` when that agent already exists; `409` when the id holds a non-agent node. The gate is the credential's permission on the nest: an owner's or admin's nest-scoped write key can register (that is how an agent registers itself), a key whose user has only write or read access can't, and system keys can't.
+- `POST /nests/:nestId/run/:agent` — new optional body fields: `report_only` (no bundle is built; returns `201 { run_id, api_version, parent_run_id: null, depth: 0 }`), `started_at` (ISO, at most 24 h back, not in the future), `external_ref` (≤ 200 chars). Accepts `Idempotency-Key` with or without `report_only` (a replayed bundle run returns the same `run_id` and a freshly built bundle). `runs.source` is set server-side: `external` for `report_only`, `runner` otherwise.
+- `POST /runs/:id/steps` — accepts `Idempotency-Key`, plus three typed actions whose `detail` is strict (unknown key → `422`):
+  - `decision`: `{ verdict: no_op|propose|act|escalate, reason_code (snake_case ≤ 40), summary? (≤ 280, the agent's own words), evidence? [{ kind, ref ≤ 2 KB }] (≤ 10, references never quotes), confidence? 0–1 }`. The run's ledger verdict is its strongest decision (escalate > propose > act > no_op).
+  - `proposal`: `{ review_id, node_id? }` — the review must be in the run's nest (`422` otherwise); it sets `review_requests.run_id` when empty, closing the run → proposal hop.
+  - `outcome`: `{ kind, ref?, status?: ok|failed|skipped }` — something the agent did outside the nest.
+- `PATCH /runs/:id` — also accepts `usage` (`{ input_tokens, output_tokens, … }`), `est_cost_usd` and `summary` (≤ 280), merged into `runs.trace` under the keys metacognition runs use, so external runs roll up the same way. Identical repeat → `idempotent_replay`.
+- `GET /nests/:nestId/ledger` (read) — `?from&to` (ISO; default the last 7 days, ≤ 366 days), `agent`, `verdict` (`no_op|propose|act|escalate|error`), `state` (`pending|approved|edited|rejected|expired|withdrawn`), `source` (`surfaces|metacognition|runner|external`), `binding`, `q` (proposal titles; private-nest rows never match), `cursor`, `limit` (≤ 200, default 50). Returns `{ api_version, range, entries[], next_cursor, totals }`. Each entry: `{ entry_id (win_<window id> | run_<run id>), at, nest{id,label}, agent{node_id,name,source}, run{id,outcome,cost_usd,external_ref}|null, verdict{code,reason_code,kinds,message_count}, decision{verdict,reason_code,confidence,summary,evidence}|null, proposal{id,title,state,edited,counts}|null, review{by,reason,at}|null, commit{node_id,version}|null, source{kind,label,url}|null, redacted }`. Keyset pagination on `(at, entry_id)`. `totals` (`entries, runs, failed, no_op, propose, act, escalate, error, none, proposals, approved, edited, rejected, expired, pending, withdrawn, cost_usd, tokens`) uses the same predicates as the rollups. Listener rows come from judged windows (no message text exists to return); every other run is one row.
+- `GET /ledger/:entryId` (read on the entry's nest) — `{ entry, chain{run, verdict, proposal, review, version, source}, steps[] (≤ 500), gaps[] }`. `gaps` names the hops this entry should have and doesn't; it is `[]` for any committed node. A nest-scoped key for another nest → `403`; no read access → `404`.
+- `GET /nests/:nestId/ledger/export?format=csv|ndjson` (read) — the same rows, filters and redaction as the ledger (≤ 50 000 rows), as a download. CSV cells starting with `= + - @` are prefixed with `'`. Each export is recorded in `node_access_events` (action `export`, node null), so it shows in the nest's activity log; a failed export is recorded too ("decision ledger export failed"). A malformed request is a `422` and doesn't count against the 6 exports an hour. MCP `context_agent_ledger_export` returns one page `{ ndjson, rows, next_cursor }` per call.
+- `GET /nests/:nestId/rollups` (read) — `?grain=day|week` (ISO weeks, UTC; a week's bucket is its Monday), `by=agent|nest|binding|reason|none` (default `agent`), plus the ledger filters. `{ api_version, grain, by, range, rows[{ bucket, key, label, nest_id, last_at, source, …totals fields }], totals, reconciles_with }`. Every bucket equals the ledger `totals` for that bucket's range and filters, and the buckets sum to the range total.
+- `GET /ledger`, `GET /rollups` (org-wide, read-only) — every nest for a server admin; for anyone else, the nests they own or administer. A nest-scoped key sees its nest only; a read-only key gets read-tier redaction. On hosted, the all-nests view is therefore PromptOwl staff only.
+
+**Redaction, identical in REST, MCP and export.** Read tier: `run.inputs`, `run.trace`, `steps[].detail`, `decision.summary` and `decision.evidence` are `null`. Personal (DM) nests (N1): for anyone but the owner — a server admin included — rows drop `source`, `proposal.title`, `decision.summary`, `decision.evidence`, `review.by`, `review.reason`, `commit.node_id` and `run.external_ref`, carry `redacted: "n1"` and `nest.label: "DM · private nest · title hidden"`, and still count in totals and rollups.
+
+Example — a Claude Code `Stop` hook reporting a session:
+
+```bash
+NEST=… NEST_KEY=cnst_…   # nest id + nest-scoped write key for this agent
+API=https://nest.example.com; AGENT=nodes/agents/claude-code-misha
+SID=$(jq -r .session_id)
+H=(-H "Authorization: Bearer $NEST_KEY" -H "Content-Type: application/json")
+RUN=$(curl -sf "${H[@]}" -H "Idempotency-Key: cc-$SID" \
+  -d "{\"report_only\":true,\"external_ref\":\"$SID\"}" "$API/nests/$NEST/run/$AGENT" | jq -r .run_id)
+curl -sf "${H[@]}" -H "Idempotency-Key: cc-$SID-d1" "$API/runs/$RUN/steps" -d '{
+  "action":"decision","detail":{"verdict":"propose","reason_code":"new_decision",
+  "summary":"Chose vitest over jest for the billing package",
+  "evidence":[{"kind":"url","ref":"https://github.com/acme/app/pull/412"}]}}'
+curl -sf "${H[@]}" -X PATCH "$API/runs/$RUN" \
+  -d '{"status":"succeeded","usage":{"input_tokens":18234,"output_tokens":2210},"est_cost_usd":0.08}'
+```
+
+Running the hook twice for the same session creates one run and one step; each repeat answers `idempotent_replay: true`.
+
 ### Schedules — run an agent on a timer
 
 - `GET /nests/:nestId/schedules` (read) — list.
@@ -2712,7 +2771,7 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
 - It stays paused until an admin resumes it.
 - A member can remove Nest from a non-general conversation (`paused_by_member`). It comes back only through an admin resume, and only once that member has agreed or has left.
 
-- `GET /surfaces/status`: installs (server admin only), binding counts by state, the disclosure.
+- `GET /surfaces/status`: installs (server admin only), binding counts by state, `org_name` (the server's `SURFACES_ORG_NAME`, or `null`), `slack_hosted` (whether the hosted one-click install is on), the disclosure.
 - `GET /surfaces/bindings?nest_id=`: server admins see every binding; others see bindings on nests they own or administer.
 - `POST /surfaces/bindings/preview` `{ install_id, conversation_id, nest_id, explicit_public_bind?, ext_capture_enabled? }` (nest owner/admin): dry-run guard, `{ would_bind, guard, disclosure }`.
   - For a private channel or DM, the caller must also be a current member (or a server admin). Otherwise the answer is a uniform `404` with no counts. The same applies to create.
@@ -2740,10 +2799,11 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
 The workspace installs a customer-owned Slack app made from our manifest (`docs/surfaces/slack-app-manifest.json`; scopes are justified in `docs/surfaces`). Nest listens to events only and never pulls channel history during normal listening. Messages that pass a deterministic gate are held in an encrypted buffer (`SURFACES_BUFFER_KEY`; with no key, nothing is stored). The window is judged after `quiet_minutes` without new messages, or when it hits its size or age cap. Proposals become review-queue drafts that readers can't see until a person approves them. Approving in the web review queue unhides the draft immediately. Within 5 minutes the purge sweep marks the item approved, or discards a rejected or cancelled draft.
 
 - `POST /surfaces/slack/installs` `{ home_nest_id }` (server admin, own credential): `201 { install_id, manifest, disclosure }`. `422` if the nest doesn't exist.
-- `GET /surfaces/slack/installs/:id` (server admin): install state plus `credentials` as booleans. Values are never returned.
+- `GET /surfaces/slack/installs/:id` (server admin): install state plus `credentials` as booleans. Values are never returned. A manifest install also returns its `manifest` again (no secrets in it), so setup can be resumed.
 - `PUT /surfaces/slack/installs/:id/credentials` `{ client_id?, client_secret?, signing_secret? }` (server admin): stored encrypted. Returns `{ stored, credentials }`, again as booleans.
 - `GET /surfaces/slack/installs/:id/oauth/start` (server admin, **signed-in browser session**; a bearer key gets `403`): `302` to Slack. The state is single use, bound to the session, and expires in 10 minutes.
-- `GET /surfaces/slack/oauth/callback`: completes the install. It refuses a reused or foreign state, and a different Slack workspace than the install's. On refusal the new token is revoked. It returns a small HTML page, or JSON for `Accept: application/json`.
+- `GET /surfaces/slack/installs/:id/channels` (server admin, own credential; MCP `context_surfaces_slack_channels_list`): the channels the setup wizard offers. Only the public and private channels the Nest bot was added to (Slack `users.conversations`), never DMs, archived channels or message text. `{ channels: [{ id, name, is_private, is_ext_shared, num_members, binding: { id, nest_id, status } | null }], truncated }` (at most 2,000 channels). `409` until the install is active; `502` when Slack refuses.
+- `GET /surfaces/slack/oauth/callback`: completes the install. In a browser, a successful install links back to the setup wizard (`/control-room?section=setup`). It refuses a reused or foreign state, and a different Slack workspace than the install's. On refusal the new token is revoked. It returns a small HTML page, or JSON for `Accept: application/json`.
 - `GET /surfaces/slack/hosted/oauth/start?home_nest_id=`: hosted one-click install. It exists only while `FEATURE_SURFACES_SLACK_HOSTED` is on.
 - `POST /surfaces/slack/:installId/events`, `POST /surfaces/slack/:installId/interactions` (and `/surfaces/slack/hosted/*` for hosted): Slack calls these.
   - Unauthenticated, but the Slack signature on the raw body is required. A bad or missing signature, a timestamp outside 300 s, or no signing secret gives `401`.
@@ -2766,9 +2826,19 @@ The workspace installs a customer-owned Slack app made from our manifest (`docs/
 MCP twins (per-nest endpoint, advertised to nest owners/admins while the flags are on):
 - bindings: `context_surfaces_status`, `context_surfaces_bindings_list`, `context_surfaces_binding_preview`, `_binding_create`, `_binding_update`, `_binding_delete`, `_binding_recheck`, `_binding_resume`;
 - identity links (server admin): `context_surfaces_links_list`, `_link_revoke`, `_link_unblock`, `_link_reviews_list`, `_link_review_decide`.
-- Slack install, settings, verdict log (S2a): `context_surfaces_slack_install_create`, `context_surfaces_settings_get`, `context_surfaces_settings_update`, `context_surfaces_windows_list`;
-- Seeds (S3): `context_surfaces_seed_apply`, `context_surfaces_seed_list`, `context_surfaces_seed_status`;
+- Slack install, settings, verdict log (S2a): `context_surfaces_slack_install_create`, `context_surfaces_slack_channels_list` (po-1186 CR3), `context_surfaces_settings_get`, `context_surfaces_settings_update`, `context_surfaces_windows_list`;
+- Seeds (S3): `context_surfaces_seed_apply`, `context_surfaces_seed_list`, `context_surfaces_seed_status`, and the cold start `context_surfaces_cold_start` (po-1186 CR2);
 - cards, audit, budget, disconnect (S2b): `context_surfaces_proposals_list`, `context_surfaces_my_pending` (any reviewer; not admin-gated), `context_surfaces_commits_list`, `context_surfaces_budget_get`, `context_surfaces_budget_update`, `context_surfaces_disconnect`. MCP never commits a proposal for a surface user: approve through `context_approve` / `context_reject` as the token's own user.
+
+#### Member explainer and the Control room setup (po-1186 CR3)
+- `GET /about/surfaces` (public, no auth; `404` while Surfaces is off): "How Nest handles your messages", a plain HTML page for anyone in a channel where Nest listens. It states what Nest reads, how long it waits (`quiet_minutes`), what it keeps, how long message text is held (`buffer_ttl_hours`), what it never saves, and `@Nest skip me`. It mentions DMs only while `dm_capture` is on. It shows the optional `SURFACES_ORG_NAME` and `LOGO_URL`, and nothing else from the server: no nest, channel or user names. The one enable notice the bot posts in a channel links to it when `PUBLIC_BASE_URL` is set.
+- `GET /health` carries `surfaces_enabled`, so the app can hide the Control room page while Surfaces is off.
+- The Control room page (`/control-room`) runs setup over the routes above: install and credentials, OAuth start, the channel list, binding preview, seed dry run and apply, then binding create (which posts the notice). Its progress is worked out from installs, bindings and applied seeds, so nothing extra is stored.
+
+#### Control room dashboard (po-1186 CR2)
+- `GET /surfaces/cold-start?nest_id=` (MCP `context_surfaces_cold_start`; nest owner/admin, any nest for a server admin): how fast a seeded nest fills up. `nest_id` omitted lists every seeded nest the caller administers (personal DM nests only for their owner). Response `{ api_version, nests: [{ nest_id, nest_label, redacted, no_seed, seed: {id, version, applied_at}, folders: [{path, approved, first_approved_at}], coverage: {covered, total}, first_approved: {node_id, at, after_seed_ms}, mirror: {people: {proposed, accepted}, areas: {proposed, accepted}}, cumulative: [{day, approved}] }] }`. Folders are the seed's folders minus its `admin_only` ones. A folder counts approved documents under it (first approval: the review decision, else the approved-version pin, else an approved version row), never the documents the seed wrote itself (its CONTEXT.md and thesis). `first_approved` is the first such approval after the seed's `applied_at`; `after_seed_ms` is the gap. `mirror` counts the org mirror's proposals and how many were approved. A personal nest seen by anyone but its owner is labelled `"DM · private nest · title hidden"`, `redacted: "n1"`, and `first_approved.node_id` is null. Nothing is stored; counts only. No seed → `no_seed: true` and empty figures.
+- Rollups gain `by=reason` (group by the verdict's `reason_code`, e.g. why windows ended with no proposal) and two fields on every row: `last_at` (the group's latest ledger row: an agent's last report, a channel's last activity) and `source` (that row's source, i.e. the agent's kind). Both `GET /nests/:nestId/rollups` and `GET /rollups`, and their MCP twins.
+- The page (`/control-room`): server admins see every nest; nest owners and admins see the nests they administer (the org ledger and rollups narrow themselves). Tabs: **Overview** (tiles, distillation by day with the no-op reasons, cold start, channels with the paused-channel alert, rollups), **Decision ledger** (filters, totals, the trace drawer, export) and **Agents** (every agent that reported in the range with its kind and last report, plus how to connect one), over the ledger, rollups, cold-start, bindings and budget routes. Setup stays server-admin only. Every figure on the page is a count of decision-ledger rows, so the tiles, rollups, channel table and ledger totals agree for the same range.
 
 #### Cards, commit and My pending (S2b)
 - S2b and S3 settings on `GET/PATCH /surfaces/settings` (server admin; the S2a ones are above): `reviewer_daily_cards` (the one daily card limit shown everywhere, default 2), `conversation_daily_cards`, `timezone`, `default_seed` and `seed_library_nests` (see Seeds below), and `dm_capture` (default `false`), and `signin_alerts` (default `true`: sign-in and configuration-change alerts to sealed-nest owners; turning it off notifies every sealed-nest owner). Turning `dm_capture` off deletes every DM buffer in the same save, withdraws pending DM proposals (no 7-day hold) and records an audit notice with the admin. Out-of-range values are `422`.

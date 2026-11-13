@@ -14,6 +14,8 @@ import { getSessionIdFromRequest } from "../auth/sessions.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { surfacesEnabled } from "./flags.js";
+import { config } from "../config.js";
+import { hostedEnabled } from "./adapters/slack/routes.js";
 import {
   UnprocessableError,
   GuardRefusedError,
@@ -129,6 +131,10 @@ surfacesRoutes.get("/status", async (c) => {
         paused_by_member: by("paused_by_member"),
         removed: by("removed"),
       },
+      // po-1186 CR3: what the setup wizard words and offers. The org name is
+      // the one the public member page shows; hosted = one-click install on.
+      org_name: config.SURFACES_ORG_NAME ?? null,
+      slack_hosted: hostedEnabled(),
       disclosure: SERVER_ADMIN_DISCLOSURE,
     });
   } catch (err) {
@@ -637,6 +643,29 @@ surfacesRoutes.get("/seeds", async (c) => {
     const nestId = str(c.req.query("nest_id"), "nest_id")!;
     assertScope(c, nestId);
     return c.json({ seeds: await listSeedsForNest(nestId, c.get("userId")) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+// ─── po-1186 CR2: cold start (AC-CR-04) ─────────────────────────────────────
+//
+// GET /surfaces/cold-start?nest_id=   one seeded nest, or every seeded nest the
+// caller administers (all for a server admin). Read-only, counts only; MCP twin
+// context_surfaces_cold_start; same zod query (src/surfaces/cold-start-schema.ts).
+
+import { coldStart, coldStartAll } from "./services/cold-start-service.js";
+import { ColdStartQuery } from "./cold-start-schema.js";
+import { parseOr422 } from "../workflow/agent-event-schema.js";
+
+surfacesRoutes.get("/cold-start", async (c) => {
+  try {
+    const q = parseOr422(ColdStartQuery, c.req.query());
+    const scope = c.get("nestScope");
+    const nestId = q.nest_id ?? scope ?? undefined;
+    if (nestId) assertScope(c, nestId);
+    const nests = nestId ? [await coldStart(nestId, c.get("userId"))] : await coldStartAll(c.get("userId"));
+    return c.json({ api_version: "2026-11", nests });
   } catch (err) {
     return handleError(c, err);
   }

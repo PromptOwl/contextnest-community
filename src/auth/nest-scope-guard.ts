@@ -40,6 +40,8 @@ const PUBLIC_PATHS = new Set([
   "/license/status",
   "/llms.txt",
   "/auth/admin-status",
+  // Surfaces member explainer: static copy, no nest data (po-1186 CR3).
+  "/about/surfaces",
 ]);
 
 function segmentMatches(seg: string, nestId: string): boolean {
@@ -82,6 +84,12 @@ export function nestKeyVerdict(
   // Run detail routes — every handler checks the run's nest against the scope
   // (loadRunWithPermission in workflow/run-routes.ts).
   if (path.startsWith("/runs/")) return { allowed: true };
+
+  // Agent control room reads (po-1186) — each narrows itself to the key's
+  // nest (orgScope keyNestScope; the trace re-checks the entry's nest).
+  if ((path === "/ledger" || path.startsWith("/ledger/") || path === "/rollups") && isGet) {
+    return { allowed: true };
+  }
 
   // The key's own nest, every sub-route. The nests-app gate still applies the
   // owner's permission on top.

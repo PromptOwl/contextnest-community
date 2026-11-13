@@ -3254,6 +3254,83 @@ describe("round 9: agent-ticket alerts, link and disconnect notices, alert fatig
 
 // ═══ Audit, REST + MCP parity, uninstall ═════════════════════════════════════
 
+describe("po-1186 control room: the decision ledger over real listener windows", () => {
+  beforeEach(async () => {
+    await resetAuthRateLimit();
+  });
+
+  it("AC-CR-05b: a judged window carries its listener run's id (surface_windows.run_id)", async () => {
+    const p = await makeProposal("C1");
+    const w = await one("SELECT run_id FROM surface_windows WHERE id = ?", [p.window_id]);
+    expect(w.run_id).toMatch(/^run_/);
+    const r = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    expect(r).toMatchObject({ nest_id: N, triggered_by: "surfaces:window", source: "server:surfaces", verdict: "propose" });
+    const b = await one("SELECT listener_agent_node_id AS a FROM surface_bindings WHERE id = ?", [bound.C1]);
+    expect(r.agent_node).toBe(b.a);
+  });
+
+  it("AC-CR-05 (Surfaces): a node committed from a Surfaces proposal has run, verdict, proposal, review, version and source in its chain, and no gaps (REST and MCP)", async () => {
+    const p = await makeProposal("C1");
+    await click("U_ERIN", "nest_approve", p.id);
+    const c = await one("SELECT * FROM surface_commits WHERE window_id = ?", [p.window_id]);
+    expect(c).toBeTruthy();
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${p.window_id}`, undefined, alice.apiKey);
+    expect(tr.status).toBe(200);
+    for (const hop of ["run", "verdict", "proposal", "review", "version", "source"]) expect(tr.data.chain[hop], hop).toBeTruthy();
+    expect(tr.data.chain.run.id).toBe((await one("SELECT run_id FROM surface_windows WHERE id = ?", [p.window_id])).run_id);
+    expect(tr.data.chain.verdict).toMatchObject({ code: "propose" });
+    expect(tr.data.chain.review).toMatchObject({ state: "approved", by: erin.email });
+    expect("reason" in tr.data.chain.review).toBe(true);
+    expect(tr.data.chain.version).toMatchObject({ node_id: c.node_id, version: Number(c.version) });
+    expect(tr.data.chain.source).toMatchObject({ kind: "slack", label: "#c1" });
+    expect(tr.data.gaps).toEqual([]);
+    expect(tr.data.entry).toMatchObject({ entry_id: `win_${p.window_id}`, agent: { source: "surfaces" }, commit: { node_id: c.node_id } });
+    const m = await app.request(`/nests/${N}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_agent_ledger_trace", arguments: { entry_id: `win_${p.window_id}` } } }),
+    });
+    const viaMcp = JSON.parse((await m.json()).result.content[0].text);
+    expect(viaMcp.gaps).toEqual([]);
+    expect(viaMcp.chain.version.node_id).toBe(c.node_id);
+  });
+
+  it("AC-CR-06: a no_op window's ledger row has verdict and reason_code, null proposal/review/commit, and no field holds the buffered message text (REST and MCP)", async () => {
+    modelImpl = () => submit(noop("chatter"));
+    const plaintext = `lunch at the ${rnd()} place tomorrow ${rnd()} anyone in for ${rnd()} tacos ${rnd()}`;
+    await say("C1", "U_BOB", plaintext);
+    // The text is in the encrypted buffer until the window is judged.
+    const open = await one("SELECT id FROM surface_windows WHERE binding_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1", [bound.C1]);
+    expect(open).toBeTruthy();
+    await tick();
+    const w = await one("SELECT * FROM surface_windows WHERE id = ?", [open.id]);
+    expect(w).toMatchObject({ status: "judged", verdict: "no_op", reason_code: "chatter" });
+    const from = new Date(Date.parse(w.judged_at) - 1000).toISOString();
+    const to = new Date(Date.parse(w.judged_at) + 1000).toISOString();
+    const page = await jsonRequest(app, "GET", `/nests/${N}/ledger?verdict=no_op&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, undefined, alice.apiKey);
+    expect(page.status).toBe(200);
+    const row = page.data.entries.find((e: any) => e.entry_id === `win_${w.id}`);
+    expect(row).toBeTruthy();
+    expect(row.verdict).toMatchObject({ code: "no_op", reason_code: "chatter" });
+    expect(row.proposal).toBeNull();
+    expect(row.review).toBeNull();
+    expect(row.commit).toBeNull();
+    const words = plaintext.split(" ").filter((x) => x.length >= 5);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${w.id}`, undefined, alice.apiKey);
+    const m = await app.request(`/nests/${N}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_agent_ledger", arguments: { verdict: "no_op", from, to } } }),
+    });
+    const mcpText = (await m.json()).result.content[0].text as string;
+    expect(mcpText).toContain(`win_${w.id}`);
+    for (const serialised of [JSON.stringify(row), JSON.stringify(tr.data), mcpText]) {
+      expect(serialised).not.toContain(plaintext);
+      for (const word of words) expect(serialised).not.toContain(word);
+    }
+  });
+});
+
 describe("audit, parity, disconnect", () => {
   it("AC-SRF-01: an approved item's audit row (REST and MCP) shows the approver, surface, Slack user id, window + message count, proposal and 'proposed by Nest listener'", async () => {
     const p = await makeProposal("C1");

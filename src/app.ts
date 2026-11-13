@@ -87,6 +87,8 @@ import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
+import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
+import { surfacesEnabled } from "./surfaces/flags.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
 import { registerConnector, getConnector } from "./surfaces/registry.js";
 import { parseKey } from "./surfaces/services/buffer-crypto.js";
@@ -139,6 +141,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import {
+  agentRegisterRoutes,
+  nestLedgerRoutes,
+  nestRollupRoutes,
+  orgLedgerRoutes,
+  orgRollupRoutes,
+} from "./governance/ledger-routes.js";
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
@@ -166,6 +175,7 @@ import {
   VaultBusyError,
   PlanLimitError,
   BillingConfirmError,
+  CodedError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
@@ -324,6 +334,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "publications",
   "branding",
   "metacognition",
+  // Registering an agent mints a governed agent node (po-1186): automation.
+  "agents",
   "schedules",
   "hooks",
   "env",
@@ -784,6 +796,9 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Surfaces (Slack → nest; needs the plane and metacognition, never in
+      // open mode). Off → /surfaces/* 404s and the Control room page hides.
+      surfaces_enabled: surfacesEnabled(),
       // Experimental features, one key each (default OFF; superadmin switches
       // under Settings → Features). Off → the feature's routes 404 and the UI
       // renders none of it. Add new experimental switches as keys here.
@@ -2906,6 +2921,12 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Agent control room (po-1186): the org-wide decision ledger, one entry's
+  // trace, and rollups. Read-only; each route scopes to the caller's nests.
+  app.use("/ledger/*", flexAuthMiddleware);
+  app.route("/ledger", orgLedgerRoutes);
+  app.use("/rollups/*", flexAuthMiddleware);
+  app.route("/rollups", orgRollupRoutes);
   // Inbound trigger hooks — public by design: the unguessable token in the
   // path is the capability; presets add platform signature verification on
   // top (see workflow/hook-routes.ts).
@@ -2918,6 +2939,10 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Surfaces member explainer (po-1186 CR3): the page the bot links in its
+  // one enable notice. Public, server-rendered, no nest data; 404 while
+  // Surfaces is off.
+  app.route(ABOUT_SURFACES_PATH, aboutSurfacesRoutes);
   // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
   // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
   app.route("/d", siteRoutes);
@@ -3930,6 +3955,11 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  // Agent control room (po-1186): register an outside agent, the nest's
+  // decision ledger (+ export) and its rollups.
+  nestsApp.route("/:nestId/agents", agentRegisterRoutes);
+  nestsApp.route("/:nestId/ledger", nestLedgerRoutes);
+  nestsApp.route("/:nestId/rollups", nestRollupRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
@@ -4062,6 +4092,9 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (err instanceof BillingConfirmError) {
       return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
+    }
+    if (err instanceof CodedError) {
+      return c.json({ ...err.extra, error: err.message, code: err.code }, err.statusCode as any, err.headers);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

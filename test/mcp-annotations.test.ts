@@ -58,6 +58,15 @@ const READ_ONLY = [
   "context_surfaces_budget_get",
   "context_surfaces_seed_list",
   "context_surfaces_seed_status",
+  // Agent control room (po-1186): the ledger is a view; an export is logged, never sent.
+  "context_agent_ledger",
+  "context_agent_ledger_trace",
+  "context_agent_ledger_export",
+  "context_agent_rollups",
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
+  "context_surfaces_slack_channels_list",
+  "context_surfaces_cold_start",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -94,6 +103,7 @@ const DESTRUCTIVE = [
   "context_surfaces_budget_update",
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
+  "context_agent_run_close",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -115,6 +125,7 @@ const OPEN_WORLD = [
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_surfaces_binding_preview",
+  "context_surfaces_slack_channels_list",
   "context_surfaces_binding_create",
   "context_surfaces_binding_update",
   "context_surfaces_binding_delete",
@@ -177,10 +188,12 @@ async function allDefinedNames(): Promise<string[]> {
   const { WORKFLOW_TOOL_DEFINITIONS } = await import("../src/mcp/workflow-tools.js");
   const { METACOGNITION_TOOL_DEFINITIONS } = await import("../src/mcp/metacognition-tools.js");
   const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
+  const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const all = [
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,
+    ...AGENT_TOOL_DEFINITIONS,
     ...METACOGNITION_TOOL_DEFINITIONS,
     ...SURFACES_TOOL_DEFINITIONS,
   ];
