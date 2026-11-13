@@ -46,6 +46,7 @@ import NestOverviewPage from '../page_factory/app/nest_overview_page.js';
 import NestDocumentsPage from '../page_factory/app/nest_documents_page.js';
 import ReviewQueuePage from '../page_factory/app/review_queue_page.js';
 import CollaboratorsPage from '../page_factory/app/collaborators_page.js';
+import FieldsPage from '../page_factory/app/fields_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -91,6 +92,9 @@ import ReviewQueueApi from './review_queue_api.js';
 
 // REST helper used to arrange Collaborators preconditions (shares, teams, visibility, keys)
 import CollaboratorsApi from './collaborators_api.js';
+
+// REST helper used to arrange Fields preconditions (fields, task rules, tasks, shares)
+import FieldsApi from './fields_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -475,6 +479,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get collaboratorsApi() {
         if (!this._collaboratorsApi) this._collaboratorsApi = new CollaboratorsApi(this.page);
         return this._collaboratorsApi;
+      },
+
+      // Nest page → Fields tab (custom fields, task numbering, surfaces, stages)
+      get fieldsPage() {
+        return new FieldsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Fields suite. One instance per role and test, so
+       * the nests it remembers for cleanup belong to that test alone.
+       */
+      get fieldsApi() {
+        if (!this._fieldsApi) this._fieldsApi = new FieldsApi(this.page);
+        return this._fieldsApi;
       },
 
       /**
