@@ -136,6 +136,106 @@ export interface ConnectGuide {
   steps: string;
 }
 
+const PLUGINS_URL = "https://github.com/PromptOwl/ContextNest/tree/development/plugins";
+const CLONE = "Get the plugin files: `git clone https://github.com/PromptOwl/ContextNest.git ~/contextnest`.";
+const README = (dir: string) => `[Plugin README](${PLUGINS_URL}/${dir})`;
+
+/**
+ * Agent plugins from the ContextNest repo (plugins/<agent>). They drive the
+ * `ctx` CLI, so one set of steps works for a local vault and for a cloud
+ * server added with `ctx login`. `v` is an alias already checked by the caller.
+ */
+function pluginGuides(v: string): ConnectGuide[] {
+  const pin = `To use only \`${v}\`, add \`export CONTEXTNEST_VAULT=${v}\` to your shell profile.`;
+  return [
+    {
+      id: "codex-plugin",
+      name: "OpenAI Codex CLI (plugin)",
+      steps: [
+        "The plugin retrieves vault context on each prompt, checks for stale nodes after `ctx update`, and offers to capture new knowledge.",
+        "",
+        "1. Add the marketplace: `codex plugin marketplace add promptowl/contextnest`.",
+        "2. Install the plugin: `codex plugin add contextnest@contextnest`.",
+        "3. Start `codex` and open `/hooks`. Trust the four Context Nest hooks.",
+        "4. Start a new thread and ask about a topic in your vault. A `hook context` line lists the nodes it found.",
+        "",
+        pin,
+        "",
+        README("codex"),
+      ].join("\n"),
+    },
+    {
+      id: "opencode",
+      name: "OpenCode (plugin)",
+      steps: [
+        "The plugin retrieves vault context on each prompt, checks for stale nodes after `ctx update`, and offers to capture new knowledge.",
+        "",
+        `1. ${CLONE}`,
+        "2. OpenCode 2: run `opencode plugin add ~/contextnest/plugins/opencode`. OpenCode 1: add `{ \"plugin\": [\"/home/<you>/contextnest/plugins/opencode/index.js\"] }` to `opencode.json`.",
+        "3. Run `opencode plugin list`. The list shows `contextnest`.",
+        "4. Start a new session.",
+        "",
+        pin,
+        "",
+        README("opencode"),
+      ].join("\n"),
+    },
+    {
+      id: "grok-build",
+      name: "Grok Build (skills and rules)",
+      steps: [
+        "Grok ignores hook output, so this plugin gives Grok the Context Nest rules and four skills only. The agent runs `ctx` itself.",
+        "",
+        `1. ${CLONE}`,
+        "2. Install the plugin: `grok plugin install ~/contextnest/plugins/grok --trust`.",
+        "3. Enable it: `grok plugin enable contextnest`.",
+        "4. In your project, add the rules: `cat ~/contextnest/plugins/grok/AGENTS.md >> AGENTS.md`.",
+        "5. Run `grok --trust inspect`. It shows `contextnest (user, enabled) 4 skills`.",
+        "",
+        README("grok"),
+      ].join("\n"),
+    },
+    {
+      id: "muse",
+      name: "Muse Code (skills and rules)",
+      steps: [
+        "Muse Code gets the Context Nest rules and four skills. The agent runs `ctx` itself.",
+        "",
+        `1. ${CLONE}`,
+        "2. Install the skills: `for s in ~/contextnest/plugins/muse/skills/*/; do muse skills install \"$s\" --scope user; done`.",
+        "3. In your project, add the rules: `cat ~/contextnest/plugins/muse/AGENTS.md >> AGENTS.md`.",
+        "4. Start `muse` and trust the workspace. `muse skills list` shows four `contextnest-*` skills.",
+        "",
+        README("muse"),
+      ].join("\n"),
+    },
+    {
+      id: "zed",
+      name: "Zed (skills and rules)",
+      steps: [
+        "The Zed Agent gets the Context Nest rules and four skills. The agent runs `ctx` itself. External agents in Zed use their own plugin.",
+        "",
+        `1. ${CLONE}`,
+        "2. Install the skills: `mkdir -p ~/.agents/skills && cp -R ~/contextnest/plugins/zed/skills/* ~/.agents/skills/`.",
+        "3. In your project, add the rules: `cat ~/contextnest/plugins/zed/AGENTS.md >> .rules`. Zed reads only one rules file, and `.rules` comes first. `ctx init` writes a `.cursorrules` file that Zed would read instead.",
+        "4. Open the project in Zed. If the title bar shows an exclamation mark icon, click it and trust the project.",
+        "5. Open the Agent Panel (`Ctrl+?`, or `Cmd+?` on macOS) and start a new Zed Agent thread. Type `/`. The list shows `/:contextnest-recall` and three other skills.",
+        "",
+        README("zed"),
+      ].join("\n"),
+    },
+  ];
+}
+
+/** Case-insensitive match on a guide's name and steps. Every word must match. */
+export function filterGuides(guides: ConnectGuide[], query: string): ConnectGuide[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return guides.filter((g) => {
+    const text = `${g.name}\n${g.steps}`.toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
+}
+
 /** Steps to connect a local vault to each agent. `vault` is an alias or a placeholder. */
 export function connectGuides(vaultAlias: string): ConnectGuide[] {
   const v = ALIAS_PATTERN.test(vaultAlias) ? vaultAlias : "<vault alias or path>";
@@ -169,6 +269,7 @@ export function connectGuides(vaultAlias: string): ConnectGuide[] {
         "3. In Claude Code, type `/mcp`. The list shows `contextnest` as connected.",
       ].join("\n"),
     },
+    ...pluginGuides(v),
     {
       id: "claude-desktop",
       name: "Claude Desktop",
@@ -260,6 +361,7 @@ export function cloudGuides(server: string, vaultAlias: string): ConnectGuide[] 
         "5. Restart Claude Code. The session start shows the nests on the server.",
       ].join("\n"),
     },
+    ...pluginGuides(v),
     ...HARNESSES.map((h) => ({
       id: h.id,
       name: h.name,
