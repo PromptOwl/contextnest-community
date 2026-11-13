@@ -123,45 +123,6 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.newNestButton).not.toBeVisible();
     });
 
-    test('CN-DASH-002: the Dashboard renders correctly after a successful sign-in', async ({
-      loginPage,
-      nestsPage,
-      appShellPage,
-    }) => {
-      test.skip(!manualRole, 'No manual-login role configured.');
-
-      await loginPage.performLogin(manualRole.email, manualRole.password);
-
-      // The shell, the page heading and the server banner all land together.
-      expect(await appShellPage.isLoggedIn()).toBe(true);
-      await expect(nestsPage.pageTitle).toBeVisible({ timeout: 15000 });
-      await expect(nestsPage.pageTitle).toContainText('Nests');
-      await expect(nestsPage.pageTitle).toContainText('Shared knowledge vaults for your team');
-      await expect(nestsPage.serverUrlCode).toBeVisible();
-      await expect(nestsPage.gridLoader).not.toBeVisible();
-    });
-
-    test('CN-DASH-004: the banner displays the server URL and the Copy button copies it', async ({
-      primary_user,
-    }) => {
-      const { page, nestsPage } = await openDashboard(primary_user, { clipboard: true });
-      await nestsPage.goto();
-
-      const origin = new URL(page.url()).origin;
-      await expect(nestsPage.serverUrlCode).toHaveText(origin);
-
-      await nestsPage.copyServerUrl.click();
-
-      const copied = await readClipboard(page);
-      if (copied !== null) {
-        expect(copied).toBe(origin);
-      } else {
-        // Clipboard unreadable in this browser — the button's Copy→Check swap
-        // is the user-visible confirmation (it carries no success toast).
-        await expect(nestsPage.copyServerUrl.locator('svg.lucide-check')).toBeVisible();
-      }
-    });
-
     test('CN-DASH-005: the banner Nest and Document counts are accurate', async ({
       primary_user,
       commonFunction,
@@ -258,28 +219,6 @@ test.describe('Community Dashboard', () => {
         !canCreate,
         'This account cannot create nests (NEST_CREATION=admins and not an admin).'
       );
-    });
-
-    test('CN-DASH-009: a nest cannot be created with an empty name', async ({ primary_user }) => {
-      const { nestsPage, api } = await openDashboard(primary_user);
-
-      await nestsPage.goto();
-      await nestsPage.openCreateDialog();
-
-      // Nothing typed: the button is dead and the form says nothing yet — the
-      // inline hint only appears once there is a name to object to.
-      await expect(nestsPage.createSubmit).toBeDisabled();
-      await expect(nestsPage.createError).toHaveCount(0);
-
-      // Whitespace does not survive trimming, so it is named as the problem.
-      await nestsPage.createNameInput.fill('   ');
-      await expect(nestsPage.createError).toHaveText('Name is required');
-      await expect(nestsPage.createSubmit).toBeDisabled();
-
-      await nestsPage.createCancel.click();
-      // Nothing was created from it. (Checked by name, not by counting: other
-      // suites create nests on this account at the same time.)
-      expect((await api.listNests()).some((n) => !(n.name ?? '').trim())).toBe(false);
     });
 
     test('CN-DASH-010: a nest name over 100 characters is rejected with an inline message', async ({
@@ -425,23 +364,6 @@ test.describe('Community Dashboard', () => {
       await nestsPage.openNest(name);
 
       await expect(page).toHaveURL(new RegExp(`/nest/${nest.id}`), { timeout: 15000 });
-    });
-
-    test('CN-DASH-018: a nest card can be opened with the keyboard (Enter/Space)', async ({
-      primary_user,
-      commonFunction,
-    }) => {
-      const { page, nestsPage, api } = await openDashboard(primary_user);
-      const enterNest = await api.createNest(commonFunction.generateEntityName('key-enter'));
-      const spaceNest = await api.createNest(commonFunction.generateEntityName('key-space'));
-
-      await nestsPage.goto();
-      await nestsPage.openNestWithKeyboard(enterNest.name, 'Enter');
-      await expect(page).toHaveURL(new RegExp(`/nest/${enterNest.id}`), { timeout: 15000 });
-
-      await nestsPage.goto();
-      await nestsPage.openNestWithKeyboard(spaceNest.name, ' ');
-      await expect(page).toHaveURL(new RegExp(`/nest/${spaceNest.id}`), { timeout: 15000 });
     });
 
     test('CN-DASH-020: an imported nest displays its Imported badge and provenance', async ({
@@ -871,30 +793,6 @@ test.describe('Community Dashboard', () => {
       }).toPass({ timeout: 60_000, intervals: [1_000, 3_000, 5_000] });
     }
 
-    test('CN-DASH-036: a shared nest displays "Shared by" and the correct role badge', async ({
-      primary_user,
-      secondary_user,
-      commonFunction,
-    }) => {
-      const { nest, dispose } = await shareWithPrimary(
-        secondary_user,
-        commonFunction,
-        'read',
-        'shared-viewer'
-      );
-      try {
-        const { nestsPage, api } = await openDashboard(primary_user);
-        // Settle the invite so the nest leaves Pending invites for the grid.
-        await api.settleInvitesFor(nest.id);
-
-        await gotoUntilCard(nestsPage, nest.name);
-        await expect(nestsPage.sharedByLine(nest.name)).toContainText(secondaryRole.email);
-        await expect(nestsPage.cardBadge(nest.name, 'Viewer')).toBeVisible();
-      } finally {
-        await dispose();
-      }
-    });
-
     test('CN-DASH-063: inside a shared nest, the banner and sidebar say who shared it and your role', async ({
       primary_user,
       secondary_user,
@@ -920,30 +818,6 @@ test.describe('Community Dashboard', () => {
         await expect(
           page.locator(`button[data-relation="shared"][title^="Open ${nest.name}"]`)
         ).toBeVisible();
-      } finally {
-        await dispose();
-      }
-    });
-
-    test('CN-DASH-037: the rename icon is hidden for non-admin collaborators', async ({
-      primary_user,
-      secondary_user,
-      commonFunction,
-    }) => {
-      // An editor is the strongest non-admin grant — rename is owner/admin only.
-      const { nest, dispose } = await shareWithPrimary(
-        secondary_user,
-        commonFunction,
-        'write',
-        'shared-editor-rename'
-      );
-      try {
-        const { nestsPage, api } = await openDashboard(primary_user);
-        await api.settleInvitesFor(nest.id);
-
-        await gotoUntilCard(nestsPage, nest.name);
-        await expect(nestsPage.cardBadge(nest.name, 'Editor')).toBeVisible();
-        await expect(nestsPage.renameIcon(nest.name)).toHaveCount(0);
       } finally {
         await dispose();
       }

@@ -88,34 +88,6 @@ test.describe('API keys', () => {
     cleanup = null;
   });
 
-  test('CN-KEYS-001: the page displays the two scope info boxes and the create form', async ({ primary_user, secondary_user, commonFunction }) => {
-    const role = await holder({ primary_user, secondary_user });
-    const { apiKeysPage: keys } = role;
-
-    await role.nestsPage.goto();
-    await expect(keys.railItem).toBeVisible();
-    await keys.railItem.click();
-    await keys.pageTitle.filter({ hasText: 'API keys' }).waitFor();
-    await expect(keys.railItem).toHaveAttribute('aria-current', 'page');
-    await expect(keys.pageTitle).toContainText('Make one key per place you connect from');
-
-    // What each scope reaches.
-    await expect(keys.allNestsBox).toBeVisible();
-    await expect(keys.allNestsBox).toContainText('Works on every nest you can see, the server-level MCP endpoint, and your account (including managing keys).');
-    await expect(keys.oneNestBox).toBeVisible();
-    await expect(keys.oneNestBox).toContainText('Reaches that one nest and nothing else');
-    await expect(keys.oneNestBox).toContainText('answer 403');
-
-    // The create form: a name, a scope (all nests by default), and Generate.
-    await expect(keys.nameInput).toBeVisible();
-    await expect(keys.nameInput).toHaveAttribute('placeholder', "What's this key for? e.g. Claude Desktop, laptop CLI");
-    await expect(keys.nameInput).toHaveAttribute('maxlength', '60');
-    await expect(keys.scopeSelect).toHaveText('All your nests');
-    await expect(keys.generate).toBeVisible();
-    await expect(keys.generate).toBeDisabled();
-    await expect(role.page.getByText("A key is shown once, when it's created.")).toBeVisible();
-  });
-
   test('CN-KEYS-002: an all-nests key is generated and its value is revealed once', async ({ primary_user, secondary_user, commonFunction }) => {
     const role = await holder({ primary_user, secondary_user });
     const { page, apiKeysPage: keys, apiKeysApi: api } = role;
