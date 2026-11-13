@@ -741,8 +741,9 @@ async function recordRun(nestId: string, agentNode: string, model: string, cost:
       ],
     );
     await getDb().run("UPDATE surface_windows SET run_id = ? WHERE id = ? AND run_id IS NULL", [runId, windowId]);
-  } catch {
-    /* audit row is best effort */
+  } catch (err) {
+    // Best effort, but never silent: a lost row is a gap in the ledger trace.
+    console.error(`[surfaces] recording the run of window ${windowId} failed: ${err instanceof Error ? err.name : "error"}`);
   }
 }
 
