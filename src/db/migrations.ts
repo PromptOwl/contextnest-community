@@ -2297,6 +2297,54 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("071_node_pins");
   }
 
+  // 072: Nest Plugins (CU-wdqcq05raz). One row per (nest, plugin) holding the
+  //   operator's config — never a secret: x-secret settings live in nest_env
+  //   (encrypted, PLUGIN__<P>__<K>), settings_json holds only plain values.
+  //   system_user_id is the plugin's own system identity (system_accounts);
+  //   plugin writes are authored by it. Not a foreign key: revoking the system
+  //   deletes that user, and the row must survive to say "re-enable to
+  //   reconnect" rather than vanish. plugin_runs is the run ledger — one row
+  //   per run-now (later: schedule, webhook), with per-item conflicts/failures.
+  if (!hasMigration("072_nest_plugins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_plugins (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          plugin TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          mode TEXT NOT NULL DEFAULT 'raw' CHECK(mode IN ('raw', 'summary')),
+          folder TEXT,
+          settings_json TEXT NOT NULL DEFAULT '{}',
+          cursor_json TEXT,
+          system_user_id TEXT,
+          last_run_at TEXT,
+          last_status TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (nest_id, plugin)
+        );
+        CREATE TABLE IF NOT EXISTS plugin_runs (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          plugin TEXT NOT NULL,
+          triggered_by TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('clean', 'conflicts', 'failed')),
+          created INTEGER NOT NULL DEFAULT 0,
+          updated INTEGER NOT NULL DEFAULT 0,
+          unchanged INTEGER NOT NULL DEFAULT 0,
+          conflicts_json TEXT NOT NULL DEFAULT '[]',
+          failed_json TEXT NOT NULL DEFAULT '[]',
+          error TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest_plugin ON plugin_runs(nest_id, plugin, started_at);
+      `);
+    })();
+    recordMigration("072_nest_plugins");
+  }
+
   // 073: nests.always_include_tags (CU-wdqcq05rn0). Tags whose documents'
   //   APPROVED text is pushed to every agent and model that enters the nest
   //   (MCP initialize, context_init, Hootie, metacognition, run bundles). Comma

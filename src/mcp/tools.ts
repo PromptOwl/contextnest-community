@@ -136,6 +136,7 @@ import {
 } from "../shared/client-metadata.js";
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { isPluginTool, runPluginTool } from "./plugin-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
@@ -488,6 +489,8 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_runs_list",
   "workflow_edges_list",
   "workflow_edge_types_list",
+  // Nest Plugins (FEATURE_PLUGINS) — the read tool; run/configure are writes.
+  "context_plugins",
 ]);
 
 /** The zod field for an `array` property in a tool's JSON schema. A list of
@@ -530,6 +533,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_set_visibility",
   "context_systems",
   "context_instructions_update",
+  // Nest Plugins: configuring provisions a system identity and stores secrets.
+  "context_plugin_configure",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
   // action; only advertised while both feature flags are on (mcp/routes.ts).
   "context_metacognition_list",
@@ -4902,6 +4907,10 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Nest Plugin tools (FEATURE_PLUGINS): same service layer as REST.
+      if (isPluginTool(toolName) && config.FEATURE_PLUGINS) {
+        return runPluginTool(toolName, args, ctx);
       }
       // Metacognition tools: same deal, behind both flags; each call re-checks
       // owner/admin and refuses system keys in metacognition/manage.ts.

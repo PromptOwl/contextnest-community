@@ -513,6 +513,8 @@ export interface NodeResponse extends TaskFields {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** Nest Plugin provenance (`metadata.provenance`) when a plugin wrote it. */
+  provenance?: Record<string, unknown>;
   /** Document-scope always-include flag (CU-wdqcq05rn0), undefined when the
    *  doc inherits from the nest's `always_include_tags`. */
   always_include?: boolean;
@@ -736,6 +738,8 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     model:
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    // Nest Plugin provenance — "ingested by <plugin> from <url>".
+    ...((fm.metadata as any)?.provenance ? { provenance: (fm.metadata as any).provenance } : {}),
     always_include: documentAlwaysIncludeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
     ...(isOriginalFile((fm.metadata as any)?.original)
@@ -1710,6 +1714,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** Nest Plugin provenance, stored as `metadata.provenance`. System writers
+   *  only (src/plugins/writer.ts) — no REST or MCP body maps onto it. */
+  provenance?: Record<string, unknown>;
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
@@ -1749,6 +1756,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   /** Custom field values to set, field key → value; `null` clears one. Merged
    *  into the stored map — keys left out are untouched. */
   fields?: FieldsPatch;
+  /** See CreateNodeInput.provenance — replaces the stored block. */
+  provenance?: Record<string, unknown>;
   /** Replacement `view:` block (§1.12), for a node that is or is becoming
    *  type: view. Replaces the block wholesale; validated like create. */
   view?: unknown;
@@ -2212,6 +2221,7 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.provenance ? { provenance: input.provenance } : {}),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
     };
@@ -3067,6 +3077,11 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.provenance) {
+        const metadata = { ...(node.frontmatter.metadata as any), provenance: patch.provenance };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = { ...(opInput.metadata as object), provenance: patch.provenance };
       }
       if (patch.alwaysInclude !== undefined) {
         if (patch.alwaysInclude !== null && typeof patch.alwaysInclude !== "boolean") {

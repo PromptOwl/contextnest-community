@@ -101,6 +101,7 @@ export const HISTORICAL_MIGRATIONS = [
   "069_site_public_url_host",
   "070_instructions_revisions",
   "071_node_pins",
+  "072_nest_plugins",
   "073_nest_always_include_tags",
   "074_org_contributions",
   "075_node_index_manifest",
@@ -1276,6 +1277,40 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
       ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
     CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
+
+    -- 072: Nest Plugins (CU-wdqcq05raz) — see migrations.ts.
+    CREATE TABLE IF NOT EXISTS nest_plugins (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      plugin TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      mode TEXT NOT NULL DEFAULT 'raw' CHECK(mode IN ('raw', 'summary')),
+      folder TEXT,
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      cursor_json TEXT,
+      system_user_id TEXT,
+      last_run_at TEXT,
+      last_status TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, plugin)
+    );
+    CREATE TABLE IF NOT EXISTS plugin_runs (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      plugin TEXT NOT NULL,
+      triggered_by TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('clean', 'conflicts', 'failed')),
+      created INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      unchanged INTEGER NOT NULL DEFAULT 0,
+      conflicts_json TEXT NOT NULL DEFAULT '[]',
+      failed_json TEXT NOT NULL DEFAULT '[]',
+      error TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest_plugin ON plugin_runs(nest_id, plugin, started_at);
   `);
 
   // Migration 073 parity: which tags mark a document always-include.
