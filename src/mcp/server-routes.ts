@@ -67,6 +67,7 @@ import {
   type ToolResult,
 } from "./tools.js";
 import { toolAnnotations, toolTitle } from "./annotations.js";
+import { STREAM_TOOL, streamToolEnabled, streamToolResult } from "./stream-tool.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
@@ -316,10 +317,13 @@ const SERVER_NEST_TOOLS = [
   "context_boards",
   "context_board_items",
   "context_bulk_update",
+  // po-1214 — `nest` optional: omitted, it is the caller's whole stream (one
+  // merged, newest-first feed, not a per-nest fan-out).
+  STREAM_TOOL,
 ];
 
 function withNestArg(tool: { name: string; description: string; inputSchema: unknown }) {
-  const fanout = FANOUT_READ_TOOLS.has(tool.name);
+  const fanout = FANOUT_READ_TOOLS.has(tool.name) || tool.name === STREAM_TOOL;
   const schema = tool.inputSchema as { properties?: object; required?: string[] };
   return {
     name: tool.name,
@@ -384,6 +388,7 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_versions",
   "context_boards",
   "context_board_items",
+  STREAM_TOOL,
 ]);
 
 /** Exported so a test can assert every defined tool is classified. */
@@ -478,6 +483,14 @@ async function handleServerToolCall(
       if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
     }
+  }
+
+  // ─── The document stream across nests (po-1214) ────────────────────────
+  // One merged feed through the same reader GET /me/stream uses. A
+  // nest-scoped credential reads only its nest.
+  if (toolName === STREAM_TOOL && !args.nest) {
+    if (!streamToolEnabled()) return "The document stream is not enabled on this server (EXPERIMENTAL_DOC_STREAM).";
+    return streamToolResult(userId, userEmail, args, nestScope ?? undefined);
   }
 
   // ─── Fan-out reads when nest is omitted ────────────────────────────────
@@ -642,6 +655,7 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    if (tool.name === STREAM_TOOL && !streamToolEnabled()) continue;
     const shape = toolShape(tool.name, tool.inputSchema);
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {

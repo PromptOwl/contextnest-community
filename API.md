@@ -1234,7 +1234,8 @@ Optional query params, applied before the per-node enrichment:
 - `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
 - `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
-- Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
+- `last_edit` (single-node GET only) — who sealed the latest version: `{ version, edited_by, edited_by_system?, edited_at, client? }`. `edited_by` is the human; `client` is the write's caller attribution (§9.4), so `client.agent` is the agent that made the call. `client` is omitted when the write carried none. Over MCP, `context_get` reports the same two names as a `**Last edited by:** <human> via <agent> (vN)` prose line, for the version it serves (the approved one under stewardship). Not sent to public readers or headless keys.
+- Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` or `last_edit` — the fields are omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -1911,7 +1912,7 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
 
 > **Experimental.** Off by default; `404` unless `EXPERIMENTAL_DOC_STREAM` is on (env, or a superadmin's `experimental_doc_stream_enabled` in `PATCH /admin/settings`). The shape may change or the endpoint may be removed.
 
-Query: `?nest=&tag=&type=&author=&since=&limit=50&offset=0`. `nest`, `tag`, `type` and `author` are multi-select — repeat the param or comma-separate the values; values within one facet are OR'd, facets are AND'd. `tag` takes either `fmt` or `#fmt`. `since` is a date (`2026-10-01T00:00:00Z`, or the `at` value of an item); one without a zone is read as UTC; a bad one is `400`. `limit` clamps silently to 1–100 (junk → 50), `offset` to 0–10000; an offset past the end is an empty page, not an error. Each facet param keeps its first 50 distinct values.
+Query: `?nest=&tag=&type=&author=&source=&since=&limit=50&offset=0&facets=1`. `nest`, `tag`, `type` and `author` are multi-select — repeat the param or comma-separate the values; values within one facet are OR'd, facets are AND'd. `tag` takes either `fmt` or `#fmt`. `since` is a date (`2026-10-01T00:00:00Z`, or the `at` value of an item); one without a zone is read as UTC; a bad one is `400`. `limit` clamps silently to 1–100 (junk → 50), `offset` to 0–10000; an offset past the end is an empty page, not an error. Each facet param keeps its first 50 distinct values. `source` is `agent` (versions whose write named an agent, `client.agent`) or `human` (the rest); any other value is `400`. Like the `author` facet it runs over member nests only. `facets=0` (or `false`) drops `counts` even on the first page — the cheap read a client polls for "N new posts": ask with `since` = the newest `at` it shows, `limit=1`, `facets=0`, and subtract the shown items at or after that time from `total` (`since` is inclusive).
 
 One item per **node version** across every nest the caller can read (owned, shared, stewarded, team-shared, share-granted, or readable through its `org`/`public` visibility), newest first (`at` desc, then insertion order, so pages never duplicate or skip). Access is the same rule the document listing and the governance feed use, resolved once per nest:
 
@@ -1934,8 +1935,12 @@ One item per **node version** across every nest the caller can read (owned, shar
       "version": 2,
       "status": "published",
       "author": "alice@acme.com",
+      "authorName": "Alice Rivera",
+      "client": { "agent": "mkt-amplifier", "session_id": "s-41" },
+      "changeNote": "Added the dosing table",
+      "review": null,
       "at": "2026-10-01 09:02:00",
-      "summary": "FMT Fecal transplant primer, revised.",
+      "summary": "Fecal transplant primer, revised.",
       "commentCount": 1,
       "kind": "published"
     }
@@ -1953,7 +1958,9 @@ One item per **node version** across every nest the caller can read (owned, shar
 }
 ```
 
-- `tags` are the document's current tags (normalized: no `#`, lowercase). `summary` is the first ~200 characters of that version's body, flattened (no diff).
+- `tags` are the document's current tags (normalized: no `#`, lowercase). `summary` is the first ~200 characters of that version's body, flattened (no diff); a leading heading that only repeats the title is left out.
+- Members only (all four are `null` for a public reader): `authorName` is the author's display name (a system account's name, else the account's `name`), `null` when unset. `client` is the write's caller attribution ([Caller attribution](#caller-attribution-client)) — `client.agent` is the agent the person wrote through; `null` when the write named none. `changeNote` is the version's change note, `null` when none; the server's own "Auto-published on create/edit (…)" stamp is not returned. `review` is set on a version in review (`status: "pending_review"`): `{ "canReview": true }` when the caller may approve or reject it — the same verdict as `GET …/can-approve`, separation of duties included — then `POST …/approve` / `POST …/reject`; `null` on every other version.
+- MCP: `context_stream` reads the same feed (same reader, same access rule) with `since`, `source`, `author`, `tag`, `type`, `limit` (default 25), `offset`; prose plus this page as `structuredContent` (facets always off). Per-nest `/nests/:nestId/mcp` scopes it to that nest; the server-level `/mcp` takes an optional `nest` and, without one, spans every nest the caller reads (a nest-scoped credential reads only its nest). Advertised only while the switch is on. Reply to a post with `context_comment`, review with `context_approve` / `context_reject`.
 - `commentCount` (members only) counts comments on the document's **open** annotation threads — the threads `GET /nests/:nestId/nodes/:nodeId/annotations` lists; post with `POST …/annotations` (new thread) or `POST …/annotations/:threadId/comments` (reply), and deep-link with `?thread=<threadId>`.
 - `kind`: `created` (version 1), `updated` (a later draft / pending edit), `published` (a later edit that went live without a review), `approved` (a review approved this version), `rejected`.
 - `counts` are per-facet totals over the caller's whole readable stream with `since` applied but **no** facet filter — they don't change with the page or with the other chips, so only the first page (`offset=0`) carries them; later pages answer `counts: null`. Tag, type and author lists are capped at 50 values each, and cover member nests only (a public-only nest is counted under `nest` alone, and a tag/type/author filter leaves those nests out). `tags` on an item are the document's current tags for members, the version's own tags for public readers.

@@ -141,6 +141,7 @@ import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, ru
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
+import { streamToolEnabled, streamToolResult } from "./stream-tool.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -472,6 +473,7 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -1501,6 +1503,25 @@ export const TOOL_DEFINITIONS = [
             "Read one of YOUR drafts: returns its unapproved working copy (by node id) so you can fix it. Omit to list.",
         },
         title: { type: "string", description: "Same as id, by title." },
+      },
+    },
+  },
+  {
+    // po-1214: the document stream a person sees on /stream, for agents.
+    // Only advertised while EXPERIMENTAL_DOC_STREAM is on (streamToolEnabled).
+    name: "context_stream",
+    description:
+      "Read the document stream: recent versions, newest first — who changed what (the person, and the agent they wrote through), the change note, an excerpt, open comment count, and whether you may review it. Reply to a post with context_comment (its id), approve or reject one in review with context_approve / context_reject. Pass `since` (the newest `at` you have seen) to get only what is new.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
+        source: { type: "string", description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
+        author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
+        tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
+        type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },
+        limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
+        offset: { type: "number", description: "Skip this many posts (paging)." },
       },
     },
   },
@@ -3009,7 +3030,8 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isHeadlessIdentity(ctx.userId))
+      const headless = await isHeadlessIdentity(ctx.userId);
+      const relations = headless
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {
@@ -3022,6 +3044,22 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      // Who sealed the version being served: the human first, then the agent
+      // its write named (spec §9.4) — the same two names the UI byline shows.
+      // The served version, not the latest row: under stewardship the body is
+      // the approved snapshot, and a draft's author would misdescribe it.
+      // Not for a headless key or a public/org reader: it names the nest's
+      // people, which the REST node detail withholds from them too.
+      const servedVersion = ctx.servedVersions?.get(node.id);
+      const lastEdit =
+        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+          ? null
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch(() => null);
+      const lastEditLine = lastEdit
+        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
+            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
+          } (v${lastEdit.version})`
+        : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -3042,6 +3080,10 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        // Prose only: the catalog's context_get payload has no provenance
+        // field yet, and test/mcp-catalog-conformance.test.ts refuses an
+        // added key. A structured field needs the engine catalog first.
+        lastEditLine,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
@@ -4557,6 +4599,13 @@ async function runTool(
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
       return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
+    }
+
+    case "context_stream": {
+      if (!streamToolEnabled()) {
+        return toolError("The document stream is not enabled on this server (EXPERIMENTAL_DOC_STREAM).", "UNAUTHORIZED_ACTION");
+      }
+      return streamToolResult(ctx.userId, userEmail, args, ctx.nestId);
     }
 
     case "context_submit_review": {

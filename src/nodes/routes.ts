@@ -653,6 +653,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       response.author = people.author;
       response.collaborators = people.collaborators;
     }
+    // The latest version's two writers — the human and the agent — for the
+    // document byline. Same gate as the roster above.
+    const last = await versions.getVersionAttribution(nestId, nodeId);
+    if (last) {
+      response.last_edit = {
+        version: last.version,
+        edited_by: last.editedBy,
+        ...(last.editedBySystem ? { edited_by_system: last.editedBySystem } : {}),
+        edited_at: last.editedAt,
+        ...(last.client ? { client: last.client } : {}),
+      };
+    }
   }
 
   // The caller's share grant on THIS node, if any. A grant is access, not
