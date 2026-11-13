@@ -58,6 +58,7 @@ const READ_ONLY = [
   "context_surfaces_budget_get",
   "context_surfaces_seed_list",
   "context_surfaces_seed_status",
+  "context_surfaces_slack_channels_list",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -115,6 +116,7 @@ const OPEN_WORLD = [
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_surfaces_binding_preview",
+  "context_surfaces_slack_channels_list",
   "context_surfaces_binding_create",
   "context_surfaces_binding_update",
   "context_surfaces_binding_delete",

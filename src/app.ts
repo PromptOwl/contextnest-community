@@ -87,6 +87,8 @@ import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
+import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
+import { surfacesEnabled } from "./surfaces/flags.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
 import { registerConnector, getConnector } from "./surfaces/registry.js";
 import { parseKey } from "./surfaces/services/buffer-crypto.js";
@@ -784,6 +786,9 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Surfaces (Slack → nest; needs the plane and metacognition, never in
+      // open mode). Off → /surfaces/* 404s and the Control room page hides.
+      surfaces_enabled: surfacesEnabled(),
       // Experimental features, one key each (default OFF; superadmin switches
       // under Settings → Features). Off → the feature's routes 404 and the UI
       // renders none of it. Add new experimental switches as keys here.
@@ -2918,6 +2923,10 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Surfaces member explainer (po-1186 CR3): the page the bot links in its
+  // one enable notice. Public, server-rendered, no nest data; 404 while
+  // Surfaces is off.
+  app.route(ABOUT_SURFACES_PATH, aboutSurfacesRoutes);
   // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
   // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
   app.route("/d", siteRoutes);

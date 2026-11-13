@@ -45,7 +45,9 @@ import { randomBytes } from "crypto";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { createBindingWithListener } from "../surfaces/services/listener-service.js";
-import { createInstall } from "../surfaces/services/install-store.js";
+import { createInstall, getInstall } from "../surfaces/services/install-store.js";
+import { listInstallChannels } from "../surfaces/adapters/slack/channels.js";
+import { SlackApiError } from "../surfaces/adapters/slack/api.js";
 import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
 import { getSettings } from "../surfaces/services/settings-service.js";
 import { updateSettingsWithEffects } from "../surfaces/services/dm-service.js";
@@ -176,6 +178,16 @@ export const SURFACES_TOOL_DEFINITIONS = [
       type: "object",
       properties: { home_nest_id: { type: "string", description: "The nest that owns this install (usually this nest)." } },
       required: [] as string[],
+    },
+  },
+  {
+    name: "context_surfaces_slack_channels_list",
+    description:
+      "List the Slack channels a connected install could listen in: only the public and private channels the Nest bot was added to, with privacy, Slack Connect, member count and any existing binding. Never DMs, archived channels or message text. Server admin only.",
+    inputSchema: {
+      type: "object",
+      properties: { install_id: { type: "string", description: "The Slack install id (context_surfaces_status lists installs)." } },
+      required: ["install_id"],
     },
   },
   {
@@ -458,6 +470,17 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         const install = await createInstall({ surface: "slack", mode: "manifest", tenantKey: `pending:${randomBytes(8).toString("hex")}`, homeNestId: nestId, installedByUserId: ctx.userId });
         const manifest = buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: install.id });
         return { text: `Install ${install.id} created. Create the Slack app from the manifest, then save its credentials in Surfaces.`, data: { install_id: install.id, manifest } };
+      }
+      case "context_surfaces_slack_channels_list": {
+        await requireOrgAdmin(ctx);
+        const install = await getInstall(reqStr(args.install_id, "install_id"));
+        if (!install || install.surface !== "slack") throw new NotFoundError("Install not found");
+        if (install.status !== "active") throw new AppError(409, "Finish connecting Slack first: this install isn't active yet.");
+        const out = await listInstallChannels(install).catch((err) => {
+          if (err instanceof SlackApiError) throw new AppError(502, `Slack refused the channel list (${err.code}).`);
+          throw err;
+        });
+        return { text: out.channels.map((ch) => `${ch.is_private ? "private" : "public"} ${ch.id} ${ch.name ?? ""}${ch.binding ? ` (bound: ${ch.binding.status})` : ""}`).join("\n") || "The bot isn't in any channel yet. Add it to a channel in Slack first.", data: out };
       }
       case "context_surfaces_settings_get": {
         await requireOrgAdmin(ctx);
