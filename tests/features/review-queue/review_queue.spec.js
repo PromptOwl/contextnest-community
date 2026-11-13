@@ -271,7 +271,8 @@ test.describe('Review Queue', () => {
     // The link only falls back to Overview once the queue has loaded, so the
     // tab can't be absent here just because it hasn't appeared yet.
     await expect(viewer.page.page).not.toHaveURL(/tab=review/);
-    await expect(viewer.page.page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
+    // The nest's home tab: Overview before po-1213, Documents after.
+    await expect(viewer.page.page.getByRole('tab', { name: /^(Overview|Documents)$/, selected: true })).toHaveCount(1);
     await expect(viewer.page.reviewTab).toHaveCount(0);
     await expect(viewer.page.rows).toHaveCount(0);
   });

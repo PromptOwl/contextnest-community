@@ -427,7 +427,7 @@ function VisibilityGlyph({ visibility }: { visibility?: string }) {
 }
 
 // The nest page's own tabs; registry pages carry their icon in meta.
-const TAB_ICONS: Record<string, typeof Home> = { overview: Home, review: ClipboardCheck };
+const TAB_ICONS: Record<string, typeof Home> = { documents: Home, review: ClipboardCheck };
 
 /** The current nest's views — review queue, board, graph, definitions,
  *  workflows — under its name, so none of them is a trip back through the

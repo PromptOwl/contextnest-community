@@ -26,6 +26,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 import {
   markdownFile,
   htmlFile,
@@ -160,6 +161,8 @@ test.describe('Nest import', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'nimp-vault');
+    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
     const vault = buildVault(test.info().outputDir);
 
     await page.importVault(vault);

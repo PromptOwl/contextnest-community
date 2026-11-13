@@ -145,7 +145,8 @@ test.describe('Collaborators', () => {
     // The link only falls back once the caller's access has loaded, so the
     // tab can't be missing here just because it hasn't appeared yet.
     await expect(viewer.page.page).not.toHaveURL(/tab=collaborators/, WRITE);
-    await expect(viewer.page.overviewTab).toHaveAttribute('aria-selected', 'true');
+    // The nest's home tab: Overview before po-1213, Documents after.
+    await expect(viewer.page.page.getByRole('tab', { name: /^(Overview|Documents)$/, selected: true })).toHaveCount(1);
     await expect(viewer.page.collaboratorsTab).toHaveCount(0);
   });
 

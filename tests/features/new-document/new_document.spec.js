@@ -21,6 +21,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 
@@ -130,6 +131,8 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-publish');
+    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
 
     await page.gotoNest(nest.id);
     await page.openNewDocument();
@@ -202,6 +205,8 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-overview-folder');
+    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
     await seedAlpha(api, nest);
 
     await page.gotoNest(nest.id);
@@ -449,6 +454,8 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-governed');
+    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
     await api.requireReview(nest.id);
 
     await page.gotoNest(nest.id);

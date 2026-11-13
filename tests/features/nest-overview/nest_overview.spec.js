@@ -18,10 +18,14 @@
  *   guides/advanced, and an empty notes folder (6 documents, 3 folders).
  * - The tree shows folders by their display name ("Guides", not "guides").
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
+ * - po-1213 retires the Overview tab: once the server under test ships it,
+ *   every case skips (src/lib/nest_home_probe.js) and
+ *   nest-documents-home/nest_documents_home.spec.js covers what moved.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 const secondaryRole = samples.secondary_user ?? null;
@@ -68,8 +72,10 @@ test.describe('Nest overview', () => {
     await role.initialize();
     const api = role.nestOverviewApi;
     test.skip(!(await api.canCreateNests()), 'This account may not create nests here.');
-    const nest = await api.createNest(commonFunction.generateEntityName(suffix), description);
     cleanups.push(() => api.deleteCreatedNests());
+    // po-1213 merged Overview into Documents; nest-documents-home covers it there.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    const nest = await api.createNest(commonFunction.generateEntityName(suffix), description);
     for (const folder of folders) await api.createFolder(nest.id, folder);
     const created = {};
     for (const doc of docs) created[doc.title] = await api.createTypedDocument(nest.id, doc);

@@ -77,6 +77,7 @@ import {
   readsWholeNest,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { isHeadlessIdentity } from "../auth/headless.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -496,6 +497,11 @@ export interface NodeResponse extends TaskFields {
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
+  /** Who sealed the latest version: the human and, when the write named one,
+   *  the agent (`client`, spec §9.4). On the node detail and every list row;
+   *  never to a public reader or a headless key — like `collaborators`, it
+   *  names the nest's people. */
+  last_edit?: ReturnType<typeof versions.toLastEdit>;
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -756,6 +762,16 @@ export async function withComputedFields<T extends NodeResponse>(
   nodes: T[],
 ): Promise<T[]> {
   return addComputedFields(nodes, await listFieldDefinitions(nestId));
+}
+
+/**
+ * May this caller see who edited a document (`last_edit`)? Not a public
+ * reader — like `collaborators`, it names the nest's people — and not a
+ * headless access key, which reads content, never people (po-1213 AC-NH-08).
+ * One rule for the list, the census feed, the node detail and the MCP reads.
+ */
+export async function canSeeEditors(nestId: string, userId: string): Promise<boolean> {
+  return !(await isPublicReader(nestId, userId)) && !(await isHeadlessIdentity(userId));
 }
 
 export interface NodeAuthorship {
@@ -1255,6 +1271,17 @@ export async function listNodesForCaller(
         frontmatterAuthor: d.frontmatter.author ?? null,
       })),
     );
+  // Who last edited each row — the human and the agent — for the Documents
+  // rows and context_list (po-1213). One query for the list. Same gate as the
+  // roster, plus headless keys: an access key reads content, not people.
+  // The LATEST edit, draft included, on purpose: a member's list shows the
+  // live document and its live status, so the draft's author is the honest
+  // editor here. context_get differs because it serves the approved body to
+  // agents under stewardship, so it names that version's editor.
+  // publicReader is already known here; only the headless check is new.
+  const lastEdits = !publicReader && !(await isHeadlessIdentity(userId))
+    ? await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id))
+    : null;
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
@@ -1264,6 +1291,8 @@ export async function listNodesForCaller(
         r.author = people.author;
         r.collaborators = people.collaborators;
       }
+      const last = lastEdits?.get(doc.id);
+      if (last) r.last_edit = versions.toLastEdit(last);
       // A grant is access, not stewardship, so it shows up in neither the nest
       // permission nor the steward roles. Without it the client cannot tell a
       // write grantee from a viewer on this row.
@@ -1535,11 +1564,18 @@ export interface NestCensus {
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
-  /** Newest-first, capped: the "Recently edited" strip. */
-  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+  /** Newest-first, capped: the "Recently edited" feed on Documents. Each item
+   *  names its last editor (`last_edit`), withheld like the list's. */
+  recent: Array<{
+    id: string;
+    title: string;
+    type: string;
+    updated_at?: string;
+    last_edit?: ReturnType<typeof versions.toLastEdit>;
+  }>;
 }
 
-const RECENT_LIMIT = 3;
+const RECENT_LIMIT = 5;
 
 export async function nestCensus(
   nestId: string,
@@ -1628,20 +1664,29 @@ export async function nestCensus(
     ),
   ].sort((a, b) => a.localeCompare(b));
 
-  const recent = visible
+  const recentDocs = visible
     .filter((d) => d.frontmatter.updated_at)
     .sort((a, b) =>
       String(b.frontmatter.updated_at).localeCompare(
         String(a.frontmatter.updated_at),
       ),
     )
-    .slice(0, RECENT_LIMIT)
-    .map((d) => ({
+    .slice(0, RECENT_LIMIT);
+  // Same gate as the list's last_edit: no editor identity for a public
+  // reader or a headless key.
+  const recentEdits = (await canSeeEditors(nestId, userId))
+    ? await versions.getLatestVersionAttributions(nestId, recentDocs.map((d) => d.id))
+    : null;
+  const recent = recentDocs.map((d) => {
+    const last = recentEdits?.get(d.id);
+    return {
       id: d.id,
       title: String(d.frontmatter.title ?? ""),
       type: d.frontmatter.type || "document",
       updated_at: d.frontmatter.updated_at,
-    }));
+      ...(last ? { last_edit: versions.toLastEdit(last) } : {}),
+    };
+  });
 
   return {
     total: visible.length,

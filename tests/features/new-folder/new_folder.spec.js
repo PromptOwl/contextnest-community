@@ -21,6 +21,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 const secondaryRole = samples.secondary_user ?? null;
@@ -59,6 +60,8 @@ test.describe('New folder', () => {
     await role.initialize();
     const api = role.newFolderApi;
     test.skip(!(await api.canCreateNests()), 'This account may not create nests here.');
+    // Every case reads the Overview's Contents tree, which po-1213 retired; port to Documents.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
     const nest = await api.createNest(commonFunction.generateEntityName(suffix), 'New Folder suite (safe to delete)');
     cleanups.push(() => api.deleteCreatedNests());
     await api.createDocument(nest.id, {

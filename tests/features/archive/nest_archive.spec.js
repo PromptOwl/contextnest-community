@@ -139,7 +139,7 @@ test.describe('Nest archive', () => {
     }
     // The governance tabs are withheld too, and the nest menu keeps no write
     // action (at most the read-only Activity log).
-    await expect(page.tab('Overview')).toBeVisible();
+    await expect(page.tab('Documents')).toBeVisible(); // Overview merged into Documents (po-1213)
     for (const tab of ['Review Queue', 'External Edits', 'Collaborators']) {
       await expect(page.tab(tab)).toHaveCount(0);
     }

@@ -96,6 +96,7 @@ import {
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
+  canSeeEditors,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import { agentSummaryProse } from "../views/deps.js";
@@ -2543,6 +2544,24 @@ async function proposeOverMcp(
   };
 }
 
+/** "owner@x.com via deal-desk" — the human first (the system account's name
+ *  when it is one), then the agent its write named. One wording for
+ *  context_get's byline and context_list's rows. */
+function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
+  const human = last.edited_by_system ? `${last.edited_by_system} (${last.edited_by})` : last.edited_by;
+  return last.client?.agent ? `${human} via ${last.client.agent}` : human;
+}
+
+/** context_list's row suffix: " · edited by <human> via <agent>, <date>".
+ *  Prose only, like context_get's byline: the engine catalog's nodeSummary
+ *  has no provenance field, and this server consumes catalog shapes rather
+ *  than adding keys (CLAUDE.md, Engine & CLI Sync). The structured block
+ *  follows once the engine ships one. The date is UTC: agents read it. */
+function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
+  if (!last) return "";
+  return ` · edited by ${lastEditorProse(last)}, ${last.edited_at.slice(0, 10)}`;
+}
+
 /**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
@@ -3009,7 +3028,8 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isHeadlessIdentity(ctx.userId))
+      const headless = await isHeadlessIdentity(ctx.userId);
+      const relations = headless
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {
@@ -3022,6 +3042,23 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      // Who sealed the version being served: the human first, then the agent
+      // its write named (spec §9.4) — the same two names the UI byline shows.
+      // The served version, not the latest row: under stewardship the body is
+      // the approved snapshot, and a draft's author would misdescribe it.
+      // Not for a headless key or a public/org reader: it names the nest's
+      // people, which the REST node detail withholds from them too.
+      const servedVersion = ctx.servedVersions?.get(node.id);
+      const lastEdit =
+        servedVersion === undefined || !(await canSeeEditors(nestId, ctx.userId))
+          ? null
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("[context_get] last-edit attribution failed:", node.id, err);
+              return null;
+            });
+      const lastEditLine = lastEdit
+        ? `**Last edited by:** ${lastEditorProse(versions.toLastEdit(lastEdit))} (v${lastEdit.version})`
+        : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -3042,6 +3079,10 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        // Prose only: the catalog's context_get payload has no provenance
+        // field yet, and test/mcp-catalog-conformance.test.ts refuses an
+        // added key. A structured field needs the engine catalog first.
+        lastEditLine,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
@@ -3152,7 +3193,7 @@ async function runTool(
       const list = nodes
         .map((n, i) => {
           const f = describeFields(valuesOf(n), listDefs);
-          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
+          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}${lastEditProse(n.last_edit)}`;
         })
         .join("\n");
       return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };

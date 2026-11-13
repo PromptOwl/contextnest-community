@@ -132,7 +132,7 @@ export function writeDocPagePrefs(
 }
 
 export interface NestSidebarView {
-  /** "overview" / "review" for the nest page's own tabs; a registry page id
+  /** "documents" / "review" for the nest page's own tabs; a registry page id
    *  (its folder name under pages/nest) for the rest. */
   id: string;
   label: string;
@@ -144,7 +144,7 @@ export interface NestSidebarView {
   /** App view page to open. */
   page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
   /** Nest-page tab, for views that are tabs of the nest page. */
-  tab?: "overview" | "review";
+  tab?: "documents" | "review";
 }
 
 /**
@@ -166,12 +166,12 @@ export function nestSidebarViews(
   },
 ): NestSidebarView[] {
   const views: NestSidebarView[] = [
-    { id: "overview", label: "Overview", page: "nest", tab: "overview" },
+    { id: "documents", label: "Documents", page: "nest", tab: "documents" },
   ];
   if (caps.isReaderView) return views;
   // Mirrors NestView's showReviewTab && !isReadOnly: an editor on an
   // ungoverned nest with nothing pending would otherwise get a row that
-  // lands on the overview.
+  // lands on Documents.
   if (!caps.isReadOnly && (opts.stewardshipEnabled || opts.hasPending))
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   // The registry pages, each gated by its own meta.visible (workflows: the
