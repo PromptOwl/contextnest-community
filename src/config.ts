@@ -876,6 +876,19 @@ export const config = {
   get EXPERIMENTAL_DOC_PINS(): boolean {
     return process.env.EXPERIMENTAL_DOC_PINS === "true";
   },
+
+  /**
+   * Experimental: the agent team stream, S1 channels (PO-1179). Slack-style
+   * channels inside a nest where agents and people post and reply; a channel
+   * is a node under `channels/`, its messages are that node's comment threads.
+   * Off by default; off → every /nests/:id/channels route 404s, the MCP
+   * channel tools are not offered and the UI hides Channels. Superadmin
+   * switchable live under Settings → Features
+   * (`experimental_agent_stream_enabled`). May change or disappear.
+   */
+  get EXPERIMENTAL_AGENT_STREAM(): boolean {
+    return process.env.EXPERIMENTAL_AGENT_STREAM === "true";
+  },
   /**
    * Development only: let a metacognition agent's feeds and MCP servers be
    * plain-http or private addresses (a local MCP server, a feed on the LAN).

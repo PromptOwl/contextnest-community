@@ -16,6 +16,7 @@
  * flags. So anything interactive (the gate form, the comment modal) is ordinary
  * HTML on a separate page or on the shell that frames the document.
  */
+import { isChannelNode } from "../channels/channel-service.js";
 import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
 import { normalizeEmail } from "../shared/email.js";
@@ -725,6 +726,12 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
   const body = String(input.body ?? "").trim().slice(0, COMMENT_MAX_CHARS);
   if (!body) {
     return c.json({ error: "Write a comment first." }, 400);
+  }
+
+  // A channel (PO-1179) takes posts from its nest's writers only; a docs-site
+  // visitor is never one, whatever the publication allows.
+  if (await isChannelNode(row.nest_id, row.node_id)) {
+    return c.json({ error: "Not found" }, 404);
   }
 
   // Lands as an unanchored annotation thread — the same list the document's

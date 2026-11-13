@@ -456,7 +456,7 @@ function NestViews({
   onConnect?: () => void;
 }) {
   const meta = useNestMeta(nestId);
-  const { typeViewEnabled } = useAuth();
+  const { typeViewEnabled, agentStreamEnabled } = useAuth();
   const caps = useMemo(() => {
     const m: any = meta.data;
     if (!m) return null;
@@ -496,11 +496,12 @@ function NestViews({
       caps
         ? nestSidebarViews(caps, {
           workflowPlaneEnabled,
+          agentStreamEnabled,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, agentStreamEnabled, stewardshipEnabled, pending],
   );
 
   // The "Views" group folds by default (remembered per browser) and opens

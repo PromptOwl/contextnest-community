@@ -57,7 +57,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-const BASELINE = 98;
+//   98->100 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread); channels are Community-only (a node
+//   convention over the comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM), so the
+//   engine has no channel operation to import a descriptor from.
+const BASELINE = 100;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

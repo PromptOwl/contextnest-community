@@ -79,6 +79,8 @@ export interface AuthContextValue {
   docStreamEnabled: boolean;
   /** Experimental document pins (/health experimental.doc_pins). */
   docPinsEnabled: boolean;
+  /** Experimental agent team stream channels (/health experimental.agent_stream). */
+  agentStreamEnabled: boolean;
   /** The assistant's name/logo/colour/greeting from /health — the admin's
    *  custom identity on an enterprise licence, the default Hootie otherwise. */
   hootieBrand: HootieBrand;
@@ -138,6 +140,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [metacognitionEnabled, setMetacognitionEnabled] = useState(false);
   const [docStreamEnabled, setDocStreamEnabled] = useState(false);
   const [docPinsEnabled, setDocPinsEnabled] = useState(false);
+  const [agentStreamEnabled, setAgentStreamEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
@@ -180,6 +183,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setMetacognitionEnabled(h.metacognition_enabled === true);
       setDocStreamEnabled(h.experimental?.doc_stream === true);
       setDocPinsEnabled(h.experimental?.doc_pins === true);
+      setAgentStreamEnabled(h.experimental?.agent_stream === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
@@ -232,6 +236,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setMetacognitionEnabled(h.metacognition_enabled === true);
         setDocStreamEnabled(h.experimental?.doc_stream === true);
         setDocPinsEnabled(h.experimental?.doc_pins === true);
+        setAgentStreamEnabled(h.experimental?.agent_stream === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
@@ -420,6 +425,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         metacognitionEnabled,
         docStreamEnabled,
         docPinsEnabled,
+        agentStreamEnabled,
         hootieBrand,
         runnerKeyConfigured,
         sharedDeployment,
