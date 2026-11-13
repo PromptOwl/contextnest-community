@@ -561,6 +561,10 @@ test.describe('My Drafts', () => {
       primary_user,
       commonFunction,
     }) => {
+      // Seeds an approved-then-edited draft and a fresh one, then waits out
+      // the list cache twice: on a loaded shared server (10–18 s per request)
+      // that runs past the default 2-minute budget.
+      test.slow();
       const { page, drafts, api, nest } = await asAuthor(primary_user, commonFunction);
       const tok = token();
       const editMark = `Edited after approval ${tok}`;
