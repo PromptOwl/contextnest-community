@@ -1,0 +1,5 @@
+---
+"@promptowl/contextnest-community": minor
+---
+
+Agent control room, backend (po-1186 CR1). A decision ledger records every agent decision, including decisions to do nothing, with the chain from the run to the saved version: `GET /nests/:id/ledger`, `GET /ledger/:entryId` (chain, steps and gaps), `GET /nests/:id/ledger/export` (CSV/NDJSON, logged in the activity log) and day/week rollups (`GET /nests/:id/rollups`). Org-wide views (`GET /ledger`, `GET /rollups`) cover every nest for a server admin and the nests you administer otherwise. Outside agents report through the runs API with a nest-scoped key: `POST /nests/:id/agents` registers one, `report_only` runs skip the bundle, typed `decision` / `proposal` / `outcome` steps are validated, and starts and steps take an `Idempotency-Key`. New `AGENT_EVENTS_RATE_PER_MIN` and `AGENT_RUNS_RATE_PER_MIN` limits. Personal-nest rows stay redacted for everyone but their owner. Every route has a `context_agent_*` MCP tool. The Slack listener's run is now linked to the window it judged.

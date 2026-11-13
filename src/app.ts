@@ -139,6 +139,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import {
+  agentRegisterRoutes,
+  nestLedgerRoutes,
+  nestRollupRoutes,
+  orgLedgerRoutes,
+  orgRollupRoutes,
+} from "./governance/ledger-routes.js";
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
@@ -166,6 +173,7 @@ import {
   VaultBusyError,
   PlanLimitError,
   BillingConfirmError,
+  CodedError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
@@ -324,6 +332,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "publications",
   "branding",
   "metacognition",
+  // Registering an agent mints a governed agent node (po-1186): automation.
+  "agents",
   "schedules",
   "hooks",
   "env",
@@ -2906,6 +2916,12 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Agent control room (po-1186): the org-wide decision ledger, one entry's
+  // trace, and rollups. Read-only; each route scopes to the caller's nests.
+  app.use("/ledger/*", flexAuthMiddleware);
+  app.route("/ledger", orgLedgerRoutes);
+  app.use("/rollups/*", flexAuthMiddleware);
+  app.route("/rollups", orgRollupRoutes);
   // Inbound trigger hooks — public by design: the unguessable token in the
   // path is the capability; presets add platform signature verification on
   // top (see workflow/hook-routes.ts).
@@ -3930,6 +3946,11 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  // Agent control room (po-1186): register an outside agent, the nest's
+  // decision ledger (+ export) and its rollups.
+  nestsApp.route("/:nestId/agents", agentRegisterRoutes);
+  nestsApp.route("/:nestId/ledger", nestLedgerRoutes);
+  nestsApp.route("/:nestId/rollups", nestRollupRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
@@ -4062,6 +4083,9 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (err instanceof BillingConfirmError) {
       return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
+    }
+    if (err instanceof CodedError) {
+      return c.json({ ...err.extra, error: err.message, code: err.code }, err.statusCode as any, err.headers);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

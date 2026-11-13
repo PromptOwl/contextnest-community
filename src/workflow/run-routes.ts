@@ -17,14 +17,28 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { engineCache } from "../nodes/engine.js";
 import { config } from "../config.js";
-import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, ConflictError, ForbiddenError, CodedError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { standingBlockFor, standingRefs } from "../governance/always-include-service.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
-import { cancelDescendants, announceRunFailed } from "./run-service.js";
+import { appendRunStep, replayableRun, type RunRequestShape } from "./run-service.js";
+import {
+  AGENT_API_VERSION,
+  AgentRunStartBody,
+  AgentRunStepBody,
+  isUniqueViolation,
+  parseIdempotencyKey,
+  parseOr422,
+} from "./agent-event-schema.js";
+import {
+  assertExternalWriteCredential,
+  closeRunIdempotent,
+  consumeAgentRate,
+  startReportRun,
+} from "./agent-events.js";
 import { envValues } from "./env-routes.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
@@ -303,9 +317,37 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
   // storage.readDocument, or a caller with write on nest A reads nest B's
   // agent bodies via `..%2FB%2Fnodes%2Fsecret`. (See src/shared/node-id.ts.)
   const agentNode = assertSafeNodeId(c.req.param("agentNode")!);
-  const body = await c.req
-    .json<{ inputs?: unknown; parent_run_id?: unknown }>()
-    .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
+  const raw = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  // Agent event API (po-1186 E2): report_only / started_at / external_ref
+  // are validated with the schema MCP shares; a bad one is a 422 naming it.
+  const body = parseOr422(AgentRunStartBody, raw && typeof raw === "object" ? raw : {});
+  const idempotencyKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
+  consumeAgentRate("runs", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
+
+  if (body.report_only === true) {
+    if (body.parent_run_id !== undefined && body.parent_run_id !== null) {
+      throw new CodedError(422, "parent_run_id: a report-only run can't be a sub-agent run", "invalid_field", {
+        field: "parent_run_id",
+      });
+    }
+    await assertExternalWriteCredential({
+      nestId,
+      apiKeyId: c.get("apiKeyId") ?? null,
+      oauth: c.get("oauthScope") !== undefined,
+    });
+    const { storage } = await engineCache.get(nestId);
+    const out = await startReportRun({
+      nestId,
+      agentNode,
+      storage,
+      triggeredBy: await resolveCallerEmail(c.get("userId")),
+      inputs: body.inputs,
+      startedAt: body.started_at,
+      externalRef: body.external_ref,
+      idempotencyKey,
+    });
+    return c.json(out, out.idempotent_replay ? 200 : 201);
+  }
 
   // A metacognition agent runs in this server, not in an external runner:
   // the trigger starts it here and hands out no bundle (no env values, no
@@ -367,24 +409,52 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     userEmail: triggeredBy,
   });
 
-  const id = `run_${uuid()}`;
-  await getDb().run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
-    [
-      id,
-      nestId,
-      agentNode,
-      triggeredBy,
-      body.inputs === undefined ? null : JSON.stringify(body.inputs),
-      new Date().toISOString(),
-      parentRunId,
-      depth,
-    ],
-  );
+  // Idempotent start (po-1186): a repeat with the same key hands back the
+  // same run (and a freshly built bundle) instead of creating a second one.
+  const req: RunRequestShape = {
+    agentNode,
+    inputs: body.inputs === undefined ? null : JSON.stringify(body.inputs),
+    externalRef: body.external_ref ?? null,
+    source: "runner",
+    parentRunId,
+    startedAt: null,
+  };
+  let id = `run_${uuid()}`;
+  let replay = false;
+  const prior = idempotencyKey ? await replayableRun(nestId, idempotencyKey, req) : null;
+  if (prior) {
+    id = prior.id;
+    replay = true;
+  } else {
+    try {
+      await getDb().run(
+        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, idempotency_key, external_ref)
+         VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          nestId,
+          agentNode,
+          triggeredBy,
+          req.inputs,
+          new Date().toISOString(),
+          parentRunId,
+          depth,
+          idempotencyKey,
+          req.externalRef,
+        ],
+      );
+    } catch (err) {
+      const winner = idempotencyKey && isUniqueViolation(err) ? await replayableRun(nestId, idempotencyKey, req) : null;
+      if (!winner) throw err;
+      id = winner.id;
+      replay = true;
+    }
+  }
 
   return c.json(
     {
+      ...(replay ? { idempotent_replay: true } : {}),
+      api_version: AGENT_API_VERSION,
       run_id: id,
       parent_run_id: parentRunId,
       depth,
@@ -395,7 +465,7 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
         steps: "POST /runs/{run_id}/steps per action; PATCH /runs/{run_id} to close",
       },
     },
-    201,
+    replay ? 200 : 201,
   );
 });
 
@@ -433,6 +503,7 @@ runListRoutes.get("/", requireWorkflowPlane, async (c) => {
     runs: rows.map((r) => ({
       ...r,
       inputs: canSeeDetail ? safeJson(r.inputs) : null,
+      idempotency_key: canSeeDetail ? ((r as { idempotency_key?: string | null }).idempotency_key ?? null) : null,
       trace: canSeeDetail ? safeJson(r.trace) : null,
     })),
   });
@@ -489,68 +560,50 @@ async function loadRunWithPermission(
     // existence rather than confirm it with a 403 (no cross-nest oracle).
     throw new NotFoundError("Run not found");
   }
+  // A read-only key only reads, whatever its owner may do — the nest gate's
+  // rule. Without it, a read key could append steps (and decision verdicts),
+  // close runs, or fetch a bundle with the nest's env values.
+  if (required === "write" && c.get("keyCapability") === "read") {
+    throw new ForbiddenError("This API key is read-only and cannot perform write or governance actions.");
+  }
   (c as any).set("runPermission", perm);
   return run;
 }
 
 // POST /runs/:id/steps
 runDetailRoutes.post("/:id/steps", requireWorkflowPlane, async (c) => {
+  consumeAgentRate("events", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
-  if (run.status !== "running") {
-    throw new ConflictError(`Run is ${run.status} — steps can't be appended`);
-  }
+  const clientKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
   // A metacognition run is executed by this server, which writes its own
   // trace. Nobody else may add to it — the trace is the agent's audit.
   if (run.claimed_by === SERVER_CLAIM) {
     throw new ConflictError("This run is executed by the server; its steps are recorded by the server");
   }
-  const body = await c.req.json<Record<string, unknown>>();
-  if (typeof body.action !== "string" || !body.action.trim()) {
-    throw new ValidationError("action is required (read|write|branch|notify|external)");
+  if ((run as { source?: string }).source === "external") {
+    await assertExternalWriteCredential({
+      nestId: run.nest_id,
+      apiKeyId: c.get("apiKeyId") ?? null,
+      oauth: c.get("oauthScope") !== undefined,
+    });
   }
-  const action = body.action.trim();
-  const nodeId = typeof body.node_id === "string" ? body.node_id : null;
-  const edgeId = typeof body.edge_id === "string" ? body.edge_id : null;
-  const detail = body.detail === undefined ? null : JSON.stringify(body.detail);
-  // Bound the step log — a runaway/hostile runner can't grow it without limit.
-  const stepCount = (await getDb().get(
-    "SELECT COUNT(*) as c FROM run_steps WHERE run_id = ?",
-    [run.id],
-  )) as { c: number };
-  if (stepCount.c >= config.RUN_MAX_STEPS) {
-    throw new ConflictError(
-      `run has reached the step limit (${config.RUN_MAX_STEPS})`,
-    );
-  }
-  // seq is server-assigned inside a transaction (not client-supplied): the
-  // ordered trace is what replay depends on, so max+insert must be atomic.
-  // A UNIQUE(run_id, seq) index (migration 017) is the backstop against any
-  // cross-connection race the transaction doesn't serialize.
-  const db = getDb();
-  let seq = 0;
-  await db.transaction(async (tx) => {
-    const last = (await tx.get(
-      "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
-      [run.id],
-    )) as { m: number | null };
-    seq = (last.m ?? 0) + 1;
-    await tx.run(
-      `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [run.id, seq, nodeId, edgeId, action, detail, new Date().toISOString()],
-    );
+  const body = await c.req.json<Record<string, unknown>>().catch(() => {
+    throw new ValidationError("Body must be JSON");
   });
-  return c.json({ ok: true, seq }, 201);
+  const input = parseOr422(AgentRunStepBody, body);
+  // The shared service: status re-check, seq, step cap and the typed-action
+  // checks run in one transaction; a repeated Idempotency-Key replays.
+  const out = await appendRunStep(run.id, input, { clientKey, anyAction: true });
+  return c.json({ ok: true, ...out, api_version: AGENT_API_VERSION }, out.idempotent_replay ? 200 : 201);
 });
 
 // PATCH /runs/:id — close or update status/trace
 runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
-  if (run.status !== "running") {
-    throw new ConflictError(`Run already terminal (${run.status})`);
-  }
-  const body = await c.req.json<Record<string, unknown>>();
-  const status = body.status;
+  const body = await c.req.json<Record<string, unknown>>().catch(() => {
+    throw new ValidationError("Body must be JSON");
+  });
+  const status = body?.status;
   if (
     typeof status !== "string" ||
     !["running", "succeeded", "failed", "cancelled"].includes(status)
@@ -562,34 +615,28 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   if (run.claimed_by === SERVER_CLAIM && status !== "cancelled") {
     throw new ConflictError("This run is executed by the server — it can be cancelled, not closed");
   }
-  const terminal = status !== "running";
-  // Compare-and-swap on the status, same as closeRun: the check above read the
-  // row before this write, so a runner reporting success through MCP in that
-  // window would otherwise be overwritten — and, since cancelling now stops the
-  // whole branch, a losing Cancel would take the completed run's sub-agents
-  // with it. Rows-affected is the arbiter; the loser gets the 409.
-  const res = await getDb().run(
-    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
-      WHERE id = ? AND status = 'running'`,
-    [
-      status,
-      body.trace === undefined ? null : JSON.stringify(body.trace),
-      terminal ? new Date().toISOString() : null,
-      run.id,
-    ],
-  );
-  if (!res.changes) {
-    const now = (await getDb().get("SELECT status FROM runs WHERE id = ?", [
-      run.id,
-    ])) as { status: string } | undefined;
-    throw new ConflictError(`Run already terminal (${now?.status ?? "closed"})`);
+  if ((run as { source?: string }).source === "external") {
+    await assertExternalWriteCredential({
+      nestId: run.nest_id,
+      apiKeyId: c.get("apiKeyId") ?? null,
+      oauth: c.get("oauthScope") !== undefined,
+    });
   }
-  // Cancelling stops the whole branch — sub-agents under this run go too.
-  // Only once the swap above won, or a lost race would cancel the descendants
-  // of a run that actually succeeded.
-  if (status === "cancelled") await cancelDescendants(run.id);
-  if (status === "failed") announceRunFailed(run, body.trace);
-  return c.json({ ok: true, status });
+  // Compare-and-swap on the status (closeRun): the loser of a close race gets
+  // the 409, and cancelling stops the whole branch only once the swap won.
+  // An identical repeat of the winning close is an idempotent replay (E4).
+  try {
+    const out = await closeRunIdempotent(run.id, body);
+    return c.json({ ok: true, ...out });
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      const now = (await getDb().get("SELECT status FROM runs WHERE id = ?", [run.id])) as
+        | { status: string }
+        | undefined;
+      throw new ConflictError(`Run already terminal (${now?.status ?? "closed"})`);
+    }
+    throw err;
+  }
 });
 
 // GET /runs/:id/bundle — re-hand the executable bundle for an EXISTING run.
@@ -642,6 +689,7 @@ runDetailRoutes.get("/:id", requireWorkflowPlane, async (c) => {
     run: {
       ...run,
       inputs: canSeeDetail ? safeJson(run.inputs) : null,
+      idempotency_key: canSeeDetail ? ((run as { idempotency_key?: string | null }).idempotency_key ?? null) : null,
       trace: canSeeDetail ? safeJson(run.trace) : null,
     },
     steps: steps.map((s) => ({

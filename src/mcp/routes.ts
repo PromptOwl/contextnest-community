@@ -18,6 +18,7 @@ import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { AGENT_TOOL_DEFINITIONS } from "./agent-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { SURFACES_TOOL_DEFINITIONS } from "./surfaces-tools.js";
@@ -85,6 +86,7 @@ function createMcpServerForNest(
     ? [
         ...TOOL_DEFINITIONS,
         ...WORKFLOW_TOOL_DEFINITIONS,
+        ...AGENT_TOOL_DEFINITIONS,
         ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
         ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
       ]
