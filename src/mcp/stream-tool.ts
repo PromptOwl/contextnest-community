@@ -88,13 +88,15 @@ export async function streamToolResult(
   const lines = page.items.map((i) => {
     const who = i.authorName || i.author?.split("@")[0] || "Someone";
     const agent = i.client?.agent ? ` via ${i.client.agent}` : "";
-    const head = `- **${who}${agent}** ${streamAction(i)} "${i.title}" in ${i.nestName} · ${i.at}`;
+    // Names, agent, title, nest and note are caller data: collapse their
+    // whitespace, or a newline in one would forge a post line of its own.
+    const head = `- **${who}${agent}** ${streamAction(i)} "${i.title}" in ${i.nestName} · ${i.at}`.replace(/\s+/g, " ");
     const meta = [
       `id: ${i.nodeId} v${i.version}`,
       i.commentCount !== null ? `${i.commentCount} open comment${i.commentCount === 1 ? "" : "s"}` : null,
       i.review ? (i.review.canReview ? "in review — you may approve or reject" : "in review") : null,
     ].filter(Boolean);
-    const note = i.changeNote ? `\n  Change: ${i.changeNote}` : "";
+    const note = i.changeNote ? `\n  Change: ${i.changeNote.replace(/\s+/g, " ")}` : "";
     const excerpt = i.summary ? `\n  > ${i.summary}` : "";
     return `${head}\n  ${meta.join(" · ")}${note}${excerpt}`;
   });

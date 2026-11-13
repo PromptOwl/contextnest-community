@@ -24,8 +24,9 @@ export async function readStreamVersion(
   } catch {
     // The unreviewed draft on top is never in the chain — its bytes are
     // the live file (same fallback as GET …/versions/:version).
-    const node = await storage.readDocument(nodeId);
-    if ((node.frontmatter.version ?? 1) === version) {
+    // A missing live file is the same broken chain: warn below, not silently.
+    const node = await storage.readDocument(nodeId).catch(() => null);
+    if (node && (node.frontmatter.version ?? 1) === version) {
       return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
     }
     // Neither the chain nor the live file has this version: a broken

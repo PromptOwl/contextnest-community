@@ -127,8 +127,9 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
           pinnedNestId,
         );
         if (!stop) setFresh(newPostCount(items, newest, p.total));
-      } catch {
-        /* a failed poll just leaves the pill as it was */
+      } catch (e) {
+        // A failed poll leaves the pill as it was; the next tick tries again.
+        console.warn("[stream] new-posts poll failed", e);
       }
     };
     const id = window.setInterval(() => void tick(), POLL_MS);
