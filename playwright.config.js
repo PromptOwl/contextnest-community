@@ -272,6 +272,22 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges and deletes its own nests; needs secondary_user
   },
+  {
+    // Nest page → Assign Steward (CN-STEW-001 … CN-STEW-013). Serial: each case
+    // works in a nest it arranges and then deletes.
+    file: 'stewards/assign_steward.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
+  {
+    // Nest page → Nest settings (CN-NSET-001 … CN-NSET-023). Serial: each case
+    // works in a nest it arranges and then deletes.
+    file: 'nest-settings/nest_settings.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges and deletes its own nests; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -355,7 +371,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'control-room', 'collaborators', 'fields'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'control-room', 'collaborators', 'fields', 'stewards', 'nest-settings'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -747,6 +763,28 @@ export default defineConfig({
           name: 'fields',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/fields/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'stewards',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/stewards/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'nest-settings',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/nest-settings/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

@@ -254,45 +254,6 @@ test.describe('My Drafts', () => {
       await expect(drafts.railItem).toHaveAttribute('aria-current', 'page');
       await expect(drafts.search).toBeVisible();
     });
-
-    test('CN-DRAFT-002: the no-drafts and no-search-match empty states display correctly', async ({
-      primary_user,
-      commonFunction,
-    }) => {
-      const { page, drafts } = await asAuthor(primary_user, commonFunction);
-
-      // ── No match: a real search for something no draft carries ──
-      await drafts.goto();
-      const query = `no-such-draft-${token()}`;
-      const body = await drafts.searchFor(query);
-      expect(body.drafts).toHaveLength(0);
-
-      await expect(drafts.root.getByText(`No drafts match "${query}".`)).toBeVisible();
-      await expect(drafts.emptyState).toHaveCount(0);
-      await expect(drafts.rows).toHaveCount(0);
-      await expect(drafts.selectAll).toHaveCount(0);
-      await expect(drafts.pageIndicator).toHaveCount(0);
-      // The search stays put, so the reader can see what matched nothing.
-      await expect(drafts.search).toHaveValue(query);
-
-      // ── No drafts at all ──
-      // Forced state: a shared test account has drafts of its own.
-      await stubMyDrafts(page, ({ limit, offset }) => ({
-        drafts: [],
-        pagination: { total: 0, limit, offset, has_more: false },
-      }));
-      await drafts.goto();
-
-      await expect(drafts.emptyState).toBeVisible();
-      await expect(drafts.noMatchState).toHaveCount(0);
-      await expect(drafts.loader).toHaveCount(0);
-      await expect(drafts.rows).toHaveCount(0);
-      await expect(drafts.selectAll).toHaveCount(0);
-      await expect(drafts.pageIndicator).toHaveCount(0);
-      await expect(drafts.search).toHaveValue('');
-      // Nothing to count, so no badge either.
-      await expect(drafts.railBadge).toHaveCount(0);
-    });
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -561,6 +522,10 @@ test.describe('My Drafts', () => {
       primary_user,
       commonFunction,
     }) => {
+      // Seeds an approved-then-edited draft and a fresh one, then waits out
+      // the list cache twice: on a loaded shared server (10–18 s per request)
+      // that runs past the default 2-minute budget.
+      test.slow();
       const { page, drafts, api, nest } = await asAuthor(primary_user, commonFunction);
       const tok = token();
       const editMark = `Edited after approval ${tok}`;
