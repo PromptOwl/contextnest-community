@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { decide, GATE_STEP, aheadInLine, rateLimitWaitMs } from "../tests/scripts/e2e-turnstile.mjs";
+import { readFileSync } from "node:fs";
+import yaml from "js-yaml";
+import { decide, GATE_STEP, aheadInLine, rateLimitWaitMs, envNumber } from "../tests/scripts/e2e-turnstile.mjs";
 
 describe("e2e turnstile (one run at a time on the shared server, none dropped)", () => {
   it("goes when no other run is in progress", () => {
@@ -25,8 +27,18 @@ describe("e2e turnstile (one run at a time on the shared server, none dropped)",
     expect(going).toEqual([21]);
   });
 
-  it("names the step it looks for in other runs", () => {
+  it("names the step it looks for in other runs, and the workflow has that step", () => {
     expect(GATE_STEP).toBe("Wait for the shared e2e server");
+    const wf = yaml.load(readFileSync(".github/workflows/contextnest-community-tests.yml", "utf8")) as {
+      jobs: Record<string, { steps: { name?: string; run?: string }[] }>;
+    };
+    const step = Object.values(wf.jobs).flatMap((j) => j.steps).find((s) => s.name === GATE_STEP);
+    expect(step?.run).toContain("e2e-turnstile.mjs");
+  });
+
+  it("falls back to the default for a missing, zero, negative or non-numeric env value", () => {
+    expect(envNumber("30", 60)).toBe(30);
+    for (const v of [undefined, "", "0", "-5", "abc"]) expect(envNumber(v, 60)).toBe(60);
   });
 
   it("knows it must wait from the run list alone when an older run is in progress (no per-run jobs calls)", () => {

@@ -28,6 +28,8 @@
  *      E2E_TURNSTILE_MAX_MINUTES (default 120), E2E_TURNSTILE_POLL_SECONDS (default 60).
  */
 
+import { pathToFileURL } from "node:url";
+
 /** Name of the workflow step that runs this script; other runs are read by it. */
 export const GATE_STEP = "Wait for the shared e2e server";
 
@@ -59,6 +61,12 @@ export function rateLimitWaitMs(res, now, pollMs) {
   const reset = Number(res.headers["x-ratelimit-reset"]);
   if (res.headers["x-ratelimit-remaining"] === "0" && reset > 0) return Math.max(pollMs, reset * 1000 - now);
   return pollMs;
+}
+
+/** A positive number from an env value, else the default (stops a 0/NaN poll from spinning). */
+export function envNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 class ApiError extends Error {
@@ -104,15 +112,16 @@ async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const selfId = Number(process.env.GITHUB_RUN_ID);
   if (!repo || !selfId || !process.env.GITHUB_TOKEN) throw new Error("GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_TOKEN are required");
-  const maxMs = Number(process.env.E2E_TURNSTILE_MAX_MINUTES ?? 120) * 60_000;
-  const pollMs = Number(process.env.E2E_TURNSTILE_POLL_SECONDS ?? 60) * 1000;
-  const { workflow_id: workflowId } = await gh(`/repos/${repo}/actions/runs/${selfId}`);
+  const maxMs = envNumber(process.env.E2E_TURNSTILE_MAX_MINUTES, 120) * 60_000;
+  const pollMs = Math.max(10, envNumber(process.env.E2E_TURNSTILE_POLL_SECONDS, 60)) * 1000;
+  let workflowId;
   const started = Date.now();
   let last = "";
   for (;;) {
     let others;
     let waitMs = pollMs;
     try {
+      workflowId ??= (await gh(`/repos/${repo}/actions/runs/${selfId}`)).workflow_id;
       others = await otherRuns(repo, selfId, workflowId);
     } catch (err) {
       // An API error must not let a run through: wait (past a rate-limit
@@ -135,7 +144,7 @@ async function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err.message);
     process.exit(1);
