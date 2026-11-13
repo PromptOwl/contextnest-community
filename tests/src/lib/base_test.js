@@ -95,6 +95,14 @@ import CollaboratorsApi from './collaborators_api.js';
 
 // REST helper used to arrange Fields preconditions (fields, task rules, tasks, shares)
 import FieldsApi from './fields_api.js';
+// Assign Steward page (Stewards tab, Assign / Edit / Remove dialogs, review controls)
+import StewardsPage from '../page_factory/app/stewards_page.js';
+// REST helper used to arrange Assign Steward preconditions (stewards, pending documents)
+import StewardsApi from './stewards_api.js';
+// Nest Settings dialog (governance settings, Systems) and where the settings show up
+import NestSettingsPage from '../page_factory/app/nest_settings_page.js';
+// REST helper used to arrange Nest Settings preconditions (settings, API keys, Systems)
+import NestSettingsApi from './nest_settings_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -493,6 +501,34 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get fieldsApi() {
         if (!this._fieldsApi) this._fieldsApi = new FieldsApi(this.page);
         return this._fieldsApi;
+      },
+
+      // Nest page → Assign Steward (Stewards tab and dialogs, what a steward can do)
+      get stewardsPage() {
+        return new StewardsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Assign Steward suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get stewardsApi() {
+        if (!this._stewardsApi) this._stewardsApi = new StewardsApi(this.page);
+        return this._stewardsApi;
+      },
+
+      // Nest page → Nest settings dialog (governance settings, Systems)
+      get nestSettingsPage() {
+        return new NestSettingsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Settings suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestSettingsApi() {
+        if (!this._nestSettingsApi) this._nestSettingsApi = new NestSettingsApi(this.page);
+        return this._nestSettingsApi;
       },
 
       /**
