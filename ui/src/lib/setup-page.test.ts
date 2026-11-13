@@ -52,7 +52,7 @@ describe("setup page", () => {
   });
 
   it("lists every agent plugin for a local vault and for a cloud server", () => {
-    const plugins = ["codex-plugin", "opencode", "grok-build", "zed"];
+    const plugins = ["codex-plugin", "opencode", "grok-build", "muse", "zed"];
     for (const guides of [connectGuides("my-nest"), cloudGuides("https://nest.example.com", "my-nest")]) {
       const ids = guides.map((g) => g.id);
       for (const p of plugins) expect(ids).toContain(p);

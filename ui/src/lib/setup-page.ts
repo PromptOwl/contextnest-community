@@ -196,6 +196,20 @@ function pluginGuides(v: string): ConnectGuide[] {
       ].join("\n"),
     },
     {
+      id: "muse",
+      name: "Muse Code (skills and rules)",
+      steps: [
+        "Muse Code gets the Context Nest rules and four skills. The agent runs `ctx` itself.",
+        "",
+        `1. ${CLONE}`,
+        "2. Install the skills: `for s in ~/contextnest/plugins/muse/skills/*/; do muse skills install \"$s\" --scope user; done`.",
+        "3. In your project, add the rules: `cat ~/contextnest/plugins/muse/AGENTS.md >> AGENTS.md`.",
+        "4. Start `muse` and trust the workspace. `muse skills list` shows four `contextnest-*` skills.",
+        "",
+        README("muse"),
+      ].join("\n"),
+    },
+    {
       id: "zed",
       name: "Zed (skills and rules)",
       steps: [
