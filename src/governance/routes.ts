@@ -52,6 +52,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
+  callerCanReadNode,
   filterAccessible,
   resolveCallerEmail,
   canRequestDeletion,
@@ -885,7 +886,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   // Review notes can carry draft-derived text (e.g. a hidden Surfaces draft).
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ error: "Access denied — no steward assignment for this node" }, 403);
   }
 
@@ -903,7 +904,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   // A node the caller can't read answers like one with no comments (which is
   // also what a node that doesn't exist answers).
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ comments: [] });
   }
   const list = await comments.listComments(nestId, nodeId, {
@@ -1000,7 +1001,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ activity: [] });
   }
   const activity = await comments.getActivity({ nestId, nodeId, limit });
@@ -1043,7 +1044,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/task-log", async (c) => {
   const limit = parseLimit(c.req.query("limit"));
   // A slice of the node's activity, so the same rule as …/activity above.
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ entries: [] });
   }
   return c.json({ entries: await listTaskActivity({ nestId, nodeId, limit }) });
