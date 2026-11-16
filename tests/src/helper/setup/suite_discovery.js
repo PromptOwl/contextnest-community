@@ -59,6 +59,7 @@ export const ESTABLISHED_ORDER = Object.freeze([
   'nest-overview',
   'nest-documents',
   'review-queue',
+  'control-room',
   'collaborators',
   'fields',
   'stewards',

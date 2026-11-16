@@ -77,6 +77,8 @@ export interface AuthContextValue {
   metacognitionEnabled: boolean;
   /** Experimental cross-nest document stream (/health experimental.doc_stream). */
   docStreamEnabled: boolean;
+  /** Surfaces (Slack → nest) is on (/health surfaces_enabled): the Control room page shows. */
+  surfacesEnabled: boolean;
   /** Experimental document pins (/health experimental.doc_pins). */
   docPinsEnabled: boolean;
   /** The assistant's name/logo/colour/greeting from /health — the admin's
@@ -137,6 +139,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [hootieEnabled, setHootieEnabled] = useState(false);
   const [metacognitionEnabled, setMetacognitionEnabled] = useState(false);
   const [docStreamEnabled, setDocStreamEnabled] = useState(false);
+  const [surfacesEnabled, setSurfacesEnabled] = useState(false);
   const [docPinsEnabled, setDocPinsEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
@@ -179,6 +182,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setHootieEnabled(h.hootie_enabled === true);
       setMetacognitionEnabled(h.metacognition_enabled === true);
       setDocStreamEnabled(h.experimental?.doc_stream === true);
+      setSurfacesEnabled(h.surfaces_enabled === true);
       setDocPinsEnabled(h.experimental?.doc_pins === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
@@ -231,6 +235,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setHootieEnabled(h.hootie_enabled === true);
         setMetacognitionEnabled(h.metacognition_enabled === true);
         setDocStreamEnabled(h.experimental?.doc_stream === true);
+        setSurfacesEnabled(h.surfaces_enabled === true);
         setDocPinsEnabled(h.experimental?.doc_pins === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
@@ -419,6 +424,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         hootieEnabled,
         metacognitionEnabled,
         docStreamEnabled,
+        surfacesEnabled,
         docPinsEnabled,
         hootieBrand,
         runnerKeyConfigured,
