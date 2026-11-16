@@ -254,6 +254,11 @@ const slugify = (s: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
 
+/** The change note the server writes when it publishes a write itself
+ *  ("Auto-published on create (<reason>)"). The document stream reads the
+ *  prefix to tell this stamp from a note a person wrote (po-1214). */
+export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
+
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
  * default), or null when the title slugifies to nothing (createNode generates
@@ -261,11 +266,6 @@ const slugify = (s: string) =>
  * confirm modal labels a staged document New vs Update with it, and the
  * structure check names the file a title will be saved as.
  */
-
-/** The change note the server writes when it publishes a write itself
- *  ("Auto-published on create (<reason>)"). The document stream reads the
- *  prefix to tell this stamp from a note a person wrote (po-1214). */
-export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
 export function derivedNodeId(title: string, folder = ""): string | null {
   const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
   return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
