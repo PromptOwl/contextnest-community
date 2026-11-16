@@ -2492,6 +2492,9 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("084_onboarding");
   }
+  // A database that ran 084 before its one-running-distill-per-person index
+  // existed (this branch's own test servers) gets it here. Idempotent.
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_jobs_one_running ON distill_jobs(user_id) WHERE status = 'running'");
 
   // 086: agent control room, CR1 (po-1186). The decision ledger is a view over
   //   runs, run steps and the Surfaces tables, so these are columns, not a new

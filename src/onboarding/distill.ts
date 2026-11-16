@@ -46,8 +46,8 @@ import { createTurn } from "../metacognition/model.js";
 import { defang } from "../metacognition/tools.js";
 import { hootieModel, resolveGatewayModel, resolveModelCredential, type ModelCredential } from "../shared/model-credential.js";
 import { storedEnvValues } from "../workflow/env-routes.js";
-import { tryConsume, retryAfterSeconds } from "../shared/rate-limit.js";
-import { AppError, ValidationError } from "../shared/errors.js";
+import { tryConsume, isLimited, retryAfterSeconds } from "../shared/rate-limit.js";
+import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { resolveNestPermission } from "../shared/access.js";
 
 // ─── limits ──────────────────────────────────────────────────────────────────
@@ -168,8 +168,12 @@ function decodeEntities(s: string): string {
   });
 }
 
-/** Elements dropped with everything inside them (to the end if never closed). */
-const DROP_BLOCKS = new Set(["script", "style", "noscript", "svg", "template", "iframe", "canvas", "head", "form", "nav", "footer"]);
+/**
+ * Elements dropped with everything inside them (to the end if never closed).
+ * Not `form`: some sites (ASP.NET WebForms, CMS themes) wrap the whole page in
+ * one, so only its controls go (their option lists, typed text and labels).
+ */
+const DROP_BLOCKS = new Set(["script", "style", "noscript", "svg", "template", "iframe", "canvas", "head", "nav", "footer", "select", "textarea", "button"]);
 const BLOCK_ENDS = new Set(["p", "div", "section", "article", "ul", "ol", "tr", "table", "blockquote", "pre", "main", "header"]);
 /** Attributes are read from at most this much of one tag, so a giant tag stays cheap. */
 const MAX_TAG_SCAN = 4096;
@@ -390,13 +394,23 @@ async function resolveGithubRef(fetchImpl: FetchLike, api: string, ref: string):
   return { name: segments[0]!, sha: null };
 }
 
+/** A JSON body from GitHub's API. A body that is not JSON says so plainly. */
+async function githubJson<T>(res: Response): Promise<T> {
+  try {
+    return JSON.parse(await textOf(res)) as T;
+  } catch (err) {
+    if (err instanceof SyntaxError) throw new ValidationError("GitHub returned an answer that is not JSON. Try again later.");
+    throw err;
+  }
+}
+
 async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string; repo: string; ref: string | null }): Promise<SourceDoc> {
   const api = `https://api.github.com/repos/${repo.owner}/${repo.repo}`;
   const gh = { accept: "application/vnd.github+json" };
   const meta = await getFollowing(fetchImpl, new URL(api), gh);
   if (meta.res.status === 404) throw new ValidationError("That GitHub repo does not exist or is not public.");
   if (!meta.res.ok) throw new ValidationError(`GitHub answered ${meta.res.status}.`);
-  const info = JSON.parse(await textOf(meta.res)) as { full_name?: string; description?: string; default_branch?: string; private?: boolean };
+  const info = (await githubJson(meta.res)) as { full_name?: string; description?: string; default_branch?: string; private?: boolean };
   if (info.private) throw new ValidationError("Only public GitHub repos can be distilled.");
   const resolved = repo.ref ? await resolveGithubRef(fetchImpl, api, repo.ref) : null;
   const ref = resolved?.name ?? info.default_branch ?? "HEAD";
@@ -414,7 +428,7 @@ async function fetchGithub(fetchImpl: FetchLike, url: URL, repo: { owner: string
   const tree = await getFollowing(fetchImpl, new URL(`${api}/git/trees/${at}?recursive=1`), gh);
   let paths: string[] = [];
   if (tree.res.ok) {
-    const t = JSON.parse(await textOf(tree.res)) as { tree?: Array<{ path?: string; type?: string }> };
+    const t = (await githubJson(tree.res)) as { tree?: Array<{ path?: string; type?: string }> };
     paths = (t.tree ?? [])
       .filter((e) => e.type === "blob" && typeof e.path === "string")
       .map((e) => e.path!)
@@ -489,8 +503,11 @@ export async function ensureOntology(nestId: string, userId: string, userEmail: 
   try {
     const node = await getNodeForCaller(nestId, { id }, userId, userEmail);
     if (node.body.trim()) return { id, text: node.body };
-  } catch {
-    /* not there yet */
+  } catch (err) {
+    // Only "not there yet" falls through to the bundled default. A database
+    // or permission failure must not look like a missing ontology, or the
+    // create below could clobber the nest's edited one.
+    if (!(err instanceof NotFoundError)) throw err;
   }
   const text = bundledOntology();
   try {
@@ -550,12 +567,89 @@ const cleanTag = (t: unknown): string | null => {
   return s ? `#${s}` : null;
 };
 
-/** The model's final document list, bounded and typed. Exactly one overview. */
 /**
- * Model output on an untrusted page can carry a tracking image or raw HTML that
- * would fire when a reviewer opens the draft. Outside code (fences and inline
- * spans, which render as text) this drops HTML comments and tags, and turns
- * images (inline and reference style) into their alt text. Links stay.
+ * HTML element names. A `<name …>` with one of these is markup and is dropped;
+ * any other `<word>` (`List<string>`, `Map<K, V>`, `a < b`) is text and stays,
+ * unless it carries attributes (ATTR_TAG). Names that are common type
+ * parameters and inert without attributes (`data`, `set`, `time`…) are left out.
+ */
+const HTML_ELEMENTS = new Set(
+  (
+    "a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup " +
+    "dd del details dfn dialog div dl dt em embed fieldset figcaption figure font footer form frame frameset " +
+    "h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd legend li link main marquee math " +
+    "meta meter nav noscript object ol optgroup p picture pre progress q rp rt ruby s samp " +
+    "script section select span strong style sub summary sup svg table tbody td template textarea " +
+    "tfoot th thead tr u ul video wbr xmp plaintext foreignobject"
+  ).split(" "),
+);
+
+/** Link schemes a draft may keep. Anything else (javascript:, data:, vbscript:, file:…) is dropped. */
+const SAFE_LINK_SCHEMES = new Set(["http", "https", "mailto"]);
+
+/**
+ * Is a markdown link target safe to keep? Relative targets (`/docs`, `#x`,
+ * `page.md`) and http(s)/mailto are. The scheme is read the way a browser
+ * would after a markdown renderer: entities decoded, angle brackets, spaces
+ * and control characters removed, so `java&#115;cript:` or `java\tscript:`
+ * is still javascript.
+ */
+export function safeLinkTarget(raw: string): boolean {
+  const t = decodeEntities(raw.replace(/^<|>$/g, ""))
+    .replace(/\\(.)/g, "$1")
+    .replace(/[\u0000- \u007f-\u009f]+/g, "");
+  const head = /^[^/?#]*/.exec(t)![0];
+  // An entity this decoder does not know (`&colon;`, `&Tab;`) before the
+  // first / ? or #: a renderer may decode it into a scheme, so refuse it.
+  if (/&[A-Za-z][A-Za-z0-9]*;/.test(head)) return false;
+  const scheme = /^([^:]*):/.exec(head)?.[1];
+  if (scheme === undefined) return true;
+  return SAFE_LINK_SCHEMES.has(scheme.toLowerCase());
+}
+
+/** `[text](target "title")`: the target may hold one level of balanced parens. */
+const INLINE_LINK = /\[((?:[^\][]|\[[^\][]*\])*)\]\(\s*(<[^<>\n]*>|(?:[^()\s]|\([^()\s]*\))*)((?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?)\s*\)/g;
+/** Any `](target …)` left over (link text the pattern above could not pair). */
+const LINK_TAIL = /\]\(\s*(<[^<>\n]*>|(?:[^()\s]|\([^()\s]*\))*)((?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?)\s*\)/g;
+/** `[label]: target "title"` (up to 3 spaces in; the target may sit on the next line). */
+const LINK_DEFINITION = /^ {0,3}\[[^\]\n]+\]:[ \t]*\n?[ \t]*(\S+)[^\n]*$/gm;
+/** An HTML element tag, open or close: removed up to its first `>` (a quoted `<` inside does not save it). */
+const HTML_TAG = new RegExp(`<\\/?(?:${[...HTML_ELEMENTS].join("|")})(?=[\\s/>])[^>]*>`, "gi");
+/** Any other tag-shaped run that carries attributes (`<x-y onclick=…>`). */
+const ATTR_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*\s[^>]*=[^>]*>/g;
+/** An autolink `<scheme:…>`. */
+const AUTOLINK = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/g;
+
+/** Links whose target is not safe: inline ones become their text, definitions go. */
+function stripUnsafeLinks(block: string): string {
+  return block
+    .replace(INLINE_LINK, (m, text: string, target: string) => (safeLinkTarget(target) ? m : text))
+    .replace(LINK_TAIL, (m, target: string) => (safeLinkTarget(target) ? m : "]"))
+    .replace(LINK_DEFINITION, (m, target: string) => (safeLinkTarget(target) ? m : ""));
+}
+
+/** Text outside code: drop comments, markup tags, images and unsafe autolinks. */
+function stripActiveText(part: string): string {
+  return part
+    .replace(/<!--[\s\S]*?(-->|$)/g, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)?/g, "$1")
+    .replace(/!\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+    .replace(AUTOLINK, (m, target: string) => (safeLinkTarget(target) ? m : ""))
+    .replace(HTML_TAG, "")
+    .replace(ATTR_TAG, "")
+    .replace(/<![^>]*>|<\?[^>]*>/g, "")
+    .replace(/[ \t]{2,}/g, " ");
+}
+
+/**
+ * Model output on an untrusted page can carry a tracking image, raw HTML or a
+ * `javascript:` link that would fire when a reviewer opens the draft. Outside
+ * fenced code this turns a link whose target is not http(s), mailto or
+ * relative into its text and drops a reference definition with such a target
+ * (before inline code is set aside: a backtick inside a link target does not
+ * start a code span). Outside code spans too, it drops HTML comments and
+ * markup tags and turns images (inline and reference style) into their alt
+ * text. Safe links and text like `List<string>` stay.
  */
 export function stripActiveMarkdown(md: string): string {
   return md
@@ -563,23 +657,15 @@ export function stripActiveMarkdown(md: string): string {
     .map((block, i) =>
       i % 2 === 1
         ? block
-        : block
+        : stripUnsafeLinks(block)
             .split(/(`[^`\n]*`)/)
-            .map((part, j) =>
-              j % 2 === 1
-                ? part
-                : part
-                    .replace(/<!--[\s\S]*?(-->|$)/g, "")
-                    .replace(/!\[([^\]]*)\]\([^)]*\)?/g, "$1")
-                    .replace(/!\[([^\]]*)\]\[[^\]]*\]/g, "$1")
-                    .replace(/<\/?[A-Za-z!][^>]*>?/g, "")
-                    .replace(/[ \t]{2,}/g, " "),
-            )
+            .map((part, j) => (j % 2 === 1 ? part : stripActiveText(part)))
             .join(""),
     )
     .join("");
 }
 
+/** The model's final document list, bounded and typed. Exactly one overview. */
 export function boundNodes(raw: Record<string, unknown> | null, provenance: string): DistilledNode[] {
   const list = Array.isArray(raw?.nodes) ? (raw!.nodes as unknown[]) : [];
   const out: DistilledNode[] = [];
@@ -663,6 +749,7 @@ export interface DistillJob {
 }
 
 const iso = () => new Date().toISOString();
+const STOPPED_BY_RESTART = "The distill stopped (the server restarted). Start it again.";
 
 async function update(id: string, patch: Partial<Pick<DistillJob, "status" | "phase" | "done_steps" | "total_steps" | "error">> & { nodes?: DistillJob["nodes"] }) {
   const sets: string[] = [];
@@ -708,12 +795,13 @@ export async function getDistillJob(jobId: string, userId: string): Promise<Dist
   const r = (await getDb().get("SELECT * FROM distill_jobs WHERE id = ? AND user_id = ?", [jobId, userId])) as Record<string, any> | undefined;
   if (!r) return null;
   if (r.status === "running" && Date.now() - Date.parse(r.updated_at) > STALE_MS) {
-    await update(r.id, { status: "failed", phase: "failed", error: "The distill stopped (the server restarted). Start it again." });
+    await update(r.id, { status: "failed", phase: "failed", error: STOPPED_BY_RESTART });
     return getDistillJob(jobId, userId);
   }
   return view(r);
 }
 
+/** Jobs running in this process (the MAX_SERVER_JOBS cap is per process). */
 let runningJobs = 0;
 
 export type StartDistillResult =
@@ -724,6 +812,11 @@ export type StartDistillResult =
  * Start a distill into `nestId` as `userId`. With a model key and the feature
  * on, a background job (poll getDistillJob). Without either, the same
  * ontology as a prompt for the person's own agent — no server cost.
+ *
+ * Cheap refusals come first: the URL, nest access, then (server mode) "one of
+ * yours is running", the server cap and the hourly limit, all before the
+ * ontology is written into the nest. The hourly run is spent only once the
+ * job row exists, so a failed INSERT costs nothing.
  */
 export async function startDistill(opts: {
   nestId: string;
@@ -736,10 +829,10 @@ export async function startDistill(opts: {
   const perm = await resolveNestPermission(opts.nestId, opts.userId).catch(() => null);
   if (!perm || perm === "none") throw new AppError(404, "Nest not found.");
   if (perm === "read") throw new AppError(403, "You need edit access to this nest to distill into it.");
-  const nest = (await getDb().get("SELECT name FROM nests WHERE id = ?", [opts.nestId])) as { name: string } | undefined;
-  const ontology = await ensureOntology(opts.nestId, opts.userId, opts.userEmail);
   const credential = config.DISTILL_ENABLED ? resolveModelCredential(await storedEnvValues(opts.nestId)) : null;
   if (!credential) {
+    const nest = (await getDb().get("SELECT name FROM nests WHERE id = ?", [opts.nestId])) as { name: string } | undefined;
+    const ontology = await ensureOntology(opts.nestId, opts.userId, opts.userEmail);
     return {
       mode: "agent",
       reason: config.DISTILL_ENABLED ? "This server has no model key, so your own agent runs the distill." : "Server-side distill is off on this server, so your own agent runs the distill.",
@@ -747,13 +840,14 @@ export async function startDistill(opts: {
       ontology_id: ontology.id,
     };
   }
-  return withDistillStartLock(opts.userId, () => claimAndRun(opts, url, credential, ontology.text));
+  return withDistillStartLock(opts.userId, () => claimAndRun(opts, url, credential));
 }
 
 /**
- * One start at a time per person: the "already running" check and the job
- * INSERT span awaits, so two parallel starts could both pass the check.
- * In-process is enough (single-process server, as the node write lock).
+ * One start at a time per person in this process: the "already running"
+ * check and the job INSERT span awaits. Across processes the partial unique
+ * index on distill_jobs(user_id) WHERE status = 'running' (migration 084)
+ * holds the same rule: a second INSERT fails and reads as "already running".
  */
 const distillStartChains = new Map<string, Promise<unknown>>();
 function withDistillStartLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
@@ -768,36 +862,66 @@ function withDistillStartLock<T>(userId: string, fn: () => Promise<T>): Promise<
   return run;
 }
 
+const ALREADY_RUNNING = "A distill of yours is already running. Wait for it to finish.";
+
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  return e?.code === "23505" || e?.code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed|duplicate key value/i.test(e?.message ?? "");
+}
+
 async function claimAndRun(
   opts: { nestId: string; userId: string; userEmail: string; fetchImpl?: FetchLike },
   url: URL,
   credential: ModelCredential,
-  ontologyText: string,
 ): Promise<StartDistillResult> {
-  const running = await getDb().get("SELECT id, updated_at FROM distill_jobs WHERE user_id = ? AND status = 'running'", [opts.userId]) as
+  const running = (await getDb().get("SELECT id, updated_at FROM distill_jobs WHERE user_id = ? AND status = 'running'", [opts.userId])) as
     | { id: string; updated_at: string }
     | undefined;
-  if (running && Date.now() - Date.parse(running.updated_at) <= STALE_MS) {
-    throw new TooManyRequestsError("A distill of yours is already running. Wait for it to finish.", 30);
+  if (running) {
+    if (Date.now() - Date.parse(running.updated_at) <= STALE_MS) throw new TooManyRequestsError(ALREADY_RUNNING, 30);
+    // Its process died: close it, so the unique index lets this one in.
+    await update(running.id, { status: "failed", phase: "failed", error: STOPPED_BY_RESTART });
   }
+  // Per process: on a multi-instance deployment each instance runs up to this many.
   if (runningJobs >= MAX_SERVER_JOBS) throw new TooManyRequestsError("The server is busy with other distills. Try again in a minute.", 60);
   const key = `distill:${opts.userId}`;
-  if (!tryConsume(key, DISTILL_RATE)) {
+  if (isLimited(key, DISTILL_RATE)) {
     const wait = retryAfterSeconds(key, DISTILL_RATE);
     throw new TooManyRequestsError(`You can run ${DISTILL_RATE.max} distills an hour. Try again in ${Math.ceil(wait / 60)} minutes.`, wait);
   }
+  const ontology = await ensureOntology(opts.nestId, opts.userId, opts.userEmail);
   const id = randomUUID();
-  await getDb().run(
-    "INSERT INTO distill_jobs (id, nest_id, user_id, url, status, phase, done_steps, total_steps, nodes_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', 'fetching', 0, 0, '[]', ?, ?)",
-    [id, opts.nestId, opts.userId, url.toString(), iso(), iso()],
-  );
+  try {
+    await getDb().run(
+      "INSERT INTO distill_jobs (id, nest_id, user_id, url, status, phase, done_steps, total_steps, nodes_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', 'fetching', 0, 0, '[]', ?, ?)",
+      [id, opts.nestId, opts.userId, url.toString(), iso(), iso()],
+    );
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new TooManyRequestsError(ALREADY_RUNNING, 30);
+    throw err;
+  }
+  // The row exists: now the run counts against the hour.
+  tryConsume(key, DISTILL_RATE);
   runningJobs++;
-  const work = runJob(id, url, opts, credential, ontologyText).finally(() => {
+  const work = runJob(id, url, opts, credential, ontology.text).finally(() => {
     runningJobs--;
   });
   inFlight.set(id, work);
   void work.finally(() => inFlight.delete(id));
   return { mode: "server", job: (await getDistillJob(id, opts.userId))! };
+}
+
+/**
+ * At startup: every distill still marked running belonged to a previous
+ * process (jobs run in-process), so close it now instead of blocking that
+ * person's next distill until it goes stale. Returns how many were closed.
+ */
+export async function recoverOrphanedDistills(): Promise<number> {
+  const r = await getDb().run("UPDATE distill_jobs SET status = 'failed', phase = 'failed', error = ?, updated_at = ? WHERE status = 'running'", [
+    STOPPED_BY_RESTART,
+    iso(),
+  ]);
+  return Number((r as { changes?: number })?.changes ?? 0);
 }
 
 /** Running jobs, so a test (or a shutdown) can wait for them. */

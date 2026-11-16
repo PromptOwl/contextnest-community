@@ -10,6 +10,8 @@
  *                 the person through connect and fill after it exists.
  *
  * distill_jobs — one row per server-side distill run, polled for progress.
+ *   At most one `running` row per person (partial unique index), so the
+ *   one-at-a-time rule holds across processes, not just inside one.
  */
 export function onboardingDdl(now: string): string {
   return `
@@ -38,5 +40,6 @@ export function onboardingDdl(now: string): string {
       updated_at TEXT NOT NULL DEFAULT ${now}
     );
     CREATE INDEX IF NOT EXISTS idx_distill_jobs_user ON distill_jobs(user_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_jobs_one_running ON distill_jobs(user_id) WHERE status = 'running';
   `;
 }
