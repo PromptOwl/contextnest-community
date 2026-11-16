@@ -1786,7 +1786,17 @@ export function DocumentEditor({
       // the edits it had just written. A save is the answer to that question.
       bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
-      setError(err.message);
+      if (err.status === 409 && err.body?.error === "Version conflict") {
+        console.warn("[version-conflict]", err.body);
+        const { current_version: current, updated_by: by } = err.body;
+        // Adopt the server's version so the next Save goes through; the edits stay.
+        if (typeof current === "number") setBaseVersion(current);
+        setError(
+          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Your edits are kept — press Save again to overwrite, or reload to take theirs.`,
+        );
+      } else {
+        setError(err.message);
+      }
     } finally {
       setSaving(false);
     }

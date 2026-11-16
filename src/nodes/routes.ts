@@ -844,6 +844,9 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     const baseVersion = parseInt(baseVersionHeader, 10);
     const conflict = await versions.checkConflict(nestId, nodeId, baseVersion);
     if (conflict.conflict) {
+      console.warn(
+        `[version-conflict] nest=${nestId} node=${nodeId} base=${baseVersion} current=${conflict.currentVersion} updated_by=${conflict.updatedBy ?? "?"}`,
+      );
       return c.json(
         {
           error: "Version conflict",
