@@ -34,14 +34,14 @@
   },
   "artifact /p/:slug": {
     "status": 200,
-    "contentType": "text/html; charset=utf-8",
-    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
-    "xContentTypeOptions": "nosniff",
+    "contentType": "text/html; charset=UTF-8",
+    "csp": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; connect-src 'self'; frame-ancestors 'self'",
+    "xContentTypeOptions": null,
     "referrerPolicy": "no-referrer",
     "xArtifactSnapshot": null,
     "cacheControl": null,
-    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
-    "bodyLength": 210
+    "bodySha256": "fb6037fac225ed19e1d17066fbdd4be15c5085c1eda6574ad8b48be3a7de820f",
+    "bodyLength": 4138
   },
   "artifact /p/:slug/view": {
     "status": 200,
@@ -95,8 +95,8 @@
     "referrerPolicy": "no-referrer",
     "xArtifactSnapshot": null,
     "cacheControl": null,
-    "bodySha256": "6f4ced131e30eded1f5773185c1e02e7cace424743da0f2f13e65c05f5463c3f",
-    "bodyLength": 1349
+    "bodySha256": "2e3a3ef7ddd1db957b9db59c72fea8ed299d5aa8abe4a33561f6dff7cc6e992e",
+    "bodyLength": 3633
   },
   "document /p/:slug/view": {
     "status": 200,
