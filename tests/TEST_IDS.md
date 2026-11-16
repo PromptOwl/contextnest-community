@@ -65,6 +65,7 @@ Add a row here whenever you add a `data-testid` to the UI.
 |---|---|
 | `document-editor-request-access` | Document top bar: "Request edit access" for a viewer — `ui/src/components/DocumentEditor.tsx` |
 | `document-editor-share-link` | Document ⋮ menu: "Share public link" — copies the document's public link, or publishes first (`ui/src/lib/share-link.ts`) |
+| `publish-link-invite-<publishId>` | Publish dialog → Links: switch for the "Make your own nest" strip on that link — `ui/src/components/PublishDialog.tsx` |
 | `doc-share-link-<nodeId>` | Documents list row ⋯ menu: "Share public link" — `ui/src/components/nest/DocumentsTab.tsx` |
 | `nest-request-access` | Nest header: "Request edit access" for a viewer — `ui/src/components/NestView.tsx` |
 | `request-access-pending` | Dialog shown when the caller's request is already pending |

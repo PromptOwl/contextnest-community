@@ -12,7 +12,12 @@ const MCP_HEADERS = {
   "Content-Type": "application/json",
   Accept: "application/json, text/event-stream",
 };
-const TOOLS = ["context_public_link_create", "context_public_links", "context_public_link_revoke"];
+const TOOLS = [
+  "context_public_link_create",
+  "context_public_links",
+  "context_public_link_update",
+  "context_public_link_revoke",
+];
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -205,6 +210,45 @@ describe("context_public_links", () => {
   it("refuses an editor", async () => {
     const r = await call("context_public_links", {}, editor.apiKey);
     expect(r.isError).toBe(true);
+  });
+});
+
+describe("the invitation strip (show_invite)", () => {
+  it("is on by default and can be left off when the link is made", async () => {
+    const on = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    expect(on.data.publish.show_invite).toBe(true);
+    expect(await (await app.request(`/p/${on.data.publish.slug}`)).text()).toContain("data-cn-cta");
+
+    const off = await call("context_public_link_create", { id: "nodes/handbook", show_invite: false }, owner.apiKey);
+    expect(off.isError).toBe(false);
+    expect(off.data.publish.show_invite).toBe(false);
+    expect(off.text).toMatch(/Make your own nest.*not shown|no .*Make your own nest/i);
+    expect(await (await app.request(`/p/${off.data.publish.slug}`)).text()).not.toContain("data-cn-cta");
+  });
+
+  it("context_public_link_update switches it on a live link, as PATCH does", async () => {
+    const made = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const { id, slug } = made.data.publish;
+    const off = await call("context_public_link_update", { link_id: id, show_invite: false }, owner.apiKey);
+    expect(off.isError).toBe(false);
+    expect(off.data.publish.show_invite).toBe(false);
+    expect(off.text).toContain(`http://localhost/p/${slug}`);
+    expect(await (await app.request(`/p/${slug}`)).text()).not.toContain("data-cn-cta");
+    const listed = await call("context_public_links", { id: "nodes/handbook" }, owner.apiKey);
+    expect(listed.data.publishes.find((p: any) => p.id === id).show_invite).toBe(false);
+
+    const missing = await call("context_public_link_update", { link_id: "nope", show_invite: false }, owner.apiKey);
+    expect(missing.isError).toBe(true);
+    expect(missing.data.code).toBe("DOCUMENT_NOT_FOUND");
+    const refused = await call("context_public_link_update", { link_id: id, show_invite: true }, editor.apiKey);
+    expect(refused.isError).toBe(true);
+    expect(await (await app.request(`/p/${slug}`)).text()).not.toContain("data-cn-cta");
+  });
+
+  it("classifies the update as a change to a page on the open web", async () => {
+    const body = await mcp("tools/list", {}, owner.apiKey);
+    const t = body.result.tools.find((x: any) => x.name === "context_public_link_update");
+    expect(t.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
   });
 });
 

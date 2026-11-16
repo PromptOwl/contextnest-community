@@ -3271,6 +3271,9 @@ export interface Publication {
   comments_enabled: boolean;
   watermark: boolean;
   no_download: boolean;
+  /** The page shows the "Make your own nest" strip. Absent on a server that
+   *  predates the setting, where it is always shown. */
+  show_invite?: boolean;
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;
@@ -3296,6 +3299,7 @@ export async function createPublication(
     comments_enabled?: boolean;
     watermark?: boolean;
     no_download?: boolean;
+    show_invite?: boolean;
     code?: string | null;
     allowlist?: string[];
     expires_at?: string | null;
@@ -3304,6 +3308,18 @@ export async function createPublication(
   return request<{ publish: Publication; link: string }>(
     `/nests/${nestId}/publications`,
     { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Change a live link's settings in place; its URL stays the same. */
+export async function updatePublication(
+  nestId: string,
+  publishId: string,
+  data: { show_invite: boolean },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications/${publishId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
   );
 }
 

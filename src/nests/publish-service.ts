@@ -46,6 +46,9 @@ export interface PublishRow {
   comments_enabled: number; // 0 | 1
   watermark: number; // 0 | 1 — stamp the viewer's email across the page
   no_download: number; // 0 | 1 — discourage print/copy
+  /** 0 | 1 — show the "Make your own nest" strip on this link's page (PO-1365).
+   *  1 by default. A white-label nest (hide_powered_by) never shows it. */
+  show_invite: number;
   created_by: string;
   created_at: string;
   expires_at: string | null;
@@ -107,6 +110,7 @@ export function toPublishResponse(row: PublishRow) {
     comments_enabled: row.comments_enabled === 1,
     watermark: row.watermark === 1,
     no_download: row.no_download === 1,
+    show_invite: row.show_invite !== 0,
     created_at: row.created_at,
     expires_at: row.expires_at,
     revoked_at: row.revoked_at,
@@ -122,6 +126,8 @@ export async function createPublish(params: {
   commentsEnabled?: boolean;
   watermark?: boolean;
   noDownload?: boolean;
+  /** Default true. */
+  showInvite?: boolean;
   code?: string | null;
   allowlist?: string[];
   expiresAt?: string | null;
@@ -172,8 +178,8 @@ export async function createPublish(params: {
   await db.run(
     `INSERT INTO publish
        (id, nest_id, node_id, slug, access_mode, code_hash, comments_enabled,
-        watermark, no_download, created_by, created_at, expires_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        watermark, no_download, show_invite, created_by, created_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     [
       id,
       nestId,
@@ -184,6 +190,7 @@ export async function createPublish(params: {
       params.commentsEnabled ? 1 : 0,
       params.watermark ? 1 : 0,
       params.noDownload ? 1 : 0,
+      params.showInvite === false ? 0 : 1,
       createdBy,
       created,
       params.expiresAt ?? null,
@@ -215,6 +222,8 @@ export interface PublishRequest {
   comments_enabled?: boolean;
   watermark?: boolean;
   no_download?: boolean;
+  /** Show the "Make your own nest" strip on the page. Default true. */
+  show_invite?: boolean;
   code?: string | null;
   allowlist?: string[];
   expires_at?: string | null;
@@ -249,6 +258,7 @@ export async function publishDocumentLink(input: {
     commentsEnabled: !!body.comments_enabled,
     watermark: !!body.watermark,
     noDownload: !!body.no_download,
+    showInvite: body.show_invite !== false,
     code: body.code ?? null,
     allowlist: Array.isArray(body.allowlist) ? body.allowlist : [],
     expiresAt: body.expires_at ?? null,
@@ -304,6 +314,29 @@ export async function listPublish(nestId: string): Promise<PublishRow[]> {
     "SELECT * FROM publish WHERE nest_id = ? ORDER BY created_at DESC",
     [nestId],
   )) as PublishRow[];
+}
+
+/**
+ * Change a link's own settings without changing its URL. Only `show_invite`
+ * today: the "Make your own nest" strip is the one thing an owner needs to
+ * take off a page that is already in someone's inbox. Returns the updated
+ * row, or undefined when the nest has no such link. The REST route and the
+ * MCP tool both call this.
+ */
+export async function updatePublish(
+  nestId: string,
+  id: string,
+  patch: { show_invite?: unknown },
+): Promise<PublishRow | undefined> {
+  if (typeof patch.show_invite !== "boolean") {
+    throw new ValidationError("show_invite must be true or false");
+  }
+  const res = await getDb().run("UPDATE publish SET show_invite = ? WHERE id = ? AND nest_id = ?", [
+    patch.show_invite ? 1 : 0,
+    id,
+    nestId,
+  ]);
+  return res.changes > 0 ? getPublishById(nestId, id) : undefined;
 }
 
 /** Revoke (soft) — the link stops working immediately. Returns false if the

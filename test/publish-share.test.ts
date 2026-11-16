@@ -224,9 +224,8 @@ describe("a gated link reveals nothing about the document", () => {
     expect(meta(html, "description")).toBeNull();
     expect(meta(html, "og:url")).toBe(`http://localhost/p/${slug}`);
     expect(meta(html, "og:image")).toBe(`http://localhost/p/${slug}/og-image`);
-    // The gate never carried a robots directive, and still carries none.
-    expect(meta(html, "robots")).toBeNull();
-    expect(res.headers.get("x-robots-tag")).toBeNull();
+    // A gate page is not something to index; the open page is unchanged.
+    expect(meta(html, "robots")).toBe("noindex");
     expect(html).not.toContain("Secret Roadmap");
     expect(html).not.toContain("ninth");
   });
@@ -360,6 +359,70 @@ describe("a white-label nest shows no strip", () => {
     expect(html).not.toContain("ref=share");
     expect(html).not.toContain("Make your own nest");
     expect(html).not.toContain("Secured by PromptOwl");
+  });
+});
+
+describe("a link with the invitation switched off (show_invite: false)", () => {
+  it("is on by default, and reported on the link", async () => {
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/publications`, { node_id: "nodes/handbook" }, owner.apiKey);
+    expect(made.data.publish.show_invite).toBe(true);
+    const off = await jsonRequest(app, "POST", `/nests/${nestId}/publications`, { node_id: "nodes/handbook", show_invite: false }, owner.apiKey);
+    expect(off.data.publish.show_invite).toBe(false);
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/publications`, undefined, owner.apiKey);
+    expect(list.data.publishes.find((p: any) => p.id === off.data.publish.id).show_invite).toBe(false);
+  });
+
+  it("shows no strip on a markdown page, the gate, or the comment shell", async () => {
+    for (const extra of [{}, { access_mode: "code", code: "swordfish" }, { comments_enabled: true }]) {
+      const slug = await publish(nestId, "nodes/handbook", { show_invite: false, ...extra });
+      const { html } = await page(`/p/${slug}`);
+      expect(html, JSON.stringify(extra)).not.toContain("data-cn-cta");
+      expect(html).not.toContain("ref=share");
+      expect(html).not.toContain("Make your own nest");
+    }
+  });
+
+  it("serves an author's HTML page directly, not framed", async () => {
+    const slug = await publish(nestId, "nodes/deck", { show_invite: false });
+    const { res, html } = await page(`/p/${slug}`);
+    expect((res.headers.get("content-security-policy") ?? "").startsWith(ARTIFACT_SANDBOX_CSP)).toBe(true);
+    expect(html).not.toContain("cn-frame");
+    expect(html).not.toContain("data-cn-cta");
+    expect(html).toContain("<h1>Quarterly deck</h1>");
+    // Same bytes as the document view, apart from the preview tags in <head>.
+    const view = (await page(`/p/${slug}/view`)).html;
+    expect(html.replace(/<meta (?:property|name)="(?:og:|twitter:|robots|description)[^>]*>/g, "")).toBe(view);
+  });
+
+  it("can be switched on and off on a live link, by the people who may publish", async () => {
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/publications`, { node_id: "nodes/deck" }, owner.apiKey);
+    const { id, slug } = made.data.publish;
+    expect((await page(`/p/${slug}`)).html).toContain("data-cn-cta");
+
+    const off = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: false }, owner.apiKey);
+    expect(off.status).toBe(200);
+    expect(off.data.publish.show_invite).toBe(false);
+    expect(off.data.publish.slug).toBe(slug);
+    const now = await page(`/p/${slug}`);
+    expect(now.html).not.toContain("data-cn-cta");
+    expect(now.html).not.toContain("cn-frame");
+
+    const on = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: true }, owner.apiKey);
+    expect(on.data.publish.show_invite).toBe(true);
+    expect((await page(`/p/${slug}`)).html).toContain("data-cn-cta");
+
+    const bad = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: "no" }, owner.apiKey);
+    expect(bad.status).toBe(400);
+    const stranger = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: false }, reviewer.apiKey);
+    expect([403, 404]).toContain(stranger.status);
+    const missing = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/nope`, { show_invite: false }, owner.apiKey);
+    expect(missing.status).toBe(404);
+    expect((await page(`/p/${slug}`)).html).toContain("data-cn-cta");
+  });
+
+  it("cannot switch the strip on for a white-label nest", async () => {
+    const slug = await publish(whiteNest, "nodes/handbook", { show_invite: true });
+    expect((await page(`/p/${slug}`)).html).not.toContain("data-cn-cta");
   });
 });
 

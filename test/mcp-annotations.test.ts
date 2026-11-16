@@ -74,6 +74,7 @@ const READ_ONLY = [
 
 /** Can overwrite or remove something that already exists. */
 const DESTRUCTIVE = [
+  "context_public_link_update",
   "context_public_link_revoke",
   "context_instructions_update",
   "context_table_rows",
@@ -115,6 +116,7 @@ const DESTRUCTIVE = [
 const OPEN_WORLD = [
   // Public links (PO-1365): a page on the open web, and its removal.
   "context_public_link_create",
+  "context_public_link_update",
   "context_public_link_revoke",
   "context_upload",
   // Fetches a public URL (PO-1185).

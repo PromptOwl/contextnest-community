@@ -1,5 +1,5 @@
 /**
- * Share a document (PO-1365) — CN-SHARE-001 … CN-SHARE-006
+ * Share a document (PO-1365) — CN-SHARE-001 … CN-SHARE-007
  *
  * Under test: the "Share public link" action in a document's ⋮ menu
  * (ui/src/lib/share-link.ts) and the public page it leads to (`/p/<slug>`,
@@ -162,6 +162,35 @@ test.describe('Share a document', () => {
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText(`Publish “${DOC_TITLE}”`)).toBeVisible();
     await expect(dialog.getByRole('tab', { name: 'Links (1)' })).toBeVisible(WRITE);
+  });
+
+  test('CN-SHARE-007: Verify that switching off “Make your own nest” on a link removes the strip from its page, at the same URL', async ({
+    primary_user,
+    commonFunction,
+    browser,
+  }) => {
+    const { api, nest, page, share } = await ownerDocument(primary_user, commonFunction, 'share-invite');
+    await share.click();
+    await expect(page.getByText(`“${DOC_TITLE}” is now public`)).toBeVisible(WRITE);
+    const [made] = await links(api, nest.id);
+    expect(made.show_invite).toBe(true);
+
+    const stranger = await asStranger(browser);
+    await stranger.goto(made.link);
+    await expect(stranger.locator('[data-cn-cta]')).toBeVisible();
+
+    // Manage opens the dialog on its Links tab, where the switch is.
+    await page.getByRole('button', { name: 'Manage', exact: true }).click();
+    const toggle = page.getByTestId(`publish-link-invite-${made.id}`);
+    await expect(toggle).toHaveAttribute('aria-checked', 'true', WRITE);
+    await toggle.click();
+    await expect(page.getByText('“Make your own nest” removed from this link')).toBeVisible(WRITE);
+    await expect.poll(async () => (await links(api, nest.id))[0].show_invite, WRITE).toBe(false);
+
+    await stranger.reload();
+    await expect(stranger.getByRole('heading', { name: DOC_TITLE })).toBeVisible();
+    await expect(stranger.locator('[data-cn-cta]')).toHaveCount(0);
+    expect(stranger.url()).toBe(made.link);
   });
 
   test('CN-SHARE-005: Verify that the public page carries link-preview tags and a Make your own nest strip that goes to sign-up', async ({

@@ -244,6 +244,8 @@ export function DocumentsTab({
   }, [deletionRequests]);
 
   const [publishNode, setPublishNode] = useState<any | null>(null);
+  // Share's Manage opens the Publish dialog on its Links tab.
+  const [publishTab, setPublishTab] = useState<"new" | "links">("new");
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -1329,7 +1331,10 @@ export function DocumentsTab({
                                   nestId,
                                   nodeId: node.id,
                                   title: node.title || node.id,
-                                  onManage: () => setPublishNode(node),
+                                  onManage: () => {
+                                    setPublishTab("links");
+                                    setPublishNode(node);
+                                  },
                                 })
                               }
                             >
@@ -1338,7 +1343,12 @@ export function DocumentsTab({
                             </DropdownMenuItem>
                           )}
                           {canManage && (
-                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setPublishTab("new");
+                                setPublishNode(node);
+                              }}
+                            >
                               <Share2 className="h-3.5 w-3.5 mr-2" />
                               Publish
                             </DropdownMenuItem>
@@ -2259,6 +2269,7 @@ export function DocumentsTab({
           nestId={nestId}
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
+          initialTab={publishTab}
           onClose={() => setPublishNode(null)}
         />
       )}

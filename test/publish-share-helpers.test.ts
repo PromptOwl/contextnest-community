@@ -71,8 +71,10 @@ describe("previewMetaTags", () => {
     expect(tags).toContain(`<meta name="robots" content="index, follow">`);
   });
 
-  it("writes no robots tag when asked to say nothing", () => {
-    expect(previewMetaTags({ ...base, robots: "omit" })).not.toContain("robots");
+  it("says noindex for a gate page", () => {
+    const tags = previewMetaTags({ ...base, robots: "noindex" });
+    expect(tags).toContain(`<meta name="robots" content="noindex">`);
+    expect(tags).not.toContain("index, follow");
   });
 });
 

@@ -153,22 +153,23 @@ export interface PreviewMeta {
 }
 
 /**
- * Indexing. /p pages have never carried a robots directive, and robots.txt
- * does not disallow /p/, so a published page is indexable by whoever finds
- * its (unguessable) link. This tag states that behaviour rather than changing
- * it; making shared links `noindex` is a policy decision, made here in one
- * place if it is taken.
+ * Indexing of an OPEN page. /p pages have never carried a robots directive,
+ * and robots.txt does not disallow /p/, so a published page is indexable by
+ * whoever finds its (unguessable) link. This tag states that behaviour rather
+ * than changing it; making shared links `noindex` is a policy decision, made
+ * here in one place if it is taken. Gate pages are `noindex` (PreviewRobots).
  */
 export const PUBLISH_ROBOTS = "index, follow";
 
-/** What `previewMetaTags` says about indexing. A gate page says nothing, as it
- *  always has: it gets no robots tag at all rather than a new instruction. */
-export type PreviewRobots = "state" | "omit";
+/** What `previewMetaTags` says about indexing: an open page states the
+ *  behaviour above; a gate page ("Protected document", nothing to read) is
+ *  `noindex`. */
+export type PreviewRobots = "state" | "noindex";
 
 /** The `<head>` tags for a link preview. Every value is escaped here. */
 export function previewMetaTags(m: PreviewMeta): string {
   const tags: Array<[string, string, string]> = [
-    ...(m.robots === "omit" ? [] : ([["name", "robots", PUBLISH_ROBOTS]] as Array<[string, string, string]>)),
+    ["name", "robots", m.robots === "noindex" ? "noindex" : PUBLISH_ROBOTS],
     ["property", "og:type", "article"],
     ["property", "og:title", m.title],
     ["property", "og:url", m.url],

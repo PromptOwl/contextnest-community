@@ -18,6 +18,7 @@ import {
   listPublish,
   getPublishById,
   revokePublish,
+  updatePublish,
   listViews,
   toPublishResponse,
   PUBLISH_FORBIDDEN,
@@ -66,6 +67,20 @@ publishRoutes.get("/:id/views", async (c) => {
   if (!row) throw new NotFoundError(PUBLISH_NOT_FOUND);
   const views = await listViews(row.id);
   return c.json({ count: views.length, views });
+});
+
+// PATCH /nests/:nestId/publications/:id — change a live link's settings in
+// place (its URL stays the same). Body: { show_invite: boolean }.
+publishRoutes.patch("/:id", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await requireManage(c, nestId);
+  const body = await c.req.json<{ show_invite?: unknown }>().catch(() => ({}));
+  const row = await updatePublish(nestId, c.req.param("id")!, body);
+  if (!row) throw new NotFoundError(PUBLISH_NOT_FOUND);
+  return c.json({
+    publish: toPublishResponse(row),
+    link: `${requestBaseUrl(c.req.url)}/p/${row.slug}`,
+  });
 });
 
 // DELETE /nests/:nestId/publish/:id — revoke the link.

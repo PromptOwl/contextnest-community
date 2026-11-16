@@ -310,10 +310,15 @@ function chromeOf(c: any): PageChrome {
   return { baseUrl: requestBaseUrl(c.req.url) };
 }
 
-/** A white-label nest (hide_powered_by, a server-admin setting) shows no
- *  invitation to our product, the same rule as the "Secured by" line. */
-function showsCta(brand: PublishBrand | null): boolean {
-  return !brand?.b.hide_powered_by;
+/** Whether this link's page carries the "Make your own nest" strip. Two
+ *  switches, either of which turns it off: the link's own `show_invite` (set
+ *  by whoever manages the link — a proposal sent to a client, say), and the
+ *  nest's white-label setting (hide_powered_by, a server-admin setting — the
+ *  same rule as the "Secured by" line), which a link cannot override. With it
+ *  off, the page is served as it was before the strip existed: nothing added
+ *  to the body, and an author's HTML page not framed. */
+function showsCta(row: PublishRow, brand: PublishBrand | null): boolean {
+  return row.show_invite !== 0 && !brand?.b.hide_powered_by;
 }
 
 /** The link-preview tags for a publish. `doc` is what may be said about the
@@ -338,8 +343,8 @@ function previewTags(
     siteName: brand?.b.site_title || "ContextNest",
     image: external ? logoUrl : `${url}/og-image`,
     card: hasLogo ? "summary" : "summary_large_image",
-    // The gate never carried a robots directive; it still carries none.
-    robots: doc ? "state" : "omit",
+    // A gate page has nothing to index.
+    robots: doc ? "state" : "noindex",
   });
 }
 
@@ -466,7 +471,7 @@ async function renderPublished(
   // So: load it for every /p/:slug render (chrome), and for a markdown body
   // wherever it is served; skip it for an HTML body or a view at /view.
   const brand = chrome || (!isHtml && type !== "view") ? await loadBrand(row) : null;
-  const cta = !!chrome && showsCta(brand);
+  const cta = !!chrome && showsCta(row, brand);
 
   // An author's HTML page is a complete document we never edit, so our strip
   // cannot go in it. /p/:slug frames it instead — the reader shell the comment
@@ -516,7 +521,8 @@ async function renderPublished(
     });
   }
   if (isHtml) {
-    // Only reached on /p/:slug for a white-label nest (no strip, so no frame):
+    // Only reached on /p/:slug when the strip is off — the link's show_invite
+    // or a white-label nest — so there is nothing to frame it for:
     // the author's page as before, plus the preview tags in its own <head>.
     const page = chrome
       ? withHeadTags(
@@ -613,7 +619,7 @@ function gatePage(
   // document title, no excerpt. The strip is an invitation to the product and
   // carries nothing about the document either.
   const preview = chrome ? previewTags(row, brand, chrome, null) : "";
-  const invite = chrome && showsCta(brand) ? gateCta(chrome.baseUrl) : "";
+  const invite = chrome && showsCta(row, brand) ? gateCta(chrome.baseUrl) : "";
   const wantsCode = row.access_mode === "code";
   // A passcode is typed from a slide, a QR, or someone reading it aloud, so
   // let the reader check what they typed before submitting.
@@ -866,7 +872,7 @@ publishRenderRoutes.get("/:slug", async (c) => {
   return shellResponse(c, row, doc.title, viewer.email, brand, {
     comments: true,
     head: previewTags(row, brand, chrome, doc),
-    cta: showsCta(brand) ? ctaStrip(chrome.baseUrl) : "",
+    cta: showsCta(row, brand) ? ctaStrip(chrome.baseUrl) : "",
   });
 });
 

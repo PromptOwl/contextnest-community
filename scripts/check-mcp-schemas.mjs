@@ -72,15 +72,17 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
-//   103->106 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision).
+//   103->107 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision).
 //   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
 //   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
 //     context_public_link_create — twin of POST /nests/:id/publications. Mints an unguessable /p/<slug> page for one
 //       document's approved version under a gate (public, passcode, email, invite); the engine has no hosted pages or gates.
 //     context_public_links — twin of GET /nests/:id/publications. Reads the `publish` rows; no engine op lists them.
+//     context_public_link_update — twin of PATCH /nests/:id/publications/:id. Sets the per-link `show_invite` flag on a
+//       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
 //     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
 //       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
-const BASELINE = 106;
+const BASELINE = 107;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

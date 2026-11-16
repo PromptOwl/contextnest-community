@@ -1,7 +1,7 @@
 /**
  * Public links over MCP (PO-1365): publish one document at /p/<slug>, list a
- * document's links, revoke one. The twins of POST / GET / DELETE
- * /nests/:nestId/publications (nests/publish-routes.ts), on the same service
+ * document's links, change one's settings, revoke one. The twins of POST /
+ * GET / PATCH / DELETE /nests/:nestId/publications (nests/publish-routes.ts), on the same service
  * (nests/publish-service.ts), so a link made by an agent is the link the
  * Publish dialog shows and the other way round.
  *
@@ -26,6 +26,7 @@ import {
   listPublish,
   publishDocumentLink,
   revokePublish,
+  updatePublish,
   toPublishResponse,
   type PublishMode,
   type PublishRow,
@@ -58,8 +59,26 @@ export const PUBLIC_LINK_TOOL_DEFINITIONS = [
         comments_enabled: { type: "boolean", description: "Let readers leave comments, which go to the document's stewards. Default false." },
         watermark: { type: "boolean", description: "Stamp the reader's email across the page (email and invite links only). Default false." },
         no_download: { type: "boolean", description: "Discourage copying and printing. Default false." },
+        show_invite: {
+          type: "boolean",
+          description:
+            'Show the one-line "Make your own nest" strip on the page. Default true. Pass false for a document sent to a client or anywhere the strip does not belong; the page is then served with nothing added.',
+        },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "context_public_link_update",
+    description:
+      'Change a public link\'s settings without changing its URL. Nest owners/admins only. show_invite turns the "Make your own nest" strip on the page on or off; nothing else about a link can be changed (revoke it and create another). Mirrors PATCH /nests/:id/publications/:id.',
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        link_id: { type: "string", description: "The link's id, from context_public_links or context_public_link_create." },
+        show_invite: { type: "boolean", description: 'true shows the "Make your own nest" strip on the page, false removes it.' },
+      },
+      required: ["link_id", "show_invite"],
     },
   },
   {
@@ -116,6 +135,13 @@ function gate(mode: PublishMode, invited = 0): { access: "open" | "gated"; says:
   }
 }
 
+/** What the page says about our product, in one sentence. */
+function inviteLine(row: PublishRow): string {
+  return row.show_invite !== 0
+    ? 'The page shows a one-line "Make your own nest" strip (not on a white-label nest); show_invite: false removes it.'
+    : 'The "Make your own nest" strip is not shown on this page.';
+}
+
 function describeRow(row: PublishRow, baseUrl: string) {
   const { access, says } = gate(row.access_mode);
   const live: boolean = isLivePublish(row);
@@ -169,6 +195,7 @@ export async function runPublicLinkTool(
           comments_enabled: args.comments_enabled === true,
           watermark: args.watermark === true,
           no_download: args.no_download === true,
+          show_invite: args.show_invite !== false,
           code: typeof args.code === "string" ? args.code : null,
           allowlist: Array.isArray(args.allowlist) ? args.allowlist.map(String) : [],
           expires_at: typeof args.expires_at === "string" && args.expires_at ? args.expires_at : null,
@@ -184,11 +211,23 @@ export async function runPublicLinkTool(
           `Access: ${says}.`,
           `Readers see the approved version${version != null ? ` (v${version})` : ""}; later approved versions appear at the same link, drafts never do.`,
           row.expires_at ? `The link stops working at ${row.expires_at}.` : "",
+          inviteLine(row),
           `To take it down: context_public_link_revoke with link_id ${row.id}.`,
         ]
           .filter(Boolean)
           .join("\n"),
         data: { publish: toPublishResponse(row), link, access },
+      };
+    }
+
+    if (toolName === "context_public_link_update") {
+      const id = typeof args.link_id === "string" ? args.link_id.trim() : "";
+      const row = id ? await updatePublish(ctx.nestId, id, { show_invite: args.show_invite }) : undefined;
+      if (!row) return refusal(PUBLISH_NOT_FOUND, "DOCUMENT_NOT_FOUND");
+      const link = `${baseUrl}/p/${row.slug}`;
+      return {
+        text: `Updated ${link} (${row.node_id}). ${inviteLine(row)}`,
+        data: { publish: toPublishResponse(row), link },
       };
     }
 
