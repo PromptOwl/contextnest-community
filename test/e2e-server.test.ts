@@ -3,7 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
-import { DIRECTORY_PEOPLE, FEATURE_ENV, FREE_SEAT_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from "../tests/e2e-server/lib.mjs";
+import { createServer } from "node:http";
+import { CLOSE_WELCOME_PATH, DIRECTORY_PEOPLE, FEATURE_ENV, FREE_SEAT_PEOPLE, KEEP_ALIVE_MODULE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from "../tests/e2e-server/lib.mjs";
 import { entitlementOf } from "../src/auth/license.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -111,6 +112,36 @@ describe("e2e server launcher (Playwright against this checkout's own build)", (
     expect(FREE_SEAT_PEOPLE).toEqual(["qa-viewer@example.com"]);
     expect(PAID_SEAT_PEOPLE.length).toBeGreaterThan(0);
     expect(SEATS_NEST_NAME).not.toMatch(/^AUTO_/); // the orphan sweep must keep it
+  });
+
+  // PO-1388: someone who owns no nest gets the welcome screen in place of the
+  // nest list, and the second account owns none on a fresh server.
+  it("closes the welcome screen for each test account, so their dashboard is the nest list", () => {
+    const [, route] = CLOSE_WELCOME_PATH.match(/^\/onboarding(\/[a-z]+)$/) ?? [];
+    expect(route).toBe("/dismiss");
+    expect(readFileSync(join(repoRoot, "src/onboarding/routes.ts"), "utf8")).toContain(`onboardingRoutes.post("${route}"`);
+    const launcher = readFileSync(join(repoRoot, "tests/e2e-server/start.mjs"), "utf8");
+    const accounts = launcher.slice(launcher.indexOf("for (const [i, account] of settings.accounts.entries())"), launcher.indexOf("GET /auth/admin-status"));
+    expect(accounts).toContain("call('POST', CLOSE_WELCOME_PATH, {}, res.cookie)");
+  });
+
+  // PO-1388: an API call on a connection the server was closing failed with ECONNRESET.
+  describe("idle connections", () => {
+    it("the server under test loads keep-alive.mjs first, and keeps NODE_OPTIONS that were already set", () => {
+      expect(KEEP_ALIVE_MODULE).toMatch(/^file:\/\/.*\/tests\/e2e-server\/keep-alive\.mjs$/);
+      expect(serverEnv(readSettings(ACCOUNTS), "/tmp/data").NODE_OPTIONS).toBe(`--import ${KEEP_ALIVE_MODULE}`);
+      expect(serverEnv(readSettings(ACCOUNTS), "/tmp/data", "--max-old-space-size=512").NODE_OPTIONS).toBe(
+        `--max-old-space-size=512 --import ${KEEP_ALIVE_MODULE}`,
+      );
+    });
+
+    it("a server made after it loads keeps an idle connection for two minutes, not Node's five seconds", async () => {
+      expect(createServer().keepAliveTimeout).toBe(5_000);
+      const { KEEP_ALIVE_MS } = await import(KEEP_ALIVE_MODULE);
+      expect(KEEP_ALIVE_MS).toBe(120_000);
+      // The server's own code imports createServer by name (src/shared/http-server.ts).
+      expect(createServer().keepAliveTimeout).toBe(KEEP_ALIVE_MS);
+    });
   });
 
   describe("the workflow", () => {
