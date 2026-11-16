@@ -54,6 +54,9 @@ test.describe('Graph: context pull replay', () => {
   test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
 
   test.afterEach(async ({ primary_user }) => {
+    // A case skipped before it initialised the role made nothing to delete,
+    // and reading the role's page before initialize() throws.
+    if (!primary_user._initialized) return;
     await primary_user.nestOverviewApi.deleteCreatedNests().catch(() => {});
   });
 
