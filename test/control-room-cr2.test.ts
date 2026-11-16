@@ -509,6 +509,9 @@ describe("AC-CR-04 (review 2): cold start", () => {
     expect(cs.no_seed).toBe(false);
     expect(cs.folders).toEqual([]);
     expect(cs.coverage).toEqual({ covered: 0, total: 0 });
+    // …and says so, so the card can explain the empty figures.
+    expect(cs.folders_withheld).toBe(true);
+    expect((await cold(R)).folders_withheld).toBe(false);
   });
 
   it("a seed older than 400 days draws its last 400 days, starting from the right running total, without walking every earlier day", async () => {

@@ -4977,6 +4977,8 @@ export interface CrColdStart {
   no_seed: boolean;
   seed: { id: string; version: number; applied_at: string } | null;
   folders: Array<{ path: string; approved: number; first_approved_at: string | null }>;
+  /** The seed's listener settings couldn't be read, so folder names are withheld. */
+  folders_withheld?: boolean;
   coverage: { covered: number; total: number };
   first_approved: { node_id: string | null; at: string; after_seed_ms: number } | null;
   mirror: { people: { proposed: number; accepted: number }; areas: { proposed: number; accepted: number } };

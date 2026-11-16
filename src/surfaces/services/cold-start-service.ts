@@ -45,6 +45,8 @@ export interface ColdStart {
   no_seed: boolean;
   seed: { id: string; version: number; applied_at: string } | null;
   folders: ColdStartFolder[];
+  /** True when the seed's listener settings couldn't be read, so folder names are withheld (fail closed). */
+  folders_withheld: boolean;
   coverage: { covered: number; total: number };
   first_approved: { node_id: string | null; at: string; after_seed_ms: number } | null;
   mirror: { people: { proposed: number; accepted: number }; areas: { proposed: number; accepted: number } };
@@ -161,6 +163,7 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
     no_seed: true,
     seed: null,
     folders: [],
+    folders_withheld: false,
     coverage: { covered: 0, total: 0 },
     first_approved: null,
     mirror: { people: { proposed: 0, accepted: 0 }, areas: { proposed: 0, accepted: 0 } },
@@ -263,6 +266,7 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
     no_seed: false,
     seed: { id: first.seed_id, version: Number(first.seed_version), applied_at: first.applied_at },
     folders,
+    folders_withheld: listenerUnreadable,
     coverage: { covered: folders.filter((f) => f.approved > 0).length, total: folders.length },
     first_approved: firstApproved,
     mirror,

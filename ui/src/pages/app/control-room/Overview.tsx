@@ -365,6 +365,11 @@ function ColdStartCard({ scope, onSetup }: { scope: ControlRoomScope; onSetup: (
           />
           {mirrorProposed > 0 && <Figure label="People and areas" value={`${mirrorAccepted} of ${mirrorProposed}`} foot="accepted" testId="cs-mirror" />}
         </div>
+        {cur.folders_withheld && (
+          <p className="mb-2 text-sm text-muted-foreground" data-testid="cs-withheld">
+            Folder names are hidden because this nest&apos;s listener settings couldn&apos;t be read, and some of its folders may be admin-only. Applying the starter to this nest again rewrites them.
+          </p>
+        )}
         {[...cur.folders].sort((a, b) => b.approved - a.approved || a.path.localeCompare(b.path)).map((f) => (
           <Bar key={f.path} name={f.path} value={f.approved} max={max} tone="accent" mono dim={f.approved === 0} />
         ))}
