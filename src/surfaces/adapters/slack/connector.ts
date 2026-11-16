@@ -45,9 +45,12 @@ import { REMEMBER_RE, SKIP_ME_RE } from "../../core/gate.js";
 
 const MAX_MEMBER_PAGES = 50;
 
+/** The message token() throws when the install has no usable bot token. */
+export const NO_BOT_TOKEN = "no bot token";
+
 async function token(installId: string): Promise<string> {
   const t = await getSecret(installId, "bot_token");
-  if (!t) throw new Error("no bot token");
+  if (!t) throw new Error(NO_BOT_TOKEN);
   return t;
 }
 

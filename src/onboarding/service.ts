@@ -17,7 +17,7 @@ import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js"
 import { isOrgAdmin } from "../surfaces/services/binding-service.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 
-import { hostedEnabled } from "../surfaces/adapters/slack/routes.js";
+import { hostedEnabled } from "../surfaces/flags.js";
 import { surfacesEnabled } from "../surfaces/flags.js";
 import { resolveModelCredential } from "../shared/model-credential.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
