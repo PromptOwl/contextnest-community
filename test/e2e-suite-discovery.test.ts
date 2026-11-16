@@ -118,6 +118,9 @@ describe("e2e suite discovery (adding a suite never edits playwright.config.js)"
     put("bad/suite.json", JSON.stringify({ standalone: "no" }));
     expect(() => discoverSuites(features, { order: [] })).toThrow(/"standalone" must be true or false/);
 
+    put("bad/suite.json", JSON.stringify({ baseURL: "" }));
+    expect(() => discoverSuites(features, { order: [] })).toThrow(/"baseURL" must be an http\(s\) URL/);
+
     put("bad/suite.json", "[]");
     expect(() => discoverSuites(features, { order: [] })).toThrow(/must hold a JSON object/);
   });

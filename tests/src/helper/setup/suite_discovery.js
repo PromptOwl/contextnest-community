@@ -101,8 +101,8 @@ export function readSuiteSettings(suiteDir) {
       throw new Error(`${file}: "${key}" must be true or false`);
     }
   }
-  if ('baseURL' in settings && typeof settings.baseURL !== 'string') {
-    throw new Error(`${file}: "baseURL" must be a string`);
+  if ('baseURL' in settings && (typeof settings.baseURL !== 'string' || !/^https?:\/\/\S+$/.test(settings.baseURL))) {
+    throw new Error(`${file}: "baseURL" must be an http(s) URL`);
   }
   return settings;
 }
