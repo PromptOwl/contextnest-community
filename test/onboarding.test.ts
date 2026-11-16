@@ -151,6 +151,20 @@ describe("AC2: Create my nest", () => {
     expect(r.data.first_run).toBe(false);
     expect(r.data.nest.id).toBe(nestId);
   });
+
+  it("does not make a second nest when the first one was made but never recorded (orphan after a failed write)", async () => {
+    const orphan = await registerUser(app, "orla@onboarding.test", "Orla");
+    // Simulate createNest succeeding and the onboarding write after it failing.
+    const made = await jsonRequest(app, "POST", "/nests", { name: "Orla's nest" }, orphan.apiKey);
+    expect(made.status).toBe(201);
+    const r = await jsonRequest(app, "POST", "/onboarding/nest", {}, orphan.apiKey);
+    expect(r.status).toBe(200);
+    expect(r.data.nest.id).toBe(made.data.id ?? made.data.nest?.id);
+    const { getDb } = await import("../src/db/client.js");
+    const owned = (await getDb().all("SELECT id FROM nests WHERE user_id = ? AND archived_at IS NULL", [orphan.userId])) as { id: string }[];
+    expect(owned.length).toBe(1);
+    expect((await getDb().get("SELECT nest_id FROM user_onboarding WHERE user_id = ?", [orphan.userId]))?.nest_id).toBe(owned[0]!.id);
+  });
 });
 
 describe("AC3: every tile has the nest's MCP URL", () => {
@@ -211,6 +225,23 @@ describe("AC4: the connect proof", () => {
   it("refuses the check on a nest the caller cannot read", async () => {
     const r = await jsonRequest(app, "GET", `/onboarding/connection?nest_id=${nestId}`, undefined, veteran.apiKey);
     expect(r.status).toBe(404);
+  });
+
+  it("never proves itself: polling the proof (REST or context_onboarding with the nest) is not a read", async () => {
+    const proofless = await registerUser(app, "pia@onboarding.test", "Pia");
+    const nest = (await jsonRequest(app, "POST", "/onboarding/nest", {}, proofless.apiKey)).data.nest.id;
+    const t0 = new Date(Date.now() - 1000).toISOString();
+    for (let i = 0; i < 3; i++) {
+      await jsonRequest(app, "GET", `/onboarding/connection?nest_id=${nest}&since=${encodeURIComponent(t0)}`, undefined, proofless.apiKey);
+      await mcp(app, "/mcp", proofless.apiKey, "context_onboarding", { nest }, "claude-code");
+    }
+    // A keyed GET of the nest's settings, not its content, does not count either.
+    await app.request(`/nests/${nest}/settings`, { headers: authed(proofless.apiKey) });
+    await new Promise((r) => setTimeout(r, 150));
+    const { getDb } = await import("../src/db/client.js");
+    const traced = (await getDb().all("SELECT tool FROM api_events WHERE nest_id = ? AND kind = 'mcp'", [nest])) as { tool: string }[];
+    const r = await jsonRequest(app, "GET", `/onboarding/connection?nest_id=${nest}&since=${encodeURIComponent(t0)}`, undefined, proofless.apiKey);
+    expect(r.data.connected, JSON.stringify(traced)).toBe(false);
   });
 });
 
@@ -378,5 +409,143 @@ describe("MCP parity", () => {
     const text = await res.text();
     for (const t of ["context_onboarding", "context_onboarding_update", "context_distill"]) expect(text).toContain(`"${t}"`);
     expect(text).not.toContain('"context_distill_status"');
+  });
+});
+
+describe("credentials that are not the person's own full credential", () => {
+  const ROUTES: Array<[string, string, Record<string, unknown>?]> = [
+    ["GET", "/onboarding"],
+    ["POST", "/onboarding/dismiss", {}],
+    ["POST", "/onboarding/reopen", {}],
+    ["POST", "/onboarding/nest", {}],
+    ["GET", "/onboarding/connection?nest_id=NEST"],
+    ["POST", "/onboarding/distill", { nest_id: "NEST", url: "https://acme.test/" }],
+    ["GET", "/onboarding/distill/00000000-0000-0000-0000-000000000000"],
+    ["GET", "/onboarding/slack/start?nest_id=NEST"],
+  ];
+
+  it("a nest-scoped key (read-only or read-write) gets 403 on every /onboarding route", async () => {
+    const keys: Record<string, string> = {};
+    for (const capability of ["read", "write"]) {
+      const k = await jsonRequest(app, "POST", "/auth/keys", { label: `scoped-${capability}`, nest_id: nestId, capability }, newbie.apiKey);
+      expect(k.status, JSON.stringify(k.data)).toBeLessThan(300);
+      keys[capability] = k.data.api_key ?? k.data.key;
+    }
+    for (const [capability, key] of Object.entries(keys)) {
+      for (const [method, path, body] of ROUTES) {
+        const url = path.replace("NEST", nestId);
+        const res = await app.request(url, {
+          method,
+          headers: { "Content-Type": "application/json", ...authed(key) },
+          ...(body ? { body: JSON.stringify({ ...body, ...(body.nest_id ? { nest_id: nestId } : {}) }) } : {}),
+        });
+        expect(res.status, `${capability} key: ${method} ${path}`).toBe(403);
+      }
+      // The MCP twins refuse a nest-scoped key too.
+      const res = await app.request("/mcp", {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...authed(key) },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpc++, method: "tools/call", params: { name: "context_onboarding_update", arguments: { action: "dismiss" } } }),
+      });
+      expect(await res.text()).not.toMatch(/Welcome screen: not shown/);
+    }
+    // Nothing changed for the person.
+    expect((await jsonRequest(app, "GET", "/onboarding", undefined, newbie.apiKey)).data.dismissed).toBe(false);
+  });
+});
+
+describe("self-serve Slack: the browser entry point and the install rows", () => {
+  const KEYS = [
+    "FEATURE_WORKFLOW_PLANE",
+    "FEATURE_METACOGNITION",
+    "FEATURE_SURFACES",
+    "FEATURE_SURFACES_SLACK_HOSTED",
+    "SURFACES_SLACK_HOSTED_CLIENT_ID",
+    "SURFACES_SLACK_HOSTED_CLIENT_SECRET",
+    "SURFACES_SLACK_HOSTED_SIGNING_SECRET",
+    "SURFACES_SLACK_SELF_SERVE",
+    "PUBLIC_BASE_URL",
+  ];
+  let sol: Awaited<ReturnType<typeof registerUser>>;
+  let solNest = "";
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      FEATURE_WORKFLOW_PLANE: "true",
+      FEATURE_METACOGNITION: "true",
+      FEATURE_SURFACES: "true",
+      FEATURE_SURFACES_SLACK_HOSTED: "true",
+      PUBLIC_BASE_URL: "https://nest.onboard.test",
+    });
+    await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_self_serve: true }, root.apiKey);
+    await resetAuthRateLimit();
+    sol = await registerUser(app, "sol@onboarding.test", "Sol");
+    await resetAuthRateLimit();
+    const made = await jsonRequest(app, "POST", "/onboarding/nest", {}, sol.apiKey);
+    expect(made.status, JSON.stringify(made.data)).toBeLessThan(300);
+    solNest = made.data.nest.id;
+  });
+  afterAll(() => {
+    for (const k of KEYS) delete process.env[k];
+  });
+
+  it("does not spend the person's attempts while the Slack app is not configured", async () => {
+    delete process.env.SURFACES_SLACK_HOSTED_CLIENT_ID;
+    delete process.env.SURFACES_SLACK_HOSTED_CLIENT_SECRET;
+    delete process.env.SURFACES_SLACK_HOSTED_SIGNING_SECRET;
+    const cookie = await login(app, sol.email);
+    for (let i = 0; i < 7; i++) {
+      const r = await app.request(`/surfaces/slack/hosted/oauth/self-serve?home_nest_id=${solNest}`, { headers: { Cookie: cookie } });
+      expect(r.status).toBe(409);
+    }
+    Object.assign(process.env, {
+      SURFACES_SLACK_HOSTED_CLIENT_ID: "hosted-cid",
+      SURFACES_SLACK_HOSTED_CLIENT_SECRET: "hosted-secret",
+      SURFACES_SLACK_HOSTED_SIGNING_SECRET: "hosted-signing",
+    });
+    const ok = await app.request(`/surfaces/slack/hosted/oauth/self-serve?home_nest_id=${solNest}`, { headers: { Cookie: cookie } });
+    expect(ok.status).toBe(302);
+  });
+
+  it("reuses the pending install on a retry instead of leaving a pending row per abandoned attempt", async () => {
+    const cookie = await login(app, sol.email);
+    for (let i = 0; i < 3; i++) {
+      const r = await app.request(`/surfaces/slack/hosted/oauth/self-serve?home_nest_id=${solNest}`, { headers: { Cookie: cookie } });
+      expect(r.status).toBe(302);
+    }
+    const { getDb } = await import("../src/db/client.js");
+    const rows = (await getDb().all("SELECT id FROM surface_installs WHERE home_nest_id = ? AND status = 'pending'", [solNest])) as { id: string }[];
+    expect(rows.length).toBe(1);
+  });
+
+  it("the welcome screen's link refuses a nest the person does not own (the Surfaces route decides)", async () => {
+    const cookie = await login(app, sol.email);
+    const start = await app.request(`/onboarding/slack/start?nest_id=${nestId}`, { headers: { Cookie: cookie } });
+    expect(start.status).toBe(302);
+    const hop = await app.request(start.headers.get("location")!, { headers: { Cookie: cookie } });
+    expect(hop.status).toBe(422);
+    const { getDb } = await import("../src/db/client.js");
+    expect(await getDb().get("SELECT 1 AS x FROM surface_installs WHERE home_nest_id = ? AND installed_by_user_id = ?", [nestId, sol.userId])).toBeUndefined();
+  });
+
+  it("uses the same admin check in the tile as in the route", async () => {
+    // Self-serve off: a non-admin's tile cannot connect, and the route refuses.
+    await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_self_serve: false }, root.apiKey);
+    try {
+      const tile = await jsonRequest(app, "GET", "/onboarding", undefined, sol.apiKey);
+      expect(tile.data.connectors.slack.can_connect).toBe(false);
+      const cookie = await login(app, sol.email);
+      const r = await app.request(`/surfaces/slack/hosted/oauth/self-serve?home_nest_id=${solNest}`, { headers: { Cookie: cookie } });
+      expect(r.status).toBe(403);
+      // A server admin: the tile offers Connect and the route starts the install.
+      await jsonRequest(app, "POST", "/onboarding/reopen", {}, root.apiKey);
+      const rootNest = (await jsonRequest(app, "POST", "/onboarding/nest", {}, root.apiKey)).data.nest.id;
+      const adminTile = await jsonRequest(app, "GET", "/onboarding", undefined, root.apiKey);
+      expect(adminTile.data.connectors.slack.can_connect).toBe(true);
+      const rootCookie = await login(app, root.email);
+      const ok = await app.request(`/surfaces/slack/hosted/oauth/self-serve?home_nest_id=${rootNest}`, { headers: { Cookie: rootCookie } });
+      expect(ok.status).toBe(302);
+    } finally {
+      await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_self_serve: true }, root.apiKey);
+    }
   });
 });

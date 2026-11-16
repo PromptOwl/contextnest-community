@@ -51,7 +51,9 @@ function fail(c: C, err: unknown) {
 /** Onboarding state is the person's own: a nest-scoped or system key has none. */
 onboardingRoutes.use("*", async (c, next) => {
   if (c.get("nestScope")) return c.json({ error: "This key is scoped to one nest and has no onboarding." }, 403);
-  if (c.req.method !== "GET" && c.get("keyCapability") === "read") {
+  // A read-only key cannot write, and /slack/start begins an install, so it
+  // counts as a write although it is a GET.
+  if ((c.req.method !== "GET" || c.req.path.endsWith("/slack/start")) && c.get("keyCapability") === "read") {
     return c.json({ error: "This API key is read-only and cannot perform write or governance actions." }, 403);
   }
   // Creating a nest and distilling write content: the same read-only gate as

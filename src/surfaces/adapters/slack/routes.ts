@@ -21,6 +21,7 @@ import { getSessionIdFromRequest } from "../../../auth/sessions.js";
 import { credentialMayContribute } from "../../../governance/org-contribution.js";
 import { config } from "../../../config.js";
 import { getDb } from "../../../db/client.js";
+import { tryConsume } from "../../../shared/rate-limit.js";
 import { surfacesEnabled, ORG_ID } from "../../flags.js";
 import { createInstall, getInstall, type InstallRow } from "../../services/install-store.js";
 import { getSecret, secretPresence, setSecret, deleteSecrets } from "../../services/secret-store.js";
@@ -351,18 +352,27 @@ slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
   const nest = nestId ? ((await getDb().get("SELECT user_id FROM nests WHERE id = ? AND archived_at IS NULL", [nestId])) as { user_id: string } | undefined) : undefined;
   // Your own nest only (a server admin may target any nest, as on the admin path).
   if (!nest || (nest.user_id !== userId && !admin)) return c.json({ error: "home_nest_id must name a nest you own" }, 422);
-  const { tryConsume } = await import("../../../shared/rate-limit.js");
-  if (!tryConsume(`slack-self-serve:${userId}`, SELF_SERVE_LIMIT)) return c.json({ error: "Too many Slack connect attempts. Try again in an hour." }, 429);
+  // Configuration and session first: a misconfigured server must not spend
+  // the person's attempts.
   const creds = hostedCreds();
   if (!creds.clientId || !creds.clientSecret || !creds.signing) return c.json({ error: "A server admin must configure the Slack app on this server first." }, 409);
   if (!sessionBinding(c)) return c.json({ error: "Open this link from a signed-in browser session." }, 403);
-  const install = await createInstall({
-    surface: "slack",
-    mode: "hosted",
-    tenantKey: `pending:${randomBytes(8).toString("hex")}`,
-    homeNestId: nestId,
-    installedByUserId: userId,
-  });
+  if (!tryConsume(`slack-self-serve:${userId}`, SELF_SERVE_LIMIT)) return c.json({ error: "Too many Slack connect attempts. Try again in an hour." }, 429);
+  // An abandoned attempt left a pending install for this person and nest:
+  // start again on it, so retries never pile up `pending:*` rows.
+  const pending = (await getDb().get(
+    "SELECT id FROM surface_installs WHERE surface = 'slack' AND mode = 'hosted' AND status = 'pending' AND home_nest_id = ? AND installed_by_user_id = ? AND tenant_key LIKE 'pending:%' ORDER BY created_at DESC LIMIT 1",
+    [nestId, userId],
+  )) as { id: string } | undefined;
+  const install =
+    (pending && (await getInstall(pending.id))) ||
+    (await createInstall({
+      surface: "slack",
+      mode: "hosted",
+      tenantKey: `pending:${randomBytes(8).toString("hex")}`,
+      homeNestId: nestId,
+      installedByUserId: userId,
+    }));
   return startOAuth(c, install, creds.clientId, "hosted", SELF_SERVE_RETURN);
 });
 
@@ -465,6 +475,10 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
     await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch(() => {});
   }
   const back = safeReturnPath(row.return_to);
-  if (back && !(c.req.header("Accept") || "").includes("application/json")) return c.redirect(`${back}&slack=connected`, 302);
+  if (back && !(c.req.header("Accept") || "").includes("application/json")) {
+    const to = new URL(back, "http://app.invalid");
+    to.searchParams.set("slack", "connected");
+    return c.redirect(`${to.pathname}${to.search}`, 302);
+  }
   return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id, ...(back ? { return_to: back } : {}) });
 });

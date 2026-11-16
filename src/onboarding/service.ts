@@ -14,6 +14,7 @@ import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { createNest } from "../nests/service.js";
 import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js";
+import { isOrgAdmin } from "../surfaces/services/binding-service.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 
 import { hostedEnabled } from "../surfaces/adapters/slack/routes.js";
@@ -40,7 +41,10 @@ export interface SlackConnectorState {
   configured: boolean;
   /** This person may connect their own workspace (self-serve or admin). */
   can_connect: boolean;
-  /** An active install has this nest as its home. */
+  /**
+   * An active install has this nest as its home, whoever installed it: the
+   * tile reports the nest's state (an admin may have connected it for you).
+   */
   connected: boolean;
   /** Present only when not configured and the caller is a server admin. */
   admin_settings_path: string | null;
@@ -131,7 +135,9 @@ export function slackConfigured(): boolean {
 }
 
 export async function slackState(userId: string, nestId: string | null): Promise<SlackConnectorState> {
-  const admin = await isServerAdminUserId(userId);
+  // The same check the self-serve route makes, so the tile never offers
+  // Connect where the route would refuse.
+  const admin = await isOrgAdmin(userId);
   const configured = slackConfigured();
   let connected = false;
   if (nestId && surfacesEnabled()) {
@@ -197,12 +203,6 @@ export async function reopenOnboarding(userId: string): Promise<void> {
 }
 
 /**
- * "Create my nest": one nest named "<Name>'s nest", owned by the caller,
- * through the ordinary createNest path (nest-creation policy, plan cap and
- * seat check included). Idempotent: a second call returns the nest the first
- * one made, so a double click cannot make two.
- */
-/**
  * One "Create my nest" at a time per person. The check-then-create below spans
  * several awaits, so a double click (or two tabs) would otherwise both see no
  * nest and make two. In-process is enough: the server is single-process, the
@@ -210,6 +210,12 @@ export async function reopenOnboarding(userId: string): Promise<void> {
  */
 const createMyNestChains = new Map<string, Promise<unknown>>();
 
+/**
+ * "Create my nest": one nest named "<Name>'s nest", owned by the caller,
+ * through the ordinary createNest path (nest-creation policy, plan cap and
+ * seat check included). Idempotent: a second call returns the nest the first
+ * one made, so a double click cannot make two.
+ */
 export function createMyNest(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
   const prev = (createMyNestChains.get(userId) ?? Promise.resolve()).catch(() => {});
   const run = prev.then(() => createMyNestOnce(userId, name));
@@ -234,6 +240,14 @@ async function createMyNestOnce(userId: string, name?: string): Promise<NestRef 
   }
   const wanted = (name ?? "").trim() || (await suggestedNestName(userId));
   if (wanted.length > 120) throw new ValidationError("A nest name is at most 120 characters.");
+  // A live nest of exactly this name that the person owns is the one to use:
+  // either an earlier call made it and failed to record it below (so a retry
+  // must not make a second), or they made it by hand.
+  const same = (await ownedNests(userId)).find((n) => n.name === wanted);
+  if (same) {
+    await upsert(userId, { nest_id: same.id });
+    return { ...same, created: false };
+  }
   let nest;
   try {
     nest = await createNest(userId, wanted);
@@ -277,31 +291,43 @@ export const READ_PROOF_TOOLS = [
 ];
 
 /**
+ * REST reads of a nest's content, for the keyed-GET branch of the proof:
+ * documents, search, context and the like, not members, settings or traces.
+ */
+const CONTENT_READ_PATHS = ["context", "search", "overview", "export", "graph", "folders", "instructions", "query", "resolve", "nodes"];
+
+/**
  * The connect proof: did an agent, acting as this person, really read this
  * nest at or after `since`? Answered from the activity trace (api_events),
  * which logs every MCP tool call and every REST request with the nest and the
  * authenticated user. Counted:
  *   - an MCP read tool on this nest (per-nest /nests/:id/mcp, or the
  *     server-level /mcp with this nest as its target or in its fan-out);
- *   - a REST read of this nest made with an agent's key (a key label or a
- *     client block names the agent; a browser session names none);
+ *   - a REST read of this nest's content (CONTENT_READ_PATHS) made with an
+ *     agent's key (a key label or a client block names the agent; a browser
+ *     session names none);
  *   - a Hootie answer over this nest (POST /nests/:id/chat).
  * Nothing the agent says about itself is trusted to decide this: the row's
- * nest and user are the authenticated facts.
+ * nest and user are the authenticated facts. The onboarding tools themselves
+ * (context_onboarding polls this proof) are not in READ_PROOF_TOOLS, and the
+ * /onboarding REST routes are not traced, so checking never proves itself.
+ * Which agent read is self-reported (`client`); the UI names the tile's agent
+ * only when `client` matches it, and says "An agent read your nest" otherwise.
  */
 export async function connectionEvidence(userId: string, nestId: string, since?: string | null): Promise<ConnectionEvidence> {
   const after = since && !Number.isNaN(Date.parse(since)) ? new Date(Date.parse(since)).toISOString() : "1970-01-01T00:00:00.000Z";
   const placeholders = READ_PROOF_TOOLS.map(() => "?").join(", ");
+  const contentPlaceholders = CONTENT_READ_PATHS.map(() => "?").join(", ");
   const rows = (await getDb().all(
     `SELECT ts, kind, method, path, tool, client_json FROM api_events
       WHERE nest_id = ? AND user_id = ? AND ts >= ? AND status < 400
         AND (
           (kind = 'mcp' AND tool IN (${placeholders}))
           OR (kind = 'api' AND method = 'POST' AND path = ?)
-          OR (kind = 'api' AND client_json IS NOT NULL AND (method = 'GET' OR path = ?))
+          OR (kind = 'api' AND client_json IS NOT NULL AND method = 'GET' AND (path IN (${contentPlaceholders}) OR path LIKE ?))
         )
       ORDER BY ts DESC LIMIT 1`,
-    [nestId, userId, after, ...READ_PROOF_TOOLS, `/nests/${nestId}/chat`, `/nests/${nestId}/context`],
+    [nestId, userId, after, ...READ_PROOF_TOOLS, `/nests/${nestId}/chat`, ...CONTENT_READ_PATHS.map((p) => `/nests/${nestId}/${p}`), `/nests/${nestId}/nodes/%`],
   )) as Array<{ ts: string; kind: string; method: string | null; path: string | null; tool: string | null; client_json: string | null }>;
   const hit = rows[0];
   if (!hit) return { connected: false, at: null, via: null, client: null, tool: null };
