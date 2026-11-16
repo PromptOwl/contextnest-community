@@ -246,6 +246,7 @@ describe("context pull log — public readers and access keys", () => {
   let openDoc: string;
   let draftDoc: string;
   let accessKey: string;
+  let keyNestId: string;
 
   beforeAll(async () => {
     env = setupTestEnv();
@@ -258,13 +259,19 @@ describe("context pull log — public readers and access keys", () => {
     draftDoc = (await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Draft Doc", content: "# Draft\n\nheron private" }, owner.apiKey)).data.node.id;
     const vis = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
     expect(vis.status).toBe(200);
-    await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: true }, owner.apiKey);
-    accessKey = (await jsonRequest(app, "POST", `/nests/${nestId}/headless/keys`, { label: "Partner" }, owner.apiKey)).data.api_key;
+    // Headless publishing is for a private nest: a second one, pulled from too.
+    keyNestId = (await jsonRequest(app, "POST", "/nests", { name: "Partner Pulls" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${keyNestId}/nodes`, { title: "Partner Doc", content: "# Partner\n\nheron" }, owner.apiKey);
+    expect((await jsonRequest(app, "PUT", `/nests/${keyNestId}/headless`, { enabled: true }, owner.apiKey)).status).toBe(200);
+    accessKey = (await jsonRequest(app, "POST", `/nests/${keyNestId}/headless/keys`, { label: "Partner" }, owner.apiKey)).data.api_key;
+    expect(accessKey).toBeTruthy();
 
     resetAccessThrottle();
-    // The owner pulls both documents, then only the draft.
-    await callTool(app, nestId, owner.apiKey, "context_search", { query: "heron", client: { agent: "Owner Agent" } });
-    await callTool(app, nestId, owner.apiKey, "context_get", { id: draftDoc, client: { agent: "Owner Agent" } });
+    // The owner (over REST, which serves members the working copy) pulls both
+    // documents, then opens only the draft.
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/search?q=heron`, undefined, owner.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${draftDoc}`, undefined, owner.apiKey)).status).toBe(200);
+    await callTool(app, keyNestId, owner.apiKey, "context_search", { query: "heron", client: { agent: "Owner Agent" } });
     await flushAccessLog();
   });
 
@@ -273,7 +280,7 @@ describe("context pull log — public readers and access keys", () => {
   it("shows a public reader only the documents they can read, with no person, agent or version", async () => {
     const own = (await pulls(app, nestId, owner.apiKey)).data.pulls;
     expect(own.length).toBe(2);
-    expect(own.find((p: any) => p.tool === "context_search").steps.map((s: any) => s.nodeId).sort()).toEqual([draftDoc, openDoc].sort());
+    expect(own.find((p: any) => p.tool === "search").steps.map((s: any) => s.nodeId).sort()).toEqual([draftDoc, openDoc].sort());
 
     const { status, data } = await pulls(app, nestId, stranger.apiKey);
     expect(status).toBe(200);
@@ -289,9 +296,13 @@ describe("context pull log — public readers and access keys", () => {
   });
 
   it("refuses the route and the tool to a headless access key", async () => {
-    const r = await jsonRequest(app, "GET", `/nests/${nestId}/pulls`, undefined, accessKey);
+    // The key reads its nest…
+    expect((await jsonRequest(app, "GET", `/nests/${keyNestId}/search?q=heron`, undefined, accessKey)).status).toBe(200);
+    // …but not who pulled from it, over REST or MCP.
+    const r = await jsonRequest(app, "GET", `/nests/${keyNestId}/pulls`, undefined, accessKey);
     expect([403, 404]).toContain(r.status);
-    const t = await callTool(app, nestId, accessKey, "context_pull_log", {});
+    const t = await callTool(app, keyNestId, accessKey, "context_pull_log", {});
     expect(t.isError).toBe(true);
+    expect(JSON.stringify(t)).not.toContain("owner@pub.test");
   });
 });

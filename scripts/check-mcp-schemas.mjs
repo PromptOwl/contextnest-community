@@ -57,7 +57,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-const BASELINE = 98;
+//   98->99 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
+//   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
+//   engine op exists.
+const BASELINE = 99;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

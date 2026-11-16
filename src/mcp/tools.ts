@@ -127,7 +127,8 @@ import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
-import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
+import { flushAccessLog, recordNodeAccess, type AccessAction } from "../governance/access-log.js";
+import { describePull, describeStep, getPull, listPulls, pullViewer } from "../governance/pull-log-service.js";
 import {
   clientToolField,
   mergeClient,
@@ -430,6 +431,9 @@ export interface McpToolContext {
    * call by handleToolCall.
    */
   servedVersions?: Map<string, number>;
+  /** Bytes of each document body handed over during this call, filled in
+   *  next to servedVersions — the size the pull replay shows (po-1252). */
+  servedBytes?: Map<string, number>;
   /** Capability of the credential driving this call. 'read' (a read-only key)
    *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
    *  when unset (cookie sessions, unscoped legacy keys, open mode). */
@@ -476,6 +480,7 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_review_queue",
   "context_my_drafts",
   "context_versions",
+  "context_pull_log",
   "context_deletion_queue",
   "context_unsynced_list",
   "context_relations",
@@ -1574,6 +1579,20 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_pull_log",
+    description:
+      "The context pull log: each retrieval made in this nest (context_get, context_search, context_query, context_resolve, REST search / query / context, Hootie), newest first, with the documents it handed over in order — version served, size, and where the server walked the graph, the hop and the document each was reached from. Pass `pull_id` for one pull's full trace. Who pulled (the person and the agent) is shown only to callers with write access or above. Use it to see what context an agent actually got.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        pull_id: { type: "string", description: "One pull's id (from a listing) — returns that pull's trace" },
+        limit: { type: "number", description: "Pulls per page, 1-50 (default 20)" },
+        before: { type: "string", description: "The `nextBefore` cursor from the previous page" },
+        agent: { type: "string", description: "Only pulls made through this agent (case-insensitive)" },
+      },
+    },
+  },
+  {
     name: "context_versions",
     description:
       "Show the version history of a node — all edits, who made them, their approval status, and which version is currently approved for AI use.",
@@ -1778,6 +1797,16 @@ async function resolveLlmBody(
   node: ContextNode,
   gate?: BatchedBodyGate,
 ): Promise<string | null> {
+  const body = await resolveLlmBodyGated(ctx, node, gate);
+  if (body !== null) ctx.servedBytes?.set(node.id, Buffer.byteLength(body, "utf8"));
+  return body;
+}
+
+async function resolveLlmBodyGated(
+  ctx: McpToolContext,
+  node: ContextNode,
+  gate?: BatchedBodyGate,
+): Promise<string | null> {
   // Enforce the SAME per-node access gate as the REST retrieval path. This was
   // missing here — MCP callers bypassed canUserAccess and could read every
   // approved node's body regardless of document/tag/steward scope. Route through
@@ -1915,6 +1944,7 @@ async function resolveOwnDraft(
     return null;
   }
   ctx.servedVersions?.set(node.id, current);
+  ctx.servedBytes?.set(node.id, Buffer.byteLength(node.body || "", "utf8"));
   return {
     body: node.body || "",
     version: current,
@@ -1960,6 +1990,10 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     userEmail: ctx.userEmail,
     client: ctx.client,
     ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
+    ...(ctx.servedBytes?.size ? { sizes: Object.fromEntries(ctx.servedBytes) } : {}),
+    // A get or a search hands over direct hits. context_query walks the graph
+    // in the engine, which reports no per-document hop — left unknown.
+    ...(toolName === "context_query" ? {} : { hops: Object.fromEntries(ids.map((id) => [id, { hop: 0 }])) }),
     detail: toolName,
   });
 }
@@ -1997,7 +2031,7 @@ export async function handleToolCall(
     });
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
-  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map() };
+  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map(), servedBytes: new Map() };
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
@@ -3207,12 +3241,14 @@ async function runTool(
       let total = 0;
       const resolved: string[] = [];
       const handed: string[] = [];
+      const handedBytes: Record<string, number> = {};
       for (const { node: n, body } of resolvedBodies) {
         if (body === null) continue; // not visible / no approved version yet
         const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
         handed.push(n.id);
+        handedBytes[n.id] = Buffer.byteLength(entry, "utf8");
         total += entry.length;
       }
       recordNodeAccess({
@@ -3223,6 +3259,7 @@ async function runTool(
         userId: ctx.userId,
         userEmail,
         client: ctx.client,
+        sizes: handedBytes,
         detail: "context_resolve",
       });
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
@@ -3752,6 +3789,44 @@ async function runTool(
           : `Rows updated in **${node.frontmatter.title}** — ${a.appended} added, ${a.updated} updated, ${a.deleted} deleted; v${r.version}, ${r.state}${r.review_id ? `, review ${r.review_id}` : ""}${r.review_error ? ` (review not submitted: ${r.review_error})` : ""}`,
         data: r,
       };
+    }
+
+    case "context_pull_log": {
+      // Read model over the access log (po-1252) — the same service and the
+      // same who-sees-whom rule as GET /nests/:id/pulls.
+      const viewer = await pullViewer(nestId, userId, userEmail);
+      await flushAccessLog();
+      if (args.pull_id !== undefined) {
+        if (typeof args.pull_id !== "string" || !args.pull_id.trim()) {
+          return toolError("pull_id must be a non-empty string", "VALIDATION_FAILED");
+        }
+        const pull = await getPull({ nestId, viewer, pullId: args.pull_id.trim() });
+        if (!pull) return toolError(`No pull "${args.pull_id}" here that you can see.`, "DOCUMENT_NOT_FOUND");
+        return {
+          text: [describePull(pull), "", ...pull.steps.map(describeStep)].join("\n"),
+          data: { pull },
+        };
+      }
+      if (args.agent !== undefined && (typeof args.agent !== "string" || args.agent.length > 200)) {
+        return toolError("agent must be a string of at most 200 characters", "VALIDATION_FAILED");
+      }
+      if (args.before !== undefined && typeof args.before !== "string") {
+        return toolError("before must be the nextBefore string from a previous page", "VALIDATION_FAILED");
+      }
+      const page = await listPulls({
+        nestId,
+        viewer,
+        limit: args.limit === undefined ? undefined : Number(args.limit),
+        before: args.before,
+        agent: args.agent,
+      });
+      const lines = page.pulls.map(describePull);
+      const head = !page.accessLogEnabled
+        ? "The access log is off for this nest, so no new pulls are recorded."
+        : page.pulls.length
+          ? `${page.pulls.length} pull(s), newest first${page.hasMore ? ` (more: pass before="${page.nextBefore}")` : ""}:`
+          : "No pulls recorded yet.";
+      return { text: [head, ...lines].join("\n"), data: page as unknown as Record<string, unknown> };
     }
 
     case "context_task_log": {

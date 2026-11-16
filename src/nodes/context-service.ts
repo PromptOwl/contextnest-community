@@ -227,6 +227,10 @@ export async function resolveContext(params: {
   const hopSeeds = [
     ...new Map([...documents, ...titleMatches].map((d) => [d.id, d])).values(),
   ];
+  // How each document was reached, for the pull replay (po-1252): hop 0 for a
+  // match, hop N and the document it was reached from for a neighbour. A
+  // document missing here (a prompt's full-text hit) matched directly.
+  const reachedBy = new Map<string, { hop: number; via: string | null }>();
   if (hopSeeds.length > 0 && hops > 0) {
     const byTitle = new Map(
       allDocs.map((d: ContextNode) => [
@@ -269,6 +273,7 @@ export async function resolveContext(params: {
           if (!doc || !isVisible(doc)) continue;
           next.push(nb);
           titleMatches.push(doc);
+          reachedBy.set(nb, { hop: depth + 1, via: id });
         }
       }
       frontier = next;
@@ -381,6 +386,10 @@ export async function resolveContext(params: {
     userEmail,
     client,
     versions: await readableVersions(nestId, userId, included),
+    hops: Object.fromEntries(included.map((n) => [n.id, reachedBy.get(n.id) ?? { hop: 0, via: null }])),
+    sizes: Object.fromEntries(
+      included.map((n) => [n.id, Buffer.byteLength(formatContextBlock(n, n.url), "utf8")]),
+    ),
     detail: "context",
   });
 

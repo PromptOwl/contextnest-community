@@ -14,10 +14,19 @@
  * Kept deliberately cheap, because it sits on the read path:
  *   - fire-and-forget: callers never await it, and a broken table never
  *     fails a read (same contract as the activity trace);
- *   - throttled: the same actor + document + action is recorded at most once
- *     per THROTTLE_MS, so an agent re-reading a doc in a loop is one row;
+ *   - throttled per pull: the same actor + agent + tool handing over the same
+ *     documents at the same versions is recorded at most once per
+ *     THROTTLE_MS, so an agent re-reading a doc in a loop is one row. A
+ *     different pull is recorded whole, even when it repeats a document — the
+ *     Graph view replays pulls, and a pull with holes in it can't be replayed;
  *   - capped: at most MAX_PER_CALL documents per retrieval;
  *   - pruned on the activity trace's retention window.
+ *
+ * Each call is one PULL (po-1252): its rows share a `pull_id`, `seq` is each
+ * document's place in what was handed over, `bytes` its size, and where the
+ * server ran the traversal itself (REST /context, Hootie) `hop` is how many
+ * links from a match it was and `via` the document it was reached from. The
+ * pull log (pull-log-service.ts) reads them back; nothing else stores them.
  *
  * `client` is self-reported attribution (§9.4) — shown, never trusted. Its
  * `agent` is also stored in its own column (migration 050) so an admin can ask
@@ -36,6 +45,7 @@
  * typed: admins read this log, and a search box or a Hootie prompt is not
  * theirs to read.
  */
+import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
@@ -49,13 +59,13 @@ export const MAX_PER_CALL = 50;
 /** Documents recorded per selector export — larger, since each one left. */
 export const MAX_PER_EXPORT = 1000;
 const THROTTLE_MAX_KEYS = 20_000;
-/** Rows per INSERT (11 bound values each — well under SQLite's and
+/** Rows per INSERT (16 bound values each — well under SQLite's and
  *  Postgres's parameter limits). */
 const INSERT_CHUNK = 200;
 const PRUNE_EVERY = 500;
 
 /**
- * Process-wide state: actor|nest|node|action|surface|agent → last recorded at
+ * Process-wide state: a pull's throttle key (see pullKey) → last recorded at
  * (ms), plus in-flight inserts. Held on globalThis so a module re-evaluation
  * (tests re-import the app) still shares one throttle and one flush queue.
  * Bounded: the throttle map is cleared when full.
@@ -85,6 +95,11 @@ export interface AccessEvent {
   /** Record every call, skipping the re-read throttle: each one is a
    *  separate fact (a decision-ledger export, and a failed one). */
   unthrottled?: boolean;
+  /** Where the server ran the traversal: each document's hop depth (0 = it
+   *  matched) and the document it was reached from. Omitted → unknown. */
+  hops?: Record<string, { hop: number; via?: string | null } | undefined>;
+  /** Bytes handed over per document, where the surface knows them. */
+  sizes?: Record<string, number | undefined>;
 }
 
 /** Agent name as stored: the caller's self-reported `client.agent`, bounded. */
@@ -108,21 +123,29 @@ export function liveVersions(
   return Object.fromEntries(nodes.map((n) => [n.id, Number(n.frontmatter.version) || 1]));
 }
 
-function throttleKey(actor: string, e: AccessEvent, nodeId: string | null): string {
-  return `${actor}|${e.nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agentOf(e) ?? ""}|${versionOf(e, nodeId) ?? ""}`;
+function hopOf(e: AccessEvent, nodeId: string | null): { hop: number; via: string | null } | null {
+  const h = nodeId ? e.hops?.[nodeId] : undefined;
+  if (!h || !Number.isInteger(h.hop) || h.hop < 0) return null;
+  return { hop: h.hop, via: typeof h.via === "string" && h.via ? h.via : null };
 }
 
-/** A different surface, agent or version is a different fact ("hootie read
- *  v3" is not "alice opened v4"), so all three are part of the throttle key. */
-function admit(
-  actor: string,
-  nestId: string,
-  nodeId: string | null,
-  e: AccessEvent,
-  now: number,
-) {
+function sizeOf(e: AccessEvent, nodeId: string | null): number | null {
+  const b = nodeId ? e.sizes?.[nodeId] : undefined;
+  return typeof b === "number" && Number.isFinite(b) && b >= 0 ? Math.round(b) : null;
+}
+
+/** One pull's throttle key: who, through which agent and tool, and exactly
+ *  which documents at which versions, in order. A different surface, agent,
+ *  tool, document set or version is a different fact ("hootie read v3" is not
+ *  "alice opened v4"). Hashed so a 50-document pull is a short key. */
+function pullKey(actor: string, e: AccessEvent, targets: Array<string | null>): string {
+  const docs = targets.map((id) => `${id ?? "*"}@${versionOf(e, id) ?? ""}`).join(",");
+  const raw = `${actor}|${e.nestId}|${e.action}|${e.surface}|${agentOf(e) ?? ""}|${e.detail ?? ""}|${docs}`;
+  return createHash("sha1").update(raw).digest("base64");
+}
+
+function admit(key: string, e: AccessEvent, now: number) {
   if (e.unthrottled) return true;
-  const key = throttleKey(actor, { ...e, nestId }, nodeId);
   const prev = lastSeen.get(key);
   if (prev !== undefined && now - prev < THROTTLE_MS) return false;
   // Evict the oldest tenth rather than clearing: a full clear re-records
@@ -141,10 +164,10 @@ function admit(
   return true;
 }
 
-/** Undo admit() for keys whose insert failed, so the next access is retried
- *  rather than suppressed for the whole window. */
-function release(actor: string, e: AccessEvent, targets: Array<string | null>) {
-  for (const nodeId of targets) lastSeen.delete(throttleKey(actor, e, nodeId));
+/** Undo admit() for a pull whose insert failed, so the next access is
+ *  retried rather than suppressed for the whole window. */
+function release(key: string) {
+  lastSeen.delete(key);
 }
 
 /**
@@ -180,12 +203,12 @@ export function forgetAccessLogSetting(nestId?: string): void {
   else settingCache.clear();
 }
 
-async function write(e: AccessEvent, targets: Array<string | null>, actor: string): Promise<void> {
+async function write(e: AccessEvent, targets: Array<string | null>, key: string): Promise<void> {
   try {
     if (!(await readAccessLogSetting(e.nestId))) {
       // Turned off for this nest: record nothing, and don't let the throttle
       // remember a read that was never written.
-      release(actor, e, targets);
+      release(key);
       return;
     }
     const db = getDb();
@@ -195,27 +218,37 @@ async function write(e: AccessEvent, targets: Array<string | null>, actor: strin
     // on an indexed column. The original spelling stays in client_json.
     const agent = agentOf(e)?.toLowerCase() ?? null;
     const detail = e.detail ? e.detail.slice(0, 200) : null;
+    const pullId = randomUUID();
     // One multi-row INSERT per chunk, not one per document: a 50-hit search
     // is one statement, so the cost of recording doesn't grow with the page.
     for (let i = 0; i < targets.length; i += INSERT_CHUNK) {
       const chunk = targets.slice(i, i + INSERT_CHUNK);
       await db.run(
         `INSERT INTO node_access_events
-           (ts, nest_id, node_id, action, surface, user_id, user_email, client_json, detail, version, agent)
-         VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
-        chunk.flatMap((nodeId) => [
-          ts,
-          e.nestId,
-          nodeId,
-          e.action,
-          e.surface,
-          e.userId ?? null,
-          e.userEmail ?? null,
-          client,
-          detail,
-          versionOf(e, nodeId),
-          agent,
-        ]),
+           (ts, nest_id, node_id, action, surface, user_id, user_email, client_json, detail, version, agent,
+            pull_id, seq, hop, via, bytes)
+         VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
+        chunk.flatMap((nodeId, j) => {
+          const h = hopOf(e, nodeId);
+          return [
+            ts,
+            e.nestId,
+            nodeId,
+            e.action,
+            e.surface,
+            e.userId ?? null,
+            e.userEmail ?? null,
+            client,
+            detail,
+            versionOf(e, nodeId),
+            agent,
+            pullId,
+            i + j,
+            h?.hop ?? null,
+            h?.via ?? null,
+            sizeOf(e, nodeId),
+          ];
+        }),
       );
     }
     insertsSincePrune += targets.length;
@@ -230,7 +263,7 @@ async function write(e: AccessEvent, targets: Array<string | null>, actor: strin
   } catch {
     // Recording access must never break a read — but a failed insert must
     // not silence this actor for the rest of the window either.
-    release(actor, e, targets);
+    release(key);
   }
 }
 
@@ -250,9 +283,10 @@ export function recordNodeAccess(e: AccessEvent): void {
           0,
           e.action === "export" ? MAX_PER_EXPORT : MAX_PER_CALL,
         );
-    const targets = ids.filter((id) => admit(actor, e.nestId, id, e, now));
-    if (!targets.length) return;
-    const p = write(e, targets, actor);
+    if (!ids.length) return;
+    const key = pullKey(actor, e, ids);
+    if (!admit(key, e, now)) return;
+    const p = write(e, ids, key);
     pending.add(p);
     void p.finally(() => pending.delete(p));
   } catch {
