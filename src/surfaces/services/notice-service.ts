@@ -37,7 +37,10 @@ export async function postEnableNotice(bindingId: string): Promise<boolean> {
   const claim = await getDb().run("UPDATE surface_bindings SET notice_posted_at = ? WHERE id = ? AND notice_posted_at IS NULL", [new Date().toISOString(), b.id]);
   if (claim.changes === 0) return false;
   try {
-    const ttl = (await getSettings().catch(() => DEFAULT_SETTINGS)).buffer_ttl_hours;
+    // The retention is a privacy claim: if the settings can't be read, post
+    // nothing now (the claim is released below, as when Slack refuses) rather
+    // than state a default that may not hold here.
+    const ttl = (await getSettings()).buffer_ttl_hours;
     await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl));
     return true;
   } catch {
