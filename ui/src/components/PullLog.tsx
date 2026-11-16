@@ -5,7 +5,7 @@
  */
 import { ArrowLeft, ExternalLink, FileText, Loader2, RefreshCw, RotateCcw, Route, Search } from "lucide-react";
 import type { ContextPull, PullStep } from "../lib/api";
-import { formatBytes, pullTitle, relativeTime, stepHowLabel, toolLabel } from "../lib/pull-replay";
+import { formatBytes, pullTitle, relativeTime, sizeBasis, stepHowLabel, toolLabel } from "../lib/pull-replay";
 import { cn } from "@/lib/utils";
 
 function ToolIcon({ tool, className }: { tool: string | null; className?: string }) {
@@ -213,12 +213,12 @@ export function PullTrace({
         <dl className="grid grid-cols-3 gap-px overflow-hidden rounded-md border border-border bg-border text-center">
           {(
             [
-              ["Documents", String(pull.documents)],
-              ["Size", formatBytes(pull.bytes)],
-              ["Depth", pull.maxHop == null ? "—" : pull.maxHop === 0 ? "Direct" : `${pull.maxHop} hop${pull.maxHop === 1 ? "" : "s"}`],
+              ["Documents", String(pull.documents), undefined],
+              ["Size", formatBytes(pull.bytes), sizeBasis(pull.tool)],
+              ["Depth", pull.maxHop == null ? "—" : pull.maxHop === 0 ? "Direct" : `${pull.maxHop} hop${pull.maxHop === 1 ? "" : "s"}`, undefined],
             ] as const
-          ).map(([k, v]) => (
-            <div key={k} className="bg-card px-2 py-1.5">
+          ).map(([k, v, hint]) => (
+            <div key={k} className="bg-card px-2 py-1.5" title={hint}>
               <dt className="text-[11px] text-muted-foreground">{k}</dt>
               <dd className="text-sm font-medium tabular-nums">{v}</dd>
             </div>

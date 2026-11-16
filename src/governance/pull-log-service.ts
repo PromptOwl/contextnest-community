@@ -138,16 +138,26 @@ const groupKey = (r: Row) =>
 
 const num = (v: unknown): number | null => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
+/** Titles for one request, loaded at most once however many slices it builds. */
+type TitleSource = () => Promise<Map<string, string>>;
+
+function titleSource(nestId: string, viewer: PullViewer): TitleSource {
+  let titles: Promise<Map<string, string>> | null = null;
+  return () => (titles ??= viewer.publicReader ? Promise.resolve(new Map()) : buildTitleMap(nestId));
+}
+
 async function build(
   nestId: string,
   viewer: PullViewer,
   groups: Row[][],
+  titlesOf: TitleSource = titleSource(nestId, viewer),
 ): Promise<Pull[]> {
   const ids = [...new Set(groups.flatMap((g) => g.map((r) => r.node_id)))];
   const readable = new Set(
     (await filterAccessible(nestId, viewer.userId, viewer.userEmail, ids.map((id) => ({ id })))).map((n) => n.id),
   );
-  const titles = viewer.publicReader ? new Map<string, string>() : await buildTitleMap(nestId);
+  if (!readable.size) return [];
+  const titles = await titlesOf();
   const pulls: Pull[] = [];
   for (const rows of groups) {
     // Payload order where recorded; insertion order otherwise.
@@ -219,6 +229,7 @@ export async function listPulls(params: {
   // one below can be left to the next page.
   const window = Math.min((limit + 1) * MAX_PER_CALL, MAX_ROWS);
   const pulls: Pull[] = [];
+  const titlesOf = titleSource(nestId, viewer);
   let cursor = before;
   let hasMore = false;
   let lastMin: number | null = null;
@@ -257,7 +268,7 @@ export async function listPulls(params: {
     while (consumed < ordered.length && pulls.length < limit) {
       const slice = ordered.slice(consumed, consumed + (limit - pulls.length));
       consumed += slice.length;
-      pulls.push(...(await build(nestId, viewer, slice)));
+      pulls.push(...(await build(nestId, viewer, slice, titlesOf)));
       lastMin = Math.min(...slice.flatMap((g) => g.map((r) => Number(r.id))));
     }
     hasMore = consumed < ordered.length || windowFull;
@@ -313,10 +324,12 @@ export async function getPull(params: { nestId: string; viewer: PullViewer; pull
 
 /** Plain-text summary for MCP prose. */
 export function describePull(p: Pull): string {
-  const who = p.agent ? `${p.agent}${p.actor ? ` (${p.actor})` : ""}` : p.actor ?? "someone";
+  const name = p.agent ? `${p.agent}${p.actor ? ` (${p.actor})` : ""}` : p.actor;
+  // Without identities there is no one to name — say what was pulled, not "by someone".
+  const who = name ? ` by ${name}` : "";
   const size = p.bytes != null ? `, ${formatBytes(p.bytes)}` : "";
   const hops = p.maxHop != null && p.maxHop > 0 ? `, ${p.maxHop} hop${p.maxHop === 1 ? "" : "s"}` : "";
-  return `${p.at} — ${p.tool ?? p.action} by ${who}: ${p.documents} document${p.documents === 1 ? "" : "s"}${size}${hops} [pull_id ${p.id}]`;
+  return `${p.at} — ${p.tool ?? p.action}${who}: ${p.documents} document${p.documents === 1 ? "" : "s"}${size}${hops} [pull_id ${p.id}]`;
 }
 
 export function describeStep(s: PullStep): string {

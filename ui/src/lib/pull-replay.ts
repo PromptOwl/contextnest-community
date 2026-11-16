@@ -93,6 +93,14 @@ export function toolLabel(tool: string | null, action: "read" | "retrieve"): str
   return action === "read" ? "Opened" : "Retrieved";
 }
 
+/** What a pull's size measures, per tool — the surfaces hand over different
+ *  things (API.md, pull log "Steps"), so the panel says which. */
+export function sizeBasis(tool: string | null): string {
+  if (tool === "context") return "Size of the compiled context blocks handed over (header, link and body).";
+  if (tool === "context_resolve") return "Size of the title and body entries handed over.";
+  return "Size of the document bodies handed over.";
+}
+
 export function pullTitle(p: {
   agent: string | null;
   actor: string | null;

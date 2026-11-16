@@ -6,6 +6,7 @@ import {
   toolLabel,
   formatBytes,
   stepHowLabel,
+  sizeBasis,
   type PullLike,
 } from "./pull-replay";
 
@@ -102,5 +103,14 @@ describe("labels", () => {
     expect(stepHowLabel(step("b", 1, { hop: 1, via: "a" }), title)).toBe("Hop 1 via Returns Policy");
     expect(stepHowLabel(step("b", 1, { hop: 2 }), title)).toBe("Hop 2");
     expect(stepHowLabel(step("b", 1), title)).toBeNull();
+  });
+});
+
+describe("sizeBasis — what a pull's size measures", () => {
+  it("names the basis of each surface", () => {
+    expect(sizeBasis("context")).toMatch(/compiled context blocks/);
+    expect(sizeBasis("context_resolve")).toMatch(/title and body/);
+    expect(sizeBasis("context_get")).toMatch(/document bodies/);
+    expect(sizeBasis(null)).toMatch(/document bodies/);
   });
 });
