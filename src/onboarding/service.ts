@@ -143,7 +143,10 @@ export async function slackState(userId: string, nestId: string | null): Promise
   if (nestId && surfacesEnabled()) {
     connected = !!(await getDb()
       .get("SELECT 1 AS x FROM surface_installs WHERE surface = 'slack' AND home_nest_id = ? AND status = 'active'", [nestId])
-      .catch(() => undefined));
+      .catch((err) => {
+        console.warn("[onboarding] Slack install lookup failed", err);
+        return undefined;
+      }));
   }
   const selfServe = configured && config.SURFACES_SLACK_SELF_SERVE;
   const canConnect = configured && (selfServe || admin) && !!nestId;

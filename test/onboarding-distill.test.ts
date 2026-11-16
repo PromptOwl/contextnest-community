@@ -323,6 +323,12 @@ describe("stripActiveMarkdown keeps text that only looks like a tag", () => {
     const out = stripActiveMarkdown('Hi <img src="<x>" onerror=alert(1)> there, and List<string, then <img src=y onerror=alert(2)>');
     expect(out).not.toMatch(/<img/i);
   });
+
+  it("stays fast on a model body full of unclosed tags (no ReDoS)", () => {
+    const t = Date.now();
+    for (const unit of ["<x a=", "<a ", "](a"]) boundNodes({ nodes: [{ title: "T", type: "overview", tags: [], body: unit.repeat(20_000) }] }, "u");
+    expect(Date.now() - t).toBeLessThan(2_000);
+  });
 });
 
 describe("chunkSource and boundNodes", () => {

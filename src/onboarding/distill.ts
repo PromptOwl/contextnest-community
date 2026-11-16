@@ -349,8 +349,9 @@ async function fetchSite(fetchImpl: FetchLike, start: URL): Promise<SourceDoc> {
       }
       const text = htmlToText(await textOf(got.res)).text;
       if (text.length > 200) sections.push({ locator: got.url.toString(), text });
-    } catch {
+    } catch (err) {
       // One bad link does not fail the distill.
+      console.warn(`[distill] skipped ${page.host}${page.pathname.slice(0, 80)}: ${err instanceof Error ? err.message : err}`);
     }
   }
   return { title: first.title || url.hostname, kind: "site", url: url.toString(), sections };
@@ -512,9 +513,10 @@ export async function ensureOntology(nestId: string, userId: string, userEmail: 
   const text = bundledOntology();
   try {
     await createNode(nestId, { id, title: ONTOLOGY_TITLE, content: text, tags: ["#distill", "#ontology"] }, userEmail, { notifyMentions: false });
-  } catch {
+  } catch (err) {
     // A race with another distill, or a nest that refuses the write: the
     // bundled default still runs this job.
+    console.warn(`[distill] ontology not saved in nest ${nestId}: ${err instanceof Error ? err.message : err}`);
   }
   return { id, text };
 }
@@ -616,7 +618,8 @@ const LINK_DEFINITION = /^ {0,3}\[[^\]\n]+\]:[ \t]*\n?[ \t]*(\S+)[^\n]*$/gm;
 /** An HTML element tag, open or close: removed up to its first `>` (a quoted `<` inside does not save it). */
 const HTML_TAG = new RegExp(`<\\/?(?:${[...HTML_ELEMENTS].join("|")})(?=[\\s/>])[^>]*>`, "gi");
 /** Any other tag-shaped run that carries attributes (`<x-y onclick=…>`). */
-const ATTR_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*\s[^>]*=[^>]*>/g;
+// `[^>=]*` before the `=`: one way to match, so a run with no `>` is not cubic.
+const ATTR_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*\s[^>=]*=[^>]*>/g;
 /** An autolink `<scheme:…>`. */
 const AUTOLINK = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/g;
 
@@ -675,7 +678,8 @@ export function boundNodes(raw: Record<string, unknown> | null, provenance: stri
     if (!item || typeof item !== "object") continue;
     const n = item as Record<string, unknown>;
     const title = typeof n.title === "string" ? n.title.replace(/[\r\n]+/g, " ").replace(/[#[\]<>]/g, "").replace(/\s+/g, " ").trim().slice(0, MAX_TITLE) : "";
-    const body = typeof n.body === "string" ? stripActiveMarkdown(n.body).trim().slice(0, MAX_BODY) : "";
+    // Cut first: the strip regexes are quadratic on a tag with no `>`.
+    const body = typeof n.body === "string" ? stripActiveMarkdown(n.body.slice(0, MAX_BODY)).trim() : "";
     if (!title || !body || titles.has(title.toLowerCase())) continue;
     let type = typeof n.type === "string" ? n.type.toLowerCase().trim() : "component";
     if (!NODE_TYPES.has(type)) type = "component";
@@ -984,6 +988,6 @@ async function runJob(
           ? "The model is rate limited. Try again in a few minutes."
           : "The distill failed. Try again, or use the prompt with your own agent.";
     if (!(err instanceof AppError)) console.error(`[distill] ${id} failed`, err instanceof Error ? err.message : err);
-    await update(id, { status: "failed", phase: "failed", error: message }).catch(() => {});
+    await update(id, { status: "failed", phase: "failed", error: message }).catch((e) => console.error(`[distill] ${id}: could not record the failure`, e));
   }
 }
