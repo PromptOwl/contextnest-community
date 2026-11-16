@@ -30,7 +30,7 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
@@ -715,6 +715,33 @@ export default function App() {
     }
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
+
+  // A deep link followed while signed out (PO-1391). A private nest does not
+  // resolve for a stranger, so the probe ends "unreachable", the effect above
+  // drops the link from the address bar and the sign-in form shows. When the
+  // person then signs in, put the link back and probe again as them: they land
+  // on the nest or document they were sent, not on Home (the nest list or the
+  // first-run welcome screen) or a "no access" page. Declared after the URL
+  // sync so its address is the one left standing.
+  const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
+  const wasSignedInRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = authenticated;
+    const link = deepLinkToRetryAfterSignIn({
+      probeStatus: deepLinkProbe.status,
+      entryLink: entryLinkRef.current,
+      wasSignedIn,
+      signedIn: authenticated,
+    });
+    if (!link) return;
+    // Once: a second sign-in in this tab (another account) starts from Home.
+    entryLinkRef.current = null;
+    window.history.replaceState(window.history.state, "", link);
+    setDeepLinkProbe({ status: "loading" });
+    // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
+  }, [authenticated, loading]);
 
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the

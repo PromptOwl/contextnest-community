@@ -49,6 +49,7 @@ jobs:
       CN_EXPECT_CONTROL_ROOM: '1'
       CN_EXPECT_STREAM_FEED: '1'
       CN_EXPECT_NEST_HOME: '1'
+      CN_EXPECT_INVITED_ONBOARDING: '1'
 
     steps:
       - name: Checkout code
