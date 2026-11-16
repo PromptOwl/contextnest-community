@@ -254,6 +254,8 @@ describe("binding a channel: the one notice links the member explainer", () => {
     const before = slack.posted.length;
     const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_OPS", nest_id: N }, root.apiKey);
     expect(b.status).toBe(201);
+    // The create response says whether the one notice went out.
+    expect(b.data.notice_posted).toBe(true);
     const notices = slack.posted.slice(before).filter((p) => p.channel === "C_OPS");
     expect(notices.length).toBe(1);
     expect(notices[0].text).toMatch(/^Nest is now listening here/);

@@ -138,9 +138,11 @@ export async function createBindingWithListener(input: Omit<BindInput, "listener
   const u = (await getDb().get("SELECT email FROM users WHERE id = ?", [input.actorUserId])) as { email?: string } | undefined;
   if (u?.email) await ensureListener(out.binding.id, u.email);
   const { postEnableNotice } = await import("./notice-service.js");
-  await postEnableNotice(out.binding.id);
+  // po-1186 CR3: say whether the one notice went out, so a binding listening
+  // without its disclosure is visible to the admin who created it.
+  const notice_posted = await postEnableNotice(out.binding.id);
   const row = await getBindingRow(out.binding.id);
-  return { ...out, binding: row ? await bindingView(row) : out.binding };
+  return { ...out, binding: row ? await bindingView(row) : out.binding, notice_posted };
 }
 
 /** Remove a removed binding's listener agent and untie it from the row. */

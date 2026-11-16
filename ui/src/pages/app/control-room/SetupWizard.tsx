@@ -622,11 +622,15 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
   const [channels, setChannels] = useState<SurfacesChannel[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const { viewFor } = usePreviews(state);
 
+  // One request at a time: "Check again" is disabled while a list is loading,
+  // so repeated clicks can't stack up Slack calls.
   const load = useCallback(async () => {
     if (!inst || inst.status !== "active") return;
     setErr(null);
+    setLoading(true);
     try {
       const r = await listSlackChannels(inst.id);
       setChannels(r.channels);
@@ -634,6 +638,8 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
     } catch (e) {
       setErr(errText(e, "Couldn't list the channels."));
       setChannels([]);
+    } finally {
+      setLoading(false);
     }
   }, [inst]);
   useEffect(() => {
@@ -667,7 +673,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
           <p className="mx-auto max-w-md text-muted-foreground">
             Nest isn't in any channel yet. In Slack, open a channel, type <code className="rounded bg-muted px-1">/invite</code> and pick Nest. It can only listen where it was added.
           </p>
-          <Button variant="outline" className="mt-3" onClick={load}>
+          <Button variant="outline" className="mt-3" onClick={load} disabled={loading}>
             <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
             Check again
           </Button>
@@ -1050,6 +1056,7 @@ function StarterStep({ state, back, next }: { state: SetupState; back: () => voi
 function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: () => void; onDone: () => void; onHow: () => void }) {
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [unnoticed, setUnnoticed] = useState<string[]>([]);
   const views = usePreviews(state).byChannel();
   const toBind = state.picks.filter((p) => p.on && !state.bindings.some((b) => b.conversation_id === p.channelId) && views[p.channelId] && !unresolved([p], views).length);
   const listening = state.progress.done[4];
@@ -1062,14 +1069,17 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
     if (!state.install) return;
     setBusy(true);
     const failed: string[] = [];
+    const silent: string[] = [];
     for (const p of toBind) {
       try {
-        await createSurfacesBinding({ install_id: state.install.id, conversation_id: p.channelId, nest_id: p.nestId, ext_capture_enabled: !!p.extCapture });
+        const r = await createSurfacesBinding({ install_id: state.install.id, conversation_id: p.channelId, nest_id: p.nestId, ext_capture_enabled: !!p.extCapture });
+        if (r.notice_posted === false) silent.push(`#${p.channelName}`);
       } catch (e) {
         failed.push(`#${p.channelName}: ${errText(e, "couldn't turn on")}`);
       }
     }
     setErrors(failed);
+    setUnnoticed(silent);
     await state.reload();
     state.setPicks((ps) => ps.filter((p) => failed.some((f) => f.startsWith(`#${p.channelName}:`))));
     setBusy(false);
@@ -1085,7 +1095,7 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
         <div className="mb-2 text-muted-foreground">
           {toBind.length ? `Notice posted to ${toBind.map((p) => `#${p.channelName}`).join(", ")}` : "The notice each channel gets"}
         </div>
-        {noticeParagraphs(noticeNest).map((t, i) => (
+        {noticeParagraphs(noticeNest, state.settings?.buffer_ttl_hours ?? DEFAULT_SETTINGS_COPY.buffer_ttl_hours).map((t, i) => (
           <p key={i} className={cn("leading-relaxed", i < 2 && "mb-2")}>
             {i === 0 ? (
               <>
@@ -1104,6 +1114,13 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
           </a>
         </p>
       </div>
+      {unnoticed.length > 0 && (
+        <div className="mt-4">
+          <Note tone="bad" testId="setup-notice-missing">
+            <b>The notice wasn't posted in {unnoticed.join(", ")}.</b> Nest is listening there, but members haven&apos;t been told yet. Remove the channel and turn it on again to retry the notice.
+          </Note>
+        </div>
+      )}
       {errors.length > 0 && (
         <div className="mt-4">
           <Note tone="bad">
