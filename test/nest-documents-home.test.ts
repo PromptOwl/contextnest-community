@@ -156,6 +156,10 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     );
     const v = await getVersionAttribution(nestId, id, 3);
     expect(v).toMatchObject({ version: 2, editedBy: "owner@home.test", client: { agent: "deal-desk" } });
+    // No version asked: the bump on top is still not the latest edit.
+    expect(await getVersionAttribution(nestId, id)).toMatchObject({ version: 2, client: { agent: "deal-desk" } });
+    // A real version asked: exactly that edit.
+    expect(await getVersionAttribution(nestId, id, 1)).toMatchObject({ version: 1, client: { agent: "mkt-amplifier" } });
     await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 3`, [nestId, id]);
   });
 
@@ -190,7 +194,21 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
       [nestId, "a", "b", "system:auto-publish:%"],
     )) as Array<{ detail: string }>;
     const details = plan.map((p) => p.detail).join(" | ");
-    expect(details).toMatch(/USING (COVERING )?INDEX/);
+    expect(details).toMatch(/USING (COVERING )?INDEX \S+ \(nest_id=\? AND node_id=\?/);
+    expect(details).not.toMatch(/SCAN node_versions$/m);
+  });
+
+  it("Given the per-node upper bound (the approved-version read), then SQLite still answers it from the index", async () => {
+    const plan = (await getDb().all(
+      `EXPLAIN QUERY PLAN
+       SELECT node_id, MAX(version) AS v FROM node_versions
+        WHERE nest_id = ? AND node_id IN (?, ?) AND ((node_id = ? AND version <= ?) OR (node_id = ? AND version <= ?))
+          AND author NOT LIKE ?
+        GROUP BY node_id`,
+      [nestId, "a", "b", "a", 1, "b", 2, "system:auto-publish:%"],
+    )) as Array<{ detail: string }>;
+    const details = plan.map((p) => p.detail).join(" | ");
+    expect(details).toMatch(/USING (COVERING )?INDEX \S+ \(nest_id=\? AND node_id=\?/);
     expect(details).not.toMatch(/SCAN node_versions$/m);
   });
 

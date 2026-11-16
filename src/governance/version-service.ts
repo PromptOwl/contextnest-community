@@ -219,14 +219,17 @@ export async function getLatestVersionAttributions(
 ): Promise<Map<string, DocumentVersion>> {
   const out = new Map<string, DocumentVersion>();
   const ids = upTo ? nodeIds.filter((id) => upTo.has(id)) : nodeIds;
-  // Two binds per id when bounded; either way well under SQLite's limit.
+  // Three binds per id when bounded; either way under SQLite's old 999 cap.
   const CHUNK = upTo ? 250 : 500;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
+    // The IN list is what lets the planner seek (nest_id, node_id) per node;
+    // the bound alone (an OR chain) only narrows to the nest.
+    const inList = `node_id IN (${chunk.map(() => "?").join(",")})`;
     const match = upTo
-      ? `(${chunk.map(() => "(node_id = ? AND version <= ?)").join(" OR ")})`
-      : `node_id IN (${chunk.map(() => "?").join(",")})`;
-    const matchArgs = upTo ? chunk.flatMap((id) => [id, upTo.get(id)!]) : chunk;
+      ? `${inList} AND (${chunk.map(() => "(node_id = ? AND version <= ?)").join(" OR ")})`
+      : inList;
+    const matchArgs = upTo ? [...chunk, ...chunk.flatMap((id) => [id, upTo.get(id)!])] : chunk;
     const rows = (await getDb().all(
       `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
               nv.client_json, sa.name AS system_name
