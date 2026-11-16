@@ -59,9 +59,8 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
 //   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
 //   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
-//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
-//   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
-//   100->103 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   (context_stream, po-1214, takes its schema from zod via mcpInputSchema since po-1375: no literal, no bump.)
+//   99->102 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
 //   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
 //   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
 //     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
@@ -72,7 +71,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
-const BASELINE = 103;
+const BASELINE = 102;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

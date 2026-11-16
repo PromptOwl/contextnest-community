@@ -256,9 +256,28 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /** The change note the server writes when it publishes a write itself
- *  ("Auto-published on create (<reason>)"). The document stream reads the
- *  prefix to tell this stamp from a note a person wrote (po-1214). */
+ *  ("Auto-published on create (<reason>)"). Both stamp sites build it with
+ *  autoPublishNote, and the document stream tells it from a note a person
+ *  wrote with isAutoPublishStamp (po-1214, po-1375). */
 export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
+
+export function autoPublishNote(on: "create" | "edit", reason: string): string {
+  return `${AUTO_PUBLISH_NOTE_PREFIX}${on} (${reason})`;
+}
+
+/**
+ * Is this change note the server's own stamp? The whole note must have the
+ * stamp's shape — "Auto-published on create|edit (<reason>)" and nothing
+ * after it — not just the prefix, so a person's "Auto-published on Tuesday
+ * after the sync" stays theirs. The reason is not matched against today's
+ * list: stamps stored before the reasons were reworded ("no stewards",
+ * 2026-07) are stamps too. The version row's author cannot tell the two
+ * apart: the stamp is stored under the editor's own email.
+ */
+const AUTO_PUBLISH_STAMP = new RegExp(`^${AUTO_PUBLISH_NOTE_PREFIX}(create|edit) \\([^()\\n]+\\)$`);
+export function isAutoPublishStamp(note: string): boolean {
+  return AUTO_PUBLISH_STAMP.test(note.trim());
+}
 
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
@@ -2320,7 +2339,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
+          : autoPublishNote("create", publishReason);
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -3347,7 +3366,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
+          patch.changeNote || autoPublishNote("edit", publishReason);
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

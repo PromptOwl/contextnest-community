@@ -55,7 +55,7 @@ import {
   createNest,
 } from "../nests/service.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
+import { isSuspended, getSuspensionReason, getOfflineLock, getCurrentLicense } from "../auth/license.js";
 import {
   handleToolCall,
   normalizeSearchLimit,
@@ -99,6 +99,26 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_task_log",
   "context_bulk_update",
 ]);
+
+// Server-level reads REST licenses even on GET (the nestsApp gate's
+// isGovernance list and GET /me/stream): version history. The per-nest
+// /nests/:id/mcp is a POST behind that gate already; this route is not.
+const SERVER_LICENSED_READ_TOOLS = new Set<string>([STREAM_TOOL, "context_versions"]);
+
+/** Why a gated call is refused, worded for who asked: only an admin hears
+ *  the reason (suspension, offline lock, license), like REST's readOnlyDenial. */
+async function readOnlyMessage(userId: string, blocked = "writes are blocked"): Promise<string> {
+  if (!(await canSeeLicenseDetail(userId))) return NEUTRAL_READ_ONLY;
+  if (isSuspended()) {
+    const reason = getSuspensionReason();
+    return `This server is suspended by PromptOwl; ${blocked}${
+      reason ? ` — ${reason}` : ""
+    }. Contact support@promptowl.ai.`;
+  }
+  const offlineSince = getOfflineLock();
+  if (offlineSince) return offlineLockMessage(offlineSince);
+  return FREE_TIER_EXCEEDED_MESSAGE;
+}
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
 // across ALL accessible nests. Tools that need an exact target (get, resolve, comments)
@@ -464,18 +484,14 @@ async function handleServerToolCall(
   // Kill-switch + license gate for writes — parity with per-nest write path
   // (both ask writesAllowed, so the Free tier applies here too).
   if (SERVER_WRITE_TOOLS.has(toolName) && !(await writesAllowed())) {
-    if (!(await canSeeLicenseDetail(userId))) {
-      return NEUTRAL_READ_ONLY;
-    }
-    if (isSuspended()) {
-      const reason = getSuspensionReason();
-      return `This server is suspended by PromptOwl; writes are blocked${
-        reason ? ` — ${reason}` : ""
-      }. Contact support@promptowl.ai.`;
-    }
-    const offlineSince = getOfflineLock();
-    if (offlineSince) return offlineLockMessage(offlineSince);
-    return FREE_TIER_EXCEEDED_MESSAGE;
+    return readOnlyMessage(userId);
+  }
+  // Licensed reads (po-1375): version history is a governance view REST
+  // licenses even on GET — GET /me/stream and GET …/versions answer 503 via
+  // readOnlyDenial when the license is not valid and writes are not allowed
+  // (past the Free tier, suspended, or offline-locked). Same condition here.
+  if (SERVER_LICENSED_READ_TOOLS.has(toolName) && !getCurrentLicense()?.valid && !(await writesAllowed())) {
+    return readOnlyMessage(userId, "version history is unavailable");
   }
 
   if (ONBOARDING_TOOL_NAMES.has(toolName)) {

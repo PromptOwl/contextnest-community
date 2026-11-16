@@ -2,14 +2,37 @@
  * `context_stream` (po-1214): the document stream for agents, at parity with
  * GET /me/stream — the same reader (streamForCaller), so the same nests, the
  * same access filter and the same attribution. Prose for chat clients, the
- * REST page as `structuredContent`.
+ * REST page as `structuredContent`. The same license rule too: REST's 503
+ * (readOnlyDenial) is the nest gate on the per-nest MCP and the licensed-read
+ * gate on the server-level one (server-routes.ts, po-1375).
  */
+import { z } from "zod";
 import { config } from "../config.js";
 import { streamForCaller } from "../governance/stream-read.js";
 import { STREAM_MAX_LIMIT, STREAM_MAX_OFFSET, type StreamItem } from "../governance/stream-service.js";
 import type { ToolResult } from "./tools.js";
 
 export const STREAM_TOOL = "context_stream";
+
+/**
+ * The tool's input. Its MCP JSON schema is generated from this
+ * (mcpInputSchema in tools.ts), so src/mcp/ carries no inline schema literal
+ * for it (lint:mcp-schemas, CLAUDE.md rule 5). It describes the arguments;
+ * streamToolResult still validates them, with REST's messages: limit/offset
+ * must be whole numbers in range, and author/tag/type also take an array.
+ */
+export const StreamToolInput = z.object({
+  since: z.string().optional().describe("Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)."),
+  source: z
+    .enum(["agent", "human"])
+    .optional()
+    .describe('"agent" for versions written through an agent, "human" for the rest. Omit for both.'),
+  author: z.string().optional().describe("Only versions by this email. Comma-separate several (any of them)."),
+  tag: z.string().optional().describe("Only documents carrying this tag. Comma-separate several (any of them)."),
+  type: z.string().optional().describe("Only documents of this type. Comma-separate several (any of them)."),
+  limit: z.number().optional().describe("Posts to return, 1-100 (default 25)."),
+  offset: z.number().optional().describe("Skip this many posts (paging)."),
+});
 
 /** Advertised and served only while the experimental switch is on. */
 export function streamToolEnabled(): boolean {

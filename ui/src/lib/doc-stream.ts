@@ -153,3 +153,62 @@ export function newPostCount(shown: StreamItem[], since: string | undefined, tot
   const already = shown.filter((i) => i.at >= since).length;
   return Math.max(0, total - already);
 }
+
+export interface NewPostsPollOptions {
+  /** The newest shown post's `at`: the poll counts versions at or after it. */
+  newest: string;
+  /** The posts shown now. Read at each tick, never captured, so a local
+   *  patch (a reply count, an approve) does not have to restart the poll. */
+  shown: () => StreamItem[];
+  /** How many versions are at or after `newest` (a count-only read). */
+  count: () => Promise<number>;
+  onFresh: (n: number) => void;
+  /** Default: the document is visible (always true without a DOM). */
+  visible?: () => boolean;
+  onError?: (e: unknown) => void;
+}
+
+/**
+ * Start the new-posts poll; returns stop. Every POLL_MS while visible it asks
+ * for the count and reports what is new (newPostCount); a hidden tab skips its
+ * turn; a failed poll waits longer next time (pollDelay). Nothing is reported
+ * after stop.
+ */
+export function startNewPostsPoll(o: NewPostsPollOptions): () => void {
+  const visible =
+    o.visible ?? (() => typeof document === "undefined" || document.visibilityState === "visible");
+  let stopped = false;
+  let failures = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (!stopped) timer = setTimeout(() => void tick(), pollDelay(failures));
+  };
+  const tick = async () => {
+    if (visible()) {
+      try {
+        const total = await o.count();
+        failures = 0;
+        if (!stopped) o.onFresh(newPostCount(o.shown(), o.newest, total));
+      } catch (e) {
+        // A failed poll leaves the pill as it was and waits longer next time.
+        failures++;
+        o.onError?.(e);
+      }
+    }
+    schedule();
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
+/** A post just reviewed in place, as the server will say on the next read:
+ *  an approve stores `published` (review-service) and reads as kind
+ *  `approved`; a request for changes stores and reads `rejected`. */
+export function reviewedPatch(item: StreamItem, verdict: "approved" | "rejected"): StreamItem {
+  return verdict === "approved"
+    ? { ...item, status: "published", kind: "approved", review: null }
+    : { ...item, status: "rejected", kind: "rejected", review: null };
+}
