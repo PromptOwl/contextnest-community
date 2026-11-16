@@ -8,6 +8,7 @@
  * binding for it, if any. REST (GET /surfaces/slack/installs/:id/channels)
  * and MCP (context_surfaces_slack_channels_list) both call this.
  */
+import { z } from "zod";
 import { getDb } from "../../../db/client.js";
 import type { InstallRow } from "../../services/install-store.js";
 import { botToken, NO_BOT_TOKEN } from "./connector.js";
@@ -15,6 +16,15 @@ import { slackCall, SlackApiError } from "./api.js";
 import { SurfaceRateLimited } from "../../contract.js";
 
 export const MAX_CHANNEL_PAGES = 10;
+
+/**
+ * The MCP twin's input (context_surfaces_slack_channels_list). Its JSON schema
+ * is generated from this (mcpInputSchema), so src/mcp/ carries no inline
+ * schema literal (lint:mcp-schemas). REST takes the same id from the path.
+ */
+export const SlackChannelsListInput = z.object({
+  install_id: z.string().min(1).max(200).describe("The Slack install id (context_surfaces_status lists installs)."),
+});
 
 export interface InstallChannel {
   id: string;

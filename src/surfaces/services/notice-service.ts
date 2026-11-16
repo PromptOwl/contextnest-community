@@ -22,8 +22,12 @@ import { getSettings } from "./settings-service.js";
  * number that page shows. Every argument is required, so no caller can state
  * a default retention by leaving one out.
  */
+/** Nest names are capped in the notice so a long one can't crowd out the disclosure and the link. */
+export const NOTICE_NEST_MAX = 80;
+const capName = (s: string) => (s.length > NOTICE_NEST_MAX ? `${s.slice(0, NOTICE_NEST_MAX - 1)}…` : s);
+
 export const enableNotice = (nest: string, aboutUrl: string | null, ttlHours: number) =>
-  `Nest is now listening here for ${escapeMrkdwn(nest)}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve. ` +
+  `Nest is now listening here for ${escapeMrkdwn(capName(nest))}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve. ` +
   `What it keeps: only summaries a named person approves; messages are cleared within ${ttlHours} hours. ` +
   `React 🧠 to a message to ask Nest to keep it. Say \`@Nest skip me\` and it won't use your messages. ${SERVER_ADMIN_DISCLOSURE}` +
   (aboutUrl ? ` <${aboutUrl}|How Nest handles your messages>` : "");
