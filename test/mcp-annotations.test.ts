@@ -124,7 +124,6 @@ const OPEN_WORLD = [
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_surfaces_binding_preview",
-  "context_surfaces_slack_channels_list",
   "context_surfaces_binding_create",
   "context_surfaces_binding_update",
   "context_surfaces_binding_delete",
@@ -135,6 +134,8 @@ const OPEN_WORLD = [
   "context_surfaces_settings_update",
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
+  // Read-only, but it calls Slack (users.conversations).
+  "context_surfaces_slack_channels_list",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
