@@ -175,14 +175,24 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     await getDb().run(`DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?`, [nestId, "nodes/bump-only"]);
   });
 
-  it("Given more than 500 ids, then every chunk is read and a real id past the boundary is found", async () => {
-    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+  it("Given more ids than one chunk holds, then every chunk is read and a real id past the boundary is found", async () => {
+    const { getLatestVersionAttributions, attributionChunkSize } = await import("../src/governance/version-service.js");
     const real = rowFor(await listRows(owner.apiKey), "Hand Doc").id;
-    const ids = [...Array.from({ length: 600 }, (_, i) => `nodes/missing-${i}`), real];
+    const ids = [...Array.from({ length: attributionChunkSize(false) + 10 }, (_, i) => `nodes/missing-${i}`), real];
     const map = await getLatestVersionAttributions(nestId, ids);
     expect(map.size).toBe(1);
     expect(map.get(real)?.editedBy).toBe("owner@home.test");
     expect((await getLatestVersionAttributions(nestId, [])).size).toBe(0);
+  });
+
+  // Review (2026-11-16, 18:46): the chunk size follows the binds per id, so
+  // adding a bind to the query shrinks the chunk instead of breaking it.
+  it("Given the binds one id takes, then a full chunk stays under SQLite's 999-variable cap", async () => {
+    const { attributionChunkSize, ATTRIBUTION_FIXED_BINDS } = await import("../src/governance/version-service.js");
+    // Unbounded: the IN list (1 per id). Bounded: the IN list plus (node_id, version) (3 per id).
+    expect(attributionChunkSize(false) * 1 + ATTRIBUTION_FIXED_BINDS).toBeLessThanOrEqual(999);
+    expect(attributionChunkSize(true) * 3 + ATTRIBUTION_FIXED_BINDS).toBeLessThanOrEqual(999);
+    expect(attributionChunkSize(true)).toBeLessThan(attributionChunkSize(false));
   });
 
   it("Given the bump-row filter is `author NOT LIKE <prefix>%`, then the prefix holds no LIKE wildcard", async () => {
@@ -190,10 +200,10 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     expect(SYSTEM_AUTHOR_PREFIX).not.toMatch(/[_%\\]/);
   });
 
-  it("Given more than 250 bounded ids, then every chunk is read and a real id past the boundary is found at its bound", async () => {
-    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+  it("Given more bounded ids than one chunk holds, then every chunk is read and a real id past the boundary is found at its bound", async () => {
+    const { getLatestVersionAttributions, attributionChunkSize } = await import("../src/governance/version-service.js");
     const real = rowFor(await listRows(owner.apiKey), "Agent Doc").id;
-    const ids = [...Array.from({ length: 260 }, (_, i) => `nodes/missing-${i}`), real];
+    const ids = [...Array.from({ length: attributionChunkSize(true) + 10 }, (_, i) => `nodes/missing-${i}`), real];
     const upTo = new Map(ids.map((id) => [id, 1] as [string, number]));
     const map = await getLatestVersionAttributions(nestId, ids, upTo);
     expect(map.size).toBe(1);
@@ -379,6 +389,30 @@ describe("context_list names the served (approved) version's editor under stewar
     const { data } = await jsonRequest(app, "GET", `/nests/${govNest}/census`, undefined, owner.apiKey);
     const item = (data.census.recent as any[]).find((r) => r.id === docId);
     expect(item.last_edit.client).toMatchObject({ agent: "agent-draft" });
+  });
+
+  // Review (2026-11-16, 18:46): could a Viewer be served approved-only on the
+  // list while the census names the draft's editor? No: only a public reader,
+  // ?approved_only and an agent's context_list read approved content. A
+  // Viewer's REST list is the live nest, so it and the census agree.
+  it("Given a Viewer on the same governed nest, then the REST list and the census name the same edit", async () => {
+    await resetAuthRateLimit();
+    const viewer = await registerUser(app, "viewer@home.test", "Viewer");
+    const added = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/collaborators`,
+      { email: viewer.email, permission: "read" },
+      owner.apiKey,
+    );
+    expect(added.status).toBeLessThan(300);
+
+    const rows = (await jsonRequest(app, "GET", `/nests/${govNest}/nodes`, undefined, viewer.apiKey)).data.nodes as any[];
+    const row = rows.find((r) => r.id === docId);
+    const { data } = await jsonRequest(app, "GET", `/nests/${govNest}/census`, undefined, viewer.apiKey);
+    const item = (data.census.recent as any[]).find((r) => r.id === docId);
+    expect(row.last_edit.client).toMatchObject({ agent: "agent-draft" });
+    expect(item.last_edit).toEqual(row.last_edit);
   });
 
   it("Given an upper bound per node, then getLatestVersionAttributions reads at or below it", async () => {

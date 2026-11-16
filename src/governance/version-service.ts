@@ -201,6 +201,21 @@ export async function getVersionAttribution(
   return row ? rowToVersion(row) : null;
 }
 
+/** Binds getLatestVersionAttributions spends once per query: nest_id twice
+ *  and the bump-row LIKE prefix. */
+export const ATTRIBUTION_FIXED_BINDS = 3;
+/** Binds it may spend on ids, keeping a chunk well under SQLite's old
+ *  999-variable cap with the fixed binds on top. */
+const ATTRIBUTION_ID_BIND_BUDGET = 750;
+
+/** Ids per query: the IN list takes one bind per id, and a bound adds
+ *  (node_id, version), so three. A bind added to the query belongs here, and
+ *  the chunk shrinks with it instead of overflowing the cap. */
+export function attributionChunkSize(bounded: boolean): number {
+  const bindsPerId = bounded ? 3 : 1;
+  return Math.floor(ATTRIBUTION_ID_BIND_BUDGET / bindsPerId);
+}
+
 /**
  * getVersionAttribution's latest row for each of `nodeIds`, in one query per
  * chunk of ids — the Documents list, the "Recently edited" feed and
@@ -220,8 +235,7 @@ export async function getLatestVersionAttributions(
 ): Promise<Map<string, DocumentVersion>> {
   const out = new Map<string, DocumentVersion>();
   const ids = upTo ? nodeIds.filter((id) => upTo.has(id)) : nodeIds;
-  // Three binds per id when bounded; either way under SQLite's old 999 cap.
-  const CHUNK = upTo ? 250 : 500;
+  const CHUNK = attributionChunkSize(!!upTo);
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     // The IN list is what lets the planner seek (nest_id, node_id) per node;

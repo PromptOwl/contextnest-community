@@ -1296,6 +1296,8 @@ Response (201): `{ "node": { ... }, "stewards": [...] }`. A `table` node with a 
 ### GET `/nests/:nestId/nodes/:nodeId`
 Full node content. 403 if no steward access (when stewardship on). Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
 
+`last_edit` (the list row's block, above) names the edit that produced the version served: the latest edit for a member, the approved version's edit when the approved body is served (a public reader's view, `?approved_only=1`). It is omitted for public readers and for headless access keys. For a headless key that is not new: a key reads as a public reader whenever headless reads are on (and cannot read at all when they are off), so the earlier public-reader gate already left it out. When the served version is an auto-publish bump, `last_edit.version` is the edit beneath it, so it can be lower than the node's `version`. `context_get`'s `(vN)` reports that same edit's version.
+
 **Direct raw fetch** — `?format=raw` returns the node **body** as plain text (no JSON envelope, no synthesized frontmatter):
 
 | Param / header | Effect |
