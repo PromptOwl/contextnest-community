@@ -284,6 +284,10 @@ export function autoPublishNote(on: "create" | "edit", reason: string): string {
  * list: stamps stored before the reasons were reworded ("no stewards",
  * 2026-07) are stamps too. The version row's author cannot tell the two
  * apart: the stamp is stored under the editor's own email.
+ *
+ * Accepted false positive: a person's note shaped exactly like a stamp
+ * ("Auto-published on edit (see ticket)") is hidden too. That is the price
+ * of still recognising stamps whose reason wording has since changed.
  */
 const AUTO_PUBLISH_STAMP = new RegExp(`^${AUTO_PUBLISH_NOTE_PREFIX}(create|edit) \\([^()\\n]+\\)$`);
 export function isAutoPublishStamp(note: string): boolean {

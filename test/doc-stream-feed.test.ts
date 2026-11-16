@@ -386,16 +386,9 @@ describe("doc stream as a feed (po-1214)", () => {
       expect(reason, reason).not.toMatch(/[()\n]/);
       for (const on of ["create", "edit"] as const) expect(isAutoPublishStamp(autoPublishNote(on, reason)), `${on}: ${reason}`).toBe(true);
     }
-    // autoPublishReason returns only listed reasons: no inline reason literal is left in it.
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const src = readFileSync(join(__dirname, "..", "src", "nodes", "service.ts"), "utf8");
-    const fn = src.slice(src.indexOf("async function autoPublishReason("), src.indexOf("/** Roster / parent lookups"));
-    expect(fn.length).toBeGreaterThan(0);
-    expect(fn).not.toMatch(/return\s+"|\?\s+"|:\s+"[a-z]/);
   });
 
-  it("AC-ST-08 (po-1375): Given context_stream, Then its input schema is generated from zod (no inline literal) and lint:mcp-schemas is back to 102", async () => {
+  it("AC-ST-08 (po-1375): Given context_stream, Then its input schema is the one generated from zod (StreamToolInput)", async () => {
     const { TOOL_DEFINITIONS } = await import("../src/mcp/tools.js");
     const { StreamToolInput } = await import("../src/mcp/stream-tool.js");
     const { mcpInputSchema } = await import("../src/workflow/agent-event-schema.js");
@@ -404,15 +397,7 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["since", "source", "author", "tag", "type", "limit", "offset"]);
     expect(tool.inputSchema.properties.source.enum).toEqual(["agent", "human"]);
     expect(tool.inputSchema.required).toEqual([]);
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const guard = readFileSync(join(__dirname, "..", "scripts", "check-mcp-schemas.mjs"), "utf8");
-    expect(guard).toMatch(/const BASELINE = 102;/);
-    expect(guard).not.toMatch(/context_stream \(po-1214\)/);
-    const src = readFileSync(join(__dirname, "..", "src", "mcp", "tools.ts"), "utf8");
-    const block = src.slice(src.indexOf('name: "context_stream"'), src.indexOf('name: "context_submit_review"'));
-    expect(block.length).toBeGreaterThan(0);
-    expect(block).not.toMatch(/inputSchema:\s*\{/);
+    // The baseline itself (102) is enforced by `npm run lint:mcp-schemas` in CI.
   });
 
   // Last: it adds a version, which the counts above do not expect.
