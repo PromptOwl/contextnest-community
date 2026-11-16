@@ -484,7 +484,11 @@ test.describe('Collaborators', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-public-cancel');
 
     await owner.page.goto(owner.nest.id);
-    expect(await owner.page.visibilityOptions()).toEqual(['Private', 'Organization', 'Public']);
+    // A shared deployment offers team sharing where a single-organization
+    // server offers Organization (which there would reach every organization).
+    const health = await (await primary_user.page.request.get('/health')).json();
+    const middle = health.shared_deployment ? 'Share with a team…' : 'Organization';
+    expect(await owner.page.visibilityOptions()).toEqual(['Private', middle, 'Public']);
     await owner.page.chooseVisibility('Public');
     await expect(owner.page.visibilityDialog).toContainText('Make this nest public?');
     await owner.page.visibilityDialog.getByRole('button', { name: 'Cancel' }).click();

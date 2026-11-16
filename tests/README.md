@@ -128,9 +128,17 @@ Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without
 
 ## CI
 
-Two workflows run the suite on a pull request:
+Two workflows run the suite, against two different servers:
 
-- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
-- The workflow below runs the same suite against the deployed server.
+- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") runs on every pull request. It builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
+- `.github/workflows/contextnest-community-tests.yml` ("e2e") runs the same suite against the deployed dev server (nest-dev, or `vars.TEST_URL`), with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). It does not run on pull requests: it tests what is deployed, so a failure there says nothing about a PR. It runs on a push to `development` or `main`, after the dev deploy workflow ("Deploy dev (Cloud Run)") succeeds, and by hand from the Actions tab. One run uses the server at a time (`tests/scripts/e2e-turnstile.mjs`); the others wait their turn.
 
-`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.
+Both upload the HTML report and traces as a workflow artifact.
+
+### Specs and the deployed server
+
+The deployed server is long-lived, shared, and often behind `development`. A spec has to hold on both servers:
+
+- **A feature the server may not have yet:** ask the server, skip with a reason when it is missing, and fail instead when the feature's `CN_EXPECT_*` is 1 (the PR build). Ask for something only that feature answers. `/health` carrying a flag is not enough when the feature shipped in parts: the Control room dashboard specs ask for the dashboard's own read (`GET /rollups?by=reason`).
+- **A page that differs by deployment kind:** nest-dev is a shared deployment with teams on (`/health`: `shared_deployment`), the PR build is a single-organization server. Read `/health` and expect the layout of the server under test, as the collaborators suite does for the add control and the visibility options.
+- **Stubbed navigation:** answer a stubbed navigation with a page, not a `302`. Chromium does not finish the request that follows a stubbed redirect on an https server, so it works on localhost and hangs on the deployed one.

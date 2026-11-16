@@ -13,6 +13,9 @@
  * - The other cases answer the page's reads in this browser
  *   (tests/src/lib/control_room_dashboard_stubs.js), so they don't depend on
  *   what the server holds: a paused channel, a private-nest row, day zero.
+ *   They do depend on the server's UI: the page under test is the deployed one.
+ * - Every case skips on a server that ships the Control room without these
+ *   tabs (see requireDashboard). CN_EXPECT_CONTROL_ROOM=1 makes that a failure.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
@@ -47,6 +50,27 @@ test.beforeEach(() => {
   test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR2).');
 });
 
+/**
+ * Does the server ship these tabs? The setup wizard (CR3) was released before
+ * them (CR2), and both answer /health the same, so a server can pass the check
+ * above and still show a placeholder Overview. The tabs' own read tells them
+ * apart: `GET /rollups?by=reason` came with CR2, and a server without it
+ * refuses the grouping with 422. It needs a signed-in request, so it is asked
+ * once per worker from the first case's session.
+ */
+let dashboardShipped = null;
+
+async function requireDashboard(page) {
+  if (dashboardShipped === null) {
+    const res = await page.request.get('/rollups?by=reason');
+    dashboardShipped = res.status() !== 422;
+  }
+  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+    expect(dashboardShipped, 'the server under test does not ship the Control room dashboard (GET /rollups?by=reason answers 422)').toBe(true);
+  }
+  test.skip(!dashboardShipped, 'The server under test ships the Control room without the dashboard tabs yet (po-1186 CR2).');
+}
+
 /** The page's own range: the last 14 UTC days, today included. */
 function range14() {
   const now = Date.now();
@@ -68,6 +92,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-008 / AC-CR-03: the tiles equal /surfaces/windows, /surfaces/proposals, /surfaces/commits and the budget for the range', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     const health = await (await page.request.get('/health')).json();
     test.skip(!health.surfaces_enabled, 'Surfaces is off on this server.');
     const { from, to } = range14();
@@ -120,6 +145,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-009 / AC-CR-03b: a paused channel raises an alert naming it, the reason in counts, and the three fix options', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { paused: true });
     const cr = new ControlRoomPage(page);
@@ -140,6 +166,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-010 / AC-CR-04: the cold-start card shows coverage, time to first approved and the folder bars; with no seed it says so and points to Setup', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { coldStart: 'seeded' });
     const cr = new ControlRoomPage(page);
@@ -156,6 +183,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-011 / AC-CR-07c: a private-nest row reads "DM · private nest · title hidden" in the ledger and the drawer', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, {});
     const cr = new ControlRoomPage(page);
@@ -171,6 +199,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-012: the drawer\'s Reason row is the agent\'s reason, never the verdict again; a complete chain says so', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, {});
     const cr = new ControlRoomPage(page);
@@ -189,6 +218,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-013 / AC-CR-13: day zero — Overview, Decision ledger and Agents each show their empty state with a way on, and no charts', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { empty: true });
     const cr = new ControlRoomPage(page);
@@ -208,6 +238,7 @@ test.describe('Control room: dashboard', () => {
     test(`CN-CR-014 / AC-CR-11: at ${width}px every Control room tab has no horizontal scroll and no chart label under 14px`, async ({ primary_user }) => {
       await primary_user.initialize();
       const { page } = primary_user;
+      await requireDashboard(page);
       await page.setViewportSize({ width, height: width < 500 ? 844 : 900 });
       await stubSurfacesOn(page);
       await stubDashboard(page, { paused: true, coldStart: 'seeded' });
