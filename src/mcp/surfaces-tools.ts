@@ -46,7 +46,8 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { createBindingWithListener } from "../surfaces/services/listener-service.js";
 import { createInstall, getInstall } from "../surfaces/services/install-store.js";
-import { listInstallChannels, channelListFailure, TRUNCATED_NOTE } from "../surfaces/adapters/slack/channels.js";
+import { listInstallChannels, channelListFailure, TRUNCATED_NOTE, SlackChannelsListInput } from "../surfaces/adapters/slack/channels.js";
+import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
 import { getSettings } from "../surfaces/services/settings-service.js";
 import { updateSettingsWithEffects } from "../surfaces/services/dm-service.js";
@@ -183,11 +184,8 @@ export const SURFACES_TOOL_DEFINITIONS = [
     name: "context_surfaces_slack_channels_list",
     description:
       "List the Slack channels a connected install could listen in: only the public and private channels the Nest bot was added to, with privacy, Slack Connect, member count and any existing binding. Never DMs, archived channels or message text. Server admin only.",
-    inputSchema: {
-      type: "object",
-      properties: { install_id: { type: "string", description: "The Slack install id (context_surfaces_status lists installs)." } },
-      required: ["install_id"],
-    },
+    // Generated from the shared zod schema: no inline literal (lint:mcp-schemas).
+    inputSchema: mcpInputSchema(SlackChannelsListInput),
   },
   {
     name: "context_surfaces_settings_get",

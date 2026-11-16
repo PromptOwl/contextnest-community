@@ -47,6 +47,13 @@ test.beforeEach(() => {
   test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR3).');
 });
 
+/** Setup is server-admin only: say so plainly instead of failing later on a hidden button. */
+async function expectServerAdmin(page) {
+  const r = await page.request.get('/auth/admin-status');
+  const me = r.ok() ? (await r.json())?.me : null;
+  expect(me?.is_admin, 'primary_user must be a server admin: Control room setup is server-admin only (see tests/env.template)').toBe(true);
+}
+
 async function firstNestId(page) {
   const r = await page.request.get('/nests');
   const body = await r.json();
@@ -59,6 +66,7 @@ test.describe('Control room: setup', () => {
   test('CN-CR-001: the Control room sits in the Workspace group of the rail while Surfaces is on', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await expectServerAdmin(page);
     await stubSurfacesOn(page);
     await stubSurfaces(page);
     const cr = new ControlRoomPage(page);

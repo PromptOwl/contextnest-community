@@ -239,6 +239,30 @@ describe("GET /surfaces/slack/installs/:id/channels", () => {
     if (data?.channels) expect(data.channels.map((c: any) => c.id)).toEqual(["G_PRIV", "C_EXT", "C_OPS"]);
   });
 
+  it("the MCP twin's input schema is generated from zod, so lint:mcp-schemas stays at its baseline of 98 (no new inline literal)", async () => {
+    const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
+    const { SlackChannelsListInput } = await import("../src/surfaces/adapters/slack/channels.js");
+    const { mcpInputSchema } = await import("../src/workflow/agent-event-schema.js");
+    const tool = SURFACES_TOOL_DEFINITIONS.find((t: any) => t.name === "context_surfaces_slack_channels_list")!;
+    expect(tool.inputSchema).toEqual(mcpInputSchema(SlackChannelsListInput));
+    expect(tool.inputSchema.required).toEqual(["install_id"]);
+    const guard = readFileSync(join(__dirname, "..", "scripts", "check-mcp-schemas.mjs"), "utf8");
+    expect(guard).toMatch(/const BASELINE = 98;/);
+    const src = readFileSync(join(__dirname, "..", "src", "mcp", "surfaces-tools.ts"), "utf8");
+    const block = src.slice(src.indexOf('name: "context_surfaces_slack_channels_list"'), src.indexOf('name: "context_surfaces_settings_get"'));
+    expect(block).not.toMatch(/inputSchema:\s*\{/);
+  });
+
+  it("the MCP twin refuses a non-admin and an inactive install", async () => {
+    const asOwner = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_slack_channels_list", arguments: { install_id: installId } }, alice.apiKey);
+    expect(asOwner.result?.isError ?? !!asOwner.error).toBe(true);
+    const { createInstall } = await import("../src/surfaces/services/install-store.js");
+    const pending = await createInstall({ surface: "slack", mode: "manifest", tenantKey: `T_PENDING_${Date.now()}`, homeNestId: N, status: "pending" });
+    const out = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_slack_channels_list", arguments: { install_id: pending.id } }, root.apiKey);
+    expect(out.result?.isError).toBe(true);
+    expect(out.result?.content?.[0]?.text ?? "").toMatch(/isn't active yet/);
+  });
+
   it("API.md documents the route and its MCP twin (AC-MCP-01 parity)", () => {
     const api = readFileSync(join(__dirname, "..", "API.md"), "utf8");
     expect(api).toContain("/surfaces/slack/installs/:id/channels");
@@ -285,6 +309,14 @@ describe("binding a channel: the one notice links the member explainer", () => {
         process.env.PUBLIC_BASE_URL = BASE;
       }
     }
+  });
+
+  it("a very long nest name is capped, so the disclosure and the link always fit", async () => {
+    const { enableNotice, NOTICE_NEST_MAX } = await import("../src/surfaces/services/notice-service.js");
+    const text = enableNotice("N".repeat(5000), "https://x.test/about/surfaces", 24);
+    expect(text).toContain(`${"N".repeat(NOTICE_NEST_MAX - 1)}…. It stays quiet`);
+    expect(text).not.toContain("N".repeat(NOTICE_NEST_MAX + 1));
+    expect(text).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
   });
 
   it("the notice states the server's own buffer TTL, the same number the member page shows", async () => {
