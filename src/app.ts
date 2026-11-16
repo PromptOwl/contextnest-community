@@ -86,6 +86,7 @@ import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
+import { readClient } from "./shared/client-metadata.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
@@ -707,9 +708,10 @@ export function createApp(): Hono<AuthEnv> {
       userId: c.get("userId") ?? null,
       status: c.res.status,
       durationMs: Date.now() - started,
-      // Set by whichever handler validated the request's `client` block
-      // (§9.4). Absent on a request that sent none.
-      client: c.get("clientMetadata"),
+      // The request's `client` block (§9.4), else what the transport knows
+      // (the API key's label): a keyed REST read is attributed, so the
+      // onboarding connect proof can count it. A browser session stays unattributed.
+      client: readClient(c),
     });
   });
 

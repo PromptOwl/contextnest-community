@@ -222,6 +222,18 @@ describe("AC4: the connect proof", () => {
     expect(r.data.client).toBe("goose");
   });
 
+  it("counts a REST read made with the person's labelled key", async () => {
+    const later = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 5));
+    await jsonRequest(app, "GET", `/nests/${nestId}/context`, undefined, newbie.apiKey);
+    const r = await eventually(
+      () => jsonRequest(app, "GET", `/onboarding/connection?nest_id=${nestId}&since=${encodeURIComponent(later)}`, undefined, newbie.apiKey),
+      (v) => v.data.connected === true,
+    );
+    expect(r.data.via).toBe("api");
+    expect(r.data.client).toBe("test");
+  });
+
   it("refuses the check on a nest the caller cannot read", async () => {
     const r = await jsonRequest(app, "GET", `/onboarding/connection?nest_id=${nestId}`, undefined, veteran.apiKey);
     expect(r.status).toBe(404);

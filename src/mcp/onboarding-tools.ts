@@ -111,7 +111,7 @@ export async function handleOnboardingTool(name: string, args: Record<string, an
         state.nest ? `Nest: "${state.nest.name}" (${state.nest.id}), MCP URL ${state.nest.mcp_url}.` : "No nest of your own yet. Call context_onboarding_update with action create_nest.",
         connection ? (connection.connected ? `Connect proof: an agent read this nest at ${connection.at}${connection.client ? ` (${connection.client})` : ""}.` : "Connect proof: no agent read of this nest yet.") : "",
         `Distill: ${state.distill.mode === "server" ? "runs on the server" : "returns a prompt for your own agent"}.`,
-        `Slack: ${state.connectors.slack.connected ? "connected" : state.connectors.slack.can_connect ? "ready to connect (open the welcome screen in a browser)" : (state.connectors.slack.reason ?? "not available")}.`,
+        `Slack: ${state.connectors.slack.connected ? "connected" : state.connectors.slack.can_connect ? "ready to connect (open the welcome screen in a browser)" : (state.connectors.slack.reason?.replace(/\.$/, "") ?? "not available")}.`,
         job
           ? `Distill ${job.status}: ${job.phase}, ${job.done_steps}/${job.total_steps} steps, ${job.nodes.length} documents written as drafts for your review.${job.error ? ` ${job.error}` : ""}`
           : "",
