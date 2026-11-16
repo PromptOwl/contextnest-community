@@ -77,6 +77,7 @@ import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js"
 import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
+import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -86,6 +87,8 @@ import { isInitializeRequest, serverConnectInstructions } from "./connect-instru
 // suspended/unlicensed, matching the REST policy.
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
+  "context_onboarding_update",
+  "context_distill",
   "context_create",
   "context_upload",
   "context_update",
@@ -364,6 +367,8 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
+  // First-run onboarding (PO-1185): the person's own state, server-level only.
+  ...ONBOARDING_TOOL_DEFINITIONS,
   // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
   // GET /rollups twins). Advertised only while the workflow plane is on.
   ...AGENT_ORG_TOOL_DEFINITIONS,
@@ -382,6 +387,7 @@ export const SERVER_TOOL_DEFINITIONS = [
  */
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
+  ...ONBOARDING_READ_TOOL_NAMES,
   "context_agent_ledger_org",
   "context_agent_rollups_org",
   "context_query",
@@ -470,6 +476,20 @@ async function handleServerToolCall(
     const offlineSince = getOfflineLock();
     if (offlineSince) return offlineLockMessage(offlineSince);
     return FREE_TIER_EXCEEDED_MESSAGE;
+  }
+
+  if (ONBOARDING_TOOL_NAMES.has(toolName)) {
+    return handleOnboardingTool(toolName, args ?? {}, {
+      userId,
+      userEmail,
+      baseUrl,
+      nestScope,
+      contributorCredential,
+      resolveNest: async (ref) => {
+        const nest = await resolveNestRef(ref, userId);
+        return nest && (await canRead(nest.id, userId)) ? nest : null;
+      },
+    });
   }
 
   if (toolName === "nest_create") {
