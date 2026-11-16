@@ -349,24 +349,29 @@ export async function resolveContext(params: {
   // fits does the best match go through oversized — never an empty answer
   // for a non-empty result.
   const included: (ContextNode & { url?: string })[] = [];
+  // Each included document's block, formatted once and reused for the
+  // response, the size the access log records and the blocks list.
+  const blockOf = new Map<string, string>();
   let tokenCount = 0;
   for (const doc of readable) {
     const block = formatContextBlock(doc, doc.url);
     const blockTokens = approxTokens(block);
     if (tokenCount + blockTokens > maxTokens) continue;
     included.push(doc);
+    blockOf.set(doc.id, block);
     tokenCount += blockTokens;
   }
   if (included.length === 0 && readable.length > 0) {
+    const block = formatContextBlock(readable[0], readable[0].url);
     included.push(readable[0]);
-    tokenCount = approxTokens(formatContextBlock(readable[0], readable[0].url));
+    blockOf.set(readable[0].id, block);
+    tokenCount = approxTokens(block);
   }
+  const blockFor = (n: { id: string }) => blockOf.get(n.id) ?? "";
   const truncatedByBudget = accessible.length - included.length;
 
   // ── 5. Format response ──
-  const contextMarkdown = included
-    .map((n) => formatContextBlock(n, n.url))
-    .join("\n\n---\n\n");
+  const contextMarkdown = included.map(blockFor).join("\n\n---\n\n");
 
   trackEvent("context.resolve", {
     nestId,
@@ -388,7 +393,7 @@ export async function resolveContext(params: {
     versions: await readableVersions(nestId, userId, included),
     hops: Object.fromEntries(included.map((n) => [n.id, reachedBy.get(n.id) ?? { hop: 0, via: null }])),
     sizes: Object.fromEntries(
-      included.map((n) => [n.id, Buffer.byteLength(formatContextBlock(n, n.url), "utf8")]),
+      included.map((n) => [n.id, Buffer.byteLength(blockFor(n), "utf8")]),
     ),
     detail: "context",
   });
@@ -398,7 +403,7 @@ export async function resolveContext(params: {
     blocks: included.map((n) => ({
       id: n.id,
       title: n.frontmatter.title,
-      markdown: formatContextBlock(n, n.url),
+      markdown: blockFor(n),
       header: contextBlockHeader(n, n.url),
       body: (n.body || "").trim(),
       type: n.frontmatter.type || "document",
