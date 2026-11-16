@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
+import { config } from "../config.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -1590,12 +1591,23 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * With sign-in turned off there is one user, and the nest middleware makes
+ * them the owner of every nest, including one an account made before sign-in
+ * was turned off. They scan for and decide every external edit
+ * (canDecideExternalEdit), so they see every one too: the rule below would
+ * read them as a visitor to such a nest when it is public or org-visible and
+ * hide the edit they are asked to decide (PO-1388).
+ */
+const operatesEveryNest = () => config.AUTH_MODE === "open";
+
+/**
  * May this caller see a document's pending external edits? Such an edit is
  * text nobody approved, so it follows the document's working copy: never for
  * someone who reaches the nest only through its visibility (they read approved
  * versions), otherwise the document's own read rule (PO-1192).
  */
 async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
+  if (operatesEveryNest()) return true;
   const userId = c.get("userId");
   if (await isPublicReader(nestId, userId)) return false;
   return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
@@ -1607,7 +1619,7 @@ async function readableExternalEdits(
   nestId: string,
   entries: externalEdits.ExternalEditEntry[],
 ): Promise<externalEdits.ExternalEditEntry[]> {
-  if (entries.length === 0) return entries;
+  if (entries.length === 0 || operatesEveryNest()) return entries;
   const userId = c.get("userId");
   if (await isPublicReader(nestId, userId)) return [];
   const readable = await filterAccessible(
