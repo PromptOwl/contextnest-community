@@ -26,7 +26,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
-import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
+import { requireNestHome } from '../../src/lib/nest_home_probe.js';
 import {
   markdownFile,
   htmlFile,
@@ -161,16 +161,16 @@ test.describe('Nest import', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'nimp-vault');
-    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
-    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    // The folders show in the Documents tree (po-1213 retired the Overview).
+    await requireNestHome(test, expect, api, commonFunction);
     const vault = buildVault(test.info().outputDir);
 
     await page.importVault(vault);
 
     await expect(page.toast(addedToast(2))).toBeVisible(WRITE);
     expect(await api.documentIds(nest.id)).toEqual(['nodes/guides/setup', 'nodes/team-notes/kickoff']);
-    await expect(page.folderRow('Guides')).toBeVisible(WRITE);
-    await expect(page.folderRow('Team Notes')).toBeVisible(WRITE);
+    await expect(page.folderHeader('guides')).toHaveText(/Guides/, WRITE);
+    await expect(page.folderHeader('team-notes')).toHaveText(/Team Notes/, WRITE);
   });
 
   test('CN-NIMP-006: Verify that Import → Upload PDF adds a PDF document with its text extracted', async ({

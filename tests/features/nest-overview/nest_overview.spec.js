@@ -18,9 +18,10 @@
  *   guides/advanced, and an empty notes folder (6 documents, 3 folders).
  * - The tree shows folders by their display name ("Guides", not "guides").
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
- * - po-1213 retires the Overview tab: once the server under test ships it,
- *   every case skips (src/lib/nest_home_probe.js) and
- *   nest-documents-home/nest_documents_home.spec.js covers what moved.
+ * - RETIRED (po-1224): po-1213 removed the Overview tab, so this suite is
+ *   disabled in its suite.json. nest-documents-home/nest_documents_home.spec.js
+ *   covers what moved to Documents; the folder, new-document and import suites
+ *   run against the Documents tree.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';

@@ -3,8 +3,8 @@
  *
  * Page under test: the "New folder" dialog on the nest page
  * (ui/src/components/NestView.tsx) and where the folder it creates shows up —
- * the Overview's Contents tree (ui/src/components/nest/OverviewTab.tsx) and
- * the Documents tab. The dialog's inline checks come from
+ * the Documents tree (ui/src/components/nest/DocumentsTab.tsx), the nest's
+ * home since po-1213 retired the Overview tab. The dialog's inline checks come from
  * ui/src/lib/folder-path.ts. What the dialog created is read back through the
  * REST API.
  *
@@ -15,13 +15,16 @@
  *   one document, "Alpha One", in folder "alpha" (`newFolderApi`), and deletes
  *   the nest after the test (`newFolderApi.deleteCreatedNests()`). The nest is
  *   in the entity registry for the teardown and the orphan sweeper.
- * - Every test starts on the nest's Overview tab.
+ * - Every test starts on the nest's Documents tab. Folders are found by path
+ *   ("team-notes"); the tree shows them by name ("Team Notes").
+ * - The suite skips only while the server under test still has the Overview
+ *   tab (`requireNestHome`; a failure instead on the PR build).
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
-import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
+import { requireNestHome } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 const secondaryRole = samples.secondary_user ?? null;
@@ -35,6 +38,7 @@ const createdToast = (label) => `Folder "${label}" created`;
 /** The document every nest is seeded with, and its folder. */
 const SEED_TITLE = 'Alpha One';
 const SEED_FOLDER = 'alpha';
+const SEED_ID = 'nodes/alpha/alpha-one';
 
 /** Inline errors from ui/src/lib/folder-path.ts. */
 const NO_ASCII_ERROR = 'Folder paths are built from a-z and 0-9, so the name needs at least one of those.';
@@ -54,14 +58,13 @@ test.describe('New folder', () => {
 
   /**
    * Initialise the owner, create a nest with "Alpha One" in folder "alpha",
-   * and open it on the Overview. Skips unless the owner may create nests.
+   * and open it on Documents. Skips unless the owner may create nests.
    */
   async function ownerNest(role, commonFunction, suffix) {
     await role.initialize();
     const api = role.newFolderApi;
     test.skip(!(await api.canCreateNests()), 'This account may not create nests here.');
-    // Every case reads the Overview's Contents tree, which po-1213 retired; port to Documents.
-    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    await requireNestHome(test, expect, api, commonFunction);
     const nest = await api.createNest(commonFunction.generateEntityName(suffix), 'New Folder suite (safe to delete)');
     cleanups.push(() => api.deleteCreatedNests());
     await api.createDocument(nest.id, {
@@ -71,11 +74,11 @@ test.describe('New folder', () => {
     });
     const page = role.newFolderPage;
     await page.gotoNest(nest.id);
-    await expect(page.folderRow('Alpha')).toBeVisible(WRITE);
+    await expect(page.folderHeader(SEED_FOLDER)).toBeVisible(WRITE);
     return { api, nest, page };
   }
 
-  test('CN-FOLDER-001: Verify that New Folder creates a folder and shows it in the Contents tree', async ({
+  test('CN-FOLDER-001: Verify that New Folder creates a folder and shows it in the Documents tree', async ({
     primary_user,
     commonFunction,
   }) => {
@@ -87,8 +90,8 @@ test.describe('New folder', () => {
 
     await expect(page.dialog).toBeHidden(WRITE);
     await expect(page.toast(createdToast('Team Notes'))).toBeVisible(WRITE);
-    await expect(page.folderRow('Team Notes')).toBeVisible(WRITE);
-    await expect(page.folderCount('Team Notes')).toHaveAttribute('aria-label', '0 documents');
+    await expect(page.folderHeader('team-notes')).toHaveText(/Team Notes/, WRITE);
+    expect(await page.folderTotal('team-notes')).toBe(0);
     expect(await api.folderPaths(nest.id)).toContain('team-notes');
   });
 
@@ -102,9 +105,9 @@ test.describe('New folder', () => {
     await expect(page.toast(createdToast('Gtm / Deals'))).toBeVisible(WRITE);
     expect(await api.folderPaths(nest.id)).toEqual(expect.arrayContaining(['gtm', 'gtm/deals']));
 
-    // An empty folder's row opens it in the Documents tab, where its subfolder is listed.
-    await expect(page.folderRow('Gtm')).toBeVisible(WRITE);
-    await page.folderRow('Gtm').click();
+    // Opening the empty folder scopes Documents to it, where its subfolder is listed.
+    await expect(page.folderHeader('gtm')).toBeVisible(WRITE);
+    await page.openFolder('Gtm');
     await expect(page.selectedTab).toHaveText('Documents');
     await expect(page.main.getByText('Deals', { exact: true })).toBeVisible(WRITE);
   });
@@ -119,10 +122,10 @@ test.describe('New folder', () => {
     await expect(page.toast(createdToast('Alpha / Sub'))).toBeVisible(WRITE);
     expect(await api.folderPaths(nest.id)).toContain('alpha/sub');
 
-    await page.expandFolder('Alpha');
-    await expect(page.folderRow('Alpha')).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.contents.getByText(SEED_TITLE, { exact: true })).toBeVisible(WRITE);
-    await expect(page.folderRow('Sub')).toBeVisible(WRITE);
+    await expect.poll(() => page.folderTotal(SEED_FOLDER), WRITE).toBe(1);
+    await page.expandFolder(SEED_FOLDER);
+    await expect(page.row(SEED_ID)).toContainText(SEED_TITLE, WRITE);
+    await expect(page.folderHeader('alpha/sub')).toHaveText(/Sub/, WRITE);
   });
 
   test('CN-FOLDER-004: Verify that a new empty folder is still there after a page reload', async ({
@@ -132,12 +135,12 @@ test.describe('New folder', () => {
     const { page } = await ownerNest(primary_user, commonFunction, 'folder-reload');
 
     await page.createFolder('Team Notes');
-    await expect(page.folderRow('Team Notes')).toBeVisible(WRITE);
+    await expect(page.folderHeader('team-notes')).toBeVisible(WRITE);
 
     await page.page.reload();
-    await page.contents.waitFor({ state: 'visible' });
-    await expect(page.folderRow('Team Notes')).toBeVisible(WRITE);
-    await expect(page.folderCount('Team Notes')).toHaveAttribute('aria-label', '0 documents');
+    await page.search.waitFor({ state: 'visible', timeout: 60_000 });
+    await expect(page.folderHeader('team-notes')).toHaveText(/Team Notes/, WRITE);
+    expect(await page.folderTotal('team-notes')).toBe(0);
   });
 
   test('CN-FOLDER-005: Verify that the dialog previews the rewritten name before creating', async ({
@@ -217,13 +220,13 @@ test.describe('New folder', () => {
 
     await page.createFolder('Alpha');
 
-    await expect(page.folderRow('Alpha')).toHaveCount(1);
-    await expect(page.folderCount('Alpha')).toHaveAttribute('aria-label', '1 document');
+    await expect(page.folderHeader(SEED_FOLDER)).toHaveCount(1);
+    await expect.poll(() => page.folderTotal(SEED_FOLDER), WRITE).toBe(1);
     expect((await api.folderPaths(nest.id)).filter((p) => p === SEED_FOLDER)).toHaveLength(1);
     expect(await api.documentTitlesIn(nest.id, SEED_FOLDER)).toEqual([SEED_TITLE]);
 
-    await page.expandFolder('Alpha');
-    await expect(page.contents.getByText(SEED_TITLE, { exact: true })).toBeVisible(WRITE);
+    await page.expandFolder(SEED_FOLDER);
+    await expect(page.row(SEED_ID)).toContainText(SEED_TITLE, WRITE);
   });
 
   test('CN-FOLDER-010: Verify that Cancel and Escape close the dialog without creating a folder', async ({
@@ -242,8 +245,8 @@ test.describe('New folder', () => {
     await page.page.keyboard.press('Escape');
     await expect(page.dialog).toBeHidden();
 
-    await expect(page.folderRow('Cancelled One')).toHaveCount(0);
-    await expect(page.folderRow('Escaped One')).toHaveCount(0);
+    await expect(page.folderHeader('cancelled-one')).toHaveCount(0);
+    await expect(page.folderHeader('escaped-one')).toHaveCount(0);
     expect(await api.folderPaths(nest.id)).toEqual([SEED_FOLDER]);
   });
 
@@ -264,7 +267,7 @@ test.describe('New folder', () => {
 
     const reader = secondary_user.newFolderPage;
     await reader.gotoNest(owner.nest.id);
-    await expect(reader.folderRow('Alpha')).toBeVisible(WRITE);
+    await expect(reader.folderHeader(SEED_FOLDER)).toBeVisible(WRITE);
     await expect(reader.newFolderButton).toHaveCount(0);
   });
 
@@ -278,7 +281,7 @@ test.describe('New folder', () => {
     await api.archiveNest(nest.id);
 
     await page.gotoNest(nest.id);
-    await expect(page.folderRow('Alpha')).toBeVisible(WRITE);
+    await expect(page.folderHeader(SEED_FOLDER)).toBeVisible(WRITE);
     await expect(page.newFolderButton).toHaveCount(0);
   });
 });

@@ -4,8 +4,9 @@
  * Page under test: the document editor (ui/src/components/DocumentEditor.tsx)
  * opened for a new document from the nest page (ui/src/components/NestView.tsx):
  * the header's New Document button, a folder row's "New document in <folder>"
- * on the Overview (ui/src/components/nest/OverviewTab.tsx) and "New here" in a
- * folder opened in the Documents tab (ui/src/components/nest/DocumentsTab.tsx).
+ * in the Documents tree, and "New here" in a folder opened in the Documents
+ * tab (ui/src/components/nest/DocumentsTab.tsx). Documents is the nest's home
+ * (po-1213): there is no Overview tab.
  *
  * A new document needs a title and content before its save button enables.
  * The button reads Publish when the save goes live, and Save draft when the
@@ -14,6 +15,7 @@
  */
 
 import logger from '../../helper/logger/logger.js';
+import { openMoreActions } from '../../lib/more_actions_menu.js';
 
 class NewDocumentPage {
   /**
@@ -27,10 +29,11 @@ class NewDocumentPage {
 
     // ── App header + nest page ────────────────────────────────────────────
     this.breadcrumb = page.getByTestId('header-breadcrumb');
-    // Exact: the empty Overview offers a "New document" card of its own.
+    // Exact: an empty nest offers a "New document" card of its own.
     this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true }).first();
     this.selectedTab = page.getByRole('tab', { selected: true }).first();
-    this.contents = page.getByRole('navigation', { name: 'Contents' });
+    // The summary line above the Documents list ("2 documents · 1 folder").
+    this.facts = page.getByTestId('nest-home-facts');
     this.newHereButton = this.main.getByRole('button', { name: 'New here' });
 
     // ── Editor (new document) ─────────────────────────────────────────────
@@ -78,19 +81,33 @@ class NewDocumentPage {
     await this.titleInput.waitFor({ state: 'visible' });
   }
 
-  /** A nest tab by its label (Overview, Documents, …). */
+  /** A nest tab by its label (Documents, Instructions, …). */
   tab(name) {
     return this.page.getByRole('tab', { name, exact: true });
   }
 
+  /** A folder's header in the Documents tree, by its path ("alpha"). */
+  folderHeader(path) {
+    return this.main.getByTestId(`folder-header-${path}`);
+  }
+
+  /** Hover a folder's header in the Documents tree and click one of its actions by title ("New document in Alpha"). */
+  async folderAction(path, title) {
+    this._log(`${path}: ${title}`);
+    await this.folderHeader(path).hover();
+    await this.folderHeader(path).locator(`button[title="${title}"]`).click();
+  }
+
   /**
-   * One of a folder row's hover actions in the Overview's Contents
-   * ("New document in Alpha", "Open Alpha in Documents").
+   * Open a folder in the Documents tab, so the list is scoped to it: the grid
+   * view (⋯ → Show as grid) shows each folder as a card that opens it.
    */
-  async contentsFolderAction(folderLabel, actionLabel) {
-    const row = this.contents.getByRole('button', { name: folderLabel, exact: true });
-    await row.hover();
-    await this.contents.getByRole('button', { name: actionLabel, exact: true }).click();
+  async openFolderInDocuments(label) {
+    this._log(`Opening ${label} in Documents`);
+    const grid = this.page.getByTestId('nest-view-grid');
+    await openMoreActions(this.page, grid);
+    await grid.click();
+    await this.main.locator(`button[title="Open ${label}"]`).click();
   }
 
   // ── Editing ─────────────────────────────────────────────────────────────

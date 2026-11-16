@@ -3,8 +3,11 @@
  *
  * Page under test: the document editor opened for a new document
  * (ui/src/components/DocumentEditor.tsx) from the nest page
- * (ui/src/components/NestView.tsx) — the header's New Document button, the
- * Overview's "New document in <folder>" and the Documents tab's "New here".
+ * (ui/src/components/NestView.tsx) — the header's New Document button, a
+ * Documents folder's "New document in <folder>" and the Documents tab's
+ * "New here". Documents is the nest's home (po-1213); the cases that drove
+ * the retired Overview tab run against it (po-1224) and skip only while the
+ * server under test still has the Overview.
  * What the editor creates is read back through the REST API.
  *
  * Conventions
@@ -21,7 +24,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
-import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
+import { requireNestHome } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 
@@ -131,8 +134,7 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-publish');
-    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
-    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    await requireNestHome(test, expect, api, commonFunction);
 
     await page.gotoNest(nest.id);
     await page.openNewDocument();
@@ -140,18 +142,15 @@ test.describe('New document', () => {
     await page.publishButton.click();
 
     await expect(page.toast(publishedToast('Create Probe'))).toBeVisible(WRITE);
-    await expect(page.selectedTab).toHaveText('Overview', WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
     const doc = await landed(api, nest, 'nodes/create-probe');
     expect(doc.status).toBe('published');
 
-    await page.tab('Documents').click();
     const row = page.main.getByTestId('document-row-nodes/create-probe');
     await expect(row).toContainText('Create Probe', WRITE);
     await expect(row).toContainText('Published');
     await expect(row).toContainText('v1');
-    await expect(
-      page.main.getByText('Total Documents', { exact: true }).locator('xpath=following-sibling::*[1]')
-    ).toHaveText('1');
+    await expect(page.facts).toContainText('1 document');
   });
 
   test('CN-CREATE-005: Verify that a tag added before publishing is saved with the document', async ({
@@ -200,18 +199,17 @@ test.describe('New document', () => {
     await expect(page.page).toHaveURL(/q1-plan-draft/);
   });
 
-  test('CN-CREATE-007: Verify that "New document in <folder>" from the Overview creates the document inside that folder', async ({
+  test('CN-CREATE-007: Verify that "New document in <folder>" on a Documents folder creates the document inside that folder', async ({
     primary_user,
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-overview-folder');
-    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
-    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    await requireNestHome(test, expect, api, commonFunction);
     await seedAlpha(api, nest);
 
     await page.gotoNest(nest.id);
-    await expect(page.contents).toBeVisible();
-    await page.contentsFolderAction('Alpha', 'New document in Alpha');
+    await expect(page.folderHeader('alpha')).toBeVisible(WRITE);
+    await page.folderAction('alpha', 'New document in Alpha');
     await page.titleInput.waitFor({ state: 'visible' });
     expect(await page.folderPath()).toBe('Root / Alpha');
 
@@ -220,8 +218,8 @@ test.describe('New document', () => {
 
     await expect(page.toast(publishedToast('In Alpha'))).toBeVisible(WRITE);
     await landed(api, nest, 'nodes/alpha/in-alpha');
-    // Back on the Overview, Alpha now holds both documents.
-    await expect(page.contents.getByLabel('2 documents')).toBeVisible(WRITE);
+    // Back on Documents, Alpha now holds both documents.
+    await expect(page.folderHeader('alpha')).toHaveText(/Alpha\s*2/, WRITE);
   });
 
   test('CN-CREATE-008: Verify that "New here" in a folder opened in the Documents tab starts the new document in that folder', async ({
@@ -229,11 +227,11 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-new-here');
+    await requireNestHome(test, expect, api, commonFunction);
     await seedAlpha(api, nest);
 
     await page.gotoNest(nest.id);
-    await expect(page.contents).toBeVisible();
-    await page.contentsFolderAction('Alpha', 'Open Alpha in Documents');
+    await page.openFolderInDocuments('Alpha');
     await expect(page.selectedTab).toHaveText('Documents');
     await expect(page.main.getByText('All documents', { exact: true })).toBeVisible();
 
@@ -454,8 +452,7 @@ test.describe('New document', () => {
     commonFunction,
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-governed');
-    // Needs the Overview's Contents tree, which po-1213 retired; port to Documents.
-    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    await requireNestHome(test, expect, api, commonFunction);
     await api.requireReview(nest.id);
 
     await page.gotoNest(nest.id);
@@ -470,7 +467,7 @@ test.describe('New document', () => {
 
     await page.saveDraftButton.click();
     await expect(page.toast('"Governed Draft" saved as a draft.')).toBeVisible(WRITE);
-    await expect(page.selectedTab).toHaveText('Overview', WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
     await expect.poll(() => api.nodeStatus(nest.id, 'nodes/governed-draft'), WRITE).toBe('draft');
   });
 });
