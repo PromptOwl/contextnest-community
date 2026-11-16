@@ -577,18 +577,6 @@ nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
 // shadows every suffix route (RegExpRouter) or breaks for ids nested 3+
 // segments (TrieRouter fallback) — don't change the router without
 // re-running test/nested-node-actions.test.ts.
-/** A version's attribution row as the node detail's `last_edit` field. */
-function lastEditOf(v: Awaited<ReturnType<typeof versions.getVersionAttribution>>) {
-  if (!v) return undefined;
-  return {
-    version: v.version,
-    edited_by: v.editedBy,
-    ...(v.editedBySystem ? { edited_by_system: v.editedBySystem } : {}),
-    edited_at: v.editedAt,
-    ...(v.client ? { client: v.client } : {}),
-  };
-}
-
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -666,10 +654,6 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       response.author = people.author;
       response.collaborators = people.collaborators;
     }
-    // The latest version's two writers — the human and the agent — for the
-    // document byline. Same gate as the roster above.
-    const last = lastEditOf(await versions.getVersionAttribution(nestId, nodeId));
-    if (last) response.last_edit = last;
   }
 
   // The latest version's two writers — the human and the agent — for the
@@ -677,7 +661,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // live document here (context_get, which serves agents the approved body,
   // names that version instead). Not for a public reader or a headless key
   // (AC-NH-08), who would be served the approved version.
-  if (await canSeeEditors(nestId, userId)) {
+  if (await canSeeEditors(nestId, userId, { publicReader })) {
     const last = await versions.getVersionAttribution(nestId, nodeId);
     if (last) response.last_edit = versions.toLastEdit(last);
   }
@@ -735,8 +719,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       // The byline names the served (approved) version's writers, not the
       // hidden draft's — its author, agent and session stay behind the gate.
       if (response.last_edit && response.last_edit.version !== approved) {
-        const last = lastEditOf(await versions.getVersionAttribution(nestId, nodeId, approved));
-        if (last) response.last_edit = last;
+        const last = await versions.getVersionAttribution(nestId, nodeId, approved);
+        if (last) response.last_edit = versions.toLastEdit(last);
         else delete response.last_edit;
       }
       if (isRawFormat(c)) {

@@ -2566,7 +2566,10 @@ function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
  *  follows once the engine ships one. The date is UTC: agents read it. */
 function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
   if (!last) return "";
-  return ` · edited by ${lastEditorProse(last)}, ${last.edited_at.slice(0, 10)}`;
+  // edited_at is a SQL timestamp ("YYYY-MM-DD HH:MM:SS") or ISO-8601; both
+  // start with the UTC date. Anything else drops the date, never garbles it.
+  const date = /^\d{4}-\d{2}-\d{2}/.exec(String(last.edited_at ?? ""))?.[0];
+  return ` · edited by ${lastEditorProse(last)}${date ? `, ${date}` : ""}`;
 }
 
 /**

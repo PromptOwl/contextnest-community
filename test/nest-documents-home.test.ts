@@ -181,6 +181,36 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     expect((await getLatestVersionAttributions(nestId, [])).size).toBe(0);
   });
 
+  it("Given the latest-attribution query, then SQLite answers it from the (nest_id, node_id, version) index, not a table scan", async () => {
+    const plan = (await getDb().all(
+      `EXPLAIN QUERY PLAN
+       SELECT node_id, MAX(version) AS v FROM node_versions
+        WHERE nest_id = ? AND node_id IN (?, ?) AND author NOT LIKE ?
+        GROUP BY node_id`,
+      [nestId, "a", "b", "system:auto-publish:%"],
+    )) as Array<{ detail: string }>;
+    const details = plan.map((p) => p.detail).join(" | ");
+    expect(details).toMatch(/USING (COVERING )?INDEX/);
+    expect(details).not.toMatch(/SCAN node_versions$/m);
+  });
+
+  // Pins which writes move updated_at WITHOUT sealing a version, so the UI's
+  // rule (rowLastEdit names the editor only when last_edit is the same write
+  // as updated_at) guards something real: a move does exactly this.
+  it("Given a document is moved, then updated_at moves on and no version is sealed, so last_edit is the older write", async () => {
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Mover", content: "x", client: { agent: "deal-desk" } }, owner.apiKey);
+    const id = created.data.node.id as string;
+    const before = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey)).data.node;
+    await new Promise((r) => setTimeout(r, 1100));
+    const moved = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/move`, { folder: "archive" }, owner.apiKey);
+    expect(moved.status).toBe(200);
+    const after = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${moved.data.node.id}`, undefined, owner.apiKey)).data.node;
+    expect(Date.parse(after.updated_at)).toBeGreaterThan(Date.parse(before.updated_at));
+    expect(after.last_edit.version).toBe(before.last_edit.version);
+    expect(after.last_edit.edited_at).toBe(before.last_edit.edited_at);
+    await jsonRequest(app, "DELETE", `/nests/${nestId}/nodes/${moved.data.node.id}`, undefined, owner.apiKey);
+  });
+
   it("Given the census feed, then each item's version time is the same write as the updated_at it is sorted on", async () => {
     const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey);
     for (const r of data.census.recent as any[]) {

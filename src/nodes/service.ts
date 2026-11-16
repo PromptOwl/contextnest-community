@@ -771,8 +771,15 @@ export async function withComputedFields<T extends NodeResponse>(
  * headless access key, which reads content, never people (po-1213 AC-NH-08).
  * One rule for the list, the census feed, the node detail and the MCP reads.
  */
-export async function canSeeEditors(nestId: string, userId: string): Promise<boolean> {
-  return !(await isPublicReader(nestId, userId)) && !(await isHeadlessIdentity(userId));
+export async function canSeeEditors(
+  nestId: string,
+  userId: string,
+  /** What the caller already resolved for this request, so the gate does not
+   *  look it up a second time. */
+  known: { publicReader?: boolean } = {},
+): Promise<boolean> {
+  const publicReader = known.publicReader ?? (await isPublicReader(nestId, userId));
+  return !publicReader && !(await isHeadlessIdentity(userId));
 }
 
 export interface NodeAuthorship {
@@ -1279,8 +1286,7 @@ export async function listNodesForCaller(
   // live document and its live status, so the draft's author is the honest
   // editor here. context_get differs because it serves the approved body to
   // agents under stewardship, so it names that version's editor.
-  // publicReader is already known here; only the headless check is new.
-  const lastEdits = !publicReader && !(await isHeadlessIdentity(userId))
+  const lastEdits = (await canSeeEditors(nestId, userId, { publicReader }))
     ? await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id))
     : null;
 
