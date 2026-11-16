@@ -37,7 +37,10 @@ export interface SlackConnectorState {
 export interface OnboardingState {
   enabled: boolean;
   show: boolean;
+  /** Owns no nest and was invited to none (PO-1391). Decided by the server. */
   first_run: boolean;
+  /** Nests someone else owns that this person was let into. */
+  shared_nests: number;
   dismissed: boolean;
   nest: OnboardingNest | null;
   can_create_nest: boolean;
@@ -48,6 +51,17 @@ export interface OnboardingState {
   hootie_enabled: boolean;
   distill: { enabled: boolean; model_available: boolean; mode: "server" | "agent" };
   connectors: { slack: SlackConnectorState };
+}
+
+/**
+ * The welcome gate on Home. The server decides who is a first run (someone
+ * who owns no nest and was invited to none, PO-1391) and says so in `show`;
+ * Home renders that and never works it out again from the other fields. It
+ * only ever takes the place of the nest list: a link to a nest or a document
+ * does not pass through Home, so the screen cannot replace it.
+ */
+export function homeShowsWelcome(state: (Pick<OnboardingState, "show"> & Partial<OnboardingState>) | null | undefined): boolean {
+  return state?.show === true;
 }
 
 export interface ConnectionEvidence {
