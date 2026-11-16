@@ -39,7 +39,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
-import { getDocStream } from "./governance/stream-service.js";
+import { streamForCaller } from "./governance/stream-read.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -102,7 +102,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   officeNodeRoutes,
@@ -139,6 +139,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import {
+  agentRegisterRoutes,
+  nestLedgerRoutes,
+  nestRollupRoutes,
+  orgLedgerRoutes,
+  orgRollupRoutes,
+} from "./governance/ledger-routes.js";
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
@@ -166,6 +173,7 @@ import {
   VaultBusyError,
   PlanLimitError,
   BillingConfirmError,
+  CodedError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
@@ -324,6 +332,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "publications",
   "branding",
   "metacognition",
+  // Registering an agent mints a governed agent node (po-1186): automation.
+  "agents",
   "schedules",
   "hooks",
   "env",
@@ -2666,12 +2676,13 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
   // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
-  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000),
+  // ?source=agent|human, ?facets=0 (skip the facet counts; po-1214),
+  // ?items=0 (count only: `total`, no page — the new-posts poll).
   // One item per node version across every nest the caller can read, newest
   // first, access-filtered per nest (see governance/stream-service.ts). Behind
   // its own switch: off → 404. Version history is a licensed governance view,
   // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
-  const streamUnreadableWarned = new Set<string>();
   app.get("/me/stream", async (c) => {
     if (!config.EXPERIMENTAL_DOC_STREAM) {
       return c.json(
@@ -2708,47 +2719,28 @@ export function createApp(): Hono<AuthEnv> {
       // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
       since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
     }
-    const me = await resolveCallerEmail(userId);
-    const nests = new Map<string, string>();
-    for (const n of await listVisibleNests(userId, { readable: true }))
-      nests.set(n.id, n.name ?? n.id);
-    const page = await getDocStream({
+    const sourceRaw = c.req.query("source");
+    if (sourceRaw && sourceRaw !== "agent" && sourceRaw !== "human") {
+      return c.json({ error: "source must be agent or human" }, 400);
+    }
+    const page = await streamForCaller({
       userId,
-      userEmail: me,
-      nests,
+      userEmail: await resolveCallerEmail(userId),
       filters: {
         nest: list("nest"),
         tag: list("tag"),
         type: list("type"),
         author: list("author"),
         since,
+        source: sourceRaw as "agent" | "human" | undefined,
       },
       // The service clamps (limit 1–100, default 50; offset 0–10000).
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
       offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
-      readVersion: async (nestId, nodeId, version) => {
-        const { storage, versions } = await engineCache.get(nestId);
-        try {
-          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
-        } catch {
-          // The unreviewed draft on top is never in the chain — its bytes are
-          // the live file (same fallback as GET …/versions/:version).
-          const node = await storage.readDocument(nodeId);
-          if ((node.frontmatter.version ?? 1) === version) {
-            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
-          }
-          // Neither the chain nor the live file has this version: a broken
-          // chain. The card shows no summary; say so once per document.
-          const key = `${nestId}:${nodeId}`;
-          if (!streamUnreadableWarned.has(key)) {
-            // Bounded: a long-lived server forgets old ones rather than grow.
-            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
-            streamUnreadableWarned.add(key);
-            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
-          }
-          return null;
-        }
-      },
+      // facets=0: skip the facet counts (po-1214).
+      facets: c.req.query("facets") !== "0" && c.req.query("facets") !== "false",
+      // items=0: the poll needs only `total` — no page, review or summary work.
+      items: c.req.query("items") !== "0" && c.req.query("items") !== "false",
     });
     return c.json(page);
   });
@@ -2906,6 +2898,12 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Agent control room (po-1186): the org-wide decision ledger, one entry's
+  // trace, and rollups. Read-only; each route scopes to the caller's nests.
+  app.use("/ledger/*", flexAuthMiddleware);
+  app.route("/ledger", orgLedgerRoutes);
+  app.use("/rollups/*", flexAuthMiddleware);
+  app.route("/rollups", orgRollupRoutes);
   // Inbound trigger hooks — public by design: the unguessable token in the
   // path is the capability; presets add platform signature verification on
   // top (see workflow/hook-routes.ts).
@@ -3930,6 +3928,11 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  // Agent control room (po-1186): register an outside agent, the nest's
+  // decision ledger (+ export) and its rollups.
+  nestsApp.route("/:nestId/agents", agentRegisterRoutes);
+  nestsApp.route("/:nestId/ledger", nestLedgerRoutes);
+  nestsApp.route("/:nestId/rollups", nestRollupRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
@@ -4062,6 +4065,9 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (err instanceof BillingConfirmError) {
       return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
+    }
+    if (err instanceof CodedError) {
+      return c.json({ ...err.extra, error: err.message, code: err.code }, err.statusCode as any, err.headers);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

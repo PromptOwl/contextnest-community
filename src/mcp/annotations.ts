@@ -63,6 +63,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_access_requests: read("View access requests", "Lists pending access requests."),
   context_review_queue: read("View review queue", "Lists review requests."),
   context_my_drafts: read("View my drafts", "Lists the caller's unsubmitted drafts."),
+  context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
   context_versions: read("View version history", "Returns a document's version history."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
@@ -104,6 +105,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Nest administration ────────────────────────────────────────────────
   context_headless: overwrite("Manage headless publishing", "Dispatches status, enable, disable, create_key and revoke_key; disabling pauses and revoking removes keys. The token goes only to the caller."),
   context_set_visibility: overwriteOutside("Set nest visibility", "Replaces who can read the nest, up to anyone on the internet."),
+  context_nest_teams: overwrite("Share nest with teams", "Dispatches list, share and unshare; sharing gives every team member their team role on the nest, and unsharing removes it."),
   context_systems: overwrite("Manage system identities", "Dispatches list, create, rotate, revoke, add_nest and remove_nest; rotating and revoking kill keys. The token goes only to the caller."),
 
   // ─── Metacognition agents ───────────────────────────────────────────────
@@ -126,6 +128,18 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   workflow_edge_types_list: add("List edge types", "Lists edge types, and writes the five stock types the first time a nest asks."),
   workflow_edge_type_upsert: overwrite("Save edge type", "Overwrites an edge type of the same name."),
   workflow_edge_type_delete: overwrite("Delete edge type", "Deletes an edge type."),
+
+  // ─── Agent control room (po-1186) ───────────────────────────────────────
+  context_agent_register: add("Register agent", "Creates an agent node if none has that id; an existing agent is left as it is."),
+  context_agent_run_start: add("Start agent run", "Records a new run (report-only by default); a repeated idempotency key replays, never duplicates."),
+  context_agent_run_step: add("Record agent step", "Appends a decision, proposal, outcome or other step to an open run."),
+  context_agent_run_close: overwrite("Close agent run", "Closes a run; the trace sent here replaces the stored one."),
+  context_agent_ledger: read("View decision ledger", "Lists agent decisions with their chain to the saved version."),
+  context_agent_ledger_trace: read("Trace ledger entry", "Returns one decision's chain, steps and gaps."),
+  context_agent_ledger_export: read("Export decision ledger", "Returns ledger rows as NDJSON; it sends nothing anywhere (the export is logged)."),
+  context_agent_rollups: read("View agent rollups", "Counts the ledger by day or week and by agent, nest or channel."),
+  context_agent_ledger_org: read("View org ledger", "The decision ledger across the nests the caller administers."),
+  context_agent_rollups_org: read("View org rollups", "Rollups across the nests the caller administers."),
 
   // ─── Surfaces: reads ────────────────────────────────────────────────────
   context_surfaces_status: read("Show Surfaces status", "Counts bindings from the server's own tables."),
