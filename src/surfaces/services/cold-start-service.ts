@@ -4,12 +4,20 @@
  * A read model over tables that already exist — nothing is stored:
  *   - the seed's folders: `surface_seed_items` (kind = folder), minus the
  *     seed's admin-only folders (`listener_json.admin_folders`);
- *   - what is approved in each: the first approved version of every document
- *     under the folder (`review_requests` resolved approved, else the
- *     `approved_versions` pin, else an approved/published `node_versions` row),
+ *   - what is approved in each: every document under the folder with an
+ *     approval, dated by its EARLIEST approval across `review_requests`
+ *     (resolved approved), the `approved_versions` pin and approved/published
+ *     `node_versions` rows (compared as instants, so SQLite and ISO formats mix
+ *     safely; an unparseable time is ignored). A deleted document has none of
+ *     these rows (deleteNode purges them) and a moved one carries them along;
  *     EXCLUDING the documents the seed wrote itself (its CONTEXT.md and thesis,
  *     `surface_seed_items` kind node, and the root CONTEXT when it recorded
  *     kind context — matched exactly), so a seed never counts as cover;
+ *   - counts are absolute (what each folder holds now, including documents
+ *     approved before the seed); times are seed-relative (a folder's
+ *     `first_approved_at` and the nest's `first_approved` both skip approvals
+ *     from before `applied_at`, and an unparseable `applied_at` makes no time
+ *     claim at all);
  *   - time to the first approved document = that first approval − the seed's
  *     `applied_at`;
  *   - the org mirror (people and areas): `surface_seed_mirror` × the status of
@@ -102,34 +110,39 @@ async function loadInputs(nestIds: string[]): Promise<Inputs> {
       seeded,
     ),
   );
-  // Precedence: the review decision's time, then the pin, then the version row.
+  // The earliest approval across all three sources, compared with ms() in JS:
+  // SQL MIN() compares text, and a SQLite "YYYY-MM-DD HH:MM:SS" sorts before
+  // an ISO "YYYY-MM-DDTHH:MM:SSZ" of the same day whatever the instants are.
   // One pass per table over every seeded nest, not one per nest.
   const approvals = new Map<string, Map<string, string>>();
   const take = (rows: Array<Approval & { nest_id: string }>) => {
     for (const r of rows) {
-      if (!r.at) continue;
+      if (!r.at || !Number.isFinite(ms(r.at))) continue;
       let m = approvals.get(r.nest_id);
       if (!m) approvals.set(r.nest_id, (m = new Map()));
-      if (!m.has(r.node_id)) m.set(r.node_id, r.at);
+      const cur = m.get(r.node_id);
+      if (cur === undefined || ms(r.at) < ms(cur)) m.set(r.node_id, r.at);
     }
   };
   take(
-    await allIn((ph) => `SELECT nest_id, node_id, MIN(resolved_at) AS at FROM review_requests
-                           WHERE nest_id IN (${ph}) AND status = 'approved' AND resolved_at IS NOT NULL GROUP BY nest_id, node_id`, seeded),
+    await allIn((ph) => `SELECT nest_id, node_id, resolved_at AS at FROM review_requests
+                           WHERE nest_id IN (${ph}) AND status = 'approved' AND resolved_at IS NOT NULL`, seeded),
   );
   take(await allIn((ph) => `SELECT nest_id, node_id, approved_at AS at FROM approved_versions WHERE nest_id IN (${ph})`, seeded));
   take(
-    await allIn((ph) => `SELECT nest_id, node_id, MIN(created_at) AS at FROM node_versions
-                           WHERE nest_id IN (${ph}) AND status IN ('approved', 'published') GROUP BY nest_id, node_id`, seeded),
+    await allIn((ph) => `SELECT nest_id, node_id, created_at AS at FROM node_versions
+                           WHERE nest_id IN (${ph}) AND status IN ('approved', 'published')`, seeded),
   );
   return { names, apps, items, mirror, approvals };
 }
 
-/** Comparable timestamps: SQLite's datetime('now') has no T/Z, ISO strings do. */
+/** Comparable timestamps: SQLite's datetime('now') has no T/Z, ISO strings do. NaN when unparseable. */
 function ms(at: string): number {
-  const t = Date.parse(/[TZ]/.test(at) ? at : `${at.replace(" ", "T")}Z`);
-  return Number.isFinite(t) ? t : 0;
+  return Date.parse(/[TZ]/.test(at) ? at : `${at.replace(" ", "T")}Z`);
 }
+
+/** Folder paths compare without a trailing slash: a seed item may end in "/" where a listener entry does not. */
+const normFolder = (p: string) => p.replace(/\/+$/, "");
 
 export async function coldStart(nestId: string, actorUserId: string, nowMs = Date.now()): Promise<ColdStart> {
   if (!(await canAdministerNest(nestId, actorUserId))) {
@@ -157,19 +170,29 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
   const apps = inp.apps.get(nestId) ?? [];
   if (!apps.length) return base;
 
+  // A nest can hold more than one seed application (a second seed applied
+  // later). The cold start is measured from the FIRST one: `seed` and
+  // `applied_at` are its, while folders and the mirror merge every
+  // application, since each later seed only adds folders to the same nest.
   const first = apps[0];
   const appliedMs = ms(first.applied_at);
+  const timed = Number.isFinite(appliedMs);
   const adminFolders = new Set<string>();
+  let listenerUnreadable = false;
   for (const a of apps) {
     try {
       const l = JSON.parse(a.listener_json || "{}") as { admin_folders?: unknown };
-      for (const f of Array.isArray(l.admin_folders) ? l.admin_folders : []) if (typeof f === "string") adminFolders.add(f);
+      for (const f of Array.isArray(l.admin_folders) ? l.admin_folders : []) if (typeof f === "string") adminFolders.add(normFolder(f));
     } catch {
-      /* a malformed listener hides nothing extra */
+      listenerUnreadable = true;
     }
   }
+  if (listenerUnreadable) {
+    // Fail closed: without the admin-only list, any folder name might be one.
+    console.warn(`[surfaces] cold start: unreadable listener_json for nest ${nestId}; folder names withheld`);
+  }
   const items = inp.items.get(nestId) ?? [];
-  const folderPaths = items.filter((i) => i.kind === "folder" && !adminFolders.has(i.target)).map((i) => i.target);
+  const folderPaths = listenerUnreadable ? [] : items.filter((i) => i.kind === "folder" && !adminFolders.has(normFolder(i.target))).map((i) => i.target);
   // What the seed wrote itself never counts as cover: exactly the documents
   // it recorded (kind node), and — when it wrote the nest's instructions (kind
   // context) — the root CONTEXT document. A CONTEXT document a person writes
@@ -183,7 +206,7 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
   const dirs = new Map<string, ColdStartFolder>();
   const folders: ColdStartFolder[] = folderPaths.map((path) => {
     const f: ColdStartFolder = { path, approved: 0, first_approved_at: null };
-    dirs.set(path.replace(/\/$/, ""), f);
+    dirs.set(normFolder(path), f);
     return f;
   });
   const unique = new Map<string, string>();
@@ -195,14 +218,15 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
       const f = dirs.get(parts.slice(0, i).join("/"));
       if (!f) continue;
       f.approved += 1;
-      if (!f.first_approved_at || ms(at) < ms(f.first_approved_at)) f.first_approved_at = at;
+      // Seed-relative, like first_approved below: an approval from before the seed isn't the seed's doing.
+      if (timed && ms(at) >= appliedMs && (!f.first_approved_at || ms(at) < ms(f.first_approved_at))) f.first_approved_at = at;
       // A document sits in one folder, but nested seed folders list it twice.
       unique.set(nodeId, at);
     }
   }
   let firstApproved: ColdStart["first_approved"] = null;
   for (const [nodeId, at] of unique) {
-    if (ms(at) < appliedMs) continue; // approved before the seed: not the seed's doing
+    if (!timed || ms(at) < appliedMs) continue; // approved before the seed: not the seed's doing
     if (!firstApproved || ms(at) < ms(firstApproved.at)) firstApproved = { node_id: n1 ? null : nodeId, at, after_seed_ms: ms(at) - appliedMs };
   }
 
@@ -214,7 +238,7 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
   }
 
   // Cumulative approved documents in the seed's folders, per UTC day since the seed.
-  const startDay = Date.parse(`${isoDay(appliedMs || nowMs)}T00:00:00.000Z`);
+  const startDay = Date.parse(`${isoDay(timed ? appliedMs : nowMs)}T00:00:00.000Z`);
   const endDay = Date.parse(`${isoDay(nowMs)}T00:00:00.000Z`);
   const perDay = new Map<string, number>();
   let before = 0;

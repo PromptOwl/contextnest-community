@@ -433,6 +433,94 @@ describe("AC-CR-04 (review): cold start", () => {
   });
 });
 
+// ═══ AC-CR-04 (review 2): one time rule, earliest source, input hygiene ═════
+
+describe("AC-CR-04 (review 2): cold start", () => {
+  const applied = NOW - 3 * DAY;
+  /** A fresh nest with the generic seed applied at `applied`. */
+  async function seededNest(name: string): Promise<string> {
+    const id = (await jsonRequest(app, "POST", "/nests", { name }, root.apiKey)).data.nest.id;
+    const a = await req("POST", "/surfaces/seeds/apply", { nest_id: id, seed_id: "generic-team" }, root.apiKey);
+    expect(a.status, JSON.stringify(a.data)).toBe(200);
+    await run("UPDATE surface_seed_applications SET applied_at = ? WHERE nest_id = ?", [iso(applied), id]);
+    return id;
+  }
+  /** A document in `folder` whose three approval sources carry the given times (null = no row). */
+  async function doc(nestId: string, folder: string, title: string, t: { review?: string | null; pin?: string | null; version?: string | null }) {
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title, content: `# ${title}\n\nBody.`, folder }, root.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    const id = r.data.node?.id ?? r.data.id;
+    await run("DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?", [nestId, id]);
+    if (t.version) await run("UPDATE node_versions SET status = 'published', created_at = ? WHERE nest_id = ? AND node_id = ?", [t.version, nestId, id]);
+    else await run("UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ?", [nestId, id]);
+    if (t.pin) await run("UPDATE approved_versions SET approved_at = ? WHERE nest_id = ? AND node_id = ?", [t.pin, nestId, id]);
+    else await run("DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?", [nestId, id]);
+    if (t.review) {
+      await run(
+        `INSERT INTO review_requests (id, nest_id, node_id, version, requested_by, requested_at, status, resolved_at) VALUES (?, ?, ?, 1, 'root@cr2.test', ?, 'approved', ?)`,
+        [`rv_${randomUUID()}`, nestId, id, iso(applied), t.review],
+      );
+    }
+    return id as string;
+  }
+  const cold = async (nestId: string) => (await req("GET", `/surfaces/cold-start?nest_id=${nestId}`, undefined, root.apiKey)).data.nests[0];
+
+  it("times are seed-relative everywhere: a folder's first_approved_at skips approvals from before the seed, like first_approved; counts stay absolute", async () => {
+    const cs = await cold(R);
+    const decisions = cs.folders.find((f: any) => f.path === "decisions/");
+    expect(decisions.approved).toBe(3); // the pre-seed decision is still in the folder
+    expect(Date.parse(decisions.first_approved_at)).toBe(applied + 2 * 3_600_000 + 14 * 60_000);
+    expect(decisions.first_approved_at).toBe(cs.first_approved.at);
+  });
+
+  it("a document's first approval is the earliest of its sources, not the first source that has one", async () => {
+    const Z = await seededNest("Earliest");
+    await doc(Z, "decisions", "Pinned first", { pin: iso(applied + 3_600_000), version: iso(applied + 3 * 3_600_000), review: iso(applied + 5 * 3_600_000) });
+    const cs = await cold(Z);
+    expect(cs.first_approved.after_seed_ms).toBe(3_600_000);
+  });
+
+  it("the earliest approval is found across SQLite (space) and ISO (T) timestamp formats", async () => {
+    const Z = await seededNest("Formats");
+    const day = Date.parse(`${iso(applied + DAY).slice(0, 10)}T00:00:00.000Z`);
+    const sqlite = (ms: number) => iso(ms).replace("T", " ").slice(0, 19);
+    const id = await doc(Z, "decisions", "Two reviews", { review: iso(day + 3_600_000) });
+    // A second approval, later in the same day, in SQLite's format: as text it sorts first.
+    await run(
+      `INSERT INTO review_requests (id, nest_id, node_id, version, requested_by, requested_at, status, resolved_at) VALUES (?, ?, ?, 2, 'root@cr2.test', ?, 'approved', ?)`,
+      [`rv_${randomUUID()}`, Z, id, iso(applied), sqlite(day + 3 * 3_600_000)],
+    );
+    const cs = await cold(Z);
+    expect(cs.first_approved.after_seed_ms).toBe(day + 3_600_000 - applied);
+  });
+
+  it("an admin-only folder is left out whether or not either side ends in a slash", async () => {
+    const Z = await seededNest("Slashes");
+    await run("UPDATE surface_seed_applications SET listener_json = ? WHERE nest_id = ?", [JSON.stringify({ admin_folders: ["decisions"] }), Z]);
+    const cs = await cold(Z);
+    expect(cs.folders.map((f: any) => f.path)).not.toContain("decisions/");
+    expect(cs.folders.length).toBeGreaterThan(0);
+  });
+
+  it("an unreadable listener_json fails closed: no folder names are shown, since the admin-only ones can't be told apart", async () => {
+    const Z = await seededNest("Malformed");
+    await run("UPDATE surface_seed_applications SET listener_json = ? WHERE nest_id = ?", ["{not json", Z]);
+    const cs = await cold(Z);
+    expect(cs.no_seed).toBe(false);
+    expect(cs.folders).toEqual([]);
+    expect(cs.coverage).toEqual({ covered: 0, total: 0 });
+  });
+
+  it("an unparseable applied_at makes no time claims (first_approved null), rather than counting every approval as after the seed", async () => {
+    const Z = await seededNest("Bad time");
+    await doc(Z, "decisions", "Some rule", { pin: iso(applied + DAY), version: iso(applied + DAY) });
+    await run("UPDATE surface_seed_applications SET applied_at = 'not a time' WHERE nest_id = ?", [Z]);
+    const cs = await cold(Z);
+    expect(cs.first_approved).toBeNull();
+    expect(cs.folders.find((f: any) => f.path === "decisions/")).toMatchObject({ approved: 1, first_approved_at: null });
+  });
+});
+
 // ═══ AC-CR-07c: private-nest wording ════════════════════════════════════════
 
 describe("AC-CR-07c: private-nest rows", () => {
