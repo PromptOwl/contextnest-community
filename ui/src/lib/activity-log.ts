@@ -39,7 +39,10 @@ export const ACTIVITY_FILTERS: Array<{ id: string; label: string; types: Activit
 /** What happened, capitalized: "Edited", "Pulled into search", "Read (context_get)". */
 export function activityAction(item: ActivityLogItem): string {
   let what: string;
-  if (item.type === "exported" && item.nodeId === null) what = "exported the whole nest";
+  // A nest-level export names what it was when the server recorded that (a
+  // decision ledger export, a failed one, a selector export): only a bare one
+  // is "the whole nest".
+  if (item.type === "exported" && item.nodeId === null) what = item.detail ? `exported: ${item.detail}` : "exported the whole nest";
   else if (item.type === "retrieved" && item.detail) what = `pulled into ${item.detail}`;
   else what = (ACTIVITY_LABELS[item.type] ?? item.type) + (item.detail ? ` (${item.detail})` : "");
   return what.charAt(0).toUpperCase() + what.slice(1);

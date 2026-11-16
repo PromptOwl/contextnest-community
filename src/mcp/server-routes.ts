@@ -73,6 +73,7 @@ import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
 import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
@@ -364,6 +365,9 @@ export const SERVER_TOOL_DEFINITIONS = [
   }),
   // First-run onboarding (PO-1185): the person's own state, server-level only.
   ...ONBOARDING_TOOL_DEFINITIONS,
+  // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
+  // GET /rollups twins). Advertised only while the workflow plane is on.
+  ...AGENT_ORG_TOOL_DEFINITIONS,
 ];
 
 /**
@@ -380,6 +384,8 @@ export const SERVER_TOOL_DEFINITIONS = [
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
   ...ONBOARDING_READ_TOOL_NAMES,
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
   "context_query",
   "context_search",
   "context_list",
@@ -438,6 +444,9 @@ async function handleServerToolCall(
   // them (incl. the context_create bootstrap write).
   if (capability === "read" && !MCP_READ_TOOLS.has(toolName)) {
     return `This API key is read-only and cannot call "${toolName}". Read-only keys may only read, query, search, and export. Mint a read-write key for changes.`;
+  }
+  if (isAgentOrgTool(toolName)) {
+    return runAgentOrgTool(toolName, args, { userId, apiKeyId, nestScope, capability });
   }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -662,6 +671,7 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    if (isAgentOrgTool(tool.name) && !config.FEATURE_WORKFLOW_PLANE) continue;
     const shape = toolShape(tool.name, tool.inputSchema);
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
