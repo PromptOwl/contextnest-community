@@ -451,6 +451,35 @@ describe("context pull log — paging, large pulls and older rows", () => {
     expect(notAPull.status).toBe(404);
   });
 
+  it("rejects a non-numeric limit or cursor with a 400", async () => {
+    for (const q of ["?limit=abc", "?limit=0", "?limit=2.5", "?before=abc"]) {
+      const r = await jsonRequest(app, "GET", `/nests/${openNest}/pulls${q}`, undefined, owner.apiKey);
+      expect(r.status, q).toBe(400);
+    }
+    expect((await jsonRequest(app, "GET", `/nests/${openNest}/pulls?limit=500`, undefined, owner.apiKey)).status).toBe(200);
+  });
+
+  it("flushes only the asked nest's in-flight inserts before a read", async () => {
+    // An insert for another nest that never settles must not hold up this one.
+    const state = (globalThis as any)[Symbol.for("contextnest.accessLog")];
+    const stuck = new Promise<void>(() => {});
+    state.pending.set(stuck, "some-other-nest");
+    try {
+      const settled = await Promise.race([
+        log.flushAccessLog(openNest).then(() => "flushed"),
+        new Promise((r) => setTimeout(() => r("waited"), 500)),
+      ]);
+      expect(settled).toBe("flushed");
+      const listed = await Promise.race([
+        jsonRequest(app, "GET", `/nests/${openNest}/pulls?limit=1`, undefined, owner.apiKey).then((r) => r.status),
+        new Promise((r) => setTimeout(() => r("waited"), 2000)),
+      ]);
+      expect(listed).toBe(200);
+    } finally {
+      state.pending.delete(stuck);
+    }
+  });
+
   it("recognises this database's missing-table and missing-column errors (the pre-093 fallback)", async () => {
     for (const sql of ["SELECT pull_id FROM no_such_access_table", "SELECT no_such_column FROM node_access_events"]) {
       const err = await db().all(sql).then(() => null, (e: unknown) => e);

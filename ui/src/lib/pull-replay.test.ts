@@ -43,6 +43,14 @@ describe("replayEdges — which edge lights each step", () => {
     const links: Array<[string, string]> = [["a", "b"], ["x", "b"], ["c", "q"]];
     expect(replayEdges(pull, links)).toEqual([null, null, { from: "x", to: "b" }, null]);
   });
+
+  it("draws no edge for a hop whose via was redacted, and labels it by depth alone", () => {
+    // The server blanks `via` when it names a document this reader can't see.
+    // Guessing a path through a visible neighbour would draw a walk that never happened.
+    const pull: PullLike = { steps: [step("a", 0, { hop: 0 }), step("c", 1, { hop: 2, via: null })] };
+    expect(replayEdges(pull, [["a", "c"]])).toEqual([null, null]);
+    expect(stepHowLabel(pull.steps[1], (id) => id)).toBe("Hop 2");
+  });
 });
 
 describe("replayFrame — what is lit at a step", () => {
