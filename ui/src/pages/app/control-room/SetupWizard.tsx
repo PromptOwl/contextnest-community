@@ -513,6 +513,11 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
               Open Slack to approve
             </Button>
           </div>
+          {!hosted && (
+            <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
+              The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
+            </p>
+          )}
         </div>
       )}
       <FootBar

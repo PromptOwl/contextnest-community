@@ -94,6 +94,7 @@ test.describe('Control room: setup', () => {
     const download = page.waitForEvent('download');
     await cr.button('Download manifest').click();
     expect((await download).suggestedFilename()).toBe('nest-slack-manifest.json');
+    await expect(page.getByTestId('setup-manifest-note')).toContainText("this server's current address");
     for (const [id, v] of [['cred-client_id', 'cid.123'], ['cred-client_secret', 'shh-secret'], ['cred-signing_secret', 'sign-secret']]) {
       await page.locator(`#${id}`).fill(v);
       await expect(page.locator(`#${id}`)).toHaveAttribute('type', 'password');
