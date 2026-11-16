@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
+import { config } from "../config.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -1596,6 +1597,11 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
  * versions), otherwise the document's own read rule (PO-1192).
  */
 async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
+  // Open mode (sign-in off): the one user has owner-level access to every nest
+  // (the nest gate), including one an account from before sign-in was turned
+  // off created, and decides external edits there (canDecideExternalEdit). It
+  // must be able to read the edit it decides (AC-EED-05).
+  if (config.AUTH_MODE === "open") return true;
   const userId = c.get("userId");
   if (await isPublicReader(nestId, userId)) return false;
   return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
@@ -1607,7 +1613,7 @@ async function readableExternalEdits(
   nestId: string,
   entries: externalEdits.ExternalEditEntry[],
 ): Promise<externalEdits.ExternalEditEntry[]> {
-  if (entries.length === 0) return entries;
+  if (entries.length === 0 || config.AUTH_MODE === "open") return entries;
   const userId = c.get("userId");
   if (await isPublicReader(nestId, userId)) return [];
   const readable = await filterAccessible(
