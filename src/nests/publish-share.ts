@@ -93,7 +93,9 @@ function decodeEntities(s: string): string {
   return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, name: string) => {
     if (name[0] === "#") {
       const code = name[1].toLowerCase() === "x" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
-      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+      // Out of range, or half of a surrogate pair: not a character.
+      const valid = Number.isFinite(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+      return valid ? String.fromCodePoint(code) : " ";
     }
     return ENTITIES[name.toLowerCase()] ?? whole;
   });
@@ -129,7 +131,7 @@ export function excerptOf(body: string, isHtml: boolean, title = ""): string {
   const t = title.trim();
   // Only a whole leading title: "Deck" must not eat the start of "Decks are…".
   if (t && text.toLowerCase().startsWith(t.toLowerCase()) && !/^[\p{L}\p{N}]/u.test(text.slice(t.length))) {
-    text = text.slice(t.length).trim();
+    text = text.slice(t.length).replace(/^[\s:—–-]+/, "");
   }
   if (text.length <= EXCERPT_MAX) return text;
   const cut = text.slice(0, EXCERPT_MAX);
@@ -146,6 +148,8 @@ export interface PreviewMeta {
   image: string;
   /** `summary_large_image` for the default 1200x630 card, `summary` for a logo. */
   card: "summary" | "summary_large_image";
+  /** Default "state". */
+  robots?: PreviewRobots;
 }
 
 /**
@@ -157,10 +161,14 @@ export interface PreviewMeta {
  */
 export const PUBLISH_ROBOTS = "index, follow";
 
+/** What `previewMetaTags` says about indexing. A gate page says nothing, as it
+ *  always has: it gets no robots tag at all rather than a new instruction. */
+export type PreviewRobots = "state" | "omit";
+
 /** The `<head>` tags for a link preview. Every value is escaped here. */
 export function previewMetaTags(m: PreviewMeta): string {
   const tags: Array<[string, string, string]> = [
-    ["name", "robots", PUBLISH_ROBOTS],
+    ...(m.robots === "omit" ? [] : ([["name", "robots", PUBLISH_ROBOTS]] as Array<[string, string, string]>)),
     ["property", "og:type", "article"],
     ["property", "og:title", m.title],
     ["property", "og:url", m.url],

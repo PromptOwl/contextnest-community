@@ -224,7 +224,9 @@ describe("a gated link reveals nothing about the document", () => {
     expect(meta(html, "description")).toBeNull();
     expect(meta(html, "og:url")).toBe(`http://localhost/p/${slug}`);
     expect(meta(html, "og:image")).toBe(`http://localhost/p/${slug}/og-image`);
-    expect(meta(html, "robots")).toBe("index, follow");
+    // The gate never carried a robots directive, and still carries none.
+    expect(meta(html, "robots")).toBeNull();
+    expect(res.headers.get("x-robots-tag")).toBeNull();
     expect(html).not.toContain("Secret Roadmap");
     expect(html).not.toContain("ninth");
   });
@@ -345,6 +347,13 @@ describe("a white-label nest shows no strip", () => {
     expect(html.trim()).toBe(own);
   });
 
+  it("leaves an HTML page with no <head> exactly as written", async () => {
+    const bare = "<html><body><p>No head here</p></body></html>";
+    await jsonRequest(app, "POST", `/nests/${whiteNest}/nodes`, { title: "Bare", content: bare, type: "artifact" }, owner.apiKey);
+    const slug = await publish(whiteNest, "nodes/bare");
+    expect((await page(`/p/${slug}`)).html.trim()).toBe(bare);
+  });
+
   it("on the gate", async () => {
     const slug = await publish(whiteNest, "nodes/handbook", { access_mode: "code", code: "swordfish" });
     const { html } = await page(`/p/${slug}`);
@@ -360,6 +369,7 @@ describe("/p/:slug/og-image", () => {
     const res = await app.request(`/p/${slug}/og-image`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("content-security-policy")).toContain("default-src 'none'; sandbox");
     const bytes = new Uint8Array(await res.arrayBuffer());
     expect(bytes.length).toBeGreaterThan(1000);
     expect(Array.from(bytes.slice(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);

@@ -69,6 +69,9 @@ const GATE_LIMIT = { max: 10, windowMs: 10 * 60_000 };
 const COMMENT_LIMIT = { max: 5, windowMs: 10 * 60_000 };
 const COMMENT_MAX_CHARS = 4000;
 
+// The link-preview image, per link per IP.
+const OG_IMAGE_LIMIT = { max: 120, windowMs: 10 * 60_000 };
+
 // Markdown nodes are rendered server-side so a published document reads like the
 // editor rather than as raw source. `html: false` keeps inline HTML escaped —
 // belt and braces, since the page already runs under the artifact sandbox.
@@ -335,6 +338,8 @@ function previewTags(
     siteName: brand?.b.site_title || "ContextNest",
     image: external ? logoUrl : `${url}/og-image`,
     card: hasLogo ? "summary" : "summary_large_image",
+    // The gate never carried a robots directive; it still carries none.
+    robots: doc ? "state" : "omit",
   });
 }
 
@@ -458,6 +463,8 @@ async function renderPublished(
   const isHtml = isHtmlBody(type, body);
   // Branding wraps the markdown shell, and decides the strip and the preview
   // on /p/:slug. An HTML/artifact body served at /view needs none of it.
+  // So: load it for every /p/:slug render (chrome), and for a markdown body
+  // wherever it is served; skip it for an HTML body or a view at /view.
   const brand = chrome || (!isHtml && type !== "view") ? await loadBrand(row) : null;
   const cta = !!chrome && showsCta(brand);
 
@@ -868,8 +875,14 @@ publishRenderRoutes.get("/:slug", async (c) => {
 // gate page already shows the same logo, and neither says anything about the
 // document.
 publishRenderRoutes.get("/:slug/og-image", async (c) => {
-  const row = await publish.getPublishBySlug(c.req.param("slug"));
+  const slug = c.req.param("slug");
+  // Anonymous, and each call reads the nest's branding: clamp it like the
+  // other anonymous /p routes. Generous, because unfurlers share addresses.
+  if (!tryConsume(`publish-og:${slug}:${clientIp(c)}`, OG_IMAGE_LIMIT)) return c.body(null, 429);
+  const row = await publish.getPublishBySlug(slug);
   if (!publish.isLivePublish(row)) return c.body(null, 404);
+  // `logo` is a data: URI built by inlineAsset, which only ever produces the
+  // raster types in IMAGE_MIME (png, jpeg, gif, webp) — never SVG or HTML.
   const logo = (await loadBrand(row))?.logo ?? null;
   const m = logo ? /^data:([^;]+);base64,(.*)$/s.exec(logo) : null;
   const bytes = Buffer.from(m ? m[2] : DEFAULT_OG_IMAGE_PNG_BASE64, "base64");
@@ -877,6 +890,8 @@ publishRenderRoutes.get("/:slug/og-image", async (c) => {
     "Content-Type": m ? m[1] : "image/png",
     "Cache-Control": "public, max-age=3600",
     "X-Content-Type-Options": "nosniff",
+    // An image, and nothing else: were it ever opened as a document, it runs nothing.
+    "Content-Security-Policy": "default-src 'none'; sandbox",
   });
 });
 
