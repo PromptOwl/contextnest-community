@@ -38,6 +38,7 @@ const READ_ONLY = [
   "context_review_queue",
   "context_my_drafts",
   "context_versions",
+  "context_pull_log",
   "context_unsynced_list",
   "context_metacognition_list",
   "context_metacognition_suggest",

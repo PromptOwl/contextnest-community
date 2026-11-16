@@ -1581,7 +1581,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_pull_log",
     description:
-      "The context pull log: each retrieval made in this nest (context_get, context_search, context_query, context_resolve, REST search / query / context, Hootie), newest first, with the documents it handed over in order — version served, size, and where the server walked the graph, the hop and the document each was reached from. Pass `pull_id` for one pull's full trace. Who pulled (the person and the agent) is shown only to callers with write access or above. Use it to see what context an agent actually got.",
+      "Lists the context pull log: each retrieval made in this nest (context_get, context_search, context_query, context_resolve, REST search / query / context, Hootie), newest first, with the documents it handed over in order — version served, size, and where the server walked the graph, the hop and the document each was reached from. Pass `pull_id` for one pull's full trace. Who pulled (the person and the agent) is shown only to callers with write access or above. Use it to see what context an agent actually got.",
     inputSchema: {
       type: "object" as const,
       properties: {
