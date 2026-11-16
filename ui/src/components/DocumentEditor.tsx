@@ -1699,7 +1699,7 @@ export function DocumentEditor({
         isRunnable
           ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
           : { ...payload, ...primePatch, ...viewPatch },
-        baseVersion,
+        baseVersionRef.current,
       );
       if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
       setPreviewNonce((n) => n + 1);
@@ -1737,7 +1737,7 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
-  const runSave = async (afterSave: (savedId: string) => void) => {
+  const runSave = async (afterSave: (savedId: string) => void, retried = false) => {
     // A plain save of someone else's pending submission is refused (locked);
     // the reviewer's edits only land through Save & approve.
     if (reviewerEditing) {
@@ -1789,10 +1789,18 @@ export function DocumentEditor({
       if (err.status === 409 && err.body?.error === "Version conflict") {
         console.warn("[version-conflict]", err.body);
         const { current_version: current, updated_by: by } = err.body;
-        // Adopt the server's version so the next Save goes through; the edits stay.
-        if (typeof current === "number") setBaseVersion(current);
+        if (!retried && typeof current === "number") {
+          // Re-base on the server's head and save again. The server decides the
+          // landing: a draft is updated in place, a published or pending
+          // document gets a new draft on top of the current version.
+          baseVersionRef.current = current;
+          setBaseVersion(current);
+          toast.info(`Changed${by ? ` by ${by}` : ""} meanwhile (now v${current}) — saving your edits on top.`);
+          setSaving(false);
+          return runSave(afterSave, true);
+        }
         setError(
-          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Your edits are kept — press Save again to overwrite, or reload to take theirs.`,
+          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Reload to take theirs.`,
         );
       } else {
         setError(err.message);
