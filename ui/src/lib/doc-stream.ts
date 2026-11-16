@@ -26,6 +26,8 @@ export interface StreamQuery extends Partial<StreamFilters> {
   source?: StreamSource;
   /** false: skip the facet counts (the new-posts poll). */
   facets?: boolean;
+  /** false: count only — `total`, no posts (the new-posts poll). */
+  items?: boolean;
 }
 
 export const EMPTY_STREAM_FILTERS: StreamFilters = Object.freeze({
@@ -60,6 +62,7 @@ export function streamQueryString(q: StreamQuery, pinnedNest?: string): string {
   if (q.offset != null && q.offset > 0) p.set("offset", String(q.offset));
   if (q.source) p.set("source", q.source);
   if (q.facets === false) p.set("facets", "0");
+  if (q.items === false) p.set("items", "0");
   const s = p.toString();
   return s ? `?${s}` : "";
 }
@@ -127,6 +130,17 @@ export function compactTime(raw: string, now = Date.now()): string {
   const days = Math.floor(hrs / 24);
   if (days < 7) return `${days}d`;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+/** How often the new-posts pill polls, and the ceiling it backs off to. */
+export const POLL_MS = 30_000;
+export const POLL_MAX_MS = 5 * 60_000;
+
+/** The wait before the next poll after `failures` failed polls in a row:
+ *  doubles per failure up to POLL_MAX_MS, so a down server is not hammered by
+ *  every open tab. A success resets `failures` to 0. */
+export function pollDelay(failures: number): number {
+  return Math.min(POLL_MS * 2 ** Math.max(0, Math.min(failures, 10)), POLL_MAX_MS);
 }
 
 /**

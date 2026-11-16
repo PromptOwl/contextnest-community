@@ -266,6 +266,79 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(clientMetadataSchema.safeParse({ agent: null }).success).toBe(false);
   });
 
+  it("AC-ST-06: Given items=0 (the new-posts poll), Then only the count comes back — no page, no review or summary work", async () => {
+    const svc = await import("../src/governance/stream-service.js");
+    let reads = 0;
+    const page = await svc.getDocStream({
+      userId: alice.userId,
+      userEmail: alice.email,
+      nests: new Map([[nest, "Revenue"]]),
+      filters: { since: "2026-11-01 09:03:00" },
+      limit: 1,
+      facets: false,
+      items: false,
+      readVersion: async () => {
+        reads++;
+        return { body: "" };
+      },
+    });
+    expect(reads).toBe(0);
+    expect(page.items).toEqual([]);
+    expect(page.counts).toBeNull();
+    const all = (await stream("")).data.items.filter((i: any) => i.at >= "2026-11-01 09:03:00").length;
+    expect(page.total).toBe(all);
+    expect(page.has_more).toBe(all > 0);
+    // Over REST: ?items=0.
+    const rest = await stream("?since=2026-11-01T09:03:00Z&limit=1&facets=0&items=0");
+    expect(rest.status).toBe(200);
+    expect(rest.data.items).toEqual([]);
+    expect(rest.data.total).toBe(all);
+  });
+
+  it("AC-ST-05: Given review.canReview false, When a read-only member approves or requests changes anyway, Then the server refuses (403)", async () => {
+    const forRory = (await stream("", rory)).data.items.find((i: any) => i.nodeId === reviewDoc);
+    expect(forRory.review).toEqual({ canReview: false });
+    const approve = await jsonRequest(app, "POST", `/nests/${nest}/nodes/${reviewDoc}/approve`, {}, rory.apiKey);
+    expect(approve.status).toBe(403);
+    const reject = await jsonRequest(app, "POST", `/nests/${nest}/nodes/${reviewDoc}/reject`, { note: "no" }, rory.apiKey);
+    expect(reject.status).toBe(403);
+    const after = (await stream("")).data.items.find((i: any) => i.nodeId === reviewDoc);
+    expect(after.status).toBe("pending_review");
+  });
+
+  it("AC-ST-08: Given tools/list, Then context_stream advertises source as an enum of agent and human", async () => {
+    const tools = (await mcp(app, `/nests/${nest}/mcp`, alice.apiKey, "tools/list", {})).tools;
+    const t = tools.find((x: any) => x.name === "context_stream");
+    expect(t.inputSchema.properties.source.enum).toEqual(["agent", "human"]);
+  });
+
+  it("AC-ST-02: Given a stored client whose agent is not a string, Then the post is a human post with no agent", async () => {
+    const d = await db();
+    const row = (await d.get(
+      "SELECT id, client_json FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1",
+      [nest, humanDoc],
+    )) as { id: number; client_json: string | null };
+    await d.run("UPDATE node_versions SET client_json = ? WHERE id = ?", ['{"agent":5,"session_id":"s9"}', row.id]);
+    try {
+      const item = (await stream("")).data.items.find((i: any) => i.nodeId === humanDoc);
+      expect(item.client?.agent).toBeUndefined();
+      expect(item.client?.session_id).toBe("s9");
+      expect((await stream("?source=agent")).data.items.some((i: any) => i.nodeId === humanDoc)).toBe(false);
+      expect((await stream("?source=human")).data.items.some((i: any) => i.nodeId === humanDoc)).toBe(true);
+    } finally {
+      await d.run("UPDATE node_versions SET client_json = ? WHERE id = ?", [row.client_json, row.id]);
+    }
+  });
+
+  it("AC-ST-03: summarize drops a leading heading that repeats the title despite case, emphasis or trailing punctuation, and keeps a different one", async () => {
+    const { summarize } = await import("../src/governance/stream-service.js");
+    expect(summarize("# renewal CHECKLIST\n\nBody text.", "Renewal checklist")).toBe("Body text.");
+    expect(summarize("## **Renewal checklist:**\n\nBody text.", "Renewal checklist")).toBe("Body text.");
+    expect(summarize("# _Renewal_ `checklist`!\nBody text.", "Renewal checklist")).toBe("Body text.");
+    expect(summarize("# Before the call\n\nBody text.", "Renewal checklist")).toBe("Before the call Body text.");
+    expect(summarize("Body first.\n# Renewal checklist", "Renewal checklist")).toBe("Body first. Renewal checklist");
+  });
+
   // Last: it adds a version, which the counts above do not expect.
   it("AC-ST-04: Given a person's write whose client has a key or value containing \"agent\", Then it is still a human post", async () => {
     const doc = await asPerson(app, "POST", `/nests/${nest}/nodes`, {

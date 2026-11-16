@@ -87,3 +87,18 @@ describe("doc stream feed posts (po-1214)", () => {
     expect(activeFilterCount(EMPTY_STREAM_FILTERS)).toBe(0);
   });
 });
+
+import { pollDelay, POLL_MS, POLL_MAX_MS } from "./doc-stream";
+
+describe("new-posts poll (po-1214 review)", () => {
+  it("asks for the count only: items=0 rides with facets=0", () => {
+    expect(streamQueryString({ since: "t", limit: 1, facets: false, items: false })).toBe("?since=t&limit=1&facets=0&items=0");
+  });
+
+  it("backs off after failed polls, doubling up to a ceiling, and resets on success", () => {
+    expect(pollDelay(0)).toBe(POLL_MS);
+    expect(pollDelay(1)).toBe(POLL_MS * 2);
+    expect(pollDelay(2)).toBe(POLL_MS * 4);
+    expect(pollDelay(50)).toBe(POLL_MAX_MS);
+  });
+});

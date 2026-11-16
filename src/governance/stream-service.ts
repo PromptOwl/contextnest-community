@@ -28,7 +28,8 @@
  *
  * Bounded work per call: a handful of SQL statements (page, total, four facet
  * counts, tags + comment counts for the page) plus one body read per item on
- * the page for its summary.
+ * the page for its summary. The new-posts poll asks for the count alone
+ * (`items: false`): one COUNT, nothing else.
  */
 
 import { getDb } from "../db/client.js";
@@ -146,14 +147,26 @@ interface NestScope {
   publicOnly: boolean;
 }
 
+/** A heading's text for comparing with the title: no emphasis or code marks,
+ *  no trailing punctuation, case-folded, whitespace collapsed. */
+function headingKey(s: string): string {
+  return s
+    .replace(/[*_`~]/g, "")
+    .replace(/[\s:.!?;,\-–—]+$/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 /** Flatten a body to a one-line preview. A leading heading that only
- *  repeats the title is dropped: the post already shows the title (po-1214). */
+ *  repeats the title (ignoring case, emphasis and trailing punctuation) is
+ *  dropped: the post already shows the title (po-1214). */
 export function summarize(body: string, title?: string): string {
   let text = body.replace(/<[^>]+>/g, " ");
-  const t = title?.trim().toLowerCase();
+  const t = title ? headingKey(title) : "";
   if (t) {
     text = text.replace(/^\s*#{1,6}\s+(.*)\n?/, (line, heading: string) =>
-      heading.trim().toLowerCase() === t ? "" : line,
+      headingKey(heading) === t ? "" : line,
     );
   }
   const flat = text
@@ -165,14 +178,29 @@ export function summarize(body: string, title?: string): string {
 
 /**
  * SQL for "this version's write named an agent". `client_json` is
- * JSON.stringify output (serializeClient) of a FLAT block: the engine's
- * clientMetadataSchema allows only scalar values, so there is no nested
- * object to carry an inner `"agent":` key, and no null to store. A top-level
- * `agent` key is therefore the literal `"agent":`; a key or value that merely
- * contains the word is prefixed or escaped and does not match (tested). Text
- * matching keeps it one predicate on both drivers (no json_extract / ->>).
+ * JSON.stringify output (serializeClient — see the note there) of a FLAT
+ * block: the engine's clientMetadataSchema allows only scalar values, so there
+ * is no nested object to carry an inner `"agent":` key, and no null to store
+ * (canary-tested). A top-level string `agent` is therefore the literal
+ * `"agent":"` followed by a non-empty value; a key or value that merely
+ * contains the word is prefixed or escaped and does not match, and a
+ * non-string scalar (`"agent":5`) is not an agent name (tested). Text matching
+ * keeps it one predicate on both drivers (no json_extract / ->>). It is an
+ * unindexed scan over the filtered rows, bounded by the since-window and the
+ * nest scope; revisit with a stored flag if node_versions grows large.
  */
-const AGENT_SQL = `(v.client_json LIKE '%"agent":%' AND v.client_json NOT LIKE '%"agent":""%')`;
+const AGENT_SQL = `(v.client_json LIKE '%"agent":"%' AND v.client_json NOT LIKE '%"agent":""%')`;
+
+/** A stored client block as a post shows it: `agent` is a name, so a
+ *  non-string one (the schema allows any scalar) is dropped, not shown as
+ *  "via 5". Matches AGENT_SQL, so the post is filed under people. */
+function postClient(raw: string | null): ClientMetadata | null {
+  const client = deserializeClient(raw);
+  if (!client) return null;
+  if (client.agent === undefined || typeof client.agent === "string") return client;
+  const { agent: _dropped, ...rest } = client as Record<string, unknown>;
+  return Object.keys(rest).length ? (rest as ClientMetadata) : null;
+}
 
 /**
  * What this version was, as an event. Approving a review writes status
@@ -258,6 +286,10 @@ export async function getDocStream(params: {
   /** false: skip the facet counts even on the first page — the new-posts
    *  poll (po-1214) only needs `total`. Default true. */
   facets?: boolean;
+  /** false: count only — `total` and `has_more`, no page. The new-posts poll
+   *  (po-1214) needs nothing else, so it skips the page query, its joins, the
+   *  review verdicts and the version reads. Default true. */
+  items?: boolean;
   /** One version's body and frontmatter (null when it can't be read). The
    *  body feeds the summary; a public reader's title/type/tags come from the
    *  frontmatter. */
@@ -343,11 +375,12 @@ export async function getDocStream(params: {
   }
   const whereSql = where.join(" AND ");
 
+  const wantItems = params.items !== false;
   const [totalRow, rows] = await Promise.all([
     db.get(`SELECT COUNT(*) AS c ${FROM} WHERE ${whereSql}`, whereParams) as Promise<{
       c: number | string;
     }>,
-    db.all(
+    (wantItems ? db.all(
       `SELECT v.id, v.nest_id, v.node_id, v.version, v.status, v.author, v.created_at,
               v.tags_json, v.client_json, v.change_note, ni.title, ni.type,
               u.name AS author_name, sa.name AS system_name
@@ -361,7 +394,7 @@ export async function getDocStream(params: {
         ORDER BY v.created_at DESC, v.id DESC
         LIMIT ? OFFSET ?`,
       [...whereParams, limit, offset],
-    ) as Promise<
+    ) : Promise.resolve([])) as Promise<
       Array<{
         id: number | string;
         nest_id: string;
@@ -381,6 +414,9 @@ export async function getDocStream(params: {
     >,
   ]);
   const total = Number(totalRow?.c ?? 0);
+  if (!wantItems) {
+    return { items: [], total, counts: null, limit, offset, has_more: offset < total };
+  }
 
   const memberBase = memberScopes.length ? visible(memberScopes) : null;
   const counts =
@@ -484,7 +520,7 @@ export async function getDocStream(params: {
       status: r.status,
       author: isPublic ? null : r.author,
       authorName: isPublic ? null : r.system_name || r.author_name || null,
-      client: isPublic ? null : deserializeClient(r.client_json) ?? null,
+      client: isPublic ? null : postClient(r.client_json),
       changeNote: isPublic ? null : personNote(r.change_note),
       review:
         isPublic || r.status !== "pending_review"

@@ -512,7 +512,11 @@ export function toolShape(toolName: string, inputSchema: unknown): Record<string
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
     let field: z.ZodTypeAny;
-    if (def.type === "string") field = z.string();
+    // A string enum validates and advertises its values; a list of
+    // non-strings (or an empty one) falls back to a plain string.
+    if (def.type === "string" && Array.isArray(def.enum) && def.enum.length > 0 && def.enum.every((v: unknown) => typeof v === "string"))
+      field = z.enum(def.enum as [string, ...string[]]);
+    else if (def.type === "string") field = z.string();
     else if (def.type === "number") field = z.number();
     else if (def.type === "array") field = arrayToolField(def);
     else field = z.any();
@@ -1521,7 +1525,7 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
-        source: { type: "string", description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
+        source: { type: "string", enum: ["agent", "human"], description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
         author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
         tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
         type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },

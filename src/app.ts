@@ -2677,7 +2677,8 @@ export function createApp(): Hono<AuthEnv> {
   // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
   // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
   // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000),
-  // ?source=agent|human, ?facets=0 (skip the facet counts; po-1214).
+  // ?source=agent|human, ?facets=0 (skip the facet counts; po-1214),
+  // ?items=0 (count only: `total`, no page — the new-posts poll).
   // One item per node version across every nest the caller can read, newest
   // first, access-filtered per nest (see governance/stream-service.ts). Behind
   // its own switch: off → 404. Version history is a licensed governance view,
@@ -2736,8 +2737,10 @@ export function createApp(): Hono<AuthEnv> {
       // The service clamps (limit 1–100, default 50; offset 0–10000).
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
       offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
-      // facets=0: the new-posts poll needs only `total` (po-1214).
+      // facets=0: skip the facet counts (po-1214).
       facets: c.req.query("facets") !== "0" && c.req.query("facets") !== "false",
+      // items=0: the poll needs only `total` — no page, review or summary work.
+      items: c.req.query("items") !== "0" && c.req.query("items") !== "false",
     });
     return c.json(page);
   });

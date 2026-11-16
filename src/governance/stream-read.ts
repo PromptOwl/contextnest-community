@@ -54,6 +54,7 @@ export async function streamForCaller(opts: {
   limit?: number;
   offset?: number;
   facets?: boolean;
+  items?: boolean;
   onlyNest?: string;
 }): Promise<StreamPage> {
   const nests = new Map<string, string>();
@@ -68,6 +69,7 @@ export async function streamForCaller(opts: {
     limit: opts.limit,
     offset: opts.offset,
     facets: opts.facets,
+    items: opts.items,
     readVersion: readStreamVersion,
   });
 }

@@ -42,6 +42,7 @@ import {
   initialsOf,
   mergeStreamPages,
   newPostCount,
+  pollDelay,
   postAction,
   postIdentity,
   toggleFacet,
@@ -55,8 +56,6 @@ import { MentionTextarea, CommentBody } from "./MentionTextarea";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 
 const PAGE_SIZE = 25;
-/** How often the feed asks "anything newer?" — one COUNT and one row. */
-const POLL_MS = 30_000;
 
 export interface DocStreamProps {
   /** Fix the stream to one nest (the nest's Stream tab). */
@@ -115,27 +114,39 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
   // The new-posts pill: while the tab is visible, ask how many versions are
   // at or after the newest one shown. Never reloads the list by itself — a
   // feed that jumps under the reader's thumb is worse than a stale one.
+  // The poll is a count only (items=0, facets=0): one COUNT on the server,
+  // no posts, no review verdicts, no version reads. A hidden tab skips its
+  // turn; a failed poll backs off (pollDelay) instead of retrying every 30 s.
   const newest = items[0]?.at;
   useEffect(() => {
     if (!newest) return;
     let stop = false;
-    const tick = async () => {
-      if (document.visibilityState !== "visible") return;
-      try {
-        const p = await api.getDocStream(
-          { ...filters, source, since: newest, limit: 1, facets: false },
-          pinnedNestId,
-        );
-        if (!stop) setFresh(newPostCount(items, newest, p.total));
-      } catch (e) {
-        // A failed poll leaves the pill as it was; the next tick tries again.
-        console.warn("[stream] new-posts poll failed", e);
-      }
+    let failures = 0;
+    let timer: number | undefined;
+    const schedule = () => {
+      if (!stop) timer = window.setTimeout(() => void tick(), pollDelay(failures));
     };
-    const id = window.setInterval(() => void tick(), POLL_MS);
+    const tick = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const p = await api.getDocStream(
+            { ...filters, source, since: newest, limit: 1, facets: false, items: false },
+            pinnedNestId,
+          );
+          failures = 0;
+          if (!stop) setFresh(newPostCount(items, newest, p.total));
+        } catch (e) {
+          // A failed poll leaves the pill as it was and waits longer next time.
+          failures++;
+          console.warn("[stream] new-posts poll failed", e);
+        }
+      }
+      schedule();
+    };
+    schedule();
     return () => {
       stop = true;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [newest, items, filters, source, pinnedNestId]);
 
