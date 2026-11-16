@@ -536,12 +536,32 @@ describe("context pull log — paging, large pulls and older rows", () => {
     }
   });
 
-  it("recognises this database's missing-table and missing-column errors (the pre-093 fallback)", async () => {
-    for (const sql of ["SELECT pull_id FROM no_such_access_table", "SELECT no_such_column FROM node_access_events"]) {
-      const err = await db().all(sql).then(() => null, (e: unknown) => e);
-      expect(err).toBeTruthy();
-      expect(pullLog.isMissingSchemaError(err)).toBe(true);
+  it("treats only a missing access log or 093 column as \"no pulls\" — any other schema error surfaces", async () => {
+    const errorOf = (sql: string) => db().all(sql).then(() => null, (e: unknown) => e);
+    for (const sql of ["SELECT pull_id FROM node_access_events_gone", "SELECT bytes FROM nests"]) {
+      const err = await errorOf(sql);
+      expect(err, sql).toBeTruthy();
+      expect(pullLog.isMissingSchemaError(err), sql).toBe(true);
+    }
+    for (const sql of ["SELECT 1 FROM some_unrelated_table", "SELECT no_such_column FROM users"]) {
+      const err = await errorOf(sql);
+      expect(err, sql).toBeTruthy();
+      expect(pullLog.isMissingSchemaError(err), sql).toBe(false);
     }
     expect(pullLog.isMissingSchemaError(new Error("connection reset"))).toBe(false);
+  });
+
+  it("prunes rows past retention as pull volume is written", async () => {
+    const old = new Date(Date.now() - 400 * 86_400_000).toISOString();
+    await db().run(
+      `INSERT INTO node_access_events (ts, nest_id, node_id, action, surface, user_email, detail)
+       VALUES (?, ?, 'ancient-doc', 'retrieve', 'api', 'owner@pages.test', 'search')`,
+      [old, openNest],
+    );
+    // PRUNE_EVERY (500) rows of distinct pulls: eleven 50-document searches.
+    for (let k = 0; k < 11; k++) record(openNest, Array.from({ length: 50 }, (_, i) => `vol-${k}-${i}`), `search-${k}`);
+    await log.flushAccessLog(openNest);
+    const left = await db().get("SELECT COUNT(*) AS n FROM node_access_events WHERE node_id = 'ancient-doc'");
+    expect(Number((left as any).n)).toBe(0);
   });
 });
