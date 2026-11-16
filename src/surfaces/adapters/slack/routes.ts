@@ -21,7 +21,7 @@ import { getSessionIdFromRequest } from "../../../auth/sessions.js";
 import { credentialMayContribute } from "../../../governance/org-contribution.js";
 import { config } from "../../../config.js";
 import { getDb } from "../../../db/client.js";
-import { surfacesEnabled, ORG_ID } from "../../flags.js";
+import { surfacesEnabled, hostedEnabled, ORG_ID } from "../../flags.js";
 import { createInstall, getInstall, type InstallRow } from "../../services/install-store.js";
 import { getSecret, secretPresence, setSecret, deleteSecrets } from "../../services/secret-store.js";
 import { completeInstallerLink, recordUserChange } from "../../services/identity-service.js";
@@ -33,14 +33,13 @@ import { track } from "../../services/work.js";
 import { buildManifest, BOT_SCOPES, slackUrls } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
-import { slackCall, SlackApiError } from "./api.js";
-import { listInstallChannels } from "./channels.js";
+import { slackCall } from "./api.js";
+import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
 
 type C = Context<AuthEnv>;
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
-export const hostedEnabled = () => surfacesEnabled() && config.FEATURE_SURFACES_SLACK_HOSTED;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -300,8 +299,9 @@ slackAdminRoutes.get("/installs/:id/channels", async (c) => {
   try {
     return c.json(await listInstallChannels(i));
   } catch (err) {
-    if (err instanceof SlackApiError) return c.json({ error: `Slack refused the channel list (${err.code}).` }, 502);
-    throw err;
+    const f = channelListFailure(err);
+    if (f.retryAfterSec) c.header("Retry-After", String(f.retryAfterSec));
+    return c.json({ error: f.error }, f.status);
   }
 });
 

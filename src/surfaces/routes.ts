@@ -13,9 +13,8 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
-import { surfacesEnabled } from "./flags.js";
+import { surfacesEnabled, hostedEnabled } from "./flags.js";
 import { config } from "../config.js";
-import { hostedEnabled } from "./adapters/slack/routes.js";
 import {
   UnprocessableError,
   GuardRefusedError,

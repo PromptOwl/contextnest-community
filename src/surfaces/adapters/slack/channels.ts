@@ -10,8 +10,9 @@
  */
 import { getDb } from "../../../db/client.js";
 import type { InstallRow } from "../../services/install-store.js";
-import { botToken } from "./connector.js";
-import { slackCall } from "./api.js";
+import { botToken, NO_BOT_TOKEN } from "./connector.js";
+import { slackCall, SlackApiError } from "./api.js";
+import { SurfaceRateLimited } from "../../contract.js";
 
 export const MAX_CHANNEL_PAGES = 10;
 
@@ -60,10 +61,30 @@ export async function listInstallChannels(install: InstallRow): Promise<{ channe
         name: typeof ch.name === "string" ? ch.name.slice(0, 80) : null,
         is_private: !!(ch.is_private || ch.is_group),
         is_ext_shared: !!(ch.is_ext_shared || ch.is_shared || ch.is_pending_ext_shared),
-        num_members: Number.isFinite(Number(ch.num_members)) && ch.num_members !== undefined && ch.num_members !== null ? Number(ch.num_members) : null,
+        num_members: typeof ch.num_members === "number" ? ch.num_members : null,
         binding: b ? { id: b.id, nest_id: b.nest_id, status: b.status } : null,
       };
     })
     .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
   return { channels, truncated };
 }
+
+/**
+ * How a failed channel list reads to the admin, shared by REST and MCP:
+ * no usable bot token → 409 (finish connecting), Slack rate limit → 429 with
+ * Retry-After, any other Slack refusal → 502 with Slack's code. Anything
+ * else is a real server error and is rethrown.
+ */
+export function channelListFailure(err: unknown): { status: 409 | 429 | 502; error: string; retryAfterSec?: number } {
+  if (err instanceof SurfaceRateLimited) {
+    return { status: 429, error: `Slack is rate-limiting the channel list. Try again in ${err.retryAfterSec} seconds.`, retryAfterSec: err.retryAfterSec };
+  }
+  if (err instanceof SlackApiError) return { status: 502, error: `Slack refused the channel list (${err.code}).` };
+  if (err instanceof Error && err.message === NO_BOT_TOKEN) {
+    return { status: 409, error: "This install has no usable bot token. Connect Slack again (Install to Slack) to save one." };
+  }
+  throw err;
+}
+
+/** The truncation line both surfaces show, so a missing channel is never silent. */
+export const TRUNCATED_NOTE = `Nest is in more channels than this list shows (it stops after ${MAX_CHANNEL_PAGES} pages from Slack).`;

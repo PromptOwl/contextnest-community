@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import { config } from "../config.js";
 import { surfacesEnabled } from "./flags.js";
 import { getSettings } from "./services/settings-service.js";
-import { DEFAULT_SETTINGS, type SurfaceSettings } from "./core/settings.js";
+import { type SurfaceSettings } from "./core/settings.js";
 
 export const ABOUT_SURFACES_PATH = "/about/surfaces";
 
@@ -84,11 +84,20 @@ export const aboutSurfacesRoutes = new Hono();
 
 aboutSurfacesRoutes.get("/", async (c) => {
   if (!surfacesEnabled()) return c.json({ error: "Not found" }, 404);
-  const settings = await getSettings().catch(() => ({ ...DEFAULT_SETTINGS }));
-  c.header("Cache-Control", "public, max-age=300");
   c.header("X-Robots-Tag", "noindex");
+  // The numbers on this page are privacy claims. If this server's settings
+  // can't be read, say so (503, never cached) rather than state defaults that
+  // may not be true here.
+  const settings = await getSettings().catch(() => null);
+  if (!settings) {
+    c.header("Cache-Control", "no-store");
+    return c.text("This page is unavailable right now. Try again in a minute.", 503);
+  }
+  // Revalidate every load: an admin's settings change shows on the next visit.
+  c.header("Cache-Control", "no-cache");
   // Nothing on this page runs script or loads anything but the admin's logo.
-  c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  // http: is allowed because LOGO_URL accepts http:// (src/config.ts).
+  c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: http: data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
   c.header("Referrer-Policy", "no-referrer");
   return c.html(renderAboutSurfaces({ orgName: config.SURFACES_ORG_NAME ?? null, logoUrl: config.LOGO_URL, settings }));
 });

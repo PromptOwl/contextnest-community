@@ -46,8 +46,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { createBindingWithListener } from "../surfaces/services/listener-service.js";
 import { createInstall, getInstall } from "../surfaces/services/install-store.js";
-import { listInstallChannels } from "../surfaces/adapters/slack/channels.js";
-import { SlackApiError } from "../surfaces/adapters/slack/api.js";
+import { listInstallChannels, channelListFailure, TRUNCATED_NOTE } from "../surfaces/adapters/slack/channels.js";
 import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
 import { getSettings } from "../surfaces/services/settings-service.js";
 import { updateSettingsWithEffects } from "../surfaces/services/dm-service.js";
@@ -488,10 +487,12 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         if (!install || install.surface !== "slack") throw new NotFoundError("Install not found");
         if (install.status !== "active") throw new AppError(409, "Finish connecting Slack first: this install isn't active yet.");
         const out = await listInstallChannels(install).catch((err) => {
-          if (err instanceof SlackApiError) throw new AppError(502, `Slack refused the channel list (${err.code}).`);
-          throw err;
+          const f = channelListFailure(err);
+          throw new AppError(f.status, f.error);
         });
-        return { text: out.channels.map((ch) => `${ch.is_private ? "private" : "public"} ${ch.id} ${ch.name ?? ""}${ch.binding ? ` (bound: ${ch.binding.status})` : ""}`).join("\n") || "The bot isn't in any channel yet. Add it to a channel in Slack first.", data: out };
+        const rows = out.channels.map((ch) => `${ch.is_private ? "private" : "public"} ${ch.id} ${ch.name ?? ""}${ch.binding ? ` (bound: ${ch.binding.status})` : ""}`).join("\n");
+        const text = (rows || "The bot isn't in any channel yet. Add it to a channel in Slack first.") + (out.truncated ? `\n${TRUNCATED_NOTE}` : "");
+        return { text, data: out };
       }
       case "context_surfaces_settings_get": {
         await requireOrgAdmin(ctx);

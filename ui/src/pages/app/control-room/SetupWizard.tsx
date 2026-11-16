@@ -717,7 +717,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
           })}
         </div>
       )}
-      {truncated && <p className="mt-2 text-sm text-muted-foreground">Showing the first 2,000 channels Nest is in.</p>}
+      {truncated && <p className="mt-2 text-sm text-muted-foreground">Nest is in more channels than this list shows, so some may be missing here.</p>}
       <details className="mt-3 text-sm">
         <summary className="cursor-pointer font-medium text-primary">Who counts as someone who can read a nest?</summary>
         <p className="mt-2 max-w-2xl text-foreground/80">

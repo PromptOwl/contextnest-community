@@ -24,6 +24,8 @@ const slack = {
   /** What users.conversations answers (the bot's channels). */
   botChannels: [] as Array<Record<string, unknown>>,
   conversationsError: null as string | null,
+  /** "endless": every page has a next cursor; "ratelimited": HTTP 429 with Retry-After. */
+  conversationsMode: "normal" as "normal" | "endless" | "ratelimited",
   oauth: null as Record<string, unknown> | null,
 };
 const realFetch = globalThis.fetch;
@@ -39,6 +41,11 @@ async function fakeFetch(input: any, init?: any): Promise<Response> {
       return json(slack.oauth ?? { ok: false, error: "invalid_code" });
     case "users.conversations":
       if (slack.conversationsError) return json({ ok: false, error: slack.conversationsError });
+      if (slack.conversationsMode === "ratelimited") return new Response("", { status: 429, headers: { "retry-after": "17" } });
+      if (slack.conversationsMode === "endless") {
+        const n = Number(params.cursor || 0);
+        return json({ ok: true, channels: [{ id: `C_P${n}`, name: `page-${String(n).padStart(2, "0")}`, is_private: false }], response_metadata: { next_cursor: String(n + 1) } });
+      }
       return json({ ok: true, channels: slack.botChannels, response_metadata: { next_cursor: "" } });
     case "users.info": {
       const x = slack.users.get(params.user);
@@ -180,6 +187,48 @@ describe("GET /surfaces/slack/installs/:id/channels", () => {
     expect(r.data.error).toMatch(/missing_scope/);
   });
 
+  it("stops after MAX_CHANNEL_PAGES pages and says the list is truncated (REST and MCP)", async () => {
+    const { MAX_CHANNEL_PAGES } = await import("../src/surfaces/adapters/slack/channels.js");
+    slack.conversationsMode = "endless";
+    const before = slack.calls.filter((c) => c.method === "users.conversations").length;
+    try {
+      const r = await jsonRequest(app, "GET", `/surfaces/slack/installs/${installId}/channels`, undefined, root.apiKey);
+      expect(r.status).toBe(200);
+      expect(r.data.truncated).toBe(true);
+      expect(r.data.channels.length).toBe(MAX_CHANNEL_PAGES);
+      expect(slack.calls.filter((c) => c.method === "users.conversations").length - before).toBe(MAX_CHANNEL_PAGES);
+      const out = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_slack_channels_list", arguments: { install_id: installId } }, root.apiKey);
+      expect(out.result?.content?.[0]?.text ?? "").toMatch(/more channels than this list shows/);
+    } finally {
+      slack.conversationsMode = "normal";
+    }
+  });
+
+  it("answers 429 with Retry-After, not a 500, when Slack rate-limits the list", async () => {
+    slack.conversationsMode = "ratelimited";
+    try {
+      const res = await app.request(`/surfaces/slack/installs/${installId}/channels`, { headers: { Authorization: `Bearer ${root.apiKey}` } });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("17");
+      expect((await res.json()).error).toMatch(/try again in 17 seconds/i);
+    } finally {
+      slack.conversationsMode = "normal";
+    }
+  });
+
+  it("answers 409 (save the bot token), not a 500, when an active install has no usable bot token", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const other = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id;
+    await getDb().run("UPDATE surface_installs SET status = 'active' WHERE id = ?", [other]);
+    const r = await jsonRequest(app, "GET", `/surfaces/slack/installs/${other}/channels`, undefined, root.apiKey);
+    expect(r.status).toBe(409);
+    expect(r.data.error).toMatch(/bot token/i);
+    const out = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_slack_channels_list", arguments: { install_id: other } }, root.apiKey);
+    expect(out.result?.isError).toBe(true);
+    expect(out.result?.content?.[0]?.text ?? "").toMatch(/bot token/i);
+    await getDb().run("UPDATE surface_installs SET status = 'disconnected' WHERE id = ?", [other]);
+  });
+
   it("the MCP twin context_surfaces_slack_channels_list returns the same rows", async () => {
     const out = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_slack_channels_list", arguments: { install_id: installId } }, root.apiKey);
     const data = out.result?.structuredContent ?? JSON.parse(out.result?.content?.[1]?.text ?? "null");
@@ -194,6 +243,8 @@ describe("GET /surfaces/slack/installs/:id/channels", () => {
     expect(api).toContain("/surfaces/slack/installs/:id/channels");
     expect(api).toContain("context_surfaces_slack_channels_list");
     expect(api).toContain("GET /about/surfaces");
+    // The OAuth callback's JSON `next` field is documented too.
+    expect(api).toMatch(/oauth\/callback`[^\n]*`next`/);
   });
 });
 
@@ -215,6 +266,30 @@ describe("binding a channel: the one notice links the member explainer", () => {
     const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
     expect(enableNotice("Revenue", null)).not.toMatch(/about\/surfaces/);
     expect(enableNotice("Revenue", "https://x.test/about/surfaces")).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
+    const { aboutSurfacesUrl } = await import("../src/surfaces/about-page.js");
+    delete process.env.PUBLIC_BASE_URL;
+    try {
+      expect(aboutSurfacesUrl()).toBeNull();
+    } finally {
+      process.env.PUBLIC_BASE_URL = BASE;
+    }
+  });
+
+  it("the notice states the server's own buffer TTL, the same number the member page shows", async () => {
+    const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
+    expect(enableNotice("Revenue", null)).toMatch(/messages are cleared within 24 hours/);
+    expect(enableNotice("Revenue", null, 12)).toMatch(/messages are cleared within 12 hours/);
+    await jsonRequest(app, "PATCH", "/surfaces/settings", { buffer_ttl_hours: 12, window_max_age_hours: 6 }, root.apiKey);
+    try {
+      slack.convs.set("C_TTL", { info: { id: "C_TTL", name: "ttl-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
+      const before = slack.posted.length;
+      const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_TTL", nest_id: N }, root.apiKey);
+      expect(b.status).toBe(201);
+      const notice = slack.posted.slice(before).find((p) => p.channel === "C_TTL");
+      expect(notice?.text).toMatch(/messages are cleared within 12 hours/);
+    } finally {
+      await jsonRequest(app, "PATCH", "/surfaces/settings", { buffer_ttl_hours: 24 }, root.apiKey);
+    }
   });
 });
 
@@ -252,6 +327,29 @@ describe("AC-CR-16: GET /about/surfaces", () => {
     expect(html).toContain("Keep message text longer than 12 hours");
     expect(html).toMatch(/direct messages people start with Nest themselves/);
     await jsonRequest(app, "PATCH", "/surfaces/settings", { quiet_minutes: 20, buffer_ttl_hours: 24, dm_capture: false }, root.apiKey);
+  });
+
+  it("is never cached publicly: a settings change shows on the next load, and an http:// logo isn't blocked by the CSP", async () => {
+    const res = await app.request("/about/surfaces");
+    const cc = res.headers.get("cache-control") ?? "";
+    expect(cc).toMatch(/no-cache/);
+    expect(cc).not.toMatch(/public|max-age=[1-9]/);
+    expect(res.headers.get("content-security-policy")).toMatch(/img-src https: http: data:/);
+  });
+
+  it("answers 503 with no-store, not default numbers, when the settings can't be read", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("ALTER TABLE surface_settings RENAME TO surface_settings_cr3_hidden");
+    try {
+      const res = await app.request("/about/surfaces");
+      expect(res.status).toBe(503);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const body = await res.text();
+      expect(body).not.toMatch(/quiet for \d+ minutes/);
+    } finally {
+      await getDb().run("ALTER TABLE surface_settings_cr3_hidden RENAME TO surface_settings");
+    }
+    expect((await app.request("/about/surfaces")).status).toBe(200);
   });
 
   it("escapes the org name it shows", async () => {
