@@ -80,8 +80,10 @@ const PRUNE_EVERY = 500;
  * Bounded: the throttle map is cleared when full.
  */
 const STATE_KEY = Symbol.for("contextnest.accessLog");
-const state: { lastSeen: Map<string, number>; pending: Set<Promise<void>> } =
-  ((globalThis as any)[STATE_KEY] ??= { lastSeen: new Map(), pending: new Set() });
+// pending maps each in-flight insert to its nest, so a read waits only for
+// its own nest's writes.
+const state: { lastSeen: Map<string, number>; pending: Map<Promise<void>, string> } =
+  ((globalThis as any)[STATE_KEY] ??= { lastSeen: new Map(), pending: new Map() });
 const { lastSeen, pending } = state;
 let insertsSincePrune = 0;
 
@@ -296,16 +298,18 @@ export function recordNodeAccess(e: AccessEvent): void {
     const key = pullKey(actor, e, ids);
     if (!admit(key, e, now)) return;
     const p = write(e, ids, key);
-    pending.add(p);
+    pending.set(p, e.nestId);
     void p.finally(() => pending.delete(p));
   } catch {
     /* never break the caller */
   }
 }
 
-/** Wait for in-flight inserts (tests, and the log endpoint's read-your-writes). */
-export async function flushAccessLog(): Promise<void> {
-  while (pending.size) await Promise.allSettled([...pending]);
+/** Wait for in-flight inserts (tests, and the log endpoints' read-your-writes):
+ *  one nest's, or with no nest every one. */
+export async function flushAccessLog(nestId?: string): Promise<void> {
+  const inFlight = () => [...pending].filter(([, n]) => !nestId || n === nestId).map(([p]) => p);
+  for (let batch = inFlight(); batch.length; batch = inFlight()) await Promise.allSettled(batch);
 }
 
 /** Forget the throttle window (tests). */

@@ -272,14 +272,21 @@ queryRoutes.get("/pulls", async (c) => {
   const userId = c.get("userId");
   const agent = c.req.query("agent")?.trim();
   if (agent && agent.length > 200) throw new ValidationError("agent must be at most 200 characters");
+  // Over 50 is clamped (listPulls), like the MCP tool; anything not a whole
+  // number of pulls, or a cursor that isn't one, is a caller error.
+  const limitRaw = c.req.query("limit");
+  const limit = limitRaw === undefined || limitRaw === "" ? 20 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1) throw new ValidationError("limit must be a whole number of pulls, 1 or more");
+  const before = c.req.query("before") || undefined;
+  if (before !== undefined && !/^\d+$/.test(before)) throw new ValidationError("before must be a nextBefore cursor from a previous page");
   const viewer = await pullViewer(nestId, userId, await resolveCallerEmail(userId));
-  await flushAccessLog();
+  await flushAccessLog(nestId);
   return c.json(
     await listPulls({
       nestId,
       viewer,
-      limit: Number(c.req.query("limit") ?? 20),
-      before: c.req.query("before") || undefined,
+      limit,
+      before,
       agent: agent || undefined,
     }),
   );
@@ -290,7 +297,7 @@ queryRoutes.get("/pulls/:pullId", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const viewer = await pullViewer(nestId, userId, await resolveCallerEmail(userId));
-  await flushAccessLog();
+  await flushAccessLog(nestId);
   const pull = await getPull({ nestId, viewer, pullId: c.req.param("pullId")! });
   if (!pull) throw new NotFoundError("Pull not found");
   return c.json({ pull });

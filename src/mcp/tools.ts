@@ -3799,7 +3799,7 @@ async function runTool(
       // Read model over the access log (po-1252) — the same service and the
       // same who-sees-whom rule as GET /nests/:id/pulls.
       const viewer = await pullViewer(nestId, userId, userEmail);
-      await flushAccessLog();
+      await flushAccessLog(nestId);
       if (args.pull_id !== undefined) {
         if (typeof args.pull_id !== "string" || !args.pull_id.trim()) {
           return toolError("pull_id must be a non-empty string", "VALIDATION_FAILED");

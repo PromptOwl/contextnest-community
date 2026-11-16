@@ -3870,7 +3870,7 @@ export function createApp(): Hono<AuthEnv> {
     if (types?.some((t) => !(ACTIVITY_TYPES as readonly string[]).includes(t))) {
       throw new ValidationError(`type must be one of: ${ACTIVITY_TYPES.join(", ")}`);
     }
-    await flushAccessLog();
+    await flushAccessLog(nestId);
     const page = await getScopedActivity({
       nestId,
       scope,

@@ -2542,7 +2542,7 @@ Notes:
 ### GET `/nests/:nestId/pulls` (read+)
 The context pull log, for the Graph view's replay (po-1252): each retrieval call made in this nest, newest first, as the documents it handed over in order. A read model over the access log (`node_access_events`, the same rows `GET /activity-log` reads), so it records only while the nest's `access_log_enabled` is on, and is pruned on the same retention window.
 
-Query: `limit` (1–50, default 20), `before` (the previous page's `nextBefore`), `agent` (case-insensitive exact). A page can hold fewer than `limit` pulls, even none, while `hasMore` is `true` (the newest pulls touched only documents the caller can't read): keep paging with `nextBefore`.
+Query: `limit` (a whole number from 1; above 50 is read as 50; default 20), `before` (the previous page's `nextBefore`), `agent` (case-insensitive exact). Anything else in `limit` or `before` is a `400`. A page can hold fewer than `limit` pulls, even none, while `hasMore` is `true` (the newest pulls touched only documents the caller can't read): keep paging with `nextBefore`.
 
 ```json
 {
