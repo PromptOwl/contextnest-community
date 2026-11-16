@@ -375,6 +375,12 @@ describe("context_list names the served (approved) version's editor under stewar
     expect(rows.find((r) => r.id === docId).last_edit.client).toMatchObject({ agent: "agent-draft" });
   });
 
+  it("Given the same document, then the census feed (a live-nest read, no approved mode) names the live edit, as the REST list does", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${govNest}/census`, undefined, owner.apiKey);
+    const item = (data.census.recent as any[]).find((r) => r.id === docId);
+    expect(item.last_edit.client).toMatchObject({ agent: "agent-draft" });
+  });
+
   it("Given an upper bound per node, then getLatestVersionAttributions reads at or below it", async () => {
     const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
     const bounded = await getLatestVersionAttributions(govNest, [docId], new Map([[docId, 1]]));

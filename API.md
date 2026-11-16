@@ -2508,7 +2508,7 @@ One call for everything the Documents page needs to describe the *whole* nest, w
   }
 }
 ```
-`recent` is the "Recently edited" feed on the Documents page: up to 5 documents, newest first. Each item carries `last_edit` (the list row's block: the human, then the agent in `client.agent`). `last_edit` is omitted for public readers and headless keys.
+`recent` is the "Recently edited" feed on the Documents page: up to 5 documents, newest first. Each item carries `last_edit` (the list row's block: the human, then the agent in `client.agent`), naming the latest edit, draft included, as a member's list does: the census has no approved-content mode. `last_edit` is the latest *sealed* version, so after a move `updated_at` is newer than `last_edit.edited_at` and the two are different writes; a client that pairs them should name the editor only when the times agree (the Documents page allows a minute). `last_edit` is omitted for public readers and headless keys.
 `aiReady` counts documents with a published version agents are served, whatever the status of their latest version — so it can exceed `statuses.approved`: a document with v2 published and v3 in review counts once here and once under `pending_review`.
 
 ### POST `/nests/:nestId/reindex` (write+)

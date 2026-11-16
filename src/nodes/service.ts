@@ -1685,7 +1685,10 @@ export async function nestCensus(
     )
     .slice(0, RECENT_LIMIT);
   // Same gate as the list's last_edit: no editor identity for a public
-  // reader or a headless key.
+  // reader or a headless key. No served-version bound (the list's `upTo`):
+  // the census has one caller, REST GET /census, with no approved-content
+  // mode, so everyone who gets here is reading the live nest — the latest
+  // edit, draft included, is the honest editor, as on a member's list.
   const recentEdits = (await canSeeEditors(nestId, userId))
     ? await versions.getLatestVersionAttributions(nestId, recentDocs.map((d) => d.id))
     : null;
