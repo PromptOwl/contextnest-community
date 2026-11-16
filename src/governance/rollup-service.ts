@@ -61,7 +61,7 @@ export async function rollups(
   const grain: Grain = f.grain ?? "day";
   const by: GroupBy = f.by ?? "agent";
   // q is a ledger-page search, not a rollup dimension.
-  const { rows, range } = await aggregateRows(scope, { ...f, q: undefined });
+  const { rows, range } = await aggregateRows(scope, { ...f, q: undefined }, { byReason: by === "reason" });
   const owners = await personalOwners(scope.nestIds);
   const groups = new Map<string, { bucket: string; key: string; nestId: string; lastAt: string; source: string; tally: ReturnType<typeof emptyTally> }>();
   const total = emptyTally();
@@ -76,7 +76,7 @@ export async function rollups(
             : by === "reason"
               ? r.reason_code ?? "(none)"
               : "all";
-    // r is already a SQL aggregate (one UTC day × nest × agent × binding × source × reason).
+    // r is already a SQL aggregate (one UTC day × nest × agent × binding × source, × reason for by=reason).
     const bucket = bucketOf(r.day, grain);
     const id = `${bucket}\u0000${by === "agent" || by === "binding" ? `${r.nest_id}\u0000${key}` : key}`;
     let g = groups.get(id);

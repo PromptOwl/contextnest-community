@@ -381,19 +381,26 @@ export function finishTally(t: Tally & { cost_micros: number }): Tally {
 
 /**
  * The rows matching the filters, aggregated in SQL by UTC day × nest × agent
- * × binding × source × reason code (totals + rollups). Bounded by days × groups, never by
- * the number of rows, and never reads a run's trace.
+ * × binding × source (totals + rollups), and × reason code only when the
+ * caller groups by reason (`byReason`; otherwise `reason_code` is null and
+ * adds no rows). Bounded by days × groups, never by the number of rows, and
+ * never reads a run's trace.
  */
-export async function aggregateRows(scope: LedgerScope, f: LedgerFilters): Promise<{ rows: AggRow[]; range: { from: string; to: string } }> {
+export async function aggregateRows(
+  scope: LedgerScope,
+  f: LedgerFilters,
+  opts: { byReason?: boolean } = {},
+): Promise<{ rows: AggRow[]; range: { from: string; to: string } }> {
   const range = ledgerRange(f);
   const owners = await personalOwners(scope.nestIds);
   const redacted = new Set(scope.nestIds.filter((id) => n1Redacts(owners, id, scope.viewerUserId)));
   const { sql, args } = ledgerWhere(scope, f, range, redacted);
   const rows = (await getDb().all(
-    `SELECT substr(l.at, 1, 10) AS day, MAX(l.at) AS last_at, l.nest_id, l.agent_node, l.binding_id, l.source, l.reason_code,
+    `SELECT substr(l.at, 1, 10) AS day, MAX(l.at) AS last_at, l.nest_id, l.agent_node, l.binding_id, l.source,
+            ${opts.byReason ? "l.reason_code" : "NULL AS reason_code"},
             ${TALLY_SQL}
        FROM ${LEDGER_UNION_AGG} ${sql}
-      GROUP BY substr(l.at, 1, 10), l.nest_id, l.agent_node, l.binding_id, l.source, l.reason_code`,
+      GROUP BY substr(l.at, 1, 10), l.nest_id, l.agent_node, l.binding_id, l.source${opts.byReason ? ", l.reason_code" : ""}`,
     args as any,
   )) as AggRow[];
   return { rows, range };
