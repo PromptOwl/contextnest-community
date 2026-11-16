@@ -265,8 +265,8 @@ describe("binding a channel: the one notice links the member explainer", () => {
 
   it("with no PUBLIC_BASE_URL the notice has no link (nothing to point at)", async () => {
     const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
-    expect(enableNotice("Revenue", null)).not.toMatch(/about\/surfaces/);
-    expect(enableNotice("Revenue", "https://x.test/about/surfaces")).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
+    expect(enableNotice("Revenue", null, 24)).not.toMatch(/about\/surfaces/);
+    expect(enableNotice("Revenue", "https://x.test/about/surfaces", 24)).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
     const { aboutSurfacesUrl } = await import("../src/surfaces/about-page.js");
     delete process.env.PUBLIC_BASE_URL;
     try {
@@ -278,7 +278,7 @@ describe("binding a channel: the one notice links the member explainer", () => {
 
   it("the notice states the server's own buffer TTL, the same number the member page shows", async () => {
     const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
-    expect(enableNotice("Revenue", null)).toMatch(/messages are cleared within 24 hours/);
+    expect(enableNotice("Revenue", null, 24)).toMatch(/messages are cleared within 24 hours/);
     expect(enableNotice("Revenue", null, 12)).toMatch(/messages are cleared within 12 hours/);
     await jsonRequest(app, "PATCH", "/surfaces/settings", { buffer_ttl_hours: 12, window_max_age_hours: 6 }, root.apiKey);
     try {
