@@ -53,7 +53,7 @@ import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { DocumentsHome, EmptyNest } from "./nest/DocumentsHome";
-import { DEFAULT_NEST_TAB } from "../lib/nest-tabs";
+import { DEFAULT_NEST_TAB, nestTabOpening, nestViewMenuItems } from "../lib/nest-tabs";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
@@ -433,10 +433,8 @@ export function NestView({
   // Documents is the nest's one home (po-1213): Overview merged into it, and
   // Fields moved to the header's ⋯ menu, where it opens as a dialog over
   // Documents — so an old ?tab=fields link opens that dialog.
-  const [activeTab, setActiveTabState] = useState(
-    initialTab && initialTab !== "fields" ? initialTab : DEFAULT_NEST_TAB,
-  );
-  const [fieldsOpen, setFieldsOpen] = useState(initialTab === "fields");
+  const [activeTab, setActiveTabState] = useState(() => nestTabOpening(initialTab).tab);
+  const [fieldsOpen, setFieldsOpen] = useState(() => nestTabOpening(initialTab).fieldsOpen);
   // Wrapper so every tab change mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     if (tab === "fields") {
@@ -449,13 +447,15 @@ export function NestView({
   };
   // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
   useEffect(() => {
-    if (initialTab === "fields") {
+    if (!initialTab) return;
+    const opening = nestTabOpening(initialTab);
+    setActiveTabState(opening.tab);
+    if (opening.fieldsOpen) {
       // Open the dialog over Documents, and put the URL and breadcrumb back
       // on Documents so closing it leaves no stale ?tab=fields.
       setFieldsOpen(true);
-      setActiveTabState(DEFAULT_NEST_TAB);
-      onTabChange?.(DEFAULT_NEST_TAB);
-    } else if (initialTab) setActiveTabState(initialTab);
+      onTabChange?.(opening.tab);
+    }
   }, [initialTab]);
   // List or grid for Documents, persisted per browser (a reading preference,
   // not a nest setting). The switch is in the ⋯ menu.
@@ -1602,32 +1602,27 @@ export function NestView({
               icon: Users,
               onSelect: () => setActiveTab("collaborators"),
             });
-          // How Documents lays out — a reading preference, so on Documents only.
-          if (activeTab === "documents")
-            actions.push(
-              viewMode === "list"
-                ? { label: "Show as grid", icon: LayoutGrid, testId: "nest-view-grid", onSelect: () => setViewMode("cards") }
-                : { label: "Show as list", icon: ListIcon, testId: "nest-view-list", onSelect: () => setViewMode("list") },
-            );
-          // Custom fields: readable by everyone on the nest; the dialog's own
-          // controls appear only for those who manage them (server-decided).
-          if (!grantOnly)
-            actions.push({
-              label: "Fields",
-              icon: SlidersHorizontal,
-              testId: "nest-open-fields",
-              onSelect: () => setFieldsOpen(true),
-            });
-          // Public Docs Reader Mode — server admin, or this nest's own
-          // owner/admin (canManageReaderMode). Opens the same dialog the
-          // header button did: the switch and the landing document together.
-          if (canManageReaderMode && !nestArchived && !initialLoad)
-            actions.push({
-              label: readerModeEnabled ? "Reader mode: On" : "Reader mode: Off",
-              icon: BookOpen,
-              testId: "nest-reader-mode",
-              onSelect: () => setReaderDialogOpen(true),
-            });
+          // How this page shows (po-1213; which items, and when, is
+          // lib/nest-tabs, tested there): the list/grid switch on Documents —
+          // a reading preference; Fields, whose dialog's own controls appear
+          // only for those who manage them (server-decided); and Public Docs
+          // Reader Mode, which opens the same dialog the header button did.
+          const viewActions = {
+            grid: { icon: LayoutGrid, onSelect: () => setViewMode("cards") },
+            list: { icon: ListIcon, onSelect: () => setViewMode("list") },
+            fields: { icon: SlidersHorizontal, onSelect: () => setFieldsOpen(true) },
+            reader: { icon: BookOpen, onSelect: () => setReaderDialogOpen(true) },
+          } as const;
+          for (const item of nestViewMenuItems({
+            activeTab,
+            viewMode,
+            grantOnly,
+            canManageReaderMode,
+            nestArchived,
+            initialLoad,
+            readerModeEnabled,
+          }))
+            actions.push({ label: item.label, testId: item.testId, ...viewActions[item.key] });
           // How this page shows (above) apart from managing the nest (below).
           const viewItems = actions.length;
           if (!isReadOnly && canManageGovernance)

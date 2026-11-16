@@ -30,3 +30,47 @@ export function nestTabFromParam(raw: string | null | undefined): string | undef
   if (RETIRED_TABS[raw]) return RETIRED_TABS[raw];
   return NEST_TABS.includes(raw) ? raw : undefined;
 }
+
+/**
+ * What a ?tab= value opens. `fields` has no tab of its own: it opens the
+ * Fields dialog over Documents (po-1213), so old links keep working.
+ */
+export function nestTabOpening(tab: string | null | undefined): { tab: string; fieldsOpen: boolean } {
+  if (tab === "fields") return { tab: DEFAULT_NEST_TAB, fieldsOpen: true };
+  return { tab: tab || DEFAULT_NEST_TAB, fieldsOpen: false };
+}
+
+export type NestViewMenuKey = "grid" | "list" | "fields" | "reader";
+
+/**
+ * The "how this page shows" items at the top of the nest header's ⋯ menu
+ * (po-1213): the list/grid switch (Documents only — it lays out nothing
+ * else), Fields (not for a share-grant-only viewer) and Reader mode (for
+ * whoever manages it, once the nest has loaded and while it isn't archived).
+ * NestView adds the icon and the action for each key.
+ */
+export function nestViewMenuItems(o: {
+  activeTab: string;
+  viewMode: "list" | "cards";
+  grantOnly: boolean;
+  canManageReaderMode: boolean;
+  nestArchived: boolean;
+  initialLoad: boolean;
+  readerModeEnabled: boolean;
+}): Array<{ key: NestViewMenuKey; label: string; testId: string }> {
+  const items: Array<{ key: NestViewMenuKey; label: string; testId: string }> = [];
+  if (o.activeTab === DEFAULT_NEST_TAB)
+    items.push(
+      o.viewMode === "list"
+        ? { key: "grid", label: "Show as grid", testId: "nest-view-grid" }
+        : { key: "list", label: "Show as list", testId: "nest-view-list" },
+    );
+  if (!o.grantOnly) items.push({ key: "fields", label: "Fields", testId: "nest-open-fields" });
+  if (o.canManageReaderMode && !o.nestArchived && !o.initialLoad)
+    items.push({
+      key: "reader",
+      label: o.readerModeEnabled ? "Reader mode: On" : "Reader mode: Off",
+      testId: "nest-reader-mode",
+    });
+  return items;
+}

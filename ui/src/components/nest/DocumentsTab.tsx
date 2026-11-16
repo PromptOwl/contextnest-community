@@ -39,7 +39,7 @@ import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "..
 import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
 import { rowLastEdit } from "@/lib/version-author";
-import { formatServerDate, relTime, SHORT_DATE_TIME } from "@/lib/dates";
+import { LastEditText } from "./DocumentsHome";
 import {
   LifecycleStatusBadge, SubmitForReviewModal, ReasonDialog, VersionHistoryModal,
   type DocumentLifecycleStatus, type Steward, type ReviewRequest, type Version,
@@ -1477,17 +1477,7 @@ export function DocumentsTab({
                                     line never ends on a separator. */}
                                 <span className="inline-flex min-w-0 max-w-full items-center gap-1" data-testid={`last-edit-${node.id}`}>
                                   <span aria-hidden className="mr-1">·</span>
-                                  {edit.editor && <span className="truncate">{edit.editor}</span>}
-                                  {edit.editor && edit.at && <span aria-hidden>·</span>}
-                                  {edit.at && (
-                                    <time
-                                      dateTime={edit.at}
-                                      title={formatServerDate(edit.at, SHORT_DATE_TIME)}
-                                      className="shrink-0 tabular-nums"
-                                    >
-                                      {relTime(edit.at)}
-                                    </time>
-                                  )}
+                                  <LastEditText edit={edit} />
                                 </span>
                               </>
                             );
@@ -1499,13 +1489,7 @@ export function DocumentsTab({
                           if (!edit) return null;
                           return (
                             <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground" data-testid={`last-edit-${node.id}`}>
-                              {edit.editor && <span className="truncate">{edit.editor}</span>}
-                              {edit.editor && edit.at && <span aria-hidden>·</span>}
-                              {edit.at && (
-                                <time dateTime={edit.at} title={formatServerDate(edit.at, SHORT_DATE_TIME)} className="shrink-0 tabular-nums">
-                                  {relTime(edit.at)}
-                                </time>
-                              )}
+                              <LastEditText edit={edit} />
                             </div>
                           );
                         })()}

@@ -139,22 +139,35 @@ function FeedItem({
             <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground sm:shrink-0">
               {where && <span className="max-w-[40%] shrink-0 truncate sm:hidden">{where}</span>}
               {where && (edit.editor || edit.at) && <span aria-hidden className="sm:hidden">·</span>}
-              {edit.editor && (
-                <span className="truncate" data-testid="last-editor">
-                  {edit.editor}
-                </span>
-              )}
-              {edit.editor && edit.at && <span aria-hidden>·</span>}
-              {edit.at && (
-                <time dateTime={edit.at} title={formatServerDate(edit.at, SHORT_DATE_TIME)} className="shrink-0 tabular-nums">
-                  {relTime(edit.at)}
-                </time>
-              )}
+              <LastEditText edit={edit} />
             </span>
           )}
         </span>
       </button>
     </li>
+  );
+}
+
+/**
+ * "<human> via <agent> · 2h ago", the full date on the time's hover — the
+ * last edit as a Documents row, a grid card and a feed item all show it
+ * (po-1213). No separator when only one half is there.
+ */
+export function LastEditText({ edit }: { edit: { editor: string | null; at: string | null } }) {
+  return (
+    <>
+      {edit.editor && (
+        <span className="truncate" data-testid="last-editor">
+          {edit.editor}
+        </span>
+      )}
+      {edit.editor && edit.at && <span aria-hidden>·</span>}
+      {edit.at && (
+        <time dateTime={edit.at} title={formatServerDate(edit.at, SHORT_DATE_TIME)} className="shrink-0 tabular-nums">
+          {relTime(edit.at)}
+        </time>
+      )}
+    </>
   );
 }
 

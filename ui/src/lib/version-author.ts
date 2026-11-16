@@ -10,6 +10,7 @@
  */
 import type { ClientAttribution } from "./client-attribution";
 import { displayNameFor } from "./person-name";
+import { parseServerDate } from "./dates";
 
 export interface VersionAuthorLike {
   editedBy?: string | null;
@@ -78,13 +79,32 @@ export function lastEditParts(
  * version's edited_at is the fallback. `editor` is null when the read
  * withheld `last_edit` (a public reader, a headless key), so nobody is
  * named. Null when there is nothing to show at all.
+ *
+ * The editor is named only when their version is the write `at` shows. A
+ * move rewrites updated_at without sealing a version, so after one, last_edit
+ * is an older write: naming its editor beside the newer time would credit
+ * them with a change they did not make. The row then shows the time alone.
  */
 export function rowLastEdit(
   node: { updated_at?: string | null; last_edit?: LastEdit | null },
   people: Array<{ email: string; name?: string | null }> = [],
 ): { at: string | null; editor: string | null } | null {
-  const parts = lastEditParts(node.last_edit, people);
+  let parts = lastEditParts(node.last_edit, people);
   const at = node.updated_at || node.last_edit?.edited_at || null;
+  if (parts && node.updated_at && laterWrite(node.updated_at, node.last_edit?.edited_at)) parts = null;
   if (!at && !parts) return null;
   return { at, editor: parts ? (parts.agent ? `${parts.human} via ${parts.agent}` : parts.human) : null };
+}
+
+/** How far apart updated_at and the version's own timestamp may be and still
+ *  be one write: the frontmatter is stamped before the version row is. */
+const SAME_WRITE_MS = 60_000;
+
+/** True when `updatedAt` is a later write than the version sealed at
+ *  `editedAt`. Unparsable or missing times are not evidence of one. */
+function laterWrite(updatedAt: string, editedAt: string | null | undefined): boolean {
+  const u = parseServerDate(updatedAt)?.getTime();
+  const e = parseServerDate(editedAt)?.getTime();
+  if (u === undefined || e === undefined) return false;
+  return u - e > SAME_WRITE_MS;
 }

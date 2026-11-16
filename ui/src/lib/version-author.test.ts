@@ -144,4 +144,29 @@ describe("AC-NH-03/04: rowLastEdit (Documents rows and the feed)", () => {
   it("Given neither a time nor an editor, then there is nothing to show", () => {
     expect(rowLastEdit({}, people)).toBeNull();
   });
+
+  // A move rewrites updated_at without sealing a version, so last_edit is an
+  // OLDER write than the time the row shows. Naming that editor next to the
+  // newer time would credit them with a change they did not make.
+  it("Given the document changed after its last sealed edit (a move), then the time stays and nobody is named", () => {
+    const r = rowLastEdit(
+      {
+        updated_at: "2026-11-10T12:00:00.000Z",
+        last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-03 09:00:00", client: { agent: "deal-desk" } },
+      },
+      people,
+    );
+    expect(r).toEqual({ at: "2026-11-10T12:00:00.000Z", editor: null });
+  });
+
+  it("Given the version and updated_at are the same write (SQL timestamp, seconds apart), then the editor is named", () => {
+    const r = rowLastEdit(
+      {
+        updated_at: "2026-11-10T12:00:00.400Z",
+        last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-10 12:00:02", client: { agent: "deal-desk" } },
+      },
+      people,
+    );
+    expect(r?.editor).toBe("Priya Raman via deal-desk");
+  });
 });
