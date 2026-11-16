@@ -89,28 +89,36 @@ class CollaboratorsPage {
 
   // ── Navigation ─────────────────────────────────────────────────────────────
 
+  /** Load a URL. A loaded shared server can abort the navigation; try once more. */
+  async _open(url) {
+    await this.page.goto(url).catch(async (err) => {
+      if (!String(err).includes('ERR_ABORTED')) throw err;
+      await this.page.goto(url);
+    });
+  }
+
   /** Open a nest's Collaborators tab and wait for the roster. */
   async goto(nestId) {
     this._log(`Opening the Collaborators tab of nest ${nestId}`);
-    await this.page.goto(`/nest/${nestId}?tab=collaborators`);
+    await this._open(`/nest/${nestId}?tab=collaborators`);
     await this.peopleWithAccess.waitFor({ state: 'visible' });
   }
 
   /** Follow a Collaborators link, without waiting for the tab (it may be withheld). */
   async gotoLink(nestId) {
     this._log(`Following a Collaborators link to nest ${nestId}`);
-    await this.page.goto(`/nest/${nestId}?tab=collaborators`);
+    await this._open(`/nest/${nestId}?tab=collaborators`);
     await this.backToNests.waitFor({ state: 'visible' });
   }
 
   /** Open the nest page. */
   async gotoNest(nestId) {
-    await this.page.goto(`/nest/${nestId}`);
+    await this._open(`/nest/${nestId}`);
   }
 
   /** Open one document of a nest. */
   async gotoDocument(nestId, docId) {
-    await this.page.goto(`/nest/${nestId}?doc=${encodeURIComponent(docId)}`);
+    await this._open(`/nest/${nestId}?doc=${encodeURIComponent(docId)}`);
   }
 
   /** The entries of the open document's actions menu. */

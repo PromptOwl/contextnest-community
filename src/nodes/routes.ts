@@ -576,6 +576,18 @@ nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
 // shadows every suffix route (RegExpRouter) or breaks for ids nested 3+
 // segments (TrieRouter fallback) — don't change the router without
 // re-running test/nested-node-actions.test.ts.
+/** A version's attribution row as the node detail's `last_edit` field. */
+function lastEditOf(v: Awaited<ReturnType<typeof versions.getVersionAttribution>>) {
+  if (!v) return undefined;
+  return {
+    version: v.version,
+    edited_by: v.editedBy,
+    ...(v.editedBySystem ? { edited_by_system: v.editedBySystem } : {}),
+    edited_at: v.editedAt,
+    ...(v.client ? { client: v.client } : {}),
+  };
+}
+
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -655,16 +667,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
     // The latest version's two writers — the human and the agent — for the
     // document byline. Same gate as the roster above.
-    const last = await versions.getVersionAttribution(nestId, nodeId);
-    if (last) {
-      response.last_edit = {
-        version: last.version,
-        edited_by: last.editedBy,
-        ...(last.editedBySystem ? { edited_by_system: last.editedBySystem } : {}),
-        edited_at: last.editedAt,
-        ...(last.client ? { client: last.client } : {}),
-      };
-    }
+    const last = lastEditOf(await versions.getVersionAttribution(nestId, nodeId));
+    if (last) response.last_edit = last;
   }
 
   // The caller's share grant on THIS node, if any. A grant is access, not
@@ -717,6 +721,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       response.version = approved;
       response.status = "published";
+      // The byline names the served (approved) version's writers, not the
+      // hidden draft's — its author, agent and session stay behind the gate.
+      if (response.last_edit && response.last_edit.version !== approved) {
+        const last = lastEditOf(await versions.getVersionAttribution(nestId, nodeId, approved));
+        if (last) response.last_edit = last;
+        else delete response.last_edit;
+      }
       if (isRawFormat(c)) {
         return rawNodeBody(c, response, approvedRaw);
       }
