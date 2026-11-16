@@ -3201,6 +3201,8 @@ export function createApp(): Hono<AuthEnv> {
       const isAgentActivityPath =
         parts[1] === "agent-activity" &&
         (parts.length === 2 || (parts.length === 3 && parts[2] === "undo"));
+      // Server-level MCP twins of these reads are gated by
+      // SERVER_LICENSED_READ_TOOLS (src/mcp/server-routes.ts): keep in step.
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||

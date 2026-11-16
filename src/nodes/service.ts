@@ -289,7 +289,10 @@ export function autoPublishNote(on: "create" | "edit", reason: string): string {
  * ("Auto-published on edit (see ticket)") is hidden too. That is the price
  * of still recognising stamps whose reason wording has since changed.
  */
-const AUTO_PUBLISH_STAMP = new RegExp(`^${AUTO_PUBLISH_NOTE_PREFIX}(create|edit) \\([^()\\n]+\\)$`);
+// A literal, so no regex metacharacter can slip in from the prefix. If
+// AUTO_PUBLISH_NOTE_PREFIX changes, the reason-list test (every
+// autoPublishNote must read as a stamp) fails until this is updated too.
+const AUTO_PUBLISH_STAMP = /^Auto-published on (create|edit) \([^()\n]+\)$/;
 export function isAutoPublishStamp(note: string): boolean {
   return AUTO_PUBLISH_STAMP.test(note.trim());
 }

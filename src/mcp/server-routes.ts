@@ -103,6 +103,8 @@ const SERVER_WRITE_TOOLS = new Set([
 // Server-level reads REST licenses even on GET (the nestsApp gate's
 // isGovernance list and GET /me/stream): version history. The per-nest
 // /nests/:id/mcp is a POST behind that gate already; this route is not.
+// Keep in step with isGovernance in src/app.ts: a server-level tool that
+// serves one of those governance views belongs here.
 const SERVER_LICENSED_READ_TOOLS = new Set<string>([STREAM_TOOL, "context_versions"]);
 
 /** Why a gated call is refused, worded for who asked: only an admin hears
