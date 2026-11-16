@@ -25,6 +25,8 @@ import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { ForbiddenError, ValidationError, NotFoundError } from "../shared/errors.js";
 import type { McpToolContext } from "./tools.js";
+import { parseIdempotencyKey } from "../workflow/agent-event-schema.js";
+import { assertExternalWriteCredential, consumeAgentRate } from "../workflow/agent-events.js";
 import {
   NOT_ENABLED,
   metacognitionEnabled,
@@ -57,6 +59,11 @@ import {
 } from "../workflow/edge-type-routes.js";
 
 const RUN_ID = { type: "string", description: "Run id, from workflow_run or workflow_runs_list." } as const;
+/** po-1186: the same optional idempotency key the agent event API takes. */
+const IDEMPOTENCY_KEY_PROPERTY = {
+  type: "string",
+  description: "Optional idempotency key (1-128 chars, A-Za-z0-9._:-): a retry with the same key replays the original result instead of writing twice.",
+} as const;
 
 export const WORKFLOW_TOOL_DEFINITIONS = [
   // ── Execute ──────────────────────────────────────────────────────────
@@ -74,6 +81,7 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
           description:
             "Optional: spawn this as a sub-agent run under a still-running parent (FEATURE_SUBAGENT_RUNS). Bounded by depth/fan-out and guarded against re-entrancy.",
         },
+        idempotency_key: IDEMPOTENCY_KEY_PROPERTY,
       },
       required: ["agent"],
     },
@@ -89,7 +97,8 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
         action: { type: "string", description: "read | write | branch | notify | external" },
         node_id: { type: "string", description: "Node the step touched (optional)" },
         edge_id: { type: "string", description: "Edge the step followed (optional)" },
-        detail: { type: "object", description: "Freeform payload: reads, condition results, rationale" },
+        detail: { type: "object", description: "Freeform payload: reads, condition results, rationale. Typed actions decision | proposal | outcome are validated (see context_agent_run_step)." },
+        idempotency_key: IDEMPOTENCY_KEY_PROPERTY,
       },
       required: ["run_id", "action"],
     },
@@ -286,6 +295,7 @@ export async function runWorkflowTool(
     // ── Execute ────────────────────────────────────────────────────────
     case "workflow_run": {
       requireTier(perm, "write");
+      consumeAgentRate("runs", { apiKeyId: ctx.apiKeyId ?? null, userId: ctx.userId });
       const triggeredBy = await resolveCallerEmail(ctx.userId);
       const bundle = await triggerRun({
         nestId: ctx.nestId,
@@ -295,23 +305,35 @@ export async function runWorkflowTool(
         storage: ctx.storage,
         parentRunId: args.parent_run_id,
         userId: ctx.userId,
+        idempotencyKey: parseIdempotencyKey(args.idempotency_key),
       });
       return json(bundle);
     }
     case "workflow_run_step": {
       requireTier(perm, "write");
+      consumeAgentRate("events", { apiKeyId: ctx.apiKeyId ?? null, userId: ctx.userId });
       const run = await loadNestRun(ctx, args.run_id);
-      const { seq } = await appendRunStep(run.id, {
-        action: args.action,
-        node_id: args.node_id,
-        edge_id: args.edge_id,
-        detail: args.detail,
-      });
-      return json({ ok: true, run_id: run.id, seq });
+      if ((run as { source?: string }).source === "external") {
+        await assertExternalWriteCredential({ nestId: ctx.nestId, apiKeyId: ctx.apiKeyId ?? null, requireKey: true });
+      }
+      const out = await appendRunStep(
+        run.id,
+        {
+          action: args.action,
+          node_id: args.node_id,
+          edge_id: args.edge_id,
+          detail: args.detail,
+        },
+        { clientKey: parseIdempotencyKey(args.idempotency_key) },
+      );
+      return json({ ok: true, run_id: run.id, ...out });
     }
     case "workflow_run_close": {
       requireTier(perm, "write");
       const run = await loadNestRun(ctx, args.run_id);
+      if ((run as { source?: string }).source === "external") {
+        await assertExternalWriteCredential({ nestId: ctx.nestId, apiKeyId: ctx.apiKeyId ?? null, requireKey: true });
+      }
       const { status } = await closeRun(run.id, {
         status: args.status,
         trace: args.trace,
