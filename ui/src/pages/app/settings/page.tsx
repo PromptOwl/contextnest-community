@@ -124,6 +124,8 @@ const TABS: {
       "subagent_runs_enabled",
       "metacognition_enabled",
       "surfaces_enabled",
+      "onboarding_enabled",
+      "distill_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
       "subagent_max_depth",
@@ -174,6 +176,7 @@ const TABS: {
       "surfaces_default_cap_usd",
       "surfaces_org_name",
       "surfaces_slack_hosted_enabled",
+      "surfaces_slack_self_serve",
       "surfaces_slack_hosted_client_id",
       "surfaces_slack_hosted_client_secret",
       "surfaces_slack_hosted_signing_secret",
@@ -1312,6 +1315,53 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            {/* First-run onboarding (PO-1185) */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Getting started screen</CardTitle>
+                <CardDescription>
+                  A welcome screen for a person who signs in and owns no nest
+                  yet: create their nest in one click, connect their agents,
+                  then fill it. They can skip it and open it again from Home.
+                  On by default.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">{draft.onboarding_enabled !== false ? "On" : "Off"}</span>
+                  <Switch
+                    checked={draft.onboarding_enabled !== false}
+                    onCheckedChange={(v) => set({ onboarding_enabled: v })}
+                    aria-label="Getting started screen"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Distill a site or repo</CardTitle>
+                <CardDescription>
+                  Lets a person give a public https address (a site or a public
+                  GitHub repo) and have this server write a first set of
+                  documents into their nest. It uses Hootie's model key and is
+                  limited to a few runs an hour per person. Off, or with no
+                  model key, people get a prompt to give their own agent
+                  instead. On by default.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">{draft.distill_enabled !== false ? "On" : "Off"}</span>
+                  <Switch
+                    checked={draft.distill_enabled !== false}
+                    onCheckedChange={(v) => set({ distill_enabled: v })}
+                    aria-label="Distill a site or repo"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Experimental: cross-nest document stream — its own switch */}
             <Card>
               <CardHeader>
@@ -2339,6 +2389,18 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="flex items-center justify-between">
                   <span className="text-sm">{draft.surfaces_slack_hosted_enabled ? "On" : "Off"}</span>
                   <Switch checked={!!draft.surfaces_slack_hosted_enabled} onCheckedChange={(v) => set({ surfaces_slack_hosted_enabled: v })} aria-label="Hosted Slack app" />
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-sm">
+                    Self-serve: anyone signed in can connect their own Slack
+                    workspace to a nest they own ({draft.surfaces_slack_self_serve ? "on" : "off"})
+                  </span>
+                  <Switch
+                    checked={!!draft.surfaces_slack_self_serve}
+                    disabled={!draft.surfaces_slack_hosted_enabled}
+                    onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })}
+                    aria-label="Self-serve Slack"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-slack-client-id">Client ID</Label>

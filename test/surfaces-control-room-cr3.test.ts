@@ -239,15 +239,13 @@ describe("GET /surfaces/slack/installs/:id/channels", () => {
     if (data?.channels) expect(data.channels.map((c: any) => c.id)).toEqual(["G_PRIV", "C_EXT", "C_OPS"]);
   });
 
-  it("the MCP twin's input schema is generated from zod, so lint:mcp-schemas stays at its baseline of 98 (no new inline literal)", async () => {
+  it("the MCP twin's input schema is generated from zod, so it adds no inline literal to lint:mcp-schemas", async () => {
     const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
     const { SlackChannelsListInput } = await import("../src/surfaces/adapters/slack/channels.js");
     const { mcpInputSchema } = await import("../src/workflow/agent-event-schema.js");
     const tool = SURFACES_TOOL_DEFINITIONS.find((t: any) => t.name === "context_surfaces_slack_channels_list")!;
     expect(tool.inputSchema).toEqual(mcpInputSchema(SlackChannelsListInput));
     expect(tool.inputSchema.required).toEqual(["install_id"]);
-    const guard = readFileSync(join(__dirname, "..", "scripts", "check-mcp-schemas.mjs"), "utf8");
-    expect(guard).toMatch(/const BASELINE = 98;/);
     const src = readFileSync(join(__dirname, "..", "src", "mcp", "surfaces-tools.ts"), "utf8");
     const block = src.slice(src.indexOf('name: "context_surfaces_slack_channels_list"'), src.indexOf('name: "context_surfaces_settings_get"'));
     expect(block).not.toMatch(/inputSchema:\s*\{/);

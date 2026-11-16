@@ -24,6 +24,7 @@ import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
+  seesOwnDraft,
 } from "../governance/access-guard.js";
 import { isPublicReader, permissionLevel } from "../shared/access.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -505,6 +506,18 @@ nodeRoutes.post("/:nodeId{.+}/move", async (c) => {
 nodeRoutes.get("/:nodeId{.+}/watchers", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+  // A watcher row is a person's address, so the list is for people on the
+  // nest who can read the node. Anyone else gets the answer a node with no
+  // watchers gives (PO-1192): a node the caller can't read, and every node for
+  // someone who reaches the nest only through its visibility (the same line
+  // GET …/stewards draws around addresses).
+  const userId = c.get("userId");
+  if (
+    (await isPublicReader(nestId, userId)) ||
+    !(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))
+  ) {
+    return c.json({ watchers: [] });
+  }
   return c.json({ watchers: await listWatchers(nestId, nodeId) });
 });
 
@@ -685,7 +698,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // A pending Surfaces edit is a chat-derived draft: below write, serve the
   // approved body as a public reader gets it (security round 2, M1d).
   const surfaceEdit = await approvedOnlyForSurfaceEdit(nestId, nodeId, userId);
-  if (publicReader || approvedOnly || surfaceEdit) {
+  // A write grantee, or a contributor on their own proposal, reads the draft
+  // they edit (seesOwnDraft) — approved-only would hide what they just saved.
+  const approvedBody = publicReader && !(await seesOwnDraft(nestId, nodeId, userId, userEmail));
+  if (approvedBody || approvedOnly || surfaceEdit) {
     let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
@@ -867,6 +883,9 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     const baseVersion = parseInt(baseVersionHeader, 10);
     const conflict = await versions.checkConflict(nestId, nodeId, baseVersion);
     if (conflict.conflict) {
+      console.warn(
+        `[version-conflict] nest=${nestId} node=${nodeId} base=${baseVersion} current=${conflict.currentVersion} updated_by=${conflict.updatedBy ?? "?"}`,
+      );
       return c.json(
         {
           error: "Version conflict",

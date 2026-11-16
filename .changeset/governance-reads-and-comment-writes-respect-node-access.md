@@ -1,0 +1,5 @@
+---
+"@promptowl/contextnest-community": patch
+---
+
+More governance routes now answer only for documents the caller can read. Pending external edits (`GET /nests/:id/external-edits`, `GET …/nodes/:id/external-edits` and `…/external-edits/:suggestionId`) are served for readable documents only, and never to someone who reaches a nest only because it is public or org-visible, since a pending edit is text nobody approved; `?refresh=true` rescans the disk only for callers with write access. `GET …/nodes/:id/watchers` answers with an empty list for a document the caller can't open, and for every document when the caller reaches the nest only through its visibility. `GET /nests/:id/deletion-requests` and MCP `context_deletion_queue` list only requests about documents the caller can read (folder and nest requests: people who read the whole nest). `POST …/nodes/:id/comments` and `…/comments/:commentId/resolve` answer 404 for a document the caller can't open. People added to the nest see and do what they did before.
