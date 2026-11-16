@@ -25,26 +25,37 @@ const primaryRole = samples.primary_user ?? null;
 
 /**
  * CI runs e2e against the deployed server (nest-dev), not this branch's build.
- * Until that server ships the Control room (its /health carries
- * `surfaces_enabled`), the suite skips rather than fails, as in
- * control_room_setup.spec.js. CN_EXPECT_CONTROL_ROOM=1 turns the skip into a failure.
+ * Until that server ships the dashboard, the suite skips rather than fails;
+ * CN_EXPECT_CONTROL_ROOM=1 turns the skip into a failure.
+ *
+ * `surfaces_enabled` on /health is not enough: it shipped with CR1, so a server
+ * with the setup wizard (CR3) but not the dashboard carries it too. The
+ * dashboard ships with its own route, GET /surfaces/cold-start, which such a
+ * server answers 404. The probe is made as primary_user (the route needs a
+ * session) and only once per worker.
  */
-let deployed = false;
+let deployed = null;
 
-test.beforeAll(async ({ request }) => {
+async function dashboardDeployed(page) {
   try {
-    const h = await (await request.get('/health')).json();
-    deployed = typeof h?.surfaces_enabled === 'boolean';
+    const h = await (await page.request.get('/health')).json();
+    if (typeof h?.surfaces_enabled !== 'boolean') return false;
+    return (await page.request.get('/surfaces/cold-start')).status() !== 404;
   } catch {
-    deployed = false;
+    return false;
   }
-});
+}
 
-test.beforeEach(() => {
-  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
-    expect(deployed, 'the server under test does not ship the Control room (/health has no surfaces_enabled)').toBe(true);
+test.beforeEach(async ({ primary_user }) => {
+  test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
+  if (deployed === null) {
+    await primary_user.initialize();
+    deployed = await dashboardDeployed(primary_user.page);
   }
-  test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR2).');
+  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+    expect(deployed, 'the server under test does not ship the Control room dashboard (/health has no surfaces_enabled, or GET /surfaces/cold-start answers 404)').toBe(true);
+  }
+  test.skip(!deployed, 'The server under test does not ship the Control room dashboard yet (po-1186 CR2).');
 });
 
 /** The page's own range: the last 14 UTC days, today included. */
