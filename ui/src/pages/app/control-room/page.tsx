@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
+import { toast } from "sonner";
 import { listNests } from "../../../lib/api";
 import { RANGES, rangeFor, type RangeDays } from "../../../lib/control-room-overview";
 import { SetupWizard, useSetupState } from "./SetupWizard";
@@ -103,7 +104,10 @@ export default function ControlRoomPage() {
             .map((n: any) => ({ id: n.id, name: String(n.name ?? n.id) })),
         ),
       )
-      .catch(() => setNests([]));
+      .catch((e) => {
+        setNests([]);
+        toast.error(e instanceof Error && e.message ? e.message : "Couldn't load your nests. Reload to try again.");
+      });
   }, [isAdmin]);
   // A refresh when the reader comes back to the browser tab — a new report is
   // then the only thing that moves (Agents). No polling.

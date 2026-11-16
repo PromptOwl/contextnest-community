@@ -59,7 +59,15 @@ export function Overview({
     const bs = bindings.data ?? [];
     // Team channels' nests only: a personal (DM) nest's budget is its owner's business.
     const ids = nestId ? [nestId] : [...new Set(bs.filter((b) => b.status !== "removed" && b.conversation_kind !== "dm").map((b) => b.nest_id))];
-    const out = await Promise.all(ids.map((id) => getSurfacesBudget(id).catch(() => null)));
+    const out = await Promise.all(
+      ids.map((id) =>
+        getSurfacesBudget(id).catch((e) => {
+          // One nest's budget missing must not hide the rest; say so, the spend tile under-reports.
+          console.warn(`[control-room] budget unreadable for nest ${id}`, e instanceof Error ? e.message : String(e));
+          return null;
+        }),
+      ),
+    );
     return out.filter((b): b is BudgetLite => !!b);
   }, [nestId, tick, bindings.data]);
 
