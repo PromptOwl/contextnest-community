@@ -112,28 +112,34 @@ async function loadInputs(nestIds: string[]): Promise<Inputs> {
       seeded,
     ),
   );
-  // The earliest approval across all three sources, compared with ms() in JS:
-  // SQL MIN() compares text, and a SQLite "YYYY-MM-DD HH:MM:SS" sorts before
-  // an ISO "YYYY-MM-DDTHH:MM:SSZ" of the same day whatever the instants are.
+  // The earliest approval per document across all three sources. SQL does
+  // one MIN per document and table (one row per document, not per version),
+  // over a normalised text form: as stored, a SQLite "YYYY-MM-DD HH:MM:SS"
+  // sorts before an ISO "YYYY-MM-DDTHH:MM:SSZ" of the same day whatever the
+  // instants, so 'T' → ' ' and the 'Z' is dropped first (every value is UTC;
+  // the columns are TEXT on SQLite and Postgres). JS then takes the earliest
+  // of the three sources as instants and reports it as ISO.
   // One pass per table over every seeded nest, not one per nest.
   const approvals = new Map<string, Map<string, string>>();
   const take = (rows: Array<Approval & { nest_id: string }>) => {
     for (const r of rows) {
-      if (!r.at || !Number.isFinite(ms(r.at))) continue;
+      const t = r.at ? ms(r.at) : NaN;
+      if (!Number.isFinite(t)) continue;
       let m = approvals.get(r.nest_id);
       if (!m) approvals.set(r.nest_id, (m = new Map()));
       const cur = m.get(r.node_id);
-      if (cur === undefined || ms(r.at) < ms(cur)) m.set(r.node_id, r.at);
+      if (cur === undefined || t < ms(cur)) m.set(r.node_id, new Date(t).toISOString());
     }
   };
+  const norm = (col: string) => `MIN(REPLACE(REPLACE(${col}, 'T', ' '), 'Z', ''))`;
   take(
-    await allIn((ph) => `SELECT nest_id, node_id, resolved_at AS at FROM review_requests
-                           WHERE nest_id IN (${ph}) AND status = 'approved' AND resolved_at IS NOT NULL`, seeded),
+    await allIn((ph) => `SELECT nest_id, node_id, ${norm("resolved_at")} AS at FROM review_requests
+                           WHERE nest_id IN (${ph}) AND status = 'approved' AND resolved_at IS NOT NULL GROUP BY nest_id, node_id`, seeded),
   );
   take(await allIn((ph) => `SELECT nest_id, node_id, approved_at AS at FROM approved_versions WHERE nest_id IN (${ph})`, seeded));
   take(
-    await allIn((ph) => `SELECT nest_id, node_id, created_at AS at FROM node_versions
-                           WHERE nest_id IN (${ph}) AND status IN ('approved', 'published')`, seeded),
+    await allIn((ph) => `SELECT nest_id, node_id, ${norm("created_at")} AS at FROM node_versions
+                           WHERE nest_id IN (${ph}) AND status IN ('approved', 'published') GROUP BY nest_id, node_id`, seeded),
   );
   return { names, apps, items, mirror, approvals };
 }

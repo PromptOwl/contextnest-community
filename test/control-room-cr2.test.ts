@@ -492,6 +492,8 @@ describe("AC-CR-04 (review 2): cold start", () => {
     );
     const cs = await cold(Z);
     expect(cs.first_approved.after_seed_ms).toBe(day + 3_600_000 - applied);
+    // Reported as ISO whatever format the source row used.
+    expect(cs.first_approved.at).toBe(iso(day + 3_600_000));
   });
 
   it("an admin-only folder is left out whether or not either side ends in a slash", async () => {
