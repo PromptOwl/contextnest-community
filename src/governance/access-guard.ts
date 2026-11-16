@@ -19,7 +19,9 @@ import {
   resolveNodeGrant,
   listUserGrants,
   grantCoversNode,
+  grantRoleForNode,
 } from "./grants-service.js";
+import { ownsWorkingDraft, ownWorkingDraftIds } from "./org-contribution.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -33,6 +35,18 @@ export async function resolveCallerEmail(userId: string | undefined): Promise<st
     [userId],
   ) as { email: string } | undefined;
   return row?.email || "admin@localhost";
+}
+
+/**
+ * `canReadNode` for a caller known only by id: resolves the email so route
+ * handlers don't each repeat the lookup. Use this at the route layer.
+ */
+export async function callerCanReadNode(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+): Promise<boolean> {
+  return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
 }
 
 /**
@@ -66,11 +80,57 @@ async function canReadNodeBase(
   userEmail: string,
 ): Promise<boolean> {
   if (await isPublicReader(nestId, userId)) {
-    return (await getApprovedVersion(nestId, nodeId)) !== null;
+    return (
+      (await getApprovedVersion(nestId, nodeId)) !== null ||
+      (await seesOwnDraft(nestId, nodeId, userId, userEmail))
+    );
   }
   if (!(await isStewardshipEnabled(nestId))) return true;
   if ((await canUserAccess(nestId, nodeId, userEmail)).allowed) return true;
   return (await resolveNodeGrant(nestId, userId, nodeId)) !== null;
+}
+
+/**
+ * A visibility-only reader (org/public nest, no collaborator row) normally sees
+ * approved content only. Two exceptions, both for ONE document: they hold a
+ * `write` share grant on it (they can edit it, so they must see the draft they
+ * edit), or its working copy is their own unreviewed draft (an org
+ * contributor's proposal). Neither widens what they see elsewhere in the nest.
+ */
+export async function seesOwnDraft(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+): Promise<boolean> {
+  if ((await resolveNodeGrant(nestId, userId, nodeId)) === "write") return true;
+  return !!userEmail && (await ownsWorkingDraft(nestId, nodeId, userEmail));
+}
+
+/**
+ * List form of `seesOwnDraft`: of `nodes`, the ids a visibility-only reader
+ * sees as the live draft rather than the approved snapshot. Two queries for the
+ * whole list, not one per node. Surfaces drafts stay hidden as in `canReadNode`.
+ */
+export async function ownDraftIds(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  nodes: Array<{ id: string }>,
+): Promise<Set<string>> {
+  const grants = (await listUserGrants(nestId, userId)).filter((g) => g.role === "write");
+  const owned = userEmail ? await ownWorkingDraftIds(nestId, userEmail) : new Set<string>();
+  const hidden = await hiddenSurfaceDrafts(nestId);
+  const hideSurface = anyHidden(hidden) && !(await seesSurfaceDrafts(nestId, userId));
+  return new Set(
+    nodes
+      .filter(
+        (n) =>
+          (owned.has(n.id) || grantRoleForNode(grants, n.id) === "write") &&
+          !(hideSurface && isHidden(hidden, n.id)),
+      )
+      .map((n) => n.id),
+  );
 }
 
 /**
@@ -196,5 +256,32 @@ async function filterAccessibleBase<T extends { id: string }>(
   if (coverage.nestWide) return nodes;
   return nodes.filter(
     (n) => coverage.nodeIds.has(n.id) || grantCoversNode(grants, n.id),
+  );
+}
+
+/**
+ * The deletion requests this caller may see. A request names what it targets
+ * and carries who asked and why, so it follows its target: a document's
+ * request is for callers who can read that document (`filterAccessible`), and
+ * a folder's or the nest's own is for callers who read the whole nest.
+ *
+ * Lives here so the REST queue and MCP `context_deletion_queue` share one rule.
+ */
+export async function readableDeletionRequests<
+  T extends { nodeId: string; targetType: string },
+>(nestId: string, userId: string, userEmail: string, requests: T[]): Promise<T[]> {
+  if (requests.length === 0) return requests;
+  const documents = [
+    ...new Set(requests.filter((r) => r.targetType === "document").map((r) => r.nodeId)),
+  ].map((id) => ({ id }));
+  const readable = new Set(
+    (await filterAccessible(nestId, userId, userEmail, documents)).map((n) => n.id),
+  );
+  const whole =
+    documents.length < requests.length &&
+    requests.some((r) => r.targetType !== "document") &&
+    (await readsWholeNest(nestId, userId, userEmail));
+  return requests.filter((r) =>
+    r.targetType === "document" ? readable.has(r.nodeId) : whole,
   );
 }

@@ -61,7 +61,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   /nests/:id/channels (list/create/archive, timeline/thread); channels are Community-only (a node
 //   convention over the comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM), so the
 //   engine has no channel operation to import a descriptor from.
-const BASELINE = 100;
+//   100->101 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
+//   101->102 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
+const BASELINE = 102;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

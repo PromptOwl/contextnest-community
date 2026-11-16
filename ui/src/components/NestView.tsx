@@ -1389,6 +1389,9 @@ export function NestView({
               <NestVisibilityControl
                 nestId={nestId}
                 variant="header"
+                // Team sharing lives on the Collaborators tab, whose add
+                // control opens on Team on a shared deployment.
+                onShareWithTeam={() => setActiveTab("collaborators")}
                 onChanged={fetchData}
                 onError={(m) => {
                   if (m) toast.error(m);
@@ -1820,8 +1823,9 @@ export function NestView({
         {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. Not on Overview: it
-          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
-        {activeTab !== "overview" && (
+          carries the same numbers as its own summary line (CU-wdqcq02qb1). Not on
+          Stream either: a feed starts with its posts (po-1214). */}
+        {activeTab !== "overview" && activeTab !== "stream" && (
           <div
             // While a review is open, small screens skip the stats so the
             // review itself is the first thing on screen.

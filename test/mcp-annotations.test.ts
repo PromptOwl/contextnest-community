@@ -38,6 +38,7 @@ const READ_ONLY = [
   "context_access_requests",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
   "context_versions",
   "context_unsynced_list",
   "context_metacognition_list",
@@ -59,6 +60,13 @@ const READ_ONLY = [
   "context_surfaces_budget_get",
   "context_surfaces_seed_list",
   "context_surfaces_seed_status",
+  // Agent control room (po-1186): the ledger is a view; an export is logged, never sent.
+  "context_agent_ledger",
+  "context_agent_ledger_trace",
+  "context_agent_ledger_export",
+  "context_agent_rollups",
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -78,6 +86,7 @@ const DESTRUCTIVE = [
   "context_sync_folder",
   "context_headless",
   "context_set_visibility",
+  "context_nest_teams",
   "context_systems",
   "context_metacognition_configure",
   "context_metacognition_run",
@@ -96,6 +105,7 @@ const DESTRUCTIVE = [
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
   "context_channels",
+  "context_agent_run_close",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -181,11 +191,13 @@ async function allDefinedNames(): Promise<string[]> {
   const { METACOGNITION_TOOL_DEFINITIONS } = await import("../src/mcp/metacognition-tools.js");
   const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
+  const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,
+    ...AGENT_TOOL_DEFINITIONS,
     ...METACOGNITION_TOOL_DEFINITIONS,
     ...SURFACES_TOOL_DEFINITIONS,
   ];
@@ -197,6 +209,7 @@ beforeAll(async () => {
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
   process.env.EXPERIMENTAL_AGENT_STREAM = "true";
+  process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
   const owner = await registerUser(app, "owner@annotations.test", "Owner");
@@ -225,6 +238,7 @@ afterAll(async () => {
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
   delete process.env.EXPERIMENTAL_AGENT_STREAM;
+  delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
 
@@ -234,7 +248,7 @@ describe("tools/list on every endpoint, for every key", () => {
   });
 
   it("keeps them with the feature flags off", async () => {
-    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_AGENT_STREAM"]) {
+    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_AGENT_STREAM", "EXPERIMENTAL_DOC_STREAM"]) {
       process.env[flag] = "false";
       try {
         for (const [label, path, key] of surfaces()) expectAnnotated(`${flag} off, ${label}`, await listTools(path, key));
