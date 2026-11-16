@@ -43,7 +43,9 @@ export async function postEnableNotice(bindingId: string): Promise<boolean> {
     const ttl = (await getSettings()).buffer_ttl_hours;
     await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl));
     return true;
-  } catch {
+  } catch (err) {
+    // No message text or names: the binding id and the error's message only.
+    console.warn(`[surfaces] enable notice not posted for binding ${b.id}: ${err instanceof Error ? err.message : String(err)}`);
     await getDb().run("UPDATE surface_bindings SET notice_posted_at = NULL WHERE id = ?", [b.id]);
     return false;
   }

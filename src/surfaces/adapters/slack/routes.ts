@@ -446,5 +446,5 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
   if (res.authed_user?.id) {
     await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch(() => {});
   }
-  return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id, next: "/control-room?section=setup" }, true);
+  return done(c, 200, "Nest is connected to your Slack workspace. Continue setup to choose the channels Nest listens in.", { install_id: install.id, next: "/control-room?section=setup" }, true);
 });

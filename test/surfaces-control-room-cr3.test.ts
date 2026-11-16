@@ -150,6 +150,7 @@ describe("setup facts the wizard reads", () => {
     expect(cb.status).toBe(200);
     const html = await cb.text();
     expect(html).toMatch(/Nest is connected/);
+    expect(html).toMatch(/Continue setup to choose the channels Nest listens in\./);
     expect(html).toContain('<a href="/control-room?section=setup">Continue setup</a>');
   });
 });
@@ -303,6 +304,7 @@ describe("the notice never states a default retention it can't confirm", () => {
     // Reset the claim so the notice can be attempted again, then hide the settings table.
     await getDb().run("UPDATE surface_bindings SET notice_posted_at = NULL WHERE id = ?", [b.data.binding.id]);
     const before = slack.posted.length;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await getDb().run("ALTER TABLE surface_settings RENAME TO surface_settings_cr3_hidden");
     try {
       expect(await postEnableNotice(b.data.binding.id)).toBe(false);
@@ -310,6 +312,8 @@ describe("the notice never states a default retention it can't confirm", () => {
       await getDb().run("ALTER TABLE surface_settings_cr3_hidden RENAME TO surface_settings");
     }
     expect(slack.posted.slice(before).filter((p) => p.channel === "C_NOSET")).toEqual([]);
+    expect(warn.mock.calls.some((a) => /enable notice not posted/.test(String(a[0])))).toBe(true);
+    warn.mockRestore();
     const row = (await getDb().get("SELECT notice_posted_at FROM surface_bindings WHERE id = ?", [b.data.binding.id])) as { notice_posted_at: string | null };
     expect(row.notice_posted_at).toBeNull();
     // Once the settings read again, the notice goes out.
