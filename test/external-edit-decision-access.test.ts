@@ -520,17 +520,6 @@ describe("AC-EED-05: with sign-in turned off (open mode), the one user still dec
     expect((await decideLocal(nest, PRICING, id, "approve")).status).toBe(200);
   });
 
-  it("AC-EED-05 and on a nest that was made by an account from before sign-in was turned off", async () => {
-    const nest = (await must(call("POST", "/nests", { name: "Inherited" }))).nest.id as string;
-    await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);
-    const db = (await import("../src/db/client.js")).getDb();
-    const earlier = randomUUID();
-    await db.run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)", [earlier, "earlier@eed.test", "Earlier", "x"]);
-    await db.run("UPDATE nests SET user_id = ? WHERE id = ?", [earlier, nest]);
-    expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "reject")).status).toBe(200);
-    expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "approve")).status).toBe(200);
-  });
-
   // PO-1388: the read rule for external edits (PO-1192) took the one user for
   // a visitor to such a nest and hid the edit they are asked to decide.
   it("AC-EED-05 and they see the edit they decide there: on the document, in the nest's list and in its count", async () => {
@@ -549,5 +538,38 @@ describe("AC-EED-05: with sign-in turned off (open mode), the one user still dec
     expect((await must(call("GET", `/nests/${nest}/external-edits?count=1`))).total).toBe(1);
     const detail = await must(call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits/${id}`));
     expect(JSON.stringify(detail.entry)).toContain(EDIT_TEXT);
+  });
+
+  it("AC-EED-05 and on a nest that was made by an account from before sign-in was turned off", async () => {
+    const nest = (await must(call("POST", "/nests", { name: "Inherited" }))).nest.id as string;
+    await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);
+    const db = (await import("../src/db/client.js")).getDb();
+    const earlier = randomUUID();
+    await db.run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)", [earlier, "earlier@eed.test", "Earlier", "x"]);
+    await db.run("UPDATE nests SET user_id = ? WHERE id = ?", [earlier, nest]);
+    expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "reject")).status).toBe(200);
+    expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "approve")).status).toBe(200);
+  });
+
+  it("AC-EED-05 (po-1375) only the local user: an API key sent to an open-mode server keeps its access checks", async () => {
+    const nest = (await must(call("POST", "/nests", { name: "Local Keyed" }))).nest.id as string;
+    await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);
+    const id = await stageLocal(nest, PRICING);
+    const outsider = await registerUser(open, `outsider-${Date.now()}@eed.test`, "Outsider");
+    const asKey = (path: string) => jsonRequest(open, "GET", path, undefined, outsider.apiKey);
+    // Control: the local user reads all three.
+    expect((await call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits`)).data.pending.suggestion_id).toBe(id);
+    expect((await call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits/${id}`)).status).toBe(200);
+    expect((await call("GET", `/nests/${nest}/external-edits`)).data.total).toBeGreaterThanOrEqual(1);
+    // The outsider's key: answered like a node with no edit, an unknown id, an empty list.
+    const pending = await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits`);
+    expect(pending.status).toBe(200);
+    expect(pending.data).toEqual({ pending: null });
+    const detail = await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits/${id}`);
+    expect(detail.status).toBe(404);
+    expect(detail.data).toEqual({ error: "Suggestion not found" });
+    const list = await asKey(`/nests/${nest}/external-edits`);
+    expect(list.status).toBe(200);
+    expect(list.data).toMatchObject({ entries: [], total: 0 });
   });
 });

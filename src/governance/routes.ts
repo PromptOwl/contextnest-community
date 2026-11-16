@@ -11,6 +11,7 @@ import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -1591,14 +1592,17 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /**
- * With sign-in turned off there is one user, and the nest middleware makes
- * them the owner of every nest, including one an account made before sign-in
- * was turned off. They scan for and decide every external edit
- * (canDecideExternalEdit), so they see every one too: the rule below would
- * read them as a visitor to such a nest when it is public or org-visible and
- * hide the edit they are asked to decide (PO-1388).
+ * Open mode (sign-in off) with no credential: the one local user, who has
+ * owner-level access to every nest (the nest gate) — including one an account
+ * from before sign-in was turned off created — and decides external edits
+ * there (canDecideExternalEdit), so it must read the edit it decides
+ * (AC-EED-05). Only the anonymous local identity: an API key or session sent
+ * to an open-mode server authenticates as itself (flexAuthMiddleware) and
+ * keeps every access check.
  */
-const operatesEveryNest = () => config.AUTH_MODE === "open";
+function isOpenModeLocalUser(userId: string | undefined): boolean {
+  return config.AUTH_MODE === "open" && userId === ANON_USER_ID;
+}
 
 /**
  * May this caller see a document's pending external edits? Such an edit is
@@ -1607,8 +1611,8 @@ const operatesEveryNest = () => config.AUTH_MODE === "open";
  * versions), otherwise the document's own read rule (PO-1192).
  */
 async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
-  if (operatesEveryNest()) return true;
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return true;
   if (await isPublicReader(nestId, userId)) return false;
   return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
 }
@@ -1619,8 +1623,9 @@ async function readableExternalEdits(
   nestId: string,
   entries: externalEdits.ExternalEditEntry[],
 ): Promise<externalEdits.ExternalEditEntry[]> {
-  if (entries.length === 0 || operatesEveryNest()) return entries;
+  if (entries.length === 0) return entries;
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return entries;
   if (await isPublicReader(nestId, userId)) return [];
   const readable = await filterAccessible(
     nestId,
