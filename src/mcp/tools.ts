@@ -1962,6 +1962,9 @@ const ACCESS_BY_TOOL: Record<string, AccessAction> = {
   context_search: "retrieve",
 };
 
+/** Read tools whose every document is a direct hit (hop 0) for the pull replay. */
+const DIRECT_HIT_TOOLS = new Set(["context_get", "context_search"]);
+
 function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
   const action = ACCESS_BY_TOOL[toolName];
   if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
@@ -1991,9 +1994,10 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     client: ctx.client,
     ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
     ...(ctx.servedBytes?.size ? { sizes: Object.fromEntries(ctx.servedBytes) } : {}),
-    // A get or a search hands over direct hits. context_query walks the graph
-    // in the engine, which reports no per-document hop — left unknown.
-    ...(toolName === "context_query" ? {} : { hops: Object.fromEntries(ids.map((id) => [id, { hop: 0 }])) }),
+    // A get or a search hands over direct hits (an allowlist, so a tool that
+    // walks the graph is never recorded as "matched"). context_query walks in
+    // the engine, which reports no per-document hop — left unknown.
+    ...(DIRECT_HIT_TOOLS.has(toolName) ? { hops: Object.fromEntries(ids.map((id) => [id, { hop: 0 }])) } : {}),
     detail: toolName,
   });
 }

@@ -9,7 +9,9 @@
  * the traversal, hop depth (`hop`) and the document they were reached from
  * (`via`). This groups them back into pulls, newest first. Rows written before
  * 093 have no pull_id: one call's rows share a timestamp, caller and tool, so
- * they are grouped on that and read back without order, size or hops.
+ * they are grouped on that and read back without order, size or hops. That
+ * grouping is best effort: two identical calls in the same millisecond merge,
+ * and a `legacy-<id>` id changes if retention prunes the group's first row.
  *
  * Reads and retrievals only — an export hands over the whole nest, which is
  * not a traversal worth replaying.
