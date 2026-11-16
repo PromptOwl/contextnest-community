@@ -57,9 +57,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->99 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
+//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
 //   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
-const BASELINE = 99;
+const BASELINE = 100;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

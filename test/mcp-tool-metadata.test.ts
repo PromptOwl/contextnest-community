@@ -128,7 +128,7 @@ describe("every listed tool", () => {
 
 describe("confirm_billing", () => {
   // Written out, not read from the source, so widening the set is a decision.
-  const CAN_RAISE_A_BILL = ["context_assign_steward", "context_grant", "context_resolve_access_request", "context_share_nest"];
+  const CAN_RAISE_A_BILL = ["context_assign_steward", "context_grant", "context_resolve_access_request", "context_share_nest", "context_nest_teams"];
 
   it("is offered only on the tools that can raise what someone is billed", async () => {
     for (const [label, path, key] of endpoints()) {

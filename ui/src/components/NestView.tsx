@@ -1389,6 +1389,9 @@ export function NestView({
               <NestVisibilityControl
                 nestId={nestId}
                 variant="header"
+                // Team sharing lives on the Collaborators tab, whose add
+                // control opens on Team on a shared deployment.
+                onShareWithTeam={() => setActiveTab("collaborators")}
                 onChanged={fetchData}
                 onError={(m) => {
                   if (m) toast.error(m);
