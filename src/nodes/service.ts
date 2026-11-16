@@ -97,6 +97,7 @@ import {
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { nestDoneTags, nestTaskRules, storeDefaultTaskRules } from "../nests/service.js";
+import { validateInstructions, writeInstructions } from "../nests/instructions-service.js";
 import {
   applyExclusiveNamespaces,
   bareTag,
@@ -1758,6 +1759,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
+  /** An agent registered through the agent event API (po-1186): where it
+   *  executes, its runtime label and its accountable owner, stored as
+   *  `metadata.agent`. Agent nodes only. */
+  agent?: { executes: string; runtime: string | null; owner: string };
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -2259,6 +2264,7 @@ async function createNodeOnce(
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
+      ...(input.agent && input.type === "agent" ? { agent: input.agent } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
@@ -2536,6 +2542,39 @@ async function stageImportedFilesInner(
       return !segs.includes("_suggestions") && !segs.includes(".context");
     })
     .map((f) => (/^context\.md$/i.test(String(f.path)) ? { ...f, path: "CONTEXT.md" } : f));
+  // The engine's import slugifies paths, so it would land this as `context.md`,
+  // which `readContextMd` doesn't find on a case-sensitive disk. Instructions
+  // aren't a document anyway: they go through their own write, with a revision.
+  const instructions = carried.find((f) => f.path === "CONTEXT.md");
+  const staged = await stageVaultFiles(
+    nestId,
+    carried.filter((f) => f.path !== "CONTEXT.md"),
+    userEmail,
+  );
+  if (!instructions) return staged;
+  try {
+    const content = validateInstructions(instructions.content);
+    await writeInstructions(nestId, content, {
+      authorEmail: userEmail,
+      note: "Imported with the folder",
+      source: "push",
+    });
+    return { ...staged, written: staged.written + 1 };
+  } catch (err) {
+    if (!(err instanceof ValidationError)) throw err;
+    return {
+      ...staged,
+      rejected: [...staged.rejected, "CONTEXT.md"],
+      problems: [...staged.problems, `CONTEXT.md: ${err.message}`],
+    };
+  }
+}
+
+async function stageVaultFiles(
+  nestId: string,
+  carried: Array<{ path: string; content: string }>,
+  userEmail: string
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
   // View addresses (see views/collision.ts): a document arriving at a view's
   // <view>/view/… address, or a view arriving over an occupied one, is refused

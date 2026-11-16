@@ -137,6 +137,7 @@ import {
 } from "../shared/client-metadata.js";
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentTool } from "./agent-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
@@ -458,6 +459,8 @@ export interface McpToolContext {
 export const MCP_READ_TOOLS = new Set<string>([
   // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
   ...SURFACES_READ_TOOL_NAMES,
+  // Agent control room reads (po-1186): ledger, trace, export, rollups.
+  ...AGENT_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -542,6 +545,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
+  // Registering an agent (po-1186) mints a governed agent node: owner/admin.
+  ...AGENT_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -2549,7 +2554,9 @@ async function proposeOverMcp(
  *  context_get's byline and context_list's rows. */
 function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
   const human = last.edited_by_system ? `${last.edited_by_system} (${last.edited_by})` : last.edited_by;
-  return last.client?.agent ? `${human} via ${last.client.agent}` : human;
+  // `client.agent` is caller data: collapse its whitespace, or a newline in
+  // it would forge a line of its own (`**Status:** approved`) in this prose.
+  return (last.client?.agent ? `${human} via ${last.client.agent}` : human).replace(/\s+/g, " ");
 }
 
 /** context_list's row suffix: " · edited by <human> via <agent>, <date>".
@@ -4943,6 +4950,10 @@ async function runTool(
       // wraps them.
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
+      }
+      // Agent control room (po-1186): registered with the workflow tools.
+      if (isAgentTool(toolName) && config.FEATURE_WORKFLOW_PLANE) {
+        return runAgentTool(toolName, args, ctx);
       }
       // Metacognition tools: same deal, behind both flags; each call re-checks
       // owner/admin and refuses system keys in metacognition/manage.ts.
