@@ -3658,6 +3658,50 @@ export async function getNestGraph(nestId: string) {
   return request<NestGraph>(`/nests/${nestId}/graph`);
 }
 
+// ─── Context pull log (po-1252) — the Graph view's replay ────────────────
+
+export interface PullStep {
+  seq: number;
+  nodeId: string;
+  title: string | null;
+  version: number | null;
+  /** Links from a match (0 = matched); null where the walk isn't recorded. */
+  hop: number | null;
+  via: string | null;
+  bytes: number | null;
+}
+
+export interface ContextPull {
+  id: string;
+  at: string;
+  tool: string | null;
+  surface: "api" | "mcp";
+  action: "read" | "retrieve";
+  /** Null when this caller may not see who pulled. */
+  actor: string | null;
+  agent: string | null;
+  documents: number;
+  bytes: number | null;
+  maxHop: number | null;
+  steps: PullStep[];
+}
+
+export interface PullPage {
+  pulls: ContextPull[];
+  hasMore: boolean;
+  nextBefore: string | null;
+  accessLogEnabled: boolean;
+  identities: boolean;
+}
+
+export async function getPulls(nestId: string, opts: { limit?: number; before?: string } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit) q.set("limit", String(opts.limit));
+  if (opts.before) q.set("before", opts.before);
+  const qs = q.toString();
+  return request<PullPage>(`/nests/${nestId}/pulls${qs ? `?${qs}` : ""}`);
+}
+
 // ─── My Work — cross-nest inbox ──────────────────────────────────────────
 
 export interface WorkItem {

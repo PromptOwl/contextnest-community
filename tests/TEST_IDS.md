@@ -95,3 +95,16 @@ Many more test IDs already exist across `ui/src/` (governance dialogs, document 
 |---|---|
 | `artifact-preview-frame` | Hosted artifact preview iframe (mounted once, hidden outside Preview) |
 | `raw-markdown-highlights` | Mirror layer under the raw markdown textarea; commented spans are `mark[data-thread-id]` |
+
+## Graph — context pull replay (`ui/src/components/OntologyGraphView.tsx`, `PullLog.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `graph-pull-list` | The Pulls tab's list of context pulls |
+| `graph-pull-item` | One pull in the list (click → replay) |
+| `graph-pull-trace` | The selected pull's compiled context panel |
+| `graph-pull-step` | One step of the compiled context; `data-lit="true"` once replayed |
+| `graph-pull-replay-button` | Replay the selected pull |
+| `graph-pull-hud` | Step readout over the canvas during a replay |
+| `graph-pull-edges` | The edges the replayed pull walked |
+| `graph-node` | A document node on the canvas (`data-node-id`, `data-pulled="true"` when lit) |

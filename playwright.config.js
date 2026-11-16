@@ -126,6 +126,15 @@ const testRun = [
     independent: true, // Reads the real trace; writes nothing
   },
   {
+    // Graph → context pull replay (CN-GRAPH-REPLAY-001 … 003, po-1252).
+    // Skips until the server under test ships it (/health pull_replay);
+    // CN_EXPECT_PULL_REPLAY=1 makes that a failure.
+    file: 'graph-replay/graph_replay.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest and pull
+  },
+  {
     // Admin → Message log (CN-MSG-001 … CN-MSG-029). Serial: the cases read
     // one server-wide log and its access audit. Settings saves are stubbed.
     file: 'message-log/message_log.spec.js',
@@ -362,7 +371,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators', 'fields', 'stewards', 'nest-settings'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'account', 'sidebar-rail', 'access-requests', 'import-folder', 'archive', 'new-document', 'new-folder', 'nest-import', 'nest-overview', 'nest-documents', 'review-queue', 'collaborators', 'fields', 'stewards', 'nest-settings', 'graph-replay'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -765,6 +774,17 @@ export default defineConfig({
           name: 'nest-settings',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/nest-settings/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'graph-replay',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/graph-replay/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
