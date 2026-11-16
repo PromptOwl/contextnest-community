@@ -289,3 +289,75 @@ describe("AC-NH-08: no editor identity for public readers or headless keys", () 
     expect(detail.data.node.last_edit).toBeUndefined();
   });
 });
+
+// Review (2026-11-16): under stewardship an agent is served the APPROVED
+// body, so context_list must name that version's writers, as context_get
+// does — never the hidden draft's author and agent. A member's REST list
+// shows the live document, so it keeps naming the latest edit.
+describe("context_list names the served (approved) version's editor under stewardship", () => {
+  let govNest: string;
+  let docId: string;
+
+  beforeAll(async () => {
+    govNest = (await jsonRequest(app, "POST", "/nests", { name: "Gov Home" }, owner.apiKey)).data.nest.id;
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes`,
+      { title: "Gov Doc", content: "approved body", client: { agent: "agent-approved" } },
+      owner.apiKey,
+    );
+    docId = created.data.node.id;
+    const { setApprovedVersion } = await import("../src/governance/version-service.js");
+    await setApprovedVersion(govNest, docId, 1, owner.email);
+    const on = await jsonRequest(app, "PATCH", `/nests/${govNest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    expect(on.status).toBeLessThan(300);
+    const draft = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${govNest}/nodes/${docId}`,
+      { content: "draft body", client: { agent: "agent-draft" } },
+      owner.apiKey,
+    );
+    expect(draft.status).toBeLessThan(300);
+  });
+
+  it("Given an approved v1 and a draft v2, then context_list names v1's agent, not the draft's", async () => {
+    const res = await app.request(`/nests/${govNest}/mcp`, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, ...authed(owner.apiKey) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_list", arguments: {} } }),
+    });
+    const raw = await res.text();
+    const body = raw.trim().startsWith("{")
+      ? JSON.parse(raw)
+      : JSON.parse(raw.split("\n").find((l) => l.startsWith("data: "))!.slice("data: ".length));
+    const line = (body.result.content[0].text as string).split("\n").find((l) => l.includes("**Gov Doc**"))!;
+    expect(line).toContain("via agent-approved");
+    expect(line).not.toContain("agent-draft");
+  });
+
+  it("Given the same document, then a member's REST list names the live draft's editor", async () => {
+    const rows = (await jsonRequest(app, "GET", `/nests/${govNest}/nodes`, undefined, owner.apiKey)).data.nodes as any[];
+    expect(rows.find((r) => r.id === docId).last_edit.client).toMatchObject({ agent: "agent-draft" });
+  });
+
+  it("Given an upper bound per node, then getLatestVersionAttributions reads at or below it", async () => {
+    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+    const bounded = await getLatestVersionAttributions(govNest, [docId], new Map([[docId, 1]]));
+    expect(bounded.get(docId)).toMatchObject({ version: 1, client: { agent: "agent-approved" } });
+    const latest = await getLatestVersionAttributions(govNest, [docId]);
+    expect(latest.get(docId)?.client).toMatchObject({ agent: "agent-draft" });
+  });
+});
+
+describe("context_list's prose date", () => {
+  it("Given a SQL or an ISO timestamp, then the UTC date; given anything else, no date", async () => {
+    const { lastEditProse } = await import("../src/mcp/tools.js");
+    const base = { version: 1, edited_by: "a@x.test" };
+    expect(lastEditProse({ ...base, edited_at: "2026-11-10 12:00:02" })).toBe(" · edited by a@x.test, 2026-11-10");
+    expect(lastEditProse({ ...base, edited_at: "2026-11-10T12:00:02.000Z" })).toBe(" · edited by a@x.test, 2026-11-10");
+    expect(lastEditProse({ ...base, edited_at: "yesterday" })).toBe(" · edited by a@x.test");
+    expect(lastEditProse(undefined)).toBe("");
+  });
+});

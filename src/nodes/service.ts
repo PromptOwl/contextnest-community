@@ -1282,12 +1282,17 @@ export async function listNodesForCaller(
   // Who last edited each row — the human and the agent — for the Documents
   // rows and context_list (po-1213). One query for the list. Same gate as the
   // roster, plus headless keys: an access key reads content, not people.
-  // The LATEST edit, draft included, on purpose: a member's list shows the
-  // live document and its live status, so the draft's author is the honest
-  // editor here. context_get differs because it serves the approved body to
-  // agents under stewardship, so it names that version's editor.
+  // A member's REST list shows the live document and its live status, so it
+  // names the LATEST edit, draft included.
+  // A caller served approved content (an agent under stewardship, or
+  // ?approved_only) gets the approved version's writers, as context_get
+  // names them: a hidden draft's author and agent stay behind the gate.
   const lastEdits = (await canSeeEditors(nestId, userId, { publicReader }))
-    ? await versions.getLatestVersionAttributions(nestId, accessible.map((d) => d.id))
+    ? await versions.getLatestVersionAttributions(
+        nestId,
+        accessible.map((d) => d.id),
+        approvedFields ? (approvedMap ?? new Map()) : undefined,
+      )
     : null;
 
   const enriched = await Promise.all(

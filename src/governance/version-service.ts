@@ -202,34 +202,45 @@ export async function getVersionAttribution(
 
 /**
  * getVersionAttribution's latest row for each of `nodeIds`, in one query per
- * 500 ids — the Documents list, the "Recently edited" feed and context_list
- * name the same two writers the node detail does, without a read per row.
- * Auto-publish bump rows (SYSTEM_AUTHOR_PREFIX) are skipped, as in
- * getCurrentVersions: they are not an edit. A node with no row is absent.
+ * chunk of ids — the Documents list, the "Recently edited" feed and
+ * context_list name the same two writers the node detail does, without a
+ * read per row. Auto-publish bump rows (SYSTEM_AUTHOR_PREFIX) are skipped, as
+ * in getCurrentVersions: they are not an edit. A node with no row is absent.
+ *
+ * `upTo` bounds each node to the version the caller is served (the approved
+ * one, under stewardship), as getVersionAttribution's `version` does: the
+ * latest edit at or below it. With `upTo`, a node it does not list is absent
+ * — there is no served version to name.
  */
 export async function getLatestVersionAttributions(
   nestId: string,
   nodeIds: string[],
+  upTo?: Map<string, number>,
 ): Promise<Map<string, DocumentVersion>> {
   const out = new Map<string, DocumentVersion>();
-  const CHUNK = 500;
-  for (let i = 0; i < nodeIds.length; i += CHUNK) {
-    const ids = nodeIds.slice(i, i + CHUNK);
-    const marks = ids.map(() => "?").join(",");
+  const ids = upTo ? nodeIds.filter((id) => upTo.has(id)) : nodeIds;
+  // Two binds per id when bounded; either way well under SQLite's limit.
+  const CHUNK = upTo ? 250 : 500;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const match = upTo
+      ? `(${chunk.map(() => "(node_id = ? AND version <= ?)").join(" OR ")})`
+      : `node_id IN (${chunk.map(() => "?").join(",")})`;
+    const matchArgs = upTo ? chunk.flatMap((id) => [id, upTo.get(id)!]) : chunk;
     const rows = (await getDb().all(
       `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
               nv.client_json, sa.name AS system_name
          FROM node_versions nv
          JOIN (SELECT node_id, MAX(version) AS v
                  FROM node_versions
-                WHERE nest_id = ? AND node_id IN (${marks})
+                WHERE nest_id = ? AND ${match}
                   AND author NOT LIKE ?
                 GROUP BY node_id) latest
            ON latest.node_id = nv.node_id AND latest.v = nv.version
          LEFT JOIN users u ON u.email = nv.author
          LEFT JOIN system_accounts sa ON sa.user_id = u.id
         WHERE nv.nest_id = ?`,
-      [nestId, ...ids, `${SYSTEM_AUTHOR_PREFIX}%`, nestId],
+      [nestId, ...matchArgs, `${SYSTEM_AUTHOR_PREFIX}%`, nestId],
     )) as any[];
     for (const row of rows) out.set(row.node_id, rowToVersion(row));
   }

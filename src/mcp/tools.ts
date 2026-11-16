@@ -2564,7 +2564,7 @@ function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
  *  has no provenance field, and this server consumes catalog shapes rather
  *  than adding keys (CLAUDE.md, Engine & CLI Sync). The structured block
  *  follows once the engine ships one. The date is UTC: agents read it. */
-function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
+export function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
   if (!last) return "";
   // edited_at is a SQL timestamp ("YYYY-MM-DD HH:MM:SS") or ISO-8601; both
   // start with the UTC date. Anything else drops the date, never garbles it.
