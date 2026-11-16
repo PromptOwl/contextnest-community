@@ -40,6 +40,10 @@ const overwriteOutside = (title: string, why: string): ToolClassification => ({ 
 export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Server level ───────────────────────────────────────────────────────
   nest_index: read("List nests", "Lists the nests these credentials can read."),
+  // First-run onboarding (PO-1185).
+  context_onboarding: read("Onboarding status", "Reads the caller's welcome-screen state, the activity trace and the caller's own distill job; changes nothing."),
+  context_onboarding_update: add("Update onboarding", "Flips the caller's own welcome-screen flag, or adds the caller's nest; never removes anything."),
+  context_distill: addOutside("Distill a source", "Fetches a public URL from the open internet and adds draft documents (and the ontology document) to a nest; never overwrites or publishes model output."),
   nest_create: add("Create nest", "Creates a new, empty nest; a taken name gets a suffix, never an overwrite."),
 
   // ─── Reading a nest ─────────────────────────────────────────────────────
@@ -63,6 +67,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_access_requests: read("View access requests", "Lists pending access requests."),
   context_review_queue: read("View review queue", "Lists review requests."),
   context_my_drafts: read("View my drafts", "Lists the caller's unsubmitted drafts."),
+  context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
   context_versions: read("View version history", "Returns a document's version history."),
   context_pull_log: read("View context pulls", "Returns the recorded retrievals and the documents each handed over."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
@@ -105,6 +110,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Nest administration ────────────────────────────────────────────────
   context_headless: overwrite("Manage headless publishing", "Dispatches status, enable, disable, create_key and revoke_key; disabling pauses and revoking removes keys. The token goes only to the caller."),
   context_set_visibility: overwriteOutside("Set nest visibility", "Replaces who can read the nest, up to anyone on the internet."),
+  context_nest_teams: overwrite("Share nest with teams", "Dispatches list, share and unshare; sharing gives every team member their team role on the nest, and unsharing removes it."),
   context_systems: overwrite("Manage system identities", "Dispatches list, create, rotate, revoke, add_nest and remove_nest; rotating and revoking kill keys. The token goes only to the caller."),
 
   // ─── Metacognition agents ───────────────────────────────────────────────
@@ -154,6 +160,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_budget_get: read("View Surfaces budget", "Returns the nest's spend budget."),
   context_surfaces_seed_list: read("List available seeds", "Lists available seeds."),
   context_surfaces_seed_status: read("View applied seeds", "Lists applied seeds."),
+  context_surfaces_cold_start: read("View cold start", "Counts approved documents per seed folder from the server's own tables."),
+  context_surfaces_slack_channels_list: readOutside("List Slack channels", "Saves nothing, but asks the third-party workspace which channels the bot is in."),
 
   // ─── Surfaces: writes ───────────────────────────────────────────────────
   context_surfaces_binding_create: addOutside("Bind conversation", "Binds a conversation: reads its members from the workspace and posts a notice there."),

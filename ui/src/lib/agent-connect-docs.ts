@@ -16,11 +16,14 @@
  *    key is named (a placeholder, or the env var that carries it) and never
  *    rendered — same rule connect.ts holds.
  * 2. HONESTY ABOUT OAUTH. Some surfaces only drive an OAuth client and will
- *    not accept a static bearer header. This server has no OAuth
- *    authorization server today (`/.well-known/*` 404s — see app.ts), so those
- *    harnesses get a plain "not yet" instead of steps that end in a failed
- *    connection. `support: "oauth-only"` marks them; flip to "header" and
- *    rewrite the body if/when an AS ships.
+ *    not accept a static bearer header. This server now runs an OAuth
+ *    authorization server for the server-level `/mcp`, behind the superadmin
+ *    toggle MCP_OAUTH_ENABLED (src/auth/oauth-routes.ts); with it off,
+ *    `/.well-known/*` 404s and those harnesses cannot connect. This panel's
+ *    bodies still describe the key path, so `support: "oauth-only"` entries
+ *    (Perplexity) still read "not yet": their sign-in path against this AS has
+ *    not been verified here. The welcome screen (lib/onboarding.ts) gives the
+ *    sign-in steps for the clients whose OAuth path is confirmed.
  *
  * Adding a harness: append one entry to HARNESSES. Add its id to the coverage
  * test so removal is deliberate rather than accidental.

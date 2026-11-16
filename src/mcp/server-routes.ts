@@ -67,6 +67,7 @@ import {
   type ToolResult,
 } from "./tools.js";
 import { toolAnnotations, toolTitle } from "./annotations.js";
+import { STREAM_TOOL, streamToolEnabled, streamToolResult } from "./stream-tool.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
@@ -76,6 +77,7 @@ import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js"
 import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
+import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -85,6 +87,8 @@ import { isInitializeRequest, serverConnectInstructions } from "./connect-instru
 // suspended/unlicensed, matching the REST policy.
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
+  "context_onboarding_update",
+  "context_distill",
   "context_create",
   "context_upload",
   "context_update",
@@ -318,10 +322,13 @@ const SERVER_NEST_TOOLS = [
   "context_boards",
   "context_board_items",
   "context_bulk_update",
+  // po-1214 — `nest` optional: omitted, it is the caller's whole stream (one
+  // merged, newest-first feed, not a per-nest fan-out).
+  STREAM_TOOL,
 ];
 
 function withNestArg(tool: { name: string; description: string; inputSchema: unknown }) {
-  const fanout = FANOUT_READ_TOOLS.has(tool.name);
+  const fanout = FANOUT_READ_TOOLS.has(tool.name) || tool.name === STREAM_TOOL;
   const schema = tool.inputSchema as { properties?: object; required?: string[] };
   return {
     name: tool.name,
@@ -361,6 +368,8 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
+  // First-run onboarding (PO-1185): the person's own state, server-level only.
+  ...ONBOARDING_TOOL_DEFINITIONS,
   // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
   // GET /rollups twins). Advertised only while the workflow plane is on.
   ...AGENT_ORG_TOOL_DEFINITIONS,
@@ -379,6 +388,7 @@ export const SERVER_TOOL_DEFINITIONS = [
  */
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
+  ...ONBOARDING_READ_TOOL_NAMES,
   "context_agent_ledger_org",
   "context_agent_rollups_org",
   "context_query",
@@ -392,6 +402,7 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_pull_log",
   "context_boards",
   "context_board_items",
+  STREAM_TOOL,
 ]);
 
 /** Exported so a test can assert every defined tool is classified. */
@@ -469,6 +480,20 @@ async function handleServerToolCall(
     return FREE_TIER_EXCEEDED_MESSAGE;
   }
 
+  if (ONBOARDING_TOOL_NAMES.has(toolName)) {
+    return handleOnboardingTool(toolName, args ?? {}, {
+      userId,
+      userEmail,
+      baseUrl,
+      nestScope,
+      contributorCredential,
+      resolveNest: async (ref) => {
+        const nest = await resolveNestRef(ref, userId);
+        return nest && (await canRead(nest.id, userId)) ? nest : null;
+      },
+    });
+  }
+
   if (toolName === "nest_create") {
     if (nestScope) {
       return "This credential is scoped to a single nest and cannot create new ones.";
@@ -489,6 +514,14 @@ async function handleServerToolCall(
       if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
     }
+  }
+
+  // ─── The document stream across nests (po-1214) ────────────────────────
+  // One merged feed through the same reader GET /me/stream uses. A
+  // nest-scoped credential reads only its nest.
+  if (toolName === STREAM_TOOL && !args.nest) {
+    if (!streamToolEnabled()) return "The document stream is not enabled on this server (EXPERIMENTAL_DOC_STREAM).";
+    return streamToolResult(userId, userEmail, args, nestScope ?? undefined);
   }
 
   // ─── Fan-out reads when nest is omitted ────────────────────────────────
@@ -653,6 +686,7 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    if (tool.name === STREAM_TOOL && !streamToolEnabled()) continue;
     if (isAgentOrgTool(tool.name) && !config.FEATURE_WORKFLOW_PLANE) continue;
     const shape = toolShape(tool.name, tool.inputSchema);
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };

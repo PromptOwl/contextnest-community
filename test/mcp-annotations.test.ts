@@ -17,6 +17,7 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
   "nest_index",
+  "context_onboarding",
   "context_init",
   "context_instructions_history",
   "context_overview",
@@ -37,6 +38,7 @@ const READ_ONLY = [
   "context_access_requests",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
   "context_versions",
   "context_pull_log",
   "context_unsynced_list",
@@ -59,6 +61,7 @@ const READ_ONLY = [
   "context_surfaces_budget_get",
   "context_surfaces_seed_list",
   "context_surfaces_seed_status",
+  "context_surfaces_slack_channels_list",
   // Agent control room (po-1186): the ledger is a view; an export is logged, never sent.
   "context_agent_ledger",
   "context_agent_ledger_trace",
@@ -66,6 +69,7 @@ const READ_ONLY = [
   "context_agent_rollups",
   "context_agent_ledger_org",
   "context_agent_rollups_org",
+  "context_surfaces_cold_start",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -85,6 +89,7 @@ const DESTRUCTIVE = [
   "context_sync_folder",
   "context_headless",
   "context_set_visibility",
+  "context_nest_teams",
   "context_systems",
   "context_metacognition_configure",
   "context_metacognition_run",
@@ -108,6 +113,8 @@ const DESTRUCTIVE = [
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
   "context_upload",
+  // Fetches a public URL (PO-1185).
+  "context_distill",
   // Each can change what a nest's public docs site serves.
   "context_create",
   "context_update",
@@ -134,6 +141,8 @@ const OPEN_WORLD = [
   "context_surfaces_settings_update",
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
+  // Read-only, but it calls Slack (users.conversations).
+  "context_surfaces_slack_channels_list",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -202,6 +211,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
   const owner = await registerUser(app, "owner@annotations.test", "Owner");
@@ -229,6 +239,7 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
 
@@ -238,7 +249,7 @@ describe("tools/list on every endpoint, for every key", () => {
   });
 
   it("keeps them with the feature flags off", async () => {
-    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE"]) {
+    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_DOC_STREAM"]) {
       process.env[flag] = "false";
       try {
         for (const [label, path, key] of surfaces()) expectAnnotated(`${flag} off, ${label}`, await listTools(path, key));

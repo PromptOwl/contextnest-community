@@ -16,7 +16,7 @@
  * page). Gated by `showTeams` so teams surface only where wanted (the Share
  * dialog), not in every place the collaborator roster renders.
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +43,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { nestReviewerState } from "../lib/nest-reviewer";
 import type { Team, TeamMember } from "../lib/api";
+import { TeamCreateInline } from "./TeamCreateInline";
+import { useAuth } from "../auth/AuthContext";
 import { isEmailish } from "../lib/utils";
 import {
   removeCollaboratorConfirmCopy,
@@ -108,6 +110,9 @@ interface CollaboratorManagerProps {
   /** Surface team-sharing (add a team, list shared teams) in this panel. Off
    *  by default so teams appear only in the Share dialog. */
   showTeams?: boolean;
+  /** Bumped by the host to switch the add control to Team and bring it into
+   *  view (the visibility picker's "Share with a team…"). */
+  teamRequest?: number;
   /** Offer a nest-wide Reviewer switch per person and on invite, so access
    *  and review are set in one place (CU-wdqcq04wnr). Pass only when
    *  stewardship is on and the caller can assign stewards. */
@@ -121,6 +126,7 @@ export function CollaboratorManager({
   currentUserEmail,
   callerPermission = "admin",
   showTeams = false,
+  teamRequest = 0,
   reviewers = false,
 }: CollaboratorManagerProps) {
   const self = (currentUserEmail || "").toLowerCase();
@@ -149,7 +155,19 @@ export function CollaboratorManager({
     api.assignSteward(nestId, { scope: "nest", users: [{ email, role: "reviewer" }] });
 
   // Team-sharing state (only used when showTeams).
-  const [addMode, setAddMode] = useState<"person" | "team">("person");
+  // On a shared deployment team sharing is how a nest reaches a group (org
+  // visibility there reaches every organization), so the add control opens
+  // on Team.
+  const { sharedDeployment } = useAuth();
+  const [addMode, setAddMode] = useState<"person" | "team">(
+    showTeams && sharedDeployment ? "team" : "person",
+  );
+  const addBoxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showTeams || teamRequest === 0) return;
+    setAddMode("team");
+    addBoxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [teamRequest, showTeams]);
   const [sharedTeams, setSharedTeams] = useState<SharedTeam[]>([]);
   const [myTeams, setMyTeams] = useState<Team[]>([]);
   const [selectedTeam, setSelectedTeam] = useState("");
@@ -339,7 +357,7 @@ export function CollaboratorManager({
       )}
 
       {/* Add collaborator / team */}
-      <div className="rounded-lg border p-4 space-y-3">
+      <div ref={addBoxRef} className="rounded-lg border p-4 space-y-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="flex items-center gap-2 text-sm font-medium">
             {showTeams && addMode === "team" ? (
@@ -378,7 +396,9 @@ export function CollaboratorManager({
           )}
         </div>
 
-        {showTeams && addMode === "team" ? (
+        {showTeams && addMode === "team" && myTeams.length === 0 ? (
+          <TeamCreateInline nestId={nestId} onShared={async () => { await loadTeams(); onChanged(); }} />
+        ) : showTeams && addMode === "team" ? (
           <>
             <div className="flex flex-col sm:flex-row gap-2">
               <div className="flex-1">

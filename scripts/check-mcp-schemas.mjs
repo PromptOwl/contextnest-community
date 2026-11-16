@@ -57,10 +57,25 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->99 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
+//   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
+//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
+//   100->103 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
+//   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
+//     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
+//       folds the job progress in; no separate status tool). Per-person welcome state (user_onboarding table) and the
+//       distill job row (distill_jobs) are Community server state the engine does not model.
+//     context_onboarding_update — twin of POST /onboarding/{dismiss,reopen,nest}. Flips the per-person welcome flag
+//       (user_onboarding) and creates the caller's own nest idempotently; the engine has no users or onboarding state.
+//     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
+//       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
+//       concerns outside the engine's vault-operation catalog, so there is no op to consume.
+//   103->104 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
 //   engine op exists. Product-owner sign-off for Community-only inline tools: 2026-10-24 (recorded on PR #569).
-const BASELINE = 99;
+const BASELINE = 104;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
