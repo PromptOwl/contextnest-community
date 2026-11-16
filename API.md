@@ -2646,13 +2646,20 @@ The access log — `{ count, views: [{ email, created_at }] }`.
 Revoke — the link 404s immediately.
 
 ### Public render surface (no auth chain)
-- `GET /p/:slug` — the document, a gate form (email/code/invite), or — when `comments_enabled` — a reader shell framing the document beside the comment control. Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug` — the document, a gate form (email/code/invite), or a reader shell framing the document: when `comments_enabled` (beside the comment control), and for an HTML/artifact document on a nest that is not white-label (above the strip below). Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug/og-image` — the link-preview image: the nest's uploaded logo, or a default 1200×630 card. `404` for a link that is not live.
 - `GET /p/:slug/view` — the document itself, always sandboxed. The shell frames it; gated independently, so being the frame source is not authorization.
 - `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link). Rate limited per link per IP.
 - `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open. Invite mode re-checks the allow-list here, not only when the link was sent.
 - `POST /p/:slug/comments` — JSON `{ body, email? }`, from the shell's modal. Needs the gate cleared and an identifying email; lands as an unanchored annotation thread for stewards, never on the published page.
 
 Only the approved version is ever served — a document with no approved snapshot 404s rather than exposing a draft. A revoked, expired or unknown slug answers every route above with the same HTML notice, never a hint about which it was.
+
+**Link previews.** `GET /p/:slug` carries Open Graph and Twitter card tags: `og:title`, `og:description` (up to 200 characters of the approved version's text; omitted when `no_download` is on), `og:url`, `og:site_name` (the nest's `site_title`, else `ContextNest`), `og:image` (an external https logo directly, otherwise `/p/:slug/og-image`), `twitter:card`. A gated link that has not been opened gets `Protected document` as its title and no description. Links use `PUBLIC_BASE_URL` when set, otherwise the request's origin. An HTML document that already has its own `og:` tags keeps them. `<meta name="robots" content="index, follow">` states what was already true: `/p` pages carry no `noindex` and `robots.txt` does not disallow `/p/`.
+
+**"Make your own nest".** On a nest without `hide_powered_by`, `GET /p/:slug` shows one strip linking to this deployment's sign-in page with `?ref=share` (`<base>/?ref=share`), where a new person can register and lands in first-run onboarding. It is part of the page chrome only (a markdown page, the gate, the reader shell) and never part of `GET /p/:slug/view`, whose bytes are unchanged. A white-label nest shows no strip.
+
+**MCP** (nest owner/admin only, advertised only to them on a read-write credential): `context_public_link_create` (`id`, plus the POST body's `access_mode`, `code`, `allowlist`, `expires_at`, `comments_enabled`, `watermark`, `no_download`), `context_public_links` (`id?`) and `context_public_link_revoke` (`link_id`) mirror the three routes above on the same service: same refusals, in the same words. The prose states the URL and whether the link is open (anyone with the link) or gated; `structuredContent` is the REST payload plus `access` (`open` | `gated`) and, on the list, `live`.
 
 ---
 

@@ -32,6 +32,7 @@ import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { getApprovedVersion } from "../governance/version-service.js";
+import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 
 export type PublishMode = "public" | "email" | "code" | "invite";
 
@@ -50,6 +51,12 @@ export interface PublishRow {
   expires_at: string | null;
   revoked_at: string | null;
 }
+
+/** The refusals the REST routes (publish-routes.ts) and the MCP tools
+ *  (mcp/public-link-tools.ts) both give, so the two say the same thing. */
+export const PUBLISH_FORBIDDEN =
+  "Only a nest admin, the nest owner, or the server admin can publish documents.";
+export const PUBLISH_NOT_FOUND = "Publish not found";
 
 const MODES: readonly PublishMode[] = ["public", "email", "code", "invite"];
 const LINK_TTL_SECONDS = 60 * 60; // magic link valid 1h
@@ -198,6 +205,73 @@ export async function createPublish(params: {
   const row = await getPublishBySlug(slug);
   if (!row) throw new ValidationError("failed to create publish");
   return row;
+}
+
+/** What a caller may ask for when publishing — the REST body, and the MCP
+ *  tool's arguments under the same names. */
+export interface PublishRequest {
+  node_id?: string;
+  access_mode?: string;
+  comments_enabled?: boolean;
+  watermark?: boolean;
+  no_download?: boolean;
+  code?: string | null;
+  allowlist?: string[];
+  expires_at?: string | null;
+}
+
+/**
+ * Publish one document and hand back its link: everything POST
+ * /nests/:id/publications does after its permission check, so the REST route
+ * and the MCP tool (context_public_link_create) cannot drift apart. The caller
+ * has already established that `userId` may publish in this nest.
+ */
+export async function publishDocumentLink(input: {
+  nestId: string;
+  userId: string;
+  baseUrl: string;
+  request: PublishRequest;
+}): Promise<{ row: PublishRow; link: string }> {
+  const { nestId, request: body } = input;
+  const mode = (body.access_mode ?? "public") as PublishMode;
+  // An email or invite link is opened ONLY by clicking a mailed magic link, so
+  // without a mail transport it is a link nobody — not even the person who was
+  // invited — can ever open. Refuse it rather than hand back a dead link.
+  if ((mode === "email" || mode === "invite") && !isEmailConfigured()) {
+    throw new ValidationError(
+      "Email and invite links need email set up on this server (SMTP or AWS SES, plus NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
+    );
+  }
+  const row = await createPublish({
+    nestId,
+    nodeId: (body.node_id ?? "").trim(),
+    mode,
+    commentsEnabled: !!body.comments_enabled,
+    watermark: !!body.watermark,
+    noDownload: !!body.no_download,
+    code: body.code ?? null,
+    allowlist: Array.isArray(body.allowlist) ? body.allowlist : [],
+    expiresAt: body.expires_at ?? null,
+    createdBy: input.userId,
+  });
+  const link = `${input.baseUrl}/p/${row.slug}`;
+
+  // Invite mode is useless without the invitation: an allow-listed reader who
+  // never receives the link has no way to reach the document. Fire-and-forget,
+  // like every other notification here — a dead SMTP config must not fail the
+  // publish (the link still works for anyone who has it).
+  if (mode === "invite") {
+    for (const email of await listAllowlist(row.id)) {
+      void sendEmailToRecipient(email, {
+        status: "shared",
+        docTitle: "A document has been shared with you",
+        path: "PromptOwl · ContextNest",
+        permission: "view",
+        link,
+      }, { nestId });
+    }
+  }
+  return { row, link };
 }
 
 /**
