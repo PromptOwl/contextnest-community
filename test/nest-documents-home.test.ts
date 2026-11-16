@@ -185,6 +185,21 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     expect((await getLatestVersionAttributions(nestId, [])).size).toBe(0);
   });
 
+  it("Given the bump-row filter is `author NOT LIKE <prefix>%`, then the prefix holds no LIKE wildcard", async () => {
+    const { SYSTEM_AUTHOR_PREFIX } = await import("../src/governance/version-service.js");
+    expect(SYSTEM_AUTHOR_PREFIX).not.toMatch(/[_%\\]/);
+  });
+
+  it("Given more than 250 bounded ids, then every chunk is read and a real id past the boundary is found at its bound", async () => {
+    const { getLatestVersionAttributions } = await import("../src/governance/version-service.js");
+    const real = rowFor(await listRows(owner.apiKey), "Agent Doc").id;
+    const ids = [...Array.from({ length: 260 }, (_, i) => `nodes/missing-${i}`), real];
+    const upTo = new Map(ids.map((id) => [id, 1] as [string, number]));
+    const map = await getLatestVersionAttributions(nestId, ids, upTo);
+    expect(map.size).toBe(1);
+    expect(map.get(real)).toMatchObject({ version: 1, client: { agent: "mkt-amplifier" } });
+  });
+
   it("Given the latest-attribution query, then SQLite answers it from the (nest_id, node_id, version) index, not a table scan", async () => {
     const plan = (await getDb().all(
       `EXPLAIN QUERY PLAN

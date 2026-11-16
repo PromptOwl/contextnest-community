@@ -175,7 +175,8 @@ export async function getVersion(
  * name when it is one) and the call's `client` block — without its body.
  * `version` omitted means the latest row that is an edit; with `version`,
  * the edit that produced it — that row, or the edit beneath it when it is an
- * auto-publish bump (bump rows are skipped, as in getCurrentVersion). Backs the "last edited by" line on
+ * auto-publish bump (bump rows are skipped, as in getCurrentVersion).
+ * Backs the "last edited by" line on
  * the node detail and on context_get, so both name the same two writers the
  * version list does.
  */
