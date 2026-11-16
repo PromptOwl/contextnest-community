@@ -222,6 +222,7 @@ import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
+import { documentWebPath, nestWebPath } from "./shared/web-links.js";
 import {
   protectedResourceMetadata,
   authorizationServerMetadata,
@@ -299,6 +300,19 @@ function rejectedKeyMessage(info: LicenseInfo): string {
 const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
   c.req.header("Sec-Fetch-Mode") === "navigate" ||
   (c.req.header("Accept") || "").includes("text/html");
+
+// Narrower than isDocumentNavigation, for redirecting an API address to its
+// page in the app: a top-level browser page load that carries no API
+// credentials. Sec-Fetch-Dest says "document" only for the address bar, a link
+// or a reload (never fetch/XHR, an iframe or a download); browsers too old to
+// send it are recognised by an HTML Accept. Anything with an Authorization
+// header is a program, whatever it accepts.
+const isCredentialFreePageLoad = (c: { req: { header(n: string): string | undefined } }) => {
+  if (c.req.header("Authorization")) return false;
+  const dest = c.req.header("Sec-Fetch-Dest");
+  if (dest !== undefined) return dest === "document";
+  return (c.req.header("Accept") || "").includes("text/html");
+};
 
 // The SPA shell, shared by the catch-all below and the /teams guard — same
 // file, same no-cache policy (index.html is unhashed and must always
@@ -2991,6 +3005,25 @@ export function createApp(): Hono<AuthEnv> {
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
+  // A person who opens a nest's API address in a browser — /nests/<id>, or the
+  // MCP / retrieval URL an agent passed along as "the link" — is sent to the
+  // nest's page in the app, /nest/<id>, instead of JSON, a 401 or a 404
+  // (PO-1336). Ahead of auth on purpose: the app's own sign-in then takes over,
+  // and the redirect is the same for every id, so it confirms nothing about
+  // which nests exist. Programs are untouched: they send an Authorization
+  // header or no HTML Accept (see isCredentialFreePageLoad), and a query
+  // string (?format=…) keeps the API answer for anyone who wants to see it.
+  const nestPageRedirect = createMiddleware<AuthEnv>(async (c, next) => {
+    const nestId = c.req.param("nestId")!;
+    if (nestId === "unsynced" || new URL(c.req.url).search || !isCredentialFreePageLoad(c)) {
+      return next();
+    }
+    return c.redirect(nestWebPath(nestId), 302);
+  });
+  nestsApp.get("/:nestId", nestPageRedirect);
+  nestsApp.get("/:nestId/mcp", nestPageRedirect);
+  nestsApp.get("/:nestId/context", nestPageRedirect);
+
   // Use flexible auth: open mode = no key needed, key mode = key required.
   // Three per-nest paths additionally honor PromptOwl service tickets —
   // POST :id/context (deterministic retrieval for prompt data sources),
@@ -3840,7 +3873,7 @@ export function createApp(): Hono<AuthEnv> {
     for (const id of raw.startsWith("nodes/") ? [raw] : [raw, `nodes/${raw}`]) {
       if (!(await canReadNode(nestId, id, c.get("userId"), userEmail))) continue;
       const found = await storage.readDocument(id).then(() => true, () => false);
-      if (found) return c.redirect(`/nest/${encodeURIComponent(nestId)}?${new URLSearchParams({ doc: id })}`, 302);
+      if (found) return c.redirect(documentWebPath(nestId, id), 302);
     }
     return next();
   });

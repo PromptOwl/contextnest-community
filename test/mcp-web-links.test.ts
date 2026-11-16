@@ -196,14 +196,18 @@ describe("a browser that lands on the API address of a nest", () => {
     // The app's own fetch: a session cookie, no HTML Accept.
     const fetched = await app.request(`/nests/${nestId}`, { headers: { Cookie: alice.cookie } });
     expect(fetched.status).toBe(200);
-    // No credentials, no HTML Accept: still the API's 401.
+    // No credentials, no HTML Accept: still the API's own refusal, in JSON.
     const anon = await app.request(`/nests/${nestId}`, { headers: { Accept: "application/json" } });
-    expect(anon.status).toBe(401);
+    expect(anon.status).toBe(404);
+    expect((await anon.json()).error).toBeTruthy();
     // A fetch()/XHR that happens to accept HTML is not a page load.
     const xhr = await app.request(`/nests/${nestId}`, {
       headers: { Accept: "text/html", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors" },
     });
-    expect(xhr.status).toBe(401);
+    expect(xhr.status).toBe(404);
+    // A query string keeps the API answer, even for a page load.
+    const withQuery = await app.request(`/nests/${nestId}?raw=1`, { headers: browser });
+    expect(withQuery.status).not.toBe(302);
     // Not a GET.
     const post = await app.request(`/nests/${nestId}/mcp`, { method: "POST", headers: browser });
     expect(post.status).not.toBe(302);

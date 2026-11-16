@@ -28,6 +28,8 @@ import {
 } from "../governance/access-guard.js";
 import { isPublicReader, permissionLevel } from "../shared/access.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { documentWebUrl } from "../shared/web-links.js";
+import { htmlWriteGuard, htmlWriteNotice } from "./html-artifact.js";
 import {
   assertContributorCreate,
   assertContributorPatch,
@@ -251,6 +253,14 @@ nodeRoutes.post("/bulk-delete", async (c) => {
 });
 
 // POST /nests/:nestId/nodes
+/** `web_url`: the document's page in the web app — the link for a person,
+ *  as opposed to this API address (PO-1336). Absent when the server's public
+ *  address is unknown. */
+function webLinkFields(c: { req: { url: string } }, nestId: string, nodeId: string): { web_url?: string } {
+  const url = documentWebUrl(requestBaseUrl(c.req.url), nestId, nodeId);
+  return url ? { web_url: url } : {};
+}
+
 nodeRoutes.post("/", async (c) => {
   const body = await c.req.json<{
     title?: string;
@@ -320,6 +330,15 @@ nodeRoutes.post("/", async (c) => {
   // document in the web UI authenticates with a session cookie and is exactly
   // who would be confirming it. Same hold, same 202 contract as bulk publish.
   const keyId = c.get("apiKeyId") ?? null;
+  // An HTML page sent as a document by an agent is stored as the artifact it
+  // is (nodes/html-artifact.ts, PO-1336) — the same guard context_create
+  // applies. API-key callers only, like the hold below: a person who types a
+  // code block into the editor meant a code block.
+  const html = keyId ? htmlWriteGuard({ type: body.type, content: body.content }) : null;
+  if (html) {
+    body.content = html.content;
+    if (html.type) body.type = html.type;
+  }
   if (keyId) {
     const pending = await holdWriteIfGated({
       nestId,
@@ -380,6 +399,8 @@ nodeRoutes.post("/", async (c) => {
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...webLinkFields(c, nestId, node.id),
+    ...(html ? { notice: htmlWriteNotice(html) } : {}),
     ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
@@ -752,7 +773,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           "Content-Type": "text/markdown; charset=utf-8",
         });
       }
-      return c.json({ node: response });
+      return c.json({ node: response, ...webLinkFields(c, nestId, response.id) });
     }
     // Nothing approved yet. A public reader never gets here (canReadNode
     // refused them above), but an owner asking for approved_only would fall
@@ -805,7 +826,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       "Content-Type": "text/markdown; charset=utf-8",
     });
   }
-  return c.json({ node: response });
+  return c.json({ node: response, ...webLinkFields(c, nestId, response.id) });
 });
 
 // PATCH /nests/:nestId/nodes/:nodeId — greedy catch-all; see the
@@ -902,6 +923,23 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
 
   const authorEmail = await getUserEmail(c);
 
+  // Same guard as POST and context_update (PO-1336): an agent's replaced body
+  // that is an HTML page. Needs the stored type, so it reads the node; a miss
+  // is left for updateNode to report.
+  let html: ReturnType<typeof htmlWriteGuard> = null;
+  if (c.get("apiKeyId") && typeof body.content === "string") {
+    const { storage } = await engineCache.get(nestId);
+    const storedType = await storage.readDocument(nodeId).then(
+      (n) => n.frontmatter.type as string | undefined,
+      () => undefined,
+    );
+    html = htmlWriteGuard({ type: body.type, storedType, content: body.content });
+    if (html) {
+      body.content = html.content;
+      if (html.type) body.type = html.type;
+    }
+  }
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -930,6 +968,8 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...webLinkFields(c, nestId, node.id),
+    ...(html ? { notice: htmlWriteNotice(html) } : {}),
     ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });

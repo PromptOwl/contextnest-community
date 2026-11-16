@@ -233,6 +233,22 @@ describe("REST parity", () => {
     expect(data.notice).toBeUndefined();
   });
 
+  it("an artifact already stored with a fence is still served as a page", async () => {
+    // Written the way the web app writes (no guard), so the fence is on disk.
+    const res = await app.request(`/nests/${nestId}/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: alice.cookie },
+      body: JSON.stringify({ title: "Old Fenced Deck", type: "artifact", content: FENCED }),
+    });
+    const { node } = await res.json();
+    expect(node.content.trim()).toBe(FENCED);
+    const hosted = await app.request(`/nests/${nestId}/nodes/${node.id}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    expect(hosted.status).toBe(200);
+    expect((await hosted.text()).trim()).toBe(PAGE);
+  });
+
   it("a plain document write carries the web link and no notice", async () => {
     const res = await jsonRequest(
       app,

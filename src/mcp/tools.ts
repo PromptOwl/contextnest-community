@@ -60,6 +60,8 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { htmlWriteGuard, htmlWriteNotice } from "../nodes/html-artifact.js";
+import { documentWebUrl } from "../shared/web-links.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
@@ -741,7 +743,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_get",
-    description: "Read the full content of one document, by title or ID.",
+    description:
+      "Read the full content of one document, by title or ID. The result includes the document's web app link — the one to hand a person who asks for a link.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -938,19 +941,20 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_create",
     description:
-      "Create a new knowledge node in the vault (type \"task\" for a board task; any node may carry assignee/due/priority/parent). The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
+      "Create a new knowledge node in the vault (type \"task\" for a board task; any node may carry assignee/due/priority/parent). To post an HTML page (a deck, dashboard, report or any web page), set type \"artifact\" and put the raw HTML document in `content` — it renders as a page in the web app. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move. The result gives the document's web app link: that is the link to hand a person.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Descriptive title" },
         content: {
           type: "string",
-          description: "Markdown content body",
+          description:
+            "The body. Markdown for a document. For type \"artifact\": the raw HTML document itself (starting at <!DOCTYPE html> or <html>), with no markdown code fence around it — a fenced body would show as code instead of rendering.",
         },
         type: {
           type: "string",
           description:
-            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
+            "Node type (default: document, a markdown page). Use \"artifact\" for an HTML page: the content is raw HTML and it renders as a page in the web app, where people can open and comment on it. Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",
@@ -1027,7 +1031,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
+      "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller. The result gives the document's web app link: that is the link to hand a person.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1045,7 +1049,8 @@ export const TOOL_DEFINITIONS = [
         },
         content: {
           type: "string",
-          description: "New content (replaces)",
+          description:
+            "New content (replaces). Markdown for a document. For an artifact (an HTML page): the raw HTML document itself, with no markdown code fence around it.",
         },
         description: {
           type: "string",
@@ -1877,6 +1882,27 @@ async function resolveLlmBody(
 }
 
 /** " · assignee x · due 2026-10-31 · high" — empty for a node with none. */
+/**
+ * The document's address in the web app, for the PERSON the agent is working
+ * for (PO-1336). Results used to carry no link at all, so an agent asked for
+ * one built it from the API or MCP URL, which a browser cannot open. Prose
+ * only: the catalog payloads of these tools have no link field, and
+ * test/mcp-catalog-conformance.test.ts refuses an added key. "" when the
+ * server's public address is unknown.
+ */
+function webLinkProse(ctx: McpToolContext, nodeId: string): string {
+  const url = documentWebUrl(ctx.baseUrl, ctx.nestId, nodeId);
+  return url ? `\nOpen in the web app (the link for people — share this one, not an API or MCP URL): ${url}` : "";
+}
+
+/** The same, for a listing: one pattern instead of a link per row. */
+function webLinkPatternProse(ctx: McpToolContext): string {
+  const url = documentWebUrl(ctx.baseUrl, ctx.nestId, "");
+  return url
+    ? `\n\nTo link a person to one of these, use the web app address (not an API or MCP URL): ${url}<node id, URL-encoded>`
+    : "";
+}
+
 function taskFieldsProse(n: object): string {
   const f = n as { assignee?: string; due?: string; priority?: string; parent?: string };
   const parts = [
@@ -2257,7 +2283,8 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
       return {
         text:
           `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
-          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : "") +
+          webLinkProse(ctx, node.id),
         data: {
           kind: upload.kind,
           id: node.id,
@@ -2298,7 +2325,8 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
       return {
         text:
           `Created ${upload.kind === "pdf" ? "PDF" : "document"}: **${docTitle}** (${node.id}) from ${upload.filename} — status: ${node.frontmatter.status}` +
-          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : "."),
+          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : ".") +
+          webLinkProse(ctx, node.id),
         data: {
           kind: upload.kind,
           id: node.id,
@@ -2946,7 +2974,7 @@ async function runTool(
           ? ` (showing the first ${page.length}; pass \`limit\` for more)`
           : "";
       return {
-        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}`,
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${webLinkPatternProse(ctx)}`,
         // `count` is everything found (like REST); `results` is the page.
         // Bodies are the gated ones the prose is built from. No `score`:
         // this is a term-containment filter with title-first ordering, not
@@ -3191,6 +3219,10 @@ async function runTool(
         // field yet, and test/mcp-catalog-conformance.test.ts refuses an
         // added key. A structured field needs the engine catalog first.
         lastEditLine,
+        // Prose only, for the same reason (PO-1336).
+        documentWebUrl(ctx.baseUrl, nestId, node.id)
+          ? `**Web link (for people):** ${documentWebUrl(ctx.baseUrl, nestId, node.id)}`
+          : null,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
@@ -3304,7 +3336,7 @@ async function runTool(
           return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
         })
         .join("\n");
-      return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
+      return { text: `${nodes.length} node(s):\n\n${list}${webLinkPatternProse(ctx)}`, data: { documents } };
     }
 
     case "context_resolve": {
@@ -3649,6 +3681,12 @@ async function runTool(
       } catch (err) {
         return toolError((err as Error).message, "VALIDATION_FAILED");
       }
+      // An HTML page sent as a document (usually inside a code fence) is
+      // stored as the artifact it is — see nodes/html-artifact.ts (PO-1336).
+      // Decided before the agent-write hold, so a queued write is the same one.
+      const html = htmlWriteGuard({ type: args.type, content: args.content });
+      const createContent = html ? html.content : args.content;
+      const createType = html?.type ?? args.type;
       const wanted = String(args.title ?? "").toLowerCase();
       return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
         const existingDocs = await storage.discoverDocuments();
@@ -3689,8 +3727,8 @@ async function runTool(
             documents: [
               {
                 title: args.title,
-                content: args.content,
-                type: args.type,
+                content: createContent,
+                type: createType,
                 tags: args.tags,
                 scope: args.scope,
                 folder: args.folder,
@@ -3716,8 +3754,8 @@ async function runTool(
           nestId,
           {
             title: args.title,
-            content: args.content,
-            type: args.type,
+            content: createContent,
+            type: createType,
             tags: args.tags,
             scope: args.scope,
             folder: args.folder,
@@ -3738,7 +3776,7 @@ async function runTool(
         const created = settableTaskFields(node.frontmatter.metadata);
         const tableRefs = await tableRefReport(nestId, node, ctx.userId, ctx.userEmail);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}${html ? `\n${htmlWriteNotice(html)}` : ""}${webLinkProse(ctx, node.id)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -3784,6 +3822,15 @@ async function runTool(
       } catch (err) {
         return toolError((err as Error).message, "VALIDATION_FAILED");
       }
+      // A replaced body that is an HTML page: unwrap a fenced artifact, and
+      // re-type a document to the artifact it now is (nodes/html-artifact.ts,
+      // PO-1336). `append` is never looked at.
+      const html = htmlWriteGuard({
+        type: args.type,
+        storedType: node.frontmatter.type,
+        content: args.content,
+      });
+      const updateType = html?.type ?? args.type;
       // Tags REPLACE, per the engine catalog's context_update. This used to
       // merge ("Tags to add"), which left no way to remove a tag over MCP.
       let result: Awaited<ReturnType<typeof updateNode>>;
@@ -3792,12 +3839,12 @@ async function runTool(
           nestId,
           node.id,
           {
-            content: args.content,
+            content: html ? html.content : args.content,
             append: args.append,
             tags: args.tags,
             ...(args.description !== undefined ? { description: args.description } : {}),
             status: args.status,
-            ...(args.type !== undefined ? { type: args.type } : {}),
+            ...(updateType !== undefined ? { type: updateType } : {}),
             changeNote: args.changeNote,
             client: ctx.client,
             ...taskFields,
@@ -3818,7 +3865,7 @@ async function runTool(
       const fields = settableTaskFields(updated.frontmatter.metadata);
       const tableRefs = await tableRefReport(nestId, updated, ctx.userId, ctx.userEmail);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}${html ? `\n${htmlWriteNotice(html)}` : ""}${webLinkProse(ctx, updated.id)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
