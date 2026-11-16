@@ -31,7 +31,8 @@ jobs:
   e2e-pr-build:
     name: e2e (PR build)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # About 8 minutes when healthy. A hung server or browser must not hold a runner.
+    timeout-minutes: 30
 
     env:
       BASE_URL: http://localhost:3838
