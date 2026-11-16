@@ -24,13 +24,17 @@
  *     the review it opened.
  *
  * Owner/admin of the nest only (a server admin may read any nest). N1: a
- * personal (DM) nest's label is hidden from anyone but its owner; folder names
- * are the seed's own, and the figures are counts, so they stay.
+ * personal (DM) nest's label and its first approved document id are hidden
+ * from anyone but its owner. The rest stays visible on purpose: folder names
+ * are the default seed's own (the same in every personal nest), and the
+ * figures are counts and times, the same kind the N1 ledger rows keep
+ * (redacted rows still count in totals and rollups, with their `at`).
  */
 import { getDb } from "../../db/client.js";
 import { ForbiddenError } from "../../shared/errors.js";
 import { canAdministerNest, isOrgAdmin } from "./binding-service.js";
 import { PRIVATE_TITLE, personalOwner, personalOwners } from "../n1.js";
+import { dbTimeMs } from "../../shared/db-time.js";
 
 export interface ColdStartFolder {
   path: string;
@@ -144,10 +148,8 @@ async function loadInputs(nestIds: string[]): Promise<Inputs> {
   return { names, apps, items, mirror, approvals };
 }
 
-/** Comparable timestamps: SQLite's datetime('now') has no T/Z, ISO strings do. NaN when unparseable. */
-function ms(at: string): number {
-  return Date.parse(/[TZ]/.test(at) ? at : `${at.replace(" ", "T")}Z`);
-}
+/** Comparable timestamps (shared parser): NaN when unparseable. */
+const ms = (at: string): number => dbTimeMs(at);
 
 /** Folder paths compare without a trailing slash: a seed item may end in "/" where a listener entry does not. */
 const normFolder = (p: string) => p.replace(/\/+$/, "");

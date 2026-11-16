@@ -59,7 +59,6 @@ import { SettingsError } from "../surfaces/core/settings.js";
 import { listWindows } from "../surfaces/services/report-service.js";
 import { coldStart } from "../surfaces/services/cold-start-service.js";
 import { ColdStartMcpInput } from "../surfaces/cold-start-schema.js";
-import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 
 const BINDING_ID = { type: "string", description: "Binding id (context_surfaces_bindings_list shows them)." } as const;
 const BIND_FIELDS = {

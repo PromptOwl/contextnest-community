@@ -8,6 +8,7 @@
  * the read is measured slow, and then only as a rebuildable derivative.
  */
 import { getDb } from "../db/client.js";
+import { dbTimeMs } from "../shared/db-time.js";
 import { PRIVATE_CONVERSATION, PRIVATE_TITLE, n1Redacts, personalOwners } from "../surfaces/n1.js";
 import { AGENT_API_VERSION } from "../workflow/agent-event-schema.js";
 import {
@@ -20,10 +21,9 @@ import {
   type Tally,
 } from "./ledger-service.js";
 
-/** A ledger time as an instant: ISO strings and SQLite "YYYY-MM-DD HH:MM:SS" both occur. */
+/** A ledger time as an instant (shared parser); an unreadable time sorts first. */
 const atMs = (at: string | null | undefined): number => {
-  if (!at) return -Infinity;
-  const t = Date.parse(/[TZ]/.test(at) ? at : `${at.replace(" ", "T")}Z`);
+  const t = dbTimeMs(at);
   return Number.isFinite(t) ? t : -Infinity;
 };
 

@@ -610,6 +610,25 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
     for (const r of roll.data.rows) expect(r.nest_id).toBeNull();
   });
 
+  it("AC-CR-10: a no-op with no reason code lands in (none), and the reason buckets still sum to the ledger's no_op total", async () => {
+    const w = await seedWindow({ nestId: R, bindingId: bAcme, at: NOW - DAY, verdict: "no_op" });
+    await run("UPDATE surface_windows SET reason_code = NULL WHERE id = ?", [w]);
+    try {
+      const range = OV.rangeFor(14, NOW);
+      const f = { from: range.from, to: range.to, source: "surfaces", verdict: "no_op" };
+      const roll = await req("GET", `/nests/${R}/rollups?${qs({ ...f, by: "reason", grain: "week" })}`, undefined, alice.apiKey);
+      const ledger = await req("GET", `/nests/${R}/ledger?${qs({ ...f, limit: "1" })}`, undefined, alice.apiKey);
+      expect(ledger.data.totals.no_op).toBe(seeded.noop + 1);
+      const sum = roll.data.rows.reduce((s: number, r: any) => s + Number(r.no_op || 0), 0);
+      expect(sum).toBe(ledger.data.totals.no_op);
+      expect(roll.data.rows.filter((r: any) => r.key === "(none)").reduce((s: number, r: any) => s + Number(r.no_op || 0), 0)).toBe(1);
+    } finally {
+      const runId = ((await all("SELECT run_id FROM surface_windows WHERE id = ?", [w]))[0] as any)?.run_id;
+      await run("DELETE FROM surface_windows WHERE id = ?", [w]);
+      if (runId) await run("DELETE FROM runs WHERE id = ?", [runId]);
+    }
+  });
+
   it("AC-CR-10: by=agent rows carry last_at (the latest ledger row) and source (its kind); the agents list sorts by last report", async () => {
     const range = OV.rangeFor(14, NOW);
     const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "agent", grain: "week" })}`, undefined, alice.apiKey);
