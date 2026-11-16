@@ -17,7 +17,7 @@ describe("dashboard page registry", () => {
     const ids = appPages.map((p) => p.id);
     expect(ids).toEqual([
       "nests", "my-work", "my-drafts", "stream",
-      "teams", "api-keys", "connected-apps",
+      "teams", "api-keys", "connected-apps", "control-room",
       "teammates", "settings", "trace", "messages",
       "guide", "account",
     ]);
@@ -90,6 +90,18 @@ describe("dashboard rail groups", () => {
     expect(visibleAppPage("connected-apps", { isAdmin: false, mcpOauthEnabled: true }).id).toBe(
       "connected-apps",
     );
+  });
+
+  it("lists the Control room to admins only, and only while Surfaces is on (po-1186)", () => {
+    const ids = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.flatMap((g) => g.pages).map((p) => p.id);
+    expect(ids({ isAdmin: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: true, surfacesEnabled: true })).toContain("control-room");
+    expect(appRail({ isAdmin: true, surfacesEnabled: true }).groups.find((g) => g.id === "workspace")?.pages.map((p) => p.id)).toContain("control-room");
+    expect(visibleAppPage("control-room", { isAdmin: true }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("control-room", { isAdmin: true, surfacesEnabled: true }).id).toBe("control-room");
+    expect(appPageIdFromPath("/control-room")).toBe("control-room");
   });
 
   it("lists the Stream only while the experimental doc stream is on", () => {

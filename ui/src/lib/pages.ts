@@ -40,6 +40,8 @@ export interface PageCaps {
   isSuperadmin?: boolean;
   /** The experimental cross-nest document stream is on (/health). */
   docStreamEnabled?: boolean;
+  /** Surfaces (Slack → nest) is on for this server (/health surfaces_enabled). */
+  surfacesEnabled?: boolean;
 }
 
 export interface PageMeta {

@@ -22,7 +22,7 @@ import { credentialMayContribute } from "../../../governance/org-contribution.js
 import { config } from "../../../config.js";
 import { getDb } from "../../../db/client.js";
 import { tryConsume } from "../../../shared/rate-limit.js";
-import { surfacesEnabled, ORG_ID } from "../../flags.js";
+import { surfacesEnabled, hostedEnabled, ORG_ID } from "../../flags.js";
 import { createInstall, getInstall, type InstallRow } from "../../services/install-store.js";
 import { getSecret, secretPresence, setSecret, deleteSecrets } from "../../services/secret-store.js";
 import { completeInstallerLink, recordUserChange } from "../../services/identity-service.js";
@@ -35,12 +35,12 @@ import { buildManifest, BOT_SCOPES, slackUrls } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
 import { slackCall } from "./api.js";
+import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
 
 type C = Context<AuthEnv>;
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
-export const hostedEnabled = () => surfacesEnabled() && config.FEATURE_SURFACES_SLACK_HOSTED;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -262,7 +262,10 @@ slackAdminRoutes.get("/installs/:id", async (c) => {
   if (denied) return denied;
   const i = await getInstall(c.req.param("id"));
   if (!i || i.surface !== "slack") return c.json({ error: "Not found" }, 404);
-  return c.json({ install: installView(i, await secretPresence(i.id)) });
+  // po-1186 CR3: a manifest install hands its manifest back, so the setup
+  // wizard can offer "Download manifest" again on a later visit. No secrets in it.
+  const manifest = i.mode === "manifest" ? buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: i.id }) : null;
+  return c.json({ install: installView(i, await secretPresence(i.id)), manifest });
 });
 
 slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
@@ -280,6 +283,27 @@ slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
     stored.push(k);
   }
   return c.json({ stored, credentials: await secretPresence(i.id) });
+});
+
+/**
+ * po-1186 CR3: the channels the setup wizard offers. Only conversations the
+ * bot is already a member of (users.conversations), never every channel in
+ * the workspace: Nest can't listen where it hasn't been added. Names and
+ * member counts only. Each row says whether this install already binds it.
+ */
+slackAdminRoutes.get("/installs/:id/channels", async (c) => {
+  const denied = await assertAdmin(c);
+  if (denied) return denied;
+  const i = await getInstall(c.req.param("id"));
+  if (!i || i.surface !== "slack") return c.json({ error: "Not found" }, 404);
+  if (i.status !== "active") return c.json({ error: "Finish connecting Slack first: this install isn't active yet." }, 409);
+  try {
+    return c.json(await listInstallChannels(i));
+  } catch (err) {
+    const f = channelListFailure(err);
+    if (f.retryAfterSec) c.header("Retry-After", String(f.retryAfterSec));
+    return c.json({ error: f.error }, f.status);
+  }
 });
 
 /** The state is bound to this browser session (or this credential) and single use. */
@@ -384,10 +408,12 @@ export function safeReturnPath(p: string | null | undefined): string | null {
 
 const REFUSED_NO_TOKEN = "Nest was not connected. No token was kept and nothing was read from your workspace.";
 
-function done(c: C, status: number, message: string, extra: Record<string, unknown> = {}) {
+function done(c: C, status: number, message: string, extra: Record<string, unknown> = {}, backToSetup = false) {
   if ((c.req.header("Accept") || "").includes("application/json")) return c.json({ ok: status === 200, message, ...extra }, status as any);
   const esc = message.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
-  return c.html(`<!doctype html><meta charset="utf-8"><title>Slack</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><p>${esc}</p></body>`, status as any);
+  // po-1186 CR3: a finished install goes back to the setup wizard (a fixed, same-origin path).
+  const back = backToSetup ? `<p><a href="/control-room?section=setup">Continue setup</a></p>` : "";
+  return c.html(`<!doctype html><meta charset="utf-8"><title>Slack</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><p>${esc}</p>${back}</body>`, status as any);
 }
 
 /**
@@ -480,5 +506,8 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
     to.searchParams.set("slack", "connected");
     return c.redirect(`${to.pathname}${to.search}`, 302);
   }
-  return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id, ...(back ? { return_to: back } : {}) });
+  // Self-serve (PO-1185) returns to its own page; an admin install goes on to
+  // the Control room setup wizard (po-1186 CR3).
+  if (back) return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id, return_to: back });
+  return done(c, 200, "Nest is connected to your Slack workspace. Continue setup to choose the channels Nest listens in.", { install_id: install.id, next: "/control-room?section=setup" }, true);
 });

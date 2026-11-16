@@ -13,7 +13,8 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
-import { surfacesEnabled } from "./flags.js";
+import { surfacesEnabled, hostedEnabled } from "./flags.js";
+import { config } from "../config.js";
 import {
   UnprocessableError,
   GuardRefusedError,
@@ -129,6 +130,10 @@ surfacesRoutes.get("/status", async (c) => {
         paused_by_member: by("paused_by_member"),
         removed: by("removed"),
       },
+      // po-1186 CR3: what the setup wizard words and offers. The org name is
+      // the one the public member page shows; hosted = one-click install on.
+      org_name: config.SURFACES_ORG_NAME ?? null,
+      slack_hosted: hostedEnabled(),
       disclosure: SERVER_ADMIN_DISCLOSURE,
     });
   } catch (err) {

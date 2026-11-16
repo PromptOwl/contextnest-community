@@ -61,6 +61,7 @@ const READ_ONLY = [
   "context_surfaces_budget_get",
   "context_surfaces_seed_list",
   "context_surfaces_seed_status",
+  "context_surfaces_slack_channels_list",
   // Agent control room (po-1186): the ledger is a view; an export is logged, never sent.
   "context_agent_ledger",
   "context_agent_ledger_trace",
@@ -141,6 +142,8 @@ const OPEN_WORLD = [
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
   "context_channels",
+  // Read-only, but it calls Slack (users.conversations).
+  "context_surfaces_slack_channels_list",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;

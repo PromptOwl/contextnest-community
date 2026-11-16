@@ -77,6 +77,8 @@ export interface AuthContextValue {
   metacognitionEnabled: boolean;
   /** Experimental cross-nest document stream (/health experimental.doc_stream). */
   docStreamEnabled: boolean;
+  /** Surfaces (Slack → nest) is on (/health surfaces_enabled): the Control room page shows. */
+  surfacesEnabled: boolean;
   /** Experimental document pins (/health experimental.doc_pins). */
   docPinsEnabled: boolean;
   /** Experimental agent team stream channels (/health experimental.agent_stream). */
@@ -139,6 +141,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [hootieEnabled, setHootieEnabled] = useState(false);
   const [metacognitionEnabled, setMetacognitionEnabled] = useState(false);
   const [docStreamEnabled, setDocStreamEnabled] = useState(false);
+  const [surfacesEnabled, setSurfacesEnabled] = useState(false);
   const [docPinsEnabled, setDocPinsEnabled] = useState(false);
   const [agentStreamEnabled, setAgentStreamEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
@@ -182,6 +185,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setHootieEnabled(h.hootie_enabled === true);
       setMetacognitionEnabled(h.metacognition_enabled === true);
       setDocStreamEnabled(h.experimental?.doc_stream === true);
+      setSurfacesEnabled(h.surfaces_enabled === true);
       setDocPinsEnabled(h.experimental?.doc_pins === true);
       setAgentStreamEnabled(h.experimental?.agent_stream === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
@@ -235,6 +239,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setHootieEnabled(h.hootie_enabled === true);
         setMetacognitionEnabled(h.metacognition_enabled === true);
         setDocStreamEnabled(h.experimental?.doc_stream === true);
+        setSurfacesEnabled(h.surfaces_enabled === true);
         setDocPinsEnabled(h.experimental?.doc_pins === true);
         setAgentStreamEnabled(h.experimental?.agent_stream === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
@@ -424,6 +429,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         hootieEnabled,
         metacognitionEnabled,
         docStreamEnabled,
+        surfacesEnabled,
         docPinsEnabled,
         agentStreamEnabled,
         hootieBrand,

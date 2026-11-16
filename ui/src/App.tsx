@@ -264,12 +264,13 @@ export default function App() {
     mcpOauthEnabled,
     docStreamEnabled,
     agentStreamEnabled,
+    surfacesEnabled,
     loading,
     error,
     logout,
   } = useAuth();
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -867,7 +868,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled, surfacesEnabled]);
 
   // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
   const pageTabTitle = tabTitle(crumbs);
