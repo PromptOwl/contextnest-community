@@ -276,6 +276,15 @@ describe("binding a channel: the one notice links the member explainer", () => {
     } finally {
       process.env.PUBLIC_BASE_URL = BASE;
     }
+    // A base URL that would break Slack's <url|label> link syntax gives no link, not a broken one.
+    for (const bad of ["https://x.test/a|b", "https://x.test/<b>", "https://x.test/a b"]) {
+      process.env.PUBLIC_BASE_URL = bad;
+      try {
+        expect(aboutSurfacesUrl(), bad).toBeNull();
+      } finally {
+        process.env.PUBLIC_BASE_URL = BASE;
+      }
+    }
   });
 
   it("the notice states the server's own buffer TTL, the same number the member page shows", async () => {
