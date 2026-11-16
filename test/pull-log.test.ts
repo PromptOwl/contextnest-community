@@ -144,6 +144,25 @@ describe("context pull log", () => {
     expect(p.steps.map((s: any) => s.nodeId)).toEqual(r.data.nodes.map((n: any) => n.id));
   });
 
+  it("leaves hop unknown where the engine walked the graph (context_query, context_resolve), never \"matched\"", async () => {
+    for (const [tool, args] of [
+      ["context_query", { query: "type:document" }],
+      ["context_resolve", { selector: "type:document", hops: 2 }],
+    ] as const) {
+      resetAccessThrottle();
+      const res = await callTool(app, nestId, editor.apiKey, tool, { ...args, client: { agent: "Walker" } });
+      expect(res.isError, `${tool}: ${JSON.stringify(res.content)}`).toBeFalsy();
+      const p = (await pulls(app, nestId, owner.apiKey, "?limit=1")).data.pulls[0];
+      expect(p.tool).toBe(tool);
+      expect(p.steps.length).toBeGreaterThan(0);
+      for (const s of p.steps) {
+        expect(s.hop, tool).toBeNull();
+        expect(s.via, tool).toBeNull();
+      }
+      expect(p.maxHop).toBeNull();
+    }
+  });
+
   it("reads one pull by id, and 404s an unknown one", async () => {
     const { data } = await pulls(app, nestId, owner.apiKey);
     const one = await jsonRequest(app, "GET", `/nests/${nestId}/pulls/${encodeURIComponent(data.pulls[0].id)}`, undefined, owner.apiKey);
@@ -449,6 +468,19 @@ describe("context pull log — paging, large pulls and older rows", () => {
     const searchId = Number(legacy[1].id.slice("legacy-".length));
     const notAPull = await jsonRequest(app, "GET", `/nests/${openNest}/pulls/legacy-${searchId + 1}`, undefined, owner.apiKey);
     expect(notAPull.status).toBe(404);
+  });
+
+  it("lists each distinct pull of a document in its activity log, and an identical repeat once", async () => {
+    log.resetAccessThrottle();
+    const at = (nodeIds: string[], detail: string) =>
+      log.recordNodeAccess({ nestId: openNest, nodeIds, action: "retrieve", surface: "mcp", userEmail: "owner@pages.test", detail });
+    at(["act-doc"], "context_get");
+    at(["act-doc"], "context_get");
+    at(["act-doc", "act-other"], "context_search");
+    await log.flushAccessLog(openNest);
+    const r = await jsonRequest(app, "GET", `/nests/${openNest}/activity-log?node=act-doc&type=retrieved`, undefined, owner.apiKey);
+    expect(r.status).toBe(200);
+    expect(r.data.items.map((i: any) => i.detail).sort()).toEqual(["context_get", "context_search"]);
   });
 
   it("rejects a non-numeric limit or cursor with a 400", async () => {
