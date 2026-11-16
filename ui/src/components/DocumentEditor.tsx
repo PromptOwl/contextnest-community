@@ -2039,6 +2039,11 @@ export function DocumentEditor({
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
+  // Mirrors the server's canDecideExternalEdit (PO-1193): on a governed nest
+  // an edit made outside the app is decided by whoever may approve the
+  // document, on an open nest by whoever may edit it. Everyone else still
+  // sees the notice and the diff.
+  const canDecideExternalEdit = stewardshipEnabled ? canApproveCapability : !isViewOnly;
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
@@ -2993,6 +2998,7 @@ export function DocumentEditor({
                     nestId={nestId}
                     nodeId={nodeId}
                     pending={pendingChange}
+                    canDecide={canDecideExternalEdit}
                     onResolved={() => {
                       setPendingChange(null);
                       loadNode();
