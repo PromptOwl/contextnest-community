@@ -98,7 +98,11 @@ export function rowLastEdit(
 }
 
 /** How far apart updated_at and the version's own timestamp may be and still
- *  be one write: the frontmatter is stamped before the version row is. */
+ *  be one write: the frontmatter is stamped before the version row is. A
+ *  heuristic: a move rewrites updated_at without sealing a version, and the
+ *  server sends no "this was a move" flag, so a gap over a minute is read as
+ *  a later write that the version's editor did not make (the row then shows
+ *  the time with no name). */
 const SAME_WRITE_MS = 60_000;
 
 /** True when `updatedAt` is a later write than the version sealed at
