@@ -255,7 +255,7 @@ describe("binding a channel: the one notice links the member explainer", () => {
     const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_OPS", nest_id: N }, root.apiKey);
     expect(b.status).toBe(201);
     // The create response says whether the one notice went out.
-    expect(b.data.notice_posted).toBe(true);
+    expect(b.data.notice).toBe("posted");
     const notices = slack.posted.slice(before).filter((p) => p.channel === "C_OPS");
     expect(notices.length).toBe(1);
     expect(notices[0].text).toMatch(/^Nest is now listening here/);
@@ -309,7 +309,7 @@ describe("the notice never states a default retention it can't confirm", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await getDb().run("ALTER TABLE surface_settings RENAME TO surface_settings_cr3_hidden");
     try {
-      expect(await postEnableNotice(b.data.binding.id)).toBe(false);
+      expect(await postEnableNotice(b.data.binding.id)).toBe("failed");
     } finally {
       await getDb().run("ALTER TABLE surface_settings_cr3_hidden RENAME TO surface_settings");
     }
@@ -319,7 +319,23 @@ describe("the notice never states a default retention it can't confirm", () => {
     const row = (await getDb().get("SELECT notice_posted_at FROM surface_bindings WHERE id = ?", [b.data.binding.id])) as { notice_posted_at: string | null };
     expect(row.notice_posted_at).toBeNull();
     // Once the settings read again, the notice goes out.
-    expect(await postEnableNotice(b.data.binding.id)).toBe(true);
+    expect(await postEnableNotice(b.data.binding.id)).toBe("posted");
+    expect(await postEnableNotice(b.data.binding.id)).toBe("already_posted");
+  });
+
+  it("re-binding a channel whose notice already went out says already_posted, not a failure (REST and MCP)", async () => {
+    slack.convs.set("C_AGAIN", { info: { id: "C_AGAIN", name: "again-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
+    const first = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
+    expect(first.data.notice).toBe("posted");
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, undefined, root.apiKey)).status).toBeLessThan(300);
+    const again = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
+    expect(again.status).toBe(201);
+    expect(again.data.notice).toBe("already_posted");
+    await jsonRequest(app, "DELETE", `/surfaces/bindings/${again.data.binding.id}`, undefined, root.apiKey);
+    const viaMcp = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_binding_create", arguments: { install_id: installId, conversation_id: "C_AGAIN" } }, root.apiKey);
+    const text = viaMcp.result?.content?.[0]?.text ?? "";
+    expect(viaMcp.result?.isError, text).not.toBe(true);
+    expect(text).not.toMatch(/haven't been told/);
   });
 });
 
