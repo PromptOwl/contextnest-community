@@ -31,6 +31,7 @@ import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { clearParkedDeepLink, deepLinkToOpenOnReturn, parkDeepLink, takeParkedDeepLink } from "./lib/deep-link-return";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
@@ -722,7 +723,8 @@ export default function App() {
   // person then signs in, put the link back and probe again as them: they land
   // on the nest or document they were sent, not on Home (the nest list or the
   // first-run welcome screen) or a "no access" page. Declared after the URL
-  // sync so its address is the one left standing.
+  // sync so its address is the one left standing. The helper only returns the
+  // address this page was opened on; the parked one is checked again on take.
   const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
   const wasSignedInRef = useRef<boolean | null>(null);
   useEffect(() => {
@@ -735,13 +737,38 @@ export default function App() {
       wasSignedIn,
       signedIn: authenticated,
     });
-    if (!link) return;
+    // A sign-in that left the page (PromptOwl, Google, single sign-on) comes
+    // back to Home on a fresh load: open the link parked before leaving.
+    const parked =
+      !link &&
+      deepLinkToOpenOnReturn({
+        sessionKnown: true,
+        signedIn: authenticated,
+        firstLook: wasSignedIn !== true,
+        probeStatus: deepLinkProbe.status,
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+        ? takeParkedDeepLink()
+        : null;
+    const open = link ?? parked;
+    if (!open) return;
     // Once: a second sign-in in this tab (another account) starts from Home.
     entryLinkRef.current = null;
-    window.history.replaceState(window.history.state, "", link);
+    clearParkedDeepLink();
+    window.history.replaceState(window.history.state, "", open);
     setDeepLinkProbe({ status: "loading" });
     // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
   }, [authenticated, loading]);
+
+  // Park the link while the sign-in form is up, so it also survives a sign-in
+  // that leaves the page. Only for a signed-out visitor whose link did not
+  // resolve: a signed-in person's dead link is not something to come back to.
+  useEffect(() => {
+    if (loading || authenticated || authMode !== "key") return;
+    if (deepLinkProbe.status !== "unreachable") return;
+    parkDeepLink(entryLinkRef.current);
+  }, [loading, authenticated, authMode, deepLinkProbe.status]);
 
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the

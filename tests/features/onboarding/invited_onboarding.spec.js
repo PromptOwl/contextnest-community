@@ -1,5 +1,5 @@
 /**
- * An invited person is not a first run — CN-ONBOARD-001 … CN-ONBOARD-005
+ * An invited person is not a first run — CN-ONBOARD-001 … CN-ONBOARD-006
  *
  * Pages under test: Home (the nest list, or the first-run welcome screen in
  * its place: ui/src/pages/app/nests/page.tsx and WelcomeScreen.tsx) and the
@@ -38,6 +38,7 @@ const SLOW = { timeout: 30_000 };
  *   privateNest: { id: string, name: string },
  *   orgNest: { id: string, name: string },
  *   orgDoc: { id: string, title: string },
+ *   privateDoc: { id: string, title: string },
  *   invited: { id: string, email: string, password: string },
  *   newcomer: { id: string, email: string, password: string },
  * } | null}
@@ -91,6 +92,8 @@ test.describe('An invited person is not a first run', () => {
       const made = await api.expectOk('POST', '/auth/invite', { email });
       return { id: made.user.id, email, password: made.temporary_password };
     };
+    const privateTitle = commonFunction.generateEntityName('plan');
+    const privateDoc = await api.createDocument(privateNest.id, { title: privateTitle, content: `# ${privateTitle}\n\nFor the team.\n` });
     const invited = await invite('invited');
     const newcomer = await invite('newcomer');
     // A viewer: the lightest grant, and enough to be let in.
@@ -100,6 +103,7 @@ test.describe('An invited person is not a first run', () => {
       privateNest: { id: privateNest.id, name: privateNest.name },
       orgNest: { id: orgNest.id, name: orgNest.name },
       orgDoc: { id: orgDoc.id, title: docTitle },
+      privateDoc: { id: privateDoc.id, title: privateTitle },
       invited,
       newcomer,
     };
@@ -214,6 +218,36 @@ test.describe('An invited person is not a first run', () => {
       await expect(page.getByText(seeded.privateNest.name).first()).toBeVisible(SLOW);
       await expect(page.getByText("This nest doesn't exist or you don't have access.")).toHaveCount(0);
       await expect(page.getByTestId('welcome-screen')).toHaveCount(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('CN-ONBOARD-006 the link also survives a sign-in that leaves the page and comes back to Home', async ({ browser }) => {
+    const ctx = await signedOutContext(browser);
+    try {
+      const page = await ctx.newPage();
+      const link = `/nest/${seeded.privateNest.id}?doc=${encodeURIComponent(seeded.privateDoc.id)}`;
+      await page.goto(link);
+      await expect(page.getByTestId('login-email-input')).toBeVisible(SLOW);
+
+      // What PromptOwl, Google and single sign-on do: the session is made
+      // outside this page, and the server sends the browser back to "/".
+      const signedIn = await page.request.post('/auth/login', {
+        data: { email: seeded.invited.email, password: seeded.invited.password },
+      });
+      expect(signedIn.ok()).toBe(true);
+      await page.goto('/');
+
+      await expect(page.getByTestId('document-editor-topbar')).toBeVisible(SLOW);
+      await expect(page.getByText(seeded.privateDoc.title).first()).toBeVisible(SLOW);
+      await expect(page).toHaveURL(new RegExp(`/nest/${seeded.privateNest.id}`));
+      await expect(page.getByTestId('welcome-screen')).toHaveCount(0);
+
+      // Opened once: going Home afterwards stays on Home.
+      await page.goto('/');
+      await expect(page.getByTestId('getting-started')).toBeVisible(SLOW);
+      await expect(page).not.toHaveURL(/\/nest\//);
     } finally {
       await ctx.close();
     }
