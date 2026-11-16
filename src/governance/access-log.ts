@@ -22,6 +22,15 @@
  *   - capped: at most MAX_PER_CALL documents per retrieval;
  *   - pruned on the activity trace's retention window.
  *
+ * Volume: since the throttle is per pull, not per document, rows grow with
+ * query variety — each distinct retrieval writes min(results, MAX_PER_CALL)
+ * rows, in one INSERT. An agent making 1,000 distinct 20-hit searches a day
+ * writes ~20k rows a day, ~280k over the default 14-day TRACE_RETENTION_DAYS.
+ * That is the cost of replaying pulls without holes. The prune is counted in
+ * rows written, not calls (PRUNE_EVERY), so it runs as often as volume needs
+ * and deletes on idx_node_access_ts; 093 adds one index (idx_node_access_pull).
+ * A nest that doesn't want the log can turn it off.
+ *
  * Each call is one PULL (po-1252): its rows share a `pull_id`, `seq` is each
  * document's place in what was handed over, `bytes` its size, and where the
  * server ran the traversal itself (REST /context, Hootie) `hop` is how many

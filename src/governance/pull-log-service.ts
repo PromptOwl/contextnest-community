@@ -85,8 +85,16 @@ export interface PullViewer {
 }
 
 export const MAX_PULLS = 50;
-/** Rows read per page: enough for a full page of maximum-size pulls. */
+/** Rows read per window: enough for a full page of maximum-size pulls. */
 const MAX_ROWS = 2500;
+/** Windows read for one page before handing back a cursor instead. */
+const MAX_WINDOWS = 4;
+
+/** A database without the access log, or without migration 093's columns —
+ *  SQLite's "no such table/column", Postgres's "… does not exist". */
+export function isMissingSchemaError(err: unknown): boolean {
+  return /no such (table|column)|does not exist/i.test(String((err as Error)?.message ?? err));
+}
 
 interface Row {
   id: number | string;
@@ -202,48 +210,60 @@ export async function listPulls(params: {
 
   const where = ["e.nest_id = ?", "e.action IN ('read', 'retrieve')", "e.node_id IS NOT NULL"];
   const args: Array<string | number> = [nestId];
-  if (before !== undefined) {
-    where.push("e.id < ?");
-    args.push(before);
-  }
   if (agent) {
     where.push("e.agent = ?");
     args.push(agent);
   }
+  // Each window holds a full page of maximum-size pulls (MAX_PER_CALL rows
+  // each) plus one, so a window always holds at least two pulls and the cut
+  // one below can be left to the next page.
   const window = Math.min((limit + 1) * MAX_PER_CALL, MAX_ROWS);
-  let rows: Row[];
-  try {
-    rows = (await getDb().all(
-      `SELECT ${COLUMNS} ${FROM} WHERE ${where.join(" AND ")} ORDER BY e.id DESC LIMIT ?`,
-      [...args, window],
-    )) as Row[];
-  } catch (err) {
-    // A database without the access log (or migration 093) has no pulls.
-    if (/no such (table|column)|does not exist/i.test(String((err as Error)?.message))) return empty;
-    throw err;
-  }
-  const groups = new Map<string, Row[]>();
-  for (const r of rows) {
-    const k = groupKey(r);
-    (groups.get(k) ?? groups.set(k, []).get(k)!).push(r);
-  }
-  let ordered = [...groups.values()];
-  // A full window may have cut the oldest pull in half; leave it to the next
-  // page, which starts below the last pull returned.
-  const windowFull = rows.length === window;
-  if (windowFull && ordered.length > 1) ordered = ordered.slice(0, -1);
-
   const pulls: Pull[] = [];
+  let cursor = before;
+  let hasMore = false;
   let lastMin: number | null = null;
-  let consumed = 0;
-  // Build in slices so a page of pulls this caller can't see still fills up.
-  while (consumed < ordered.length && pulls.length < limit) {
-    const slice = ordered.slice(consumed, consumed + (limit - pulls.length));
-    consumed += slice.length;
-    pulls.push(...(await build(nestId, viewer, slice)));
-    lastMin = Math.min(...slice.flatMap((g) => g.map((r) => Number(r.id))));
+  // A window can be all pulls this caller can't read (a public reader under a
+  // busy agent working in drafts). Read on, a bounded number of windows, so a
+  // page isn't empty while readable pulls sit just below it. If it still is,
+  // hasMore and nextBefore let the client carry on from there.
+  for (let pass = 0; pass < MAX_WINDOWS && pulls.length < limit; pass++) {
+    const passWhere = cursor !== undefined ? [...where, "e.id < ?"] : where;
+    const passArgs = cursor !== undefined ? [...args, cursor] : args;
+    let rows: Row[];
+    try {
+      rows = (await getDb().all(
+        `SELECT ${COLUMNS} ${FROM} WHERE ${passWhere.join(" AND ")} ORDER BY e.id DESC LIMIT ?`,
+        [...passArgs, window],
+      )) as Row[];
+    } catch (err) {
+      // A database without the access log (or migration 093) has no pulls.
+      if (isMissingSchemaError(err)) return empty;
+      throw err;
+    }
+    const groups = new Map<string, Row[]>();
+    for (const r of rows) {
+      const k = groupKey(r);
+      (groups.get(k) ?? groups.set(k, []).get(k)!).push(r);
+    }
+    let ordered = [...groups.values()];
+    // A full window may have cut the oldest pull in half; leave it to the next
+    // page, which starts below the last pull returned. (Only a window that
+    // holds one pull keeps it, and MAX_PER_CALL keeps a pull below a window.)
+    const windowFull = rows.length === window;
+    if (windowFull && ordered.length > 1) ordered = ordered.slice(0, -1);
+
+    let consumed = 0;
+    // Build in slices so a page of pulls this caller can't see still fills up.
+    while (consumed < ordered.length && pulls.length < limit) {
+      const slice = ordered.slice(consumed, consumed + (limit - pulls.length));
+      consumed += slice.length;
+      pulls.push(...(await build(nestId, viewer, slice)));
+      lastMin = Math.min(...slice.flatMap((g) => g.map((r) => Number(r.id))));
+    }
+    hasMore = consumed < ordered.length || windowFull;
+    if (!hasMore || lastMin == null) break;
+    cursor = lastMin;
   }
-  const hasMore = consumed < ordered.length || windowFull;
   return {
     pulls,
     hasMore,
@@ -284,7 +304,7 @@ export async function getPull(params: { nestId: string; viewer: PullViewer; pull
       )) as Row[];
     }
   } catch (err) {
-    if (/no such (table|column)|does not exist/i.test(String((err as Error)?.message))) return null;
+    if (isMissingSchemaError(err)) return null;
     throw err;
   }
   if (!rows.length) return null;

@@ -65,6 +65,10 @@ export function PullList({
         <p className="px-3 pb-3 text-xs text-muted-foreground">
           The access log is off for this nest, so pulls aren't recorded. The owner can turn it on in nest settings.
         </p>
+      ) : pulls.length === 0 && !loading && hasMore ? (
+        <p className="px-3 pb-3 text-xs text-muted-foreground">
+          None of the most recent pulls touched documents you can read. Older pulls may have.
+        </p>
       ) : pulls.length === 0 && !loading ? (
         <p className="px-3 pb-3 text-xs text-muted-foreground">
           No pulls yet. When an agent or a teammate retrieves context from this nest, each pull shows up here and can be replayed on the graph.

@@ -2542,7 +2542,7 @@ Notes:
 ### GET `/nests/:nestId/pulls` (read+)
 The context pull log, for the Graph view's replay (po-1252): each retrieval call made in this nest, newest first, as the documents it handed over in order. A read model over the access log (`node_access_events`, the same rows `GET /activity-log` reads), so it records only while the nest's `access_log_enabled` is on, and is pruned on the same retention window.
 
-Query: `limit` (1–50, default 20), `before` (the previous page's `nextBefore`), `agent` (case-insensitive exact).
+Query: `limit` (1–50, default 20), `before` (the previous page's `nextBefore`), `agent` (case-insensitive exact). A page can hold fewer than `limit` pulls, even none, while `hasMore` is `true` (the newest pulls touched only documents the caller can't read): keep paging with `nextBefore`.
 
 ```json
 {
@@ -2574,6 +2574,7 @@ Notes:
 - **What is a pull.** One call of: MCP `context_get` / `context_search` / `context_query` / `context_resolve` / `context_table_query`, REST `GET /nodes/:id`, `GET /search`, `POST /query`, `POST /context` (and Hootie, which goes through it), `POST /table-query`. Exports are not pulls. `tool` is the surface's own name for the call.
 - **Steps.** `seq` is the place in the payload. `version` is the version served. `bytes` is the size handed over, on the basis of each surface: the context block for `/context` and Hootie, the `## Title` entry for `context_resolve`, the served document body otherwise (for a search, the body of the hit, not its snippet). `hop` and `via` are recorded where the server walks the link graph itself (`POST /context`, Hootie): `0` for a match, `N` with the document it was reached from for a neighbour. Direct reads and searches are `hop: 0`. The engine's selector walk (`POST /query`, `context_query`, `context_resolve`) reports no per-document hop, so those steps are `hop: null`.
 - **Throttle.** An identical repeated pull (same caller, agent, tool, documents and versions) inside the access log's 10-minute window is recorded once. Any other pull is recorded whole.
+- **Volume and retention.** Each recorded pull is up to 50 rows (one per document), so the log grows with how many *different* pulls are made — about 20,000 rows a day for an agent making 1,000 distinct 20-document searches. Rows are pruned on `TRACE_RETENTION_DAYS` (default 14), checked every 500 rows written. An owner can turn the access log off per nest.
 - **Who sees what.** Every step is gated like the other query routes: a document the caller can't read is left out, and a pull with nothing readable isn't listed. `actor` and `agent` are filled only for **write+** callers (`identities: true`, the steward-overlay rule); below that they are `null` and an `agent` filter matches nothing. A visibility-only (public / org) reader also gets `version: null` and `title: null`. Headless access keys are refused.
 - Rows recorded before this release have no order, size or hops: they are grouped by call and come back with `seq` in insertion order and `bytes`/`hop` `null`.
 
