@@ -370,6 +370,18 @@ describe("AC-CR-04: cold start", () => {
     expect(server.data.nests.map((n: any) => n.nest_id)).not.toContain(P);
   });
 
+  it("AC-CR-04 (N1): a sealed personal nest refuses a server admin (403, as trace reads do); a nest admin the owner invited sees it redacted", async () => {
+    const asServerAdmin = await req("GET", `/surfaces/cold-start?nest_id=${P}`, undefined, root.apiKey);
+    expect(asServerAdmin.status).toBe(403);
+    expect(JSON.stringify(asServerAdmin.data)).not.toContain("Pat DM");
+    const viaMcp = await mcp(P, root.apiKey, "context_surfaces_cold_start", {}).catch((e) => e);
+    expect(JSON.stringify(viaMcp ?? "")).not.toContain("Pat DM");
+    const asInvitedAdmin = await req("GET", `/surfaces/cold-start?nest_id=${P}`, undefined, alice.apiKey);
+    expect(asInvitedAdmin.status).toBe(200);
+    expect(asInvitedAdmin.data.nests[0]).toMatchObject({ nest_label: "DM · private nest · title hidden", redacted: "n1" });
+    expect(JSON.stringify(asInvitedAdmin.data)).not.toContain("Pat DM");
+  });
+
   it("AC-CR-04: the MCP twin context_surfaces_cold_start returns the same read model as REST", async () => {
     const rest = (await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, alice.apiKey)).data.nests[0];
     const viaMcp = await mcp(R, alice.apiKey, "context_surfaces_cold_start", {});
@@ -608,6 +620,35 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
     expect(Object.fromEntries(breakdown.map((r) => [r.code, r.count]))).toEqual(Object.fromEntries(seeded.reasons));
     expect(breakdown[0]).toMatchObject({ code: "chatter", label: "Chatter" });
     for (const r of roll.data.rows) expect(r.nest_id).toBeNull();
+  });
+
+  it("AC-CR-10 (N1): a non-owner's rollup rows for a personal nest show nothing the ledger doesn't (label hidden; last_at and source as on the ledger rows)", async () => {
+    const bP = await seedBinding(P, "pat-dm-room");
+    const w = await seedWindow({ nestId: P, bindingId: bP, at: NOW - 2 * DAY, verdict: "no_op", reason: "chatter" });
+    try {
+      const range = OV.rangeFor(14, NOW);
+      const f = { from: range.from, to: range.to };
+      const ledger = await req("GET", `/nests/${P}/ledger?${qs({ ...f, limit: "200" })}`, undefined, alice.apiKey);
+      expect(ledger.status).toBe(200);
+      const ats = new Set(ledger.data.entries.map((e: any) => e.at));
+      const sources = new Set(ledger.data.entries.map((e: any) => e.agent?.source));
+      for (const by of ["agent", "nest", "binding", "reason"]) {
+        const roll = await req("GET", `/nests/${P}/rollups?${qs({ ...f, by, grain: "day" })}`, undefined, alice.apiKey);
+        expect(roll.status).toBe(200);
+        expect(roll.data.rows.length).toBeGreaterThan(0);
+        expect(JSON.stringify(roll.data), by).not.toContain("Pat DM");
+        expect(JSON.stringify(roll.data), by).not.toContain("pat-dm-room");
+        for (const r of roll.data.rows) {
+          expect(ats.has(r.last_at), `${by} last_at`).toBe(true);
+          expect(sources.has(r.source), `${by} source`).toBe(true);
+        }
+      }
+    } finally {
+      const runId = ((await all("SELECT run_id FROM surface_windows WHERE id = ?", [w]))[0] as any)?.run_id;
+      await run("DELETE FROM surface_windows WHERE id = ?", [w]);
+      if (runId) await run("DELETE FROM runs WHERE id = ?", [runId]);
+      await run("DELETE FROM surface_bindings WHERE id = ?", [bP]);
+    }
   });
 
   it("AC-CR-10: a no-op with no reason code lands in (none), and the reason buckets still sum to the ledger's no_op total", async () => {
