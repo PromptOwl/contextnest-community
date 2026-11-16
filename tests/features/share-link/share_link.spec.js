@@ -115,13 +115,13 @@ test.describe('Share a document', () => {
     const first = await links(api, nest.id);
     expect(first).toHaveLength(1);
 
-    // The menu is closing as the toast comes up; a click that lands on the
-    // closing trigger opens nothing, so open it until the item is there.
+    // The first click's menu is still closing as the toast comes up, and its
+    // item stays in the page until the exit animation ends. Wait for it to go
+    // before opening the menu again, or the click lands on the dying item.
     const again = page.getByTestId('document-editor-share-link');
-    await expect(async () => {
-      if (!(await again.isVisible())) await page.getByTestId('document-editor-more').click();
-      await expect(again).toBeVisible({ timeout: 2_000 });
-    }).toPass(WRITE);
+    await expect(again).toBeHidden(WRITE);
+    await page.getByTestId('document-editor-more').click();
+    await expect(again).toBeVisible();
     await again.click();
     // Copied, or shown when the browser refuses the clipboard: never re-published.
     await expect(page.getByText(/Public link copied|This document has a public link/)).toBeVisible(WRITE);
