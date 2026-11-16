@@ -252,15 +252,16 @@ nodeRoutes.post("/bulk-delete", async (c) => {
   );
 });
 
-// POST /nests/:nestId/nodes
-/** `web_url`: the document's page in the web app — the link for a person,
- *  as opposed to this API address (PO-1336). Absent when the server's public
- *  address is unknown. */
+/** `web_url` on a write response: the document's page in the web app — the
+ *  link for a person, as opposed to this API address (PO-1336). Absent when the
+ *  server's public address is unknown. Writes only: the GET shape is pinned by
+ *  the characterization goldens and its readers already hold the id. */
 function webLinkFields(c: { req: { url: string } }, nestId: string, nodeId: string): { web_url?: string } {
   const url = documentWebUrl(requestBaseUrl(c.req.url), nestId, nodeId);
   return url ? { web_url: url } : {};
 }
 
+// POST /nests/:nestId/nodes
 nodeRoutes.post("/", async (c) => {
   const body = await c.req.json<{
     title?: string;
@@ -773,7 +774,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           "Content-Type": "text/markdown; charset=utf-8",
         });
       }
-      return c.json({ node: response, ...webLinkFields(c, nestId, response.id) });
+      return c.json({ node: response });
     }
     // Nothing approved yet. A public reader never gets here (canReadNode
     // refused them above), but an owner asking for approved_only would fall
@@ -826,7 +827,7 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       "Content-Type": "text/markdown; charset=utf-8",
     });
   }
-  return c.json({ node: response, ...webLinkFields(c, nestId, response.id) });
+  return c.json({ node: response });
 });
 
 // PATCH /nests/:nestId/nodes/:nodeId — greedy catch-all; see the

@@ -3029,7 +3029,7 @@ Execute (the runner contract — the agent IS the runner):
 **Links.** The API lives under `/nests/<id>` (plural) and answers programs. The web app lives under `/nest/<id>` (singular): `/nest/<nest-id>` is a nest, `/nest/<nest-id>?doc=<node id, URL-encoded>` is one document. Agents get the web address ready-made, so they never have to build one:
 
 - `GET /index?format=json` and the `nest_index` tool: `web_url` on each nest; the markdown lists it as "web (for people)" and labels the API URLs "for agents".
-- `POST /nests/:nestId/nodes`, `PATCH` and `GET /nests/:nestId/nodes/:nodeId`: a top-level `web_url` next to `node`.
+- `POST /nests/:nestId/nodes` and `PATCH /nests/:nestId/nodes/:nodeId`: a top-level `web_url` next to `node`.
 - `context_get`, `context_create`, `context_update` and a `context_upload` document: the link in the result text. `context_list` and `context_search` end with the address pattern. The structured payloads of these tools are unchanged (they follow the engine's operation catalog).
 
 The base is `PUBLIC_BASE_URL` when set, otherwise the origin of the request. A browser page load of `/nests/:nestId`, `/nests/:nestId/mcp` or `/nests/:nestId/context` that carries no `Authorization` header and no query string is redirected (302) to `/nest/:nestId`. Requests from programs are not affected.
