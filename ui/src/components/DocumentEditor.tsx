@@ -112,6 +112,7 @@ import { CodeHighlight } from "./CodeHighlight";
 import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
+import { shareDocumentLink } from "../lib/share-link";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -2226,6 +2227,18 @@ export function DocumentEditor({
           return { ...base, icon: FolderInput, onSelect: () => setMoveTo(currentFolder) };
         case "share-doc":
           return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "share-link":
+          return {
+            ...base,
+            icon: Globe,
+            onSelect: () =>
+              void shareDocumentLink({
+                nestId,
+                nodeId,
+                title: title.trim() || "Untitled",
+                onManage: () => setShowPublish(true),
+              }),
+          };
         case "publish":
           return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
         case "delete":

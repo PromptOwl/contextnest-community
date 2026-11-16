@@ -26,9 +26,26 @@ describe("documentActions — the document-page ⋮ menu", () => {
       "copy-link",
       "move",
       "share-doc",
+      "share-link",
       "publish",
       "delete",
     ]);
+  });
+
+  // PO-1365: one click to a public link, next to the two dialogs it shortcuts.
+  it("offers Share public link wherever Publish is offered, and nowhere else", () => {
+    const share = documentActions(owner).find((a) => a.key === "share-link")!;
+    expect(share.label).toBe("Share public link");
+    expect(share.testId).toBe("document-editor-share-link");
+    for (const input of [
+      { ...owner, canShare: false },
+      { ...owner, isArchived: true },
+      { ...owner, isNew: true },
+    ]) {
+      expect(keys(input)).not.toContain("share-link");
+      expect(keys(input)).not.toContain("publish");
+    }
+    expect(keys({ ...owner, includeVersionHistory: false })).toContain("share-link");
   });
 
   it("parity: an HTML artifact gets the same sharing actions as markdown", () => {
@@ -36,7 +53,7 @@ describe("documentActions — the document-page ⋮ menu", () => {
     const artifact = keys({ ...owner, includeVersionHistory: false });
     expect(artifact).toEqual(keys(owner).filter((k) => k !== "history"));
     expect(artifact).toEqual(
-      expect.arrayContaining(["copy-link", "share-doc", "publish", "move", "delete"]),
+      expect.arrayContaining(["copy-link", "share-doc", "share-link", "publish", "move", "delete"]),
     );
   });
 
@@ -64,7 +81,7 @@ describe("documentActions — the document-page ⋮ menu", () => {
     const pdf = keys({ ...owner, isPdf: true });
     expect(pdf).not.toContain("move");
     // everything else an owner gets stays available
-    expect(pdf).toEqual(["history", "copy-link", "share-doc", "publish", "delete"]);
+    expect(pdf).toEqual(["history", "copy-link", "share-doc", "share-link", "publish", "delete"]);
   });
 
   it("an unsaved document has no node to act on — empty menu", () => {
@@ -75,6 +92,7 @@ describe("documentActions — the document-page ⋮ menu", () => {
     const archived = keys({ ...owner, isArchived: true });
     expect(archived).not.toContain("share-doc");
     expect(archived).not.toContain("publish");
+    expect(archived).not.toContain("share-link");
     expect(archived).toContain("copy-link");
   });
 
