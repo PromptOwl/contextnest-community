@@ -108,12 +108,12 @@ class CollaboratorsPage {
   /**
    * Show the add-a-person form. On a shared deployment with teams on, the add
    * control opens on Team (team sharing is how a nest reaches a group there),
-   * so the person box is on the page only once Person is chosen. Does nothing
-   * when the form is already showing or this reader has no add control.
+   * so the person box is on the page only once Person is chosen. Everyone who
+   * gets this tab gets the add control, so wait for it before looking.
    */
   async showPersonForm() {
+    await this.personInput.or(this.personMode).first().waitFor({ state: 'visible' });
     if (await this.personInput.isVisible()) return;
-    if (!(await this.personMode.isVisible())) return;
     this._log('The add control opened on Team; choosing Person');
     await this.personMode.click();
     await this.personInput.waitFor({ state: 'visible' });

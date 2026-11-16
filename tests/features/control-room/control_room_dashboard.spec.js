@@ -63,6 +63,10 @@ let dashboardShipped = null;
 async function requireDashboard(page) {
   if (dashboardShipped === null) {
     const res = await page.request.get('/rollups?by=reason');
+    // 200: shipped. 422: not shipped. 404: the workflow plane is off here, which
+    // says nothing either way, so the cases run. Anything else is a broken
+    // request, not an answer; fail here rather than remember a wrong one.
+    expect([200, 404, 422], `GET /rollups?by=reason answered ${res.status()}`).toContain(res.status());
     dashboardShipped = res.status() !== 422;
   }
   if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
