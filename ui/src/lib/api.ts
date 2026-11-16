@@ -14,6 +14,7 @@
 
 import { clearDraft } from "./draft";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
+import type { ClientAttribution } from "./client-attribution";
 import {
   ACCESS_OFFER_EVENT,
   accessOfferFromError,
@@ -22,6 +23,7 @@ import {
 } from "./access-requests";
 import type { NestBranding } from "./branding";
 import type { InstructionsRevision } from "./instructions";
+import type { OnboardingState, ConnectionEvidence } from "./onboarding";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -393,6 +395,11 @@ export interface AdminSettings {
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;
+  /** First-run onboarding switches (PO-1185). */
+  onboarding_enabled?: boolean;
+  distill_enabled?: boolean;
+  /** Any person may connect their own Slack workspace to a nest they own. */
+  surfaces_slack_self_serve?: boolean;
   /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
   surfaces_slack_hosted_enabled?: boolean;
   surfaces_slack_hosted_client_id?: string;
@@ -3788,6 +3795,15 @@ export interface StreamItem {
   status: string;
   /** null where the caller reads the nest only publicly. */
   author: string | null;
+  /** The author's display name; null when none, and for public readers. */
+  authorName?: string | null;
+  /** The write's attribution (spec §9.4); `client.agent` is the agent the
+   *  person wrote through. null when none, and for public readers. */
+  client?: ClientAttribution | null;
+  /** The version's change note (system auto-publish stamps excluded). */
+  changeNote?: string | null;
+  /** On a version in review: may the caller approve / request changes? */
+  review?: { canReview: boolean } | null;
   at: string;
   summary: string;
   /** Comments on the document's open threads; null where the caller reads
@@ -4911,3 +4927,37 @@ export const getSurfacesSeedStatus = (nestId: string) =>
 export const applySurfacesSeed = (b: { nest_id: string; seed_id: string; library_nest_id?: string | null; dry_run?: boolean }) =>
   request<SurfacesSeedResult>("/surfaces/seeds/apply", surfacesJson(b));
 // ═══ end Control room (po-1186 CR3) ═══════════════════════════════════════
+
+// ─── First-run onboarding (PO-1185) ─────────────────────────────────────────
+
+export interface DistillJobView {
+  id: string;
+  nest_id: string;
+  url: string;
+  status: "running" | "done" | "failed";
+  phase: "fetching" | "extracting" | "organizing" | "writing" | "done" | "failed";
+  done_steps: number;
+  total_steps: number;
+  nodes: Array<{ id: string; title: string }>;
+  error: string | null;
+}
+
+export type DistillStart =
+  | { mode: "server"; job: DistillJobView }
+  | { mode: "agent"; reason: string; prompt: string; ontology_id: string };
+
+export const getOnboarding = () => request<OnboardingState>("/onboarding");
+export const dismissOnboarding = () => request<OnboardingState>("/onboarding/dismiss", { method: "POST", body: "{}" });
+export const reopenOnboarding = () => request<OnboardingState>("/onboarding/reopen", { method: "POST", body: "{}" });
+export const createMyNest = (name?: string) =>
+  request<{ nest: { id: string; name: string; created: boolean }; state: OnboardingState }>("/onboarding/nest", {
+    method: "POST",
+    body: JSON.stringify(name ? { name } : {}),
+  });
+export const getConnectionEvidence = (nestId: string, since: string) =>
+  request<ConnectionEvidence>(`/onboarding/connection?nest_id=${encodeURIComponent(nestId)}&since=${encodeURIComponent(since)}`);
+export const startDistill = (nestId: string, url: string) =>
+  request<DistillStart>("/onboarding/distill", { method: "POST", body: JSON.stringify({ nest_id: nestId, url }) });
+export const getDistillJob = (jobId: string) => request<{ job: DistillJobView }>(`/onboarding/distill/${encodeURIComponent(jobId)}`);
+/** A browser navigation (OAuth redirect), not a fetch. */
+export const slackConnectUrl = (nestId: string) => `/onboarding/slack/start?nest_id=${encodeURIComponent(nestId)}`;

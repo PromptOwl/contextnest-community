@@ -21,6 +21,10 @@
  * description — that is all a stranger discovering the nest will see beside
  * its name — and offers to add one when it is empty (CU-wdqcq02mek).
  *
+ * On a shared deployment the picker leaves out Organization (unless the nest
+ * is already org) and offers "Share with a team…" instead, through the
+ * host's `onShareWithTeam` (visibilityPickerOptions).
+ *
  * A server admin can restrict widening to Public or Organization to server
  * admins (/health nest_public_visibility / nest_org_visibility). A blocked
  * tier is shown disabled with the reason; the server refuses it regardless.
@@ -61,8 +65,9 @@ import {
   visibilityNeedsAcknowledgement,
   visibilityTierHint,
   visibilityConfirmCopy,
-  visibilityMenuOptions,
+  visibilityPickerOptions,
   settleVisibilityChange,
+  type VisibilityPickerValue,
 } from "../lib/visibility-confirm";
 import { OrgContributionsSetting } from "./OrgContribution";
 
@@ -77,6 +82,11 @@ interface Props {
    *  behind the nest header's outlined badge button. Same fetch, same apply,
    *  same going-public acknowledgement. */
   variant?: "card" | "compact" | "header";
+  /** Opens team sharing for this nest. On a shared deployment the picker
+   *  offers "Share with a team…" in place of Organization (which there
+   *  reaches every organization on the server) and calls this. Without it
+   *  the team choice is not offered. */
+  onShareWithTeam?: () => void;
 }
 
 export function NestVisibilityControl({
@@ -84,6 +94,7 @@ export function NestVisibilityControl({
   onChanged,
   onError,
   variant = "card",
+  onShareWithTeam,
 }: Props) {
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const isPublic = visibility === "public";
@@ -126,7 +137,9 @@ export function NestVisibilityControl({
   // private <-> public only), with a capped tier disabled and explained.
   // Measured from the server value, not the optimistic one, so a pending
   // change can't unlock a tier.
-  const options = visibilityMenuOptions(serverVisibility ?? visibility, ctx, policy);
+  const options = visibilityPickerOptions(serverVisibility ?? visibility, ctx, policy, {
+    canShareWithTeam: !!onShareWithTeam,
+  });
 
   const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
     // Optimistic change; settleVisibilityChange reverts to the PREVIOUS value
@@ -144,7 +157,13 @@ export function NestVisibilityControl({
     else onChanged();
   };
 
-  const choose = async (next: api.NestVisibility) => {
+  const choose = async (next: VisibilityPickerValue) => {
+    // Team sharing is not a tier: it opens the Teams tab and leaves the
+    // nest's visibility as it is.
+    if (next === "team") {
+      onShareWithTeam?.();
+      return;
+    }
     if (next === visibility) return;
     const blocked = options.find((o) => o.value === next);
     if (blocked?.disabled) {
@@ -334,7 +353,7 @@ export function NestVisibilityControl({
           )}
           <Select
             value={visibility}
-            onValueChange={(v) => void choose(v as api.NestVisibility)}
+            onValueChange={(v) => void choose(v as VisibilityPickerValue)}
             disabled={saving}
           >
             <SelectTrigger className="h-8 w-[150px]" aria-label="Nest visibility">

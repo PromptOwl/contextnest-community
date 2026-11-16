@@ -17,6 +17,7 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
   "nest_index",
+  "context_onboarding",
   "context_init",
   "context_instructions_history",
   "context_overview",
@@ -37,6 +38,7 @@ const READ_ONLY = [
   "context_access_requests",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
   "context_versions",
   "context_unsynced_list",
   "context_metacognition_list",
@@ -85,6 +87,7 @@ const DESTRUCTIVE = [
   "context_sync_folder",
   "context_headless",
   "context_set_visibility",
+  "context_nest_teams",
   "context_systems",
   "context_metacognition_configure",
   "context_metacognition_run",
@@ -108,6 +111,8 @@ const DESTRUCTIVE = [
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
   "context_upload",
+  // Fetches a public URL (PO-1185).
+  "context_distill",
   // Each can change what a nest's public docs site serves.
   "context_create",
   "context_update",
@@ -204,6 +209,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
   const owner = await registerUser(app, "owner@annotations.test", "Owner");
@@ -231,6 +237,7 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
 
@@ -240,7 +247,7 @@ describe("tools/list on every endpoint, for every key", () => {
   });
 
   it("keeps them with the feature flags off", async () => {
-    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE"]) {
+    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_DOC_STREAM"]) {
       process.env[flag] = "false";
       try {
         for (const [label, path, key] of surfaces()) expectAnnotated(`${flag} off, ${label}`, await listTools(path, key));
