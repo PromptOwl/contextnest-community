@@ -5,14 +5,14 @@ End-to-end browser tests for the ContextNest Community server, built on the same
 ## Layout
 
 ```
-playwright.config.js          Test-run chain, projects, reporters
+playwright.config.js          Projects, reporters (suites are discovered)
 tests/
 ├── env.template              Copy into tests/.env/.local (or .dev) and fill in
 ├── .env/                     Environment files (gitignored)
 ├── TEST_IDS.md               data-testid reference
 ├── fixtures/                 Static test files (uploads etc.)
 ├── features/                 Spec files, one folder per functional area
-│   ├── auth/
+│   ├── auth/                 (optional suite.json per folder, see below)
 │   └── global-cleanup/       Orphan sweeper + always-run teardown
 └── src/
     ├── lib/                  base_test (fixtures), roles, entity_registry,
@@ -76,7 +76,23 @@ Reports land in `tests/test-results/` (HTML report at `tests/test-results/html/i
 - **setup-auth** logs each configured role in through the UI once and stores the session (`cnst_session` cookie) in `tests/src/cookies_storage/<alias>.json`. Later runs reuse the stored session while the cookie is valid.
 - **Role fixtures** (`primary_user`, `secondary_user`) from `tests/src/lib/base_test.js` open a pre-authenticated context lazily: `await primary_user.initialize()` then `primary_user.page` / `primary_user.nestsPage` etc.
 - **Entity registry**: every entity a test creates must be named with `commonFunction.generateEntityName()` (AUTO_ prefix) and registered via `registerEntity('nests', { id, name })`. The teardown deletes registered entities through the REST API; the pre-run **orphan sweeper** deletes stale registry entries and any AUTO_ nests left by crashed runs.
-- **Test chain**: `testRun` in `playwright.config.js` defines file order, parallel/serial mode and independence. Add a new suite by dropping a spec under `tests/features/<area>/` and adding an entry to `testRun`.
+- **Test chain**: the suites are discovered from `tests/features/` (`tests/src/helper/setup/suite_discovery.js`). Every folder is a suite and every `*.spec.js` in it is one entry in the run.
+
+## Adding a suite
+
+Add a folder under `tests/features/<area>/` with its spec. That is all: the spec joins the full run, and `npx playwright test --project=<area>` runs it alone. Do not edit `playwright.config.js`.
+
+A suite runs serial and independent of the other suites. If yours differs, put a `suite.json` next to the spec:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `"mode": "parallel"` | `"serial"` | The tests in each file run at the same time. |
+| `"independent": false` | `true` | Wait for the previous suite and stop if it failed. |
+| `"enabled": false` | `true` | Leave the suite out of the full run. |
+| `"standalone": false` | `true` | No `--project=<area>` shortcut. |
+| `"baseURL": "https://…"` | the run's | Run against another server. |
+
+`global-cleanup/` is not a suite: it holds the orphan sweep and the teardown, which the config wires up by hand.
 
 ## Writing tests
 
