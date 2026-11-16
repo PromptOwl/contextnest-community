@@ -67,6 +67,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_access_requests: read("View access requests", "Lists pending access requests."),
   context_review_queue: read("View review queue", "Lists review requests."),
   context_my_drafts: read("View my drafts", "Lists the caller's unsubmitted drafts."),
+  context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
   context_versions: read("View version history", "Returns a document's version history."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
@@ -108,6 +109,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Nest administration ────────────────────────────────────────────────
   context_headless: overwrite("Manage headless publishing", "Dispatches status, enable, disable, create_key and revoke_key; disabling pauses and revoking removes keys. The token goes only to the caller."),
   context_set_visibility: overwriteOutside("Set nest visibility", "Replaces who can read the nest, up to anyone on the internet."),
+  context_nest_teams: overwrite("Share nest with teams", "Dispatches list, share and unshare; sharing gives every team member their team role on the nest, and unsharing removes it."),
   context_systems: overwrite("Manage system identities", "Dispatches list, create, rotate, revoke, add_nest and remove_nest; rotating and revoking kill keys. The token goes only to the caller."),
 
   // ─── Metacognition agents ───────────────────────────────────────────────

@@ -208,6 +208,25 @@ describe("document grant — access is scoped to exactly that doc", () => {
   });
 });
 
+describe("write grant on an org nest — sees the draft they edit", () => {
+  it("reads their own saved edit on the granted document only", async () => {
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Org Grants" }, owner.apiKey)).data.nest.id;
+    for (const title of ["Mine", "Theirs"]) {
+      await jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content: `# ${title} approved` }, owner.apiKey);
+    }
+    expect((await jsonRequest(app, "PATCH", `/nests/${nest}/visibility`, { visibility: "org" }, owner.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true }, owner.apiKey)).status).toBe(200);
+    const share = await jsonRequest(app, "POST", `/nests/${nest}/grants`,
+      { target_type: "document", target: "nodes/mine", email: guest.email, role: "write" }, owner.apiKey);
+    expect(share.status).toBe(201);
+
+    const edit = await jsonRequest(app, "PATCH", `/nests/${nest}/nodes/nodes/mine`, { content: "# Mine grantee edit" }, guest.apiKey);
+    expect(edit.status).toBe(200);
+    const mine = await jsonRequest(app, "GET", `/nests/${nest}/nodes/nodes/mine`, undefined, guest.apiKey);
+    expect(mine.data.node.content).toContain("grantee edit");
+  });
+});
+
 describe("folder grant — covers everything under the prefix", () => {
   it("sharing the gtm/deals folder gives outsider both deals, not gtm/other", async () => {
     await jsonRequest(
