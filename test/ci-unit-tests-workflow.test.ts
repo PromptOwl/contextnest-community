@@ -16,6 +16,9 @@ const workflow = yaml.load(
 ) as any;
 const jobs = workflow.jobs;
 
+// Spelled in pieces so this file doesn't match the Postgres job's own search.
+const GATE = ["TEST", "DATABASE", "URL"].join("_");
+
 const runOf = (job: any, stepName: string): string =>
   job.steps.find((s: any) => s.name === stepName)?.run ?? "";
 
@@ -52,32 +55,33 @@ describe("unit tests in CI", () => {
     const pg = jobs["unit-postgres"];
     const service = pg.services.postgres;
     expect(service.image).toMatch(/^postgres:/);
-    const url = new URL(pg.env.TEST_DATABASE_URL);
+    const url = new URL(pg.env[GATE]);
     expect(url.username).toBe(service.env.POSTGRES_USER);
     expect(url.password).toBe(service.env.POSTGRES_PASSWORD);
     expect(url.pathname.slice(1)).toBe(service.env.POSTGRES_DB);
     expect(service.ports).toContain(`${url.port}:5432`);
   });
 
-  it("runs every test gated on TEST_DATABASE_URL in the Postgres job", () => {
+  it("runs every test gated on a real Postgres in the Postgres job", () => {
     const run = runOf(jobs["unit-postgres"], "Run the Postgres-gated tests");
     // The job finds its files by searching these folders for the variable.
-    const searched = run.match(/grep -rl .*'TEST_DATABASE_URL' (.+?) \|/)?.[1].split(" ") ?? [];
+    const search = run.match(/grep -rl .*'([A-Z_]+)' (.+?) \|/);
+    expect(search?.[1]).toBe(GATE);
+    const searched = search?.[2].split(" ") ?? [];
     expect(searched).toEqual(["test", "ui/src"]);
     expect(run).toContain("npm test -- $files");
     expect(run).toMatch(/exit 1/); // an empty search fails the job
 
-    const self = "test/ci-unit-tests-workflow.test.ts";
-    const gated = searched
-      .flatMap((dir) => testFiles(join(repoRoot, dir)))
-      .filter((f) => f !== self && readFileSync(join(repoRoot, f), "utf8").includes("TEST_DATABASE_URL"));
+    const gatedIn = (dirs: string[]) =>
+      dirs
+        .flatMap((dir) => testFiles(join(repoRoot, dir)))
+        .filter((f) => readFileSync(join(repoRoot, f), "utf8").includes(GATE))
+        .sort();
+    const gated = gatedIn(searched);
     expect(gated).toContain("test/db-postgres.test.ts");
-
+    expect(gated).not.toContain("test/ci-unit-tests-workflow.test.ts");
     // Nothing gated lives where the search doesn't look.
-    const everywhere = [...testFiles(join(repoRoot, "test")), ...testFiles(join(repoRoot, "ui"))].filter(
-      (f) => f !== self && readFileSync(join(repoRoot, f), "utf8").includes("TEST_DATABASE_URL"),
-    );
-    expect(everywhere.sort()).toEqual(gated.sort());
+    expect(gatedIn(["test", "ui"])).toEqual(gated);
   });
 
   it("has one summary job that needs the shards and the Postgres job", () => {
