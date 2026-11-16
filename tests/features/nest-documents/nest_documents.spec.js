@@ -210,19 +210,20 @@ test.describe('Nest documents', () => {
     const { nest, page } = await ownerNest(primary_user, commonFunction, 'doc-cards', STANDARD);
 
     await page.gotoDocuments(nest.id);
-    await expect(page.listViewButton).toHaveAttribute('aria-pressed', 'true');
+    // The switch is in the header's ⋯ menu (po-1213); in list view it offers grid.
+    expect(await page.viewMode()).toBe('list');
 
     // Cards list every document, folders included, flat.
-    await page.cardViewButton.click();
-    await expect(page.cardViewButton).toHaveAttribute('aria-pressed', 'true');
+    await page.switchView('cards');
+    expect(await page.viewMode()).toBe('cards');
     await expect.poll(async () => sorted(await page.rowIds()), WRITE).toEqual(sorted([ALPHA, BETA, CHARLIE, GAMMA, DELTA, EPSILON]));
     await expect(page.folderHeaders).toHaveCount(0);
 
     await page.gotoDocuments(nest.id);
-    await expect(page.cardViewButton).toHaveAttribute('aria-pressed', 'true');
+    expect(await page.viewMode()).toBe('cards');
 
-    await page.listViewButton.click();
-    await expect(page.listViewButton).toHaveAttribute('aria-pressed', 'true');
+    await page.switchView('list');
+    expect(await page.viewMode()).toBe('list');
     await expect(page.folderHeader('guides')).toBeVisible(WRITE);
   });
 

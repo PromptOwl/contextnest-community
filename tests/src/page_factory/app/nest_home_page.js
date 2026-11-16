@@ -4,6 +4,9 @@
  * edit, and the header's ⋯ menu that now holds Fields, Reader mode and the
  * list/grid switch (ui/src/components/nest/DocumentsHome.tsx, NestView.tsx).
  */
+
+import { openMoreActions } from '../../lib/more_actions_menu.js';
+
 class NestHomePage {
   constructor(page) {
     this.page = page;
@@ -28,12 +31,17 @@ class NestHomePage {
     return this.page.getByTestId(`recent-item-${nodeId}`);
   }
 
+  /** A folder's header in the Documents tree, by its path ("guides"). */
+  folderHeader(path) {
+    return this.page.getByTestId(`folder-header-${path}`);
+  }
+
   rowLastEdit(nodeId) {
     return this.page.getByTestId(`last-edit-${nodeId}`);
   }
 
   async openMenu() {
-    await this.moreActions.click();
+    await openMoreActions(this.page);
   }
 
   menuItem(testId) {

@@ -95,7 +95,9 @@ test.describe('Nest documents home', () => {
     // The feed's time has the full date on hover.
     await expect(page.feedItem(agentDoc.id).locator('time')).toHaveAttribute('title', /\d/);
 
-    await page.page.getByRole('button', { name: /Guides/ }).first().click();
+    // The folder's header, not the first "Guides" button: the feed items above
+    // name their folder too, and clicking one opens the document.
+    await page.folderHeader('guides').click();
     await expect(page.rowLastEdit(agentDoc.id)).toContainText(`via ${AGENT}`, WRITE);
     // The human comes first: something precedes " via ".
     await expect(page.rowLastEdit(agentDoc.id)).toHaveText(new RegExp(`\\S+.* via ${AGENT}`));
@@ -132,6 +134,10 @@ test.describe('Nest documents home', () => {
     const { nest, page } = await arrange(primary_user, commonFunction, 'nesthome-fields-link');
     await page.page.goto(`/nest/${nest.id}?tab=fields`);
     await expect(page.fieldsDialog).toBeVisible(WRITE);
+    // A modal hides the page behind it from the accessibility tree, so the
+    // tab is checked once the dialog closes: it was open over Documents.
+    await page.page.keyboard.press('Escape');
+    await expect(page.fieldsDialog).toBeHidden();
     await expect(page.tab('Documents')).toHaveAttribute('aria-selected', 'true');
   });
 
