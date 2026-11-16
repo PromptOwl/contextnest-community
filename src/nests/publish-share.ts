@@ -74,6 +74,10 @@ export function gateCta(baseUrl: string): string {
 // ── Link previews ───────────────────────────────────────────────────────────
 
 const EXCERPT_MAX = 200;
+/** How much of a body is read for an excerpt. /p/:slug is unauthenticated and
+ *  hit by every unfurler, so the work per view is bounded: 200 characters of
+ *  prose never need more than the opening of the document. */
+const EXCERPT_SOURCE_MAX = 20_000;
 const md = new MarkdownIt({ html: false, linkify: false });
 
 const ENTITIES: Record<string, string> = {
@@ -102,7 +106,9 @@ function textOf(html: string): string {
     html
       .replace(/<!--[\s\S]*?-->/g, " ")
       .replace(/<(script|style|head|title|template|noscript|svg)\b[\s\S]*?<\/\1\s*>/gi, " ")
-      .replace(/<[^>]*>/g, " "),
+      .replace(/<[^>]*>/g, " ")
+      // A tag cut in half by the source cap.
+      .replace(/<[^>]*$/, " "),
   )
     .replace(/\s+/g, " ")
     // Dropping an inline tag leaves its space behind: "approved , then".
@@ -118,7 +124,8 @@ function textOf(html: string): string {
  * does not say the title twice.
  */
 export function excerptOf(body: string, isHtml: boolean, title = ""): string {
-  let text = textOf(isHtml ? body : md.render(body));
+  const source = body.length > EXCERPT_SOURCE_MAX ? body.slice(0, EXCERPT_SOURCE_MAX) : body;
+  let text = textOf(isHtml ? source : md.render(source));
   const t = title.trim();
   // Only a whole leading title: "Deck" must not eat the start of "Decks are…".
   if (t && text.toLowerCase().startsWith(t.toLowerCase()) && !/^[\p{L}\p{N}]/u.test(text.slice(t.length))) {

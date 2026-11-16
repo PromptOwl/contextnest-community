@@ -151,6 +151,17 @@ describe("link previews on an open link", () => {
     expect(desc).toMatch(/word\d+…$/);
   });
 
+  it("reads only the opening of a very large document", async () => {
+    const big = `Opening line. ${"<script>".repeat(4000)} ${"filler ".repeat(20000)}`;
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Big", content: `<!doctype html><html><head></head><body>${big}</body></html>`, type: "artifact" }, owner.apiKey);
+    const slug = await publish(nestId, "nodes/big");
+    const started = Date.now();
+    const { res, html } = await page(`/p/${slug}`);
+    expect(res.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(meta(html, "og:description")).toBe("Opening line.");
+  });
+
   it("leaves the excerpt out when the link discourages copying", async () => {
     const slug = await publish(nestId, "nodes/handbook", { no_download: true });
     const { html } = await page(`/p/${slug}`);
@@ -323,6 +334,15 @@ describe("a white-label nest shows no strip", () => {
     expect(html).not.toContain("cn-frame");
     expect(html).toContain("<h1>Quarterly deck</h1>");
     expect(meta(html, "og:title")).toBe("Deck");
+  });
+
+  it("keeps the Open Graph tags an author's HTML page already has", async () => {
+    const own =
+      '<!doctype html><html><head><meta property="og:title" content="Author title"><title>T</title></head><body><p>Hi</p></body></html>';
+    await jsonRequest(app, "POST", `/nests/${whiteNest}/nodes`, { title: "Own Tags", content: own, type: "artifact" }, owner.apiKey);
+    const slug = await publish(whiteNest, "nodes/own-tags");
+    const { html } = await page(`/p/${slug}`);
+    expect(html.trim()).toBe(own);
   });
 
   it("on the gate", async () => {
