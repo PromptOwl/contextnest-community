@@ -439,4 +439,13 @@ describe("resuming the install step", () => {
     expect(JSON.stringify(r.data)).not.toContain("xoxb-T1");
     expect(r.data.manifest?.settings?.event_subscriptions?.request_url).toBe(`${BASE}/surfaces/slack/${installId}/events`);
   });
+
+  it("a hosted install gets no manifest back (it uses PromptOwl's app, so there is nothing to download)", async () => {
+    const { createInstall } = await import("../src/surfaces/services/install-store.js");
+    const hosted = await createInstall({ surface: "slack", mode: "hosted", tenantKey: `T_HOSTED_${Date.now()}`, homeNestId: N, status: "pending" });
+    const r = await jsonRequest(app, "GET", `/surfaces/slack/installs/${hosted.id}`, undefined, root.apiKey);
+    expect(r.status).toBe(200);
+    expect(r.data.install.id).toBe(hosted.id);
+    expect(r.data.manifest).toBeNull();
+  });
 });
