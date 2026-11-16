@@ -73,6 +73,27 @@ describe("imported CONTEXT.md", () => {
     expect(data.content).toContain("The exact-case copy.");
   });
 
+  it("records the imported text in the instructions history", async () => {
+    const files = [{ path: "CONTEXT.md", content: "# Team rules\n\nKeep a record.\n" }];
+    const imp = await jsonRequest(app, "POST", "/nests/import", { name: "History Rules", files }, apiKey);
+    expect(imp.status).toBe(201);
+    const { data } = await jsonRequest(app, "GET", `/nests/${imp.data.nest.id}/instructions`, undefined, apiKey);
+    expect(data.content).toContain("Keep a record.");
+    expect(data.revision?.note).toBe("Imported with the folder");
+  });
+
+  it("names an empty CONTEXT.md as a problem and keeps the other files", async () => {
+    const files = [
+      { path: "CONTEXT.md", content: "   \n" },
+      { path: "notes/alpha.md", content: "---\ntitle: Alpha\n---\n\n# Alpha\n" },
+    ];
+    const imp = await jsonRequest(app, "POST", "/nests/import", { name: "Empty Rules", files }, apiKey);
+    expect(imp.status).toBe(201);
+    expect(imp.data.rejected).toContain("CONTEXT.md");
+    expect(imp.data.problems.join("\n")).toMatch(/^CONTEXT\.md: /m);
+    expect(imp.data.documents).toBe(1);
+  });
+
   it("warns when the only CONTEXT.md sits in a subfolder", async () => {
     const files = [
       { path: "docs/CONTEXT.md", content: "# Nested rules\n" },

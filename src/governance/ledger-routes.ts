@@ -90,7 +90,9 @@ nestLedgerRoutes.get("/export", requireWorkflowPlane, async (c) => {
   try {
     out = await exportLedger(nestScope(nestId, c.get("userId"), canSeeDetail(c)), q, format);
   } catch (err) {
-    await audit(`decision ledger export failed (${format})`).catch(() => {});
+    await audit(`decision ledger export failed (${format})`).catch((e) =>
+      console.error(`[ledger] auditing a failed export in nest ${nestId} failed: ${e instanceof Error ? e.name : "error"}`),
+    );
     throw err;
   }
   const { body, rows } = out;

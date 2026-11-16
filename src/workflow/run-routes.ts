@@ -560,6 +560,12 @@ async function loadRunWithPermission(
     // existence rather than confirm it with a 403 (no cross-nest oracle).
     throw new NotFoundError("Run not found");
   }
+  // A read-only key only reads, whatever its owner may do — the nest gate's
+  // rule. Without it, a read key could append steps (and decision verdicts),
+  // close runs, or fetch a bundle with the nest's env values.
+  if (required === "write" && c.get("keyCapability") === "read") {
+    throw new ForbiddenError("This API key is read-only and cannot perform write or governance actions.");
+  }
   (c as any).set("runPermission", perm);
   return run;
 }
