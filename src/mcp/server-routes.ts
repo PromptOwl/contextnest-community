@@ -55,7 +55,7 @@ import {
   createNest,
 } from "../nests/service.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import { isSuspended, getSuspensionReason, getOfflineLock, getCurrentLicense } from "../auth/license.js";
+import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import {
   handleToolCall,
   normalizeSearchLimit,
@@ -73,7 +73,7 @@ import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
-import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, licensedReadsAllowed, writesAllowed } from "../auth/free-tier.js";
 import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
@@ -489,8 +489,8 @@ async function handleServerToolCall(
   // Licensed reads (po-1375): version history is a governance view REST
   // licenses even on GET — GET /me/stream and GET …/versions answer 503 via
   // readOnlyDenial when the license is not valid and writes are not allowed
-  // (past the Free tier, suspended, or offline-locked). Same condition here.
-  if (SERVER_LICENSED_READ_TOOLS.has(toolName) && !getCurrentLicense()?.valid && !(await writesAllowed())) {
+  // (past the Free tier, suspended, or offline-locked). Same predicate here.
+  if (SERVER_LICENSED_READ_TOOLS.has(toolName) && !(await licensedReadsAllowed())) {
     return readOnlyMessage(userId, "version history is unavailable");
   }
 

@@ -378,6 +378,23 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(personNote(null)).toBeNull();
   });
 
+  it("AC-ST-03 (po-1375): Given every reason the server auto-publishes with, Then its create and edit stamps read as stamps (no reason may hold a parenthesis or newline)", async () => {
+    const { autoPublishNote, isAutoPublishStamp, AUTO_PUBLISH_REASONS } = await import("../src/nodes/service.js");
+    const reasons = Object.values(AUTO_PUBLISH_REASONS);
+    expect(reasons.length).toBeGreaterThanOrEqual(5);
+    for (const reason of reasons) {
+      expect(reason, reason).not.toMatch(/[()\n]/);
+      for (const on of ["create", "edit"] as const) expect(isAutoPublishStamp(autoPublishNote(on, reason)), `${on}: ${reason}`).toBe(true);
+    }
+    // autoPublishReason returns only listed reasons: no inline reason literal is left in it.
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = readFileSync(join(__dirname, "..", "src", "nodes", "service.ts"), "utf8");
+    const fn = src.slice(src.indexOf("async function autoPublishReason("), src.indexOf("/** Roster / parent lookups"));
+    expect(fn.length).toBeGreaterThan(0);
+    expect(fn).not.toMatch(/return\s+"|\?\s+"|:\s+"[a-z]/);
+  });
+
   it("AC-ST-08 (po-1375): Given context_stream, Then its input schema is generated from zod (no inline literal) and lint:mcp-schemas is back to 102", async () => {
     const { TOOL_DEFINITIONS } = await import("../src/mcp/tools.js");
     const { StreamToolInput } = await import("../src/mcp/stream-tool.js");

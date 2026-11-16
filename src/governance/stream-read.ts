@@ -30,6 +30,8 @@ export function unreadableWarning(nestId: string, nodeId: string, version: numbe
   } else {
     seen = { docs: new Set(), capped: false };
     if (unreadableWarned.size >= UNREADABLE_WARN_NESTS) {
+      // The map is non-empty here (size >= the cap), so the first key exists:
+      // it is the least recently seen nest.
       unreadableWarned.delete(unreadableWarned.keys().next().value as string);
     }
   }

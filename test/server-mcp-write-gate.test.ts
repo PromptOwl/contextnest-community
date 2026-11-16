@@ -47,7 +47,7 @@ async function callServerTool(
 
 // Open mode so no auth fixtures are needed — the write gate sits before any
 // permission/nest resolution, so no nest has to exist for it to fire.
-async function buildApp(licenseMock?: () => Record<string, unknown>) {
+async function buildApp(licenseMock?: () => Record<string, unknown>, people = FREE_TIER_MAX_USERS + 1) {
   process.env.AUTH_MODE = "open";
   vi.resetModules();
   if (licenseMock) {
@@ -65,7 +65,7 @@ async function buildApp(licenseMock?: () => Record<string, unknown>) {
   await dbClient.resetDb();
   await dbClient.initDb();
   // Past the Free tier, so the unlicensed gate closes.
-  await seedPeople(FREE_TIER_MAX_USERS + 1);
+  await seedPeople(people);
   const { createApp } = await import("../src/app.js");
   return createApp();
 }
@@ -189,6 +189,29 @@ describe("server-level /mcp licensed reads — licensed", () => {
 
   it("still serves context_stream", async () => {
     const out = await callServerTool(app, "context_stream", {}, 20);
+    expect(out).not.toContain("license");
+    expect(out).toMatch(/stream is empty|# Stream/);
+  });
+});
+
+describe("server-level /mcp licensed reads — unlicensed, within the Free tier", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp(undefined, 1); // real module, no license, one person
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("serves context_stream, as GET /me/stream answers 200 (licensedReadsAllowed: writes are allowed)", async () => {
+    const { licensedReadsAllowed } = await import("../src/auth/free-tier.js");
+    expect(await licensedReadsAllowed()).toBe(true);
+    const out = await callServerTool(app, "context_stream", {}, 30);
     expect(out).not.toContain("license");
     expect(out).toMatch(/stream is empty|# Stream/);
   });

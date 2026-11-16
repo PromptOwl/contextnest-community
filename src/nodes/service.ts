@@ -261,6 +261,17 @@ const slugify = (s: string) =>
  *  wrote with isAutoPublishStamp (po-1214, po-1375). */
 export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
 
+/** Every reason autoPublishReason gives. A reason must not contain "(", ")"
+ *  or a newline: isAutoPublishStamp matches the stamp by that shape
+ *  (tested over this list). */
+export const AUTO_PUBLISH_REASONS = {
+  ungoverned: "no stewards configured",
+  task: "task — board work skips review",
+  creatorReviews: "creator is the document's reviewer",
+  primeOnly: "prime-only review, document is not prime",
+  selfApprove: "owner/admin self-approve",
+} as const;
+
 export function autoPublishNote(on: "create" | "edit", reason: string): string {
   return `${AUTO_PUBLISH_NOTE_PREFIX}${on} (${reason})`;
 }
@@ -1968,23 +1979,23 @@ async function autoPublishReason(
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
   // already looked this up passes it in — create is a hot path.
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
-  if (!governed) return "no stewards configured";
+  if (!governed) return AUTO_PUBLISH_REASONS.ungoverned;
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
   // Board work moves column many times a day; gating every drag behind a
   // reviewer would make a project board unusable. Prime still wins (above):
   // a steward who flags a task prime has asked for review on purpose.
-  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
+  if (doc.type === TASK_NODE_TYPE) return AUTO_PUBLISH_REASONS.task;
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
   // through the queue.
-  if (opts.creatorReviews) return "creator is the document's reviewer";
+  if (opts.creatorReviews) return AUTO_PUBLISH_REASONS.creatorReviews;
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
-    return "prime-only review, document is not prime";
+    return AUTO_PUBLISH_REASONS.primeOnly;
   }
   return (await actorAutoPublishes(nestId, userEmail))
-    ? "owner/admin self-approve"
+    ? AUTO_PUBLISH_REASONS.selfApprove
     : null;
 }
 
