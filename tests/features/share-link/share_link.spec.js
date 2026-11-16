@@ -90,8 +90,8 @@ test.describe('Share a document', () => {
     await share.click();
     await expect(page.getByText(`“${DOC_TITLE}” is now public`)).toBeVisible(WRITE);
     await expect(page.getByText(/Anyone with the link can read the approved version/)).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Undo' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Manage' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Manage', exact: true })).toBeVisible();
 
     const made = await links(api, nest.id);
     expect(made).toHaveLength(1);
@@ -134,7 +134,7 @@ test.describe('Share a document', () => {
     await expect(page.getByText(`“${DOC_TITLE}” is now public`)).toBeVisible(WRITE);
     const [made] = await links(api, nest.id);
 
-    await page.getByRole('button', { name: 'Undo' }).click();
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await expect(page.getByText(`“${DOC_TITLE}” is no longer public`)).toBeVisible(WRITE);
     await expect.poll(async () => (await links(api, nest.id))[0]?.revoked_at ?? null, WRITE).not.toBeNull();
 
@@ -152,7 +152,7 @@ test.describe('Share a document', () => {
     await share.click();
     await expect(page.getByText(`“${DOC_TITLE}” is now public`)).toBeVisible(WRITE);
 
-    await page.getByRole('button', { name: 'Manage' }).click();
+    await page.getByRole('button', { name: 'Manage', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText(`Publish “${DOC_TITLE}”`)).toBeVisible();
     await expect(dialog.getByRole('tab', { name: 'Links (1)' })).toBeVisible(WRITE);

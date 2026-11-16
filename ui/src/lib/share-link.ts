@@ -116,8 +116,8 @@ async function share({ nestId, nodeId, title, onManage }: ShareRequest): Promise
     const copied = await copyText(link);
     toast.success(`“${title}” is now public`, {
       description: copied
-        ? "Anyone with the link can read the approved version, without signing in. Link copied."
-        : `Anyone with the link can read the approved version, without signing in: ${link}`,
+        ? "Anyone with the link can read the approved version. Link copied."
+        : `Anyone with the link can read the approved version: ${link}`,
       duration: 12000,
       action: manage,
       cancel: {

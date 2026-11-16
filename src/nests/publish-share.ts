@@ -63,7 +63,7 @@ export function ctaStrip(baseUrl: string): string {
  *  It says nothing about the document behind the gate. */
 export const GATE_CTA_CSS = `
     .cn-gate-cta{font-size:12px;margin:6px 0 0;text-align:center}
-    .cn-gate-cta a{color:#57534e;font-weight:600;text-decoration:underline;text-underline-offset:2px}
+    .cn-gate-cta a{color:#78716c;font-weight:500;text-decoration:underline;text-underline-offset:2px}
     .cn-gate-cta a:hover{color:#1c1917}
 `;
 
