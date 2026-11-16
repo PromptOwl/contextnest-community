@@ -234,6 +234,9 @@ describe("context pull log", () => {
 
     const hidden = await callTool(app, nestId, viewer.apiKey, "context_pull_log", { limit: 5 });
     expect(hidden.structuredContent.pulls.every((p: any) => p.actor === null && p.agent === null)).toBe(true);
+    // Without identities the summary names no one, rather than "by someone".
+    expect(hidden.content[0].text).not.toContain(" by ");
+    expect(hidden.content[0].text).toContain("context_search:");
   });
 
   it("does not record a call to the pull log itself as a pull", async () => {
@@ -481,6 +484,27 @@ describe("context pull log — paging, large pulls and older rows", () => {
     const r = await jsonRequest(app, "GET", `/nests/${openNest}/activity-log?node=act-doc&type=retrieved`, undefined, owner.apiKey);
     expect(r.status).toBe(200);
     expect(r.data.items.map((i: any) => i.detail).sort()).toEqual(["context_get", "context_search"]);
+  });
+
+  it("blanks a via that names a document the reader can't see, keeping the hop", async () => {
+    // A traversal from the draft (unreadable to a public reader) to the open doc.
+    log.recordNodeAccess({
+      nestId: pubNest,
+      nodeIds: [draftDoc, openDoc],
+      action: "retrieve",
+      surface: "api",
+      userEmail: "owner@pages.test",
+      detail: "context",
+      hops: { [draftDoc]: { hop: 0 }, [openDoc]: { hop: 1, via: draftDoc } },
+      unthrottled: true,
+    });
+    await log.flushAccessLog(pubNest);
+    const asOwner = (await pulls(app, pubNest, owner.apiKey, "?limit=1")).data.pulls[0];
+    expect(asOwner.steps.find((s: any) => s.nodeId === openDoc)).toEqual(expect.objectContaining({ hop: 1, via: draftDoc }));
+    const asStranger = (await pulls(app, pubNest, stranger.apiKey, "?limit=1")).data.pulls[0];
+    expect(asStranger.tool).toBe("context");
+    expect(asStranger.steps).toEqual([expect.objectContaining({ nodeId: openDoc, hop: 1, via: null })]);
+    expect(JSON.stringify(asStranger)).not.toContain(draftDoc);
   });
 
   it("rejects a non-numeric limit or cursor with a 400", async () => {

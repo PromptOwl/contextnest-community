@@ -59,7 +59,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
 //   98->99 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
-//   engine op exists.
+//   engine op exists. Product-owner sign-off for Community-only inline tools: 2026-10-24 (recorded on PR #569).
 const BASELINE = 99;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
