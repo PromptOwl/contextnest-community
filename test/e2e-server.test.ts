@@ -65,6 +65,7 @@ describe("e2e server launcher (Playwright against this checkout's own build)", (
     it("never reaches PromptOwl: the license check goes to the launcher and telemetry is off", () => {
       expect(env.PROMPTOWL_API_URL).toBe("http://127.0.0.1:4010");
       expect(env.TELEMETRY_ENABLED).toBe("false");
+      expect(env.SMTP_URL).toBe("smtp://127.0.0.1:4025"); // the launcher's discard-all sink
     });
 
     it("turns on every feature switch the server reads from the environment", () => {

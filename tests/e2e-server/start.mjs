@@ -12,7 +12,8 @@
  *
  * What it does
  *   1. Answers the server's license check on 127.0.0.1 (a valid enterprise
- *      license owned by the first test account). Nothing leaves the machine.
+ *      license owned by the first test account) and accepts its mail on a
+ *      sink that discards it. Nothing leaves the machine.
  *   2. Starts `node dist/index.js` on a fresh SQLite data folder, key auth,
  *      feature switches on (see lib.mjs).
  *   3. Seeds what the suites expect: the test accounts (TEST_ACCOUNT1_* is the
@@ -29,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startSmtpSink } from './smtp-sink.mjs';
 import { DIRECTORY_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from './lib.mjs';
 
 const settings = readSettings(process.env);
@@ -85,6 +87,9 @@ await new Promise((resolve, reject) => {
   licenseServer.listen(settings.licensePort, '127.0.0.1', () => resolve(undefined));
 });
 
+// A mail sink, so the server has somewhere to send mail (all of it discarded).
+const smtpSink = await startSmtpSink(settings.smtpPort);
+
 // ── 2. The server under test ─────────────────────────────────────────────────
 const ownsDataRoot = !settings.dataRoot;
 const dataRoot = settings.dataRoot || mkdtempSync(join(tmpdir(), 'cn-e2e-data-'));
@@ -102,6 +107,7 @@ function stop(code) {
   if (stopping) return;
   stopping = true;
   licenseServer.close();
+  smtpSink.close();
   if (server.exitCode === null) server.kill('SIGTERM');
   if (ownsDataRoot) {
     try {

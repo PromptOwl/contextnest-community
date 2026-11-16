@@ -38,6 +38,7 @@ export const SEATS_NEST_NAME = 'E2E seats (seeded, keep)';
 export function readSettings(env) {
   const port = Number(env.E2E_SERVER_PORT || 3838);
   const licensePort = Number(env.E2E_LICENSE_PORT || 4010);
+  const smtpPort = Number(env.E2E_SMTP_PORT || 4025);
   const accounts = [
     { email: env.TEST_ACCOUNT1_USER, password: env.TEST_ACCOUNT1_PW, name: 'E2E Admin' },
     { email: env.TEST_ACCOUNT2_USER, password: env.TEST_ACCOUNT2_PW, name: 'E2E Member' },
@@ -52,6 +53,7 @@ export function readSettings(env) {
   return {
     port,
     licensePort,
+    smtpPort,
     baseUrl: `http://127.0.0.1:${port}`,
     licenseUrl: `http://127.0.0.1:${licensePort}`,
     dataRoot: env.E2E_DATA_ROOT || null,
@@ -79,6 +81,10 @@ export function serverEnv(settings, dataRoot) {
     PROMPTOWL_KEY: 'pk_e2e_local_server',
     PROMPTOWL_API_URL: settings.licenseUrl,
     TELEMETRY_ENABLED: 'false',
+    // Mail goes to the launcher's sink, which discards it. With mail set up the
+    // server writes its message log and shows the mail-dependent UI.
+    SMTP_URL: `smtp://127.0.0.1:${settings.smtpPort}`,
+    NOTIFY_EMAIL_FROM: 'e2e-server@example.com',
     DRIFT_SCAN_INTERVAL_MS: '0',
     ...FEATURE_ENV,
   };
