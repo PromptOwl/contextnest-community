@@ -4903,7 +4903,7 @@ export const listSlackChannels = (installId: string) =>
 export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
   request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
 export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
-  request<{ binding: SurfacesBinding; notice_posted?: boolean }>("/surfaces/bindings", surfacesJson(b));
+  request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>
   request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);
 export const getSurfacesSeedStatus = (nestId: string) =>

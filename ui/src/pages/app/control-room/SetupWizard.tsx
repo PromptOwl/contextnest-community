@@ -1073,7 +1073,7 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
     for (const p of toBind) {
       try {
         const r = await createSurfacesBinding({ install_id: state.install.id, conversation_id: p.channelId, nest_id: p.nestId, ext_capture_enabled: !!p.extCapture });
-        if (r.notice_posted === false) silent.push(`#${p.channelName}`);
+        if (r.notice === "failed") silent.push(`#${p.channelName}`);
       } catch (e) {
         failed.push(`#${p.channelName}: ${errText(e, "couldn't turn on")}`);
       }

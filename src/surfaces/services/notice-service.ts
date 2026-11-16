@@ -28,25 +28,36 @@ export const enableNotice = (nest: string, aboutUrl: string | null, ttlHours: nu
   `React 🧠 to a message to ask Nest to keep it. Say \`@Nest skip me\` and it won't use your messages. ${SERVER_ADMIN_DISCLOSURE}` +
   (aboutUrl ? ` <${aboutUrl}|How Nest handles your messages>` : "");
 
-export async function postEnableNotice(bindingId: string): Promise<boolean> {
+/**
+ * What happened to a binding's one notice:
+ *   posted          — posted now;
+ *   already_posted  — it went out earlier (e.g. a removed channel bound again);
+ *   not_needed      — no notice for this binding (a DM, not active, capture
+ *                     not safe, or a surface without notices);
+ *   failed          — not posted (Slack refused, or the settings couldn't be
+ *                     read); the claim is released, so the next create retries.
+ */
+export type NoticeOutcome = "posted" | "already_posted" | "not_needed" | "failed";
+
+export async function postEnableNotice(bindingId: string): Promise<NoticeOutcome> {
   const b = await getBindingRow(bindingId);
-  if (!b || b.conversation_kind === "dm" || b.status !== "active" || !b.capture_ok) return false;
+  if (!b || b.conversation_kind === "dm" || b.status !== "active" || !b.capture_ok) return "not_needed";
   const install = await getInstall(b.install_id);
   const c = install ? getConnector(install.surface) : null;
-  if (!c?.postNotice) return false;
+  if (!c?.postNotice) return "not_needed";
   const claim = await getDb().run("UPDATE surface_bindings SET notice_posted_at = ? WHERE id = ? AND notice_posted_at IS NULL", [new Date().toISOString(), b.id]);
-  if (claim.changes === 0) return false;
+  if (claim.changes === 0) return "already_posted";
   try {
     // The retention is a privacy claim: if the settings can't be read, post
     // nothing now (the claim is released below, as when Slack refuses) rather
     // than state a default that may not hold here.
     const ttl = (await getSettings()).buffer_ttl_hours;
     await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl));
-    return true;
+    return "posted";
   } catch (err) {
     // No message text or names: the binding id and the error's message only.
     console.warn(`[surfaces] enable notice not posted for binding ${b.id}: ${err instanceof Error ? err.message : String(err)}`);
     await getDb().run("UPDATE surface_bindings SET notice_posted_at = NULL WHERE id = ?", [b.id]);
-    return false;
+    return "failed";
   }
 }
