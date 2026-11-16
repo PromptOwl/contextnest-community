@@ -81,6 +81,7 @@ async function mcpTools(nestId: string, key: string): Promise<string[]> {
 
 const DAY = 86_400_000;
 const NOW = Date.now();
+const RANGE_START = Date.parse(OV.rangeFor(14, NOW).from);
 const iso = (ms: number) => new Date(ms).toISOString();
 const qs = (o: Record<string, string>) => new URLSearchParams(o).toString();
 
@@ -184,7 +185,10 @@ beforeAll(async () => {
   for (let d = 13; d >= 0; d--) {
     for (const b of [bAcme, bRevops]) {
       for (let j = 0; j < 3; j++) {
-        const at = NOW - d * DAY - (j + 1) * 3_600_000;
+        // The oldest day's windows must stay inside the 14-day range, which
+        // starts at UTC midnight: between 00:00 and 03:00 UTC, "1-3 hours
+        // before this time 13 days ago" falls on the day before it.
+        const at = Math.max(NOW - d * DAY - (j + 1) * 3_600_000, RANGE_START + (j + 1) * 60_000);
         k += 1;
         seeded.windows += 1;
         if (k % 5 === 0) {
