@@ -44,6 +44,20 @@ export function neverList(s: Pick<SurfaceSettings, "buffer_ttl_hours">): string[
   ];
 }
 
+/**
+ * The CSP img-src for this page: only the configured logo's own origin
+ * (data: for a data:image logo), and nothing at all without a logo.
+ */
+export function logoImgSrc(logoUrl: string | null): string {
+  if (!logoUrl) return "'none'";
+  if (/^data:image\//i.test(logoUrl)) return "data:";
+  try {
+    return new URL(logoUrl).origin;
+  } catch {
+    return "'none'";
+  }
+}
+
 export function renderAboutSurfaces(opts: { orgName: string | null; logoUrl: string | null; settings: SurfaceSettings }): string {
   const { orgName, logoUrl, settings: s } = opts;
   const where = orgName ? `some ${esc(orgName)} channels` : "some of your team's channels";
@@ -110,9 +124,10 @@ aboutSurfacesRoutes.get("/", async (c) => {
   }
   // Revalidate every load: an admin's settings change shows on the next visit.
   c.header("Cache-Control", "no-cache");
-  // Nothing on this page runs script or loads anything but the admin's logo.
-  // http: is allowed because LOGO_URL accepts http:// (src/config.ts).
-  c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: http: data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  // Nothing on this page runs script or loads anything but the admin's logo,
+  // and images may come only from that logo's own origin.
+  const logoUrl = config.LOGO_URL;
+  c.header("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; img-src ${logoImgSrc(logoUrl)}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   c.header("Referrer-Policy", "no-referrer");
-  return c.html(renderAboutSurfaces({ orgName: config.SURFACES_ORG_NAME ?? null, logoUrl: config.LOGO_URL, settings }));
+  return c.html(renderAboutSurfaces({ orgName: config.SURFACES_ORG_NAME ?? null, logoUrl, settings }));
 });

@@ -375,12 +375,28 @@ describe("AC-CR-16: GET /about/surfaces", () => {
     await jsonRequest(app, "PATCH", "/surfaces/settings", { quiet_minutes: 20, buffer_ttl_hours: 24, dm_capture: false }, root.apiKey);
   });
 
-  it("is never cached publicly: a settings change shows on the next load, and an http:// logo isn't blocked by the CSP", async () => {
+  it("is never cached publicly: a settings change shows on the next load", async () => {
     const res = await app.request("/about/surfaces");
     const cc = res.headers.get("cache-control") ?? "";
     expect(cc).toMatch(/no-cache/);
     expect(cc).not.toMatch(/public|max-age=[1-9]/);
-    expect(res.headers.get("content-security-policy")).toMatch(/img-src https: http: data:/);
+  });
+
+  it("the CSP allows images only from the configured logo's own origin (none without a logo)", async () => {
+    const csp = async (logo: string | undefined) => {
+      if (logo === undefined) delete process.env.LOGO_URL;
+      else process.env.LOGO_URL = logo;
+      try {
+        const res = await app.request("/about/surfaces", { headers: { "x-forwarded-for": `198.51.100.${Math.floor(Math.random() * 200)}` } });
+        return (res.headers.get("content-security-policy") ?? "").match(/img-src ([^;]+)/)?.[1];
+      } finally {
+        delete process.env.LOGO_URL;
+      }
+    };
+    expect(await csp(undefined)).toBe("'none'");
+    expect(await csp("https://cdn.example.com/brand/logo.png")).toBe("https://cdn.example.com");
+    expect(await csp("http://intranet.example:8080/logo.png")).toBe("http://intranet.example:8080");
+    expect(await csp("data:image/png;base64,AAAA")).toBe("data:");
   });
 
   it("answers 503 with no-store, not default numbers, when the settings can't be read", async () => {
