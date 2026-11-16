@@ -112,4 +112,9 @@ Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without
 
 ## CI
 
+Two workflows run the suite on a pull request:
+
+- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
+- The workflow below runs the same suite against the deployed server.
+
 `.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.
