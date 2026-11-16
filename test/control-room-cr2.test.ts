@@ -16,7 +16,7 @@
  * the tables the ledger reads, as in control-room-cr1.test.ts; the seed itself
  * is applied through the real POST /surfaces/seeds/apply.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -509,6 +509,25 @@ describe("AC-CR-04 (review 2): cold start", () => {
     expect(cs.no_seed).toBe(false);
     expect(cs.folders).toEqual([]);
     expect(cs.coverage).toEqual({ covered: 0, total: 0 });
+  });
+
+  it("a seed older than 400 days draws its last 400 days, starting from the right running total, without walking every earlier day", async () => {
+    const Z = await seededNest("Old seed");
+    const old = NOW - 900 * DAY;
+    await run("UPDATE surface_seed_applications SET applied_at = ? WHERE nest_id = ?", [iso(old), Z]);
+    await doc(Z, "decisions", "Early rule", { pin: iso(old + DAY), version: iso(old + DAY) });
+    await doc(Z, "decisions", "Recent rule", { pin: iso(NOW - 10 * DAY), version: iso(NOW - 10 * DAY) });
+    const { coldStart } = await import("../src/surfaces/services/cold-start-service.js");
+    const isoSpy = vi.spyOn(Date.prototype, "toISOString");
+    const cs = await coldStart(Z, root.userId, NOW);
+    const calls = isoSpy.mock.calls.length;
+    isoSpy.mockRestore();
+    expect(cs.cumulative.length).toBe(400);
+    expect(cs.cumulative[cs.cumulative.length - 1].day).toBe(iso(NOW).slice(0, 10));
+    expect(cs.cumulative[0].approved).toBe(1); // the early rule, counted before the window
+    expect(cs.cumulative[cs.cumulative.length - 1].approved).toBe(2);
+    // ~2 date formats per drawn day, not per day since the seed (900 days).
+    expect(calls).toBeLessThan(1_200);
   });
 
   it("an unparseable applied_at makes no time claims (first_approved null), rather than counting every approval as after the seed", async () => {

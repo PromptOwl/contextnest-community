@@ -20,6 +20,13 @@ import {
   type Tally,
 } from "./ledger-service.js";
 
+/** A ledger time as an instant: ISO strings and SQLite "YYYY-MM-DD HH:MM:SS" both occur. */
+const atMs = (at: string | null | undefined): number => {
+  if (!at) return -Infinity;
+  const t = Date.parse(/[TZ]/.test(at) ? at : `${at.replace(" ", "T")}Z`);
+  return Number.isFinite(t) ? t : -Infinity;
+};
+
 export type Grain = "day" | "week";
 export type GroupBy = "agent" | "nest" | "binding" | "reason" | "none";
 
@@ -81,7 +88,7 @@ export async function rollups(
     const id = `${bucket}\u0000${by === "agent" || by === "binding" ? `${r.nest_id}\u0000${key}` : key}`;
     let g = groups.get(id);
     if (!g) groups.set(id, (g = { bucket, key, nestId: r.nest_id, lastAt: r.last_at, source: r.source, tally: emptyTally() }));
-    if (r.last_at > g.lastAt) (g.lastAt = r.last_at), (g.source = r.source);
+    if (atMs(r.last_at) > atMs(g.lastAt)) (g.lastAt = r.last_at), (g.source = r.source);
     addToTally(g.tally, r);
     addToTally(total, r);
   }

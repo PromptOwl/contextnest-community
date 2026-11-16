@@ -237,9 +237,13 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
     if (r.status === "approved") m.accepted += 1;
   }
 
-  // Cumulative approved documents in the seed's folders, per UTC day since the seed.
-  const startDay = Date.parse(`${isoDay(timed ? appliedMs : nowMs)}T00:00:00.000Z`);
+  // Cumulative approved documents in the seed's folders, per UTC day since the
+  // seed. A seed older than MAX_DAYS is drawn from its last MAX_DAYS days: the
+  // start is clamped first (approvals before it count into `before`), so an
+  // old seed doesn't walk every day since it was applied.
+  const MAX_DAYS = 400;
   const endDay = Date.parse(`${isoDay(nowMs)}T00:00:00.000Z`);
+  const startDay = Math.max(Date.parse(`${isoDay(timed ? appliedMs : nowMs)}T00:00:00.000Z`), endDay - (MAX_DAYS - 1) * DAY_MS);
   const perDay = new Map<string, number>();
   let before = 0;
   for (const at of unique.values()) {
@@ -247,14 +251,12 @@ function build(nestId: string, inp: Inputs, n1: boolean, nowMs: number): ColdSta
     if (t < startDay) before += 1;
     else perDay.set(isoDay(t), (perDay.get(isoDay(t)) ?? 0) + 1);
   }
-  let cumulative: ColdStart["cumulative"] = [];
+  const cumulative: ColdStart["cumulative"] = [];
   let running = before;
   for (let d = startDay; d <= endDay; d += DAY_MS) {
     running += perDay.get(isoDay(d)) ?? 0;
     cumulative.push({ day: isoDay(d), approved: running });
   }
-  // A seed older than ~a year is drawn from its last 400 days.
-  if (cumulative.length > 400) cumulative = cumulative.slice(-400);
 
   return {
     ...base,
