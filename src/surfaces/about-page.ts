@@ -25,10 +25,15 @@ export const ABOUT_SURFACES_PATH = "/about/surfaces";
 /** Per client IP. Generous for people; it only stops a loop hammering a public, DB-backed page. */
 export const ABOUT_SURFACES_LIMIT: RateLimitConfig = { max: 60, windowMs: 60_000 };
 
-/** The absolute link the bot posts, or null when this server has no public base URL. */
+/**
+ * The absolute link the bot posts, or null when this server has no public base
+ * URL, or one that would break Slack's `<url|label>` link syntax (`|`, `<`,
+ * `>` or whitespace): no link is better than a broken one.
+ */
 export function aboutSurfacesUrl(): string | null {
   const base = config.PUBLIC_BASE_URL;
-  return base ? `${base}${ABOUT_SURFACES_PATH}` : null;
+  if (!base || /[|<>\s]/.test(base)) return null;
+  return `${base}${ABOUT_SURFACES_PATH}`;
 }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
