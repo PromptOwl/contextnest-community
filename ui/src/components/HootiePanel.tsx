@@ -58,6 +58,7 @@ import {
   savePanelWidth,
   answerReadyLine,
   answerOnlyBanner,
+  HOOTIE_OPEN_EVENT,
 } from "@/lib/hootie-panel";
 
 /** Where the page is; the panel derives its scope from it. */
@@ -116,6 +117,12 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
     const onResize = () => setViewport(window.innerWidth);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // Opened from elsewhere in the app (the welcome screen's Hootie tile).
+  useEffect(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener(HOOTIE_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(HOOTIE_OPEN_EVENT, onOpen);
   }, []);
   const push = open && pushesContent(viewport);
   // On wide screens the open panel sits beside the page instead of over it:
