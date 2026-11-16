@@ -91,9 +91,13 @@ const MAX_ROWS = 2500;
 const MAX_WINDOWS = 4;
 
 /** A database without the access log, or without migration 093's columns —
- *  SQLite's "no such table/column", Postgres's "… does not exist". */
+ *  SQLite's "no such table/column", Postgres's "… does not exist" — and
+ *  nothing else: an unrelated missing table or column is a fault to surface,
+ *  not an empty log. */
+const PULL_SCHEMA = /node_access_events|\b(?:e\.)?(?:pull_id|seq|hop|via|bytes)\b/i;
 export function isMissingSchemaError(err: unknown): boolean {
-  return /no such (table|column)|does not exist/i.test(String((err as Error)?.message ?? err));
+  const msg = String((err as Error)?.message ?? err);
+  return /no such (table|column)|does not exist/i.test(msg) && PULL_SCHEMA.test(msg);
 }
 
 interface Row {
