@@ -16,8 +16,9 @@
  *   2. Starts `node dist/index.js` on a fresh SQLite data folder, key auth,
  *      feature switches on (see lib.mjs).
  *   3. Seeds what the suites expect: the test accounts (TEST_ACCOUNT1_* is the
- *      server admin, TEST_ACCOUNT2_* an ordinary member) and a few
- *      qa-…@example.com people in the directory.
+ *      server admin, TEST_ACCOUNT2_* an ordinary member), a few
+ *      qa-…@example.com people in the directory, and one standing nest that
+ *      gives each of them a paid seat.
  *   4. Reports ready on GET http://127.0.0.1:<license port>/ready.
  *
  * Test-only. Never point a real server's PROMPTOWL_API_URL at this.
@@ -28,7 +29,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DIRECTORY_PEOPLE, licenseAnswer, readSettings, serverEnv } from './lib.mjs';
+import { DIRECTORY_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from './lib.mjs';
 
 const settings = readSettings(process.env);
 const log = (msg) => console.log(`[e2e-server] ${msg}`);
@@ -122,10 +123,10 @@ server.on('exit', (code) => {
 });
 
 // ── 3. Seed ──────────────────────────────────────────────────────────────────
-async function call(method, path, body, cookie) {
+async function call(method, path, body, cookie, headers = {}) {
   const res = await fetch(`${settings.baseUrl}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -175,6 +176,24 @@ async function seed() {
   for (const email of DIRECTORY_PEOPLE) {
     must(`POST /auth/invite (${email})`, await call('POST', '/auth/invite', { email }, adminCookie), [200, 201]);
     log(`directory: ${email}`);
+  }
+
+  // The second account and some of the directory already hold a paid seat, as
+  // on a long-lived server. A person's first paid role asks the granter to
+  // confirm the billing change (409 billing_confirm); the suites grant roles
+  // to these people all the time and expect no such prompt. One standing nest
+  // gives each of them a seat. Its name has no AUTO_ prefix, so the orphan sweep leaves it alone.
+  const seats = must('POST /nests (seats)', await call('POST', '/nests', { name: SEATS_NEST_NAME }, adminCookie), [200, 201]);
+  const nestId = seats.data?.nest?.id;
+  for (const email of [...settings.accounts.slice(1).map((a) => a.email), ...PAID_SEAT_PEOPLE]) {
+    must(
+      `POST /nests/:id/collaborators (${email})`,
+      await call('POST', `/nests/${nestId}/collaborators`, { email, permission: 'admin' }, adminCookie, {
+        'X-Confirm-Billing': 'true',
+      }),
+      [200, 201],
+    );
+    log(`seat: ${email}`);
   }
 }
 

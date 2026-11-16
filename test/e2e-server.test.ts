@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
-import { DIRECTORY_PEOPLE, FEATURE_ENV, licenseAnswer, readSettings, serverEnv } from "../tests/e2e-server/lib.mjs";
+import { DIRECTORY_PEOPLE, FEATURE_ENV, FREE_SEAT_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from "../tests/e2e-server/lib.mjs";
 import { entitlementOf } from "../src/auth/license.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -106,7 +106,10 @@ describe("e2e server launcher (Playwright against this checkout's own build)", (
   it("seeds directory people the collaborator and steward suites can find", () => {
     // tests/src/lib/collaborators_api.js and stewards_api.js look for these.
     for (const email of DIRECTORY_PEOPLE) expect(email).toMatch(/^qa-[a-z0-9._-]+@example\.com$/i);
-    expect(DIRECTORY_PEOPLE[0]).toMatch(/^qa-viewer/);
+    // stewards_api.freeTestPerson tries qa-viewer first and needs it unpaid.
+    expect(FREE_SEAT_PEOPLE).toEqual(["qa-viewer@example.com"]);
+    expect(PAID_SEAT_PEOPLE.length).toBeGreaterThan(0);
+    expect(SEATS_NEST_NAME).not.toMatch(/^AUTO_/); // the orphan sweep must keep it
   });
 
   describe("the workflow", () => {

@@ -16,12 +16,18 @@ export const FEATURE_ENV = Object.freeze({
   HOOTIE_ENABLED: 'true',
 });
 
-/** People added to the server's directory besides the two test accounts. */
-export const DIRECTORY_PEOPLE = Object.freeze([
-  'qa-viewer@example.com',
-  'qa-editor@example.com',
-  'qa-reviewer@example.com',
-]);
+/**
+ * People added to the server's directory besides the two test accounts.
+ * qa-viewer stays on the free seat: the suites pick it first when they want to
+ * see the "this raises what someone is billed" step.
+ */
+export const FREE_SEAT_PEOPLE = Object.freeze(['qa-viewer@example.com']);
+/** These already hold a paid seat, so granting them a role asks nothing. */
+export const PAID_SEAT_PEOPLE = Object.freeze(['qa-editor@example.com', 'qa-reviewer@example.com']);
+export const DIRECTORY_PEOPLE = Object.freeze([...FREE_SEAT_PEOPLE, ...PAID_SEAT_PEOPLE]);
+
+/** The standing nest that gives the seeded people a paid seat. No AUTO_ prefix: the orphan sweep keeps it. */
+export const SEATS_NEST_NAME = 'E2E seats (seeded, keep)';
 
 /**
  * Read the launcher's settings from the environment.
