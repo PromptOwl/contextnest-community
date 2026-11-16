@@ -16,9 +16,14 @@ import { Hono } from "hono";
 import { config } from "../config.js";
 import { surfacesEnabled } from "./flags.js";
 import { getSettings } from "./services/settings-service.js";
+import { tryConsume, retryAfterSeconds, type RateLimitConfig } from "../shared/rate-limit.js";
+import { clientIp } from "../shared/request-ip.js";
 import { type SurfaceSettings } from "./core/settings.js";
 
 export const ABOUT_SURFACES_PATH = "/about/surfaces";
+
+/** Per client IP. Generous for people; it only stops a loop hammering a public, DB-backed page. */
+export const ABOUT_SURFACES_LIMIT: RateLimitConfig = { max: 60, windowMs: 60_000 };
 
 /** The absolute link the bot posts, or null when this server has no public base URL. */
 export function aboutSurfacesUrl(): string | null {
@@ -85,6 +90,16 @@ export const aboutSurfacesRoutes = new Hono();
 aboutSurfacesRoutes.get("/", async (c) => {
   if (!surfacesEnabled()) return c.json({ error: "Not found" }, 404);
   c.header("X-Robots-Tag", "noindex");
+  // Public and unauthenticated, and it reads the settings row: limit per IP.
+  // An unidentifiable caller ("unknown") isn't limited, as on login, so one
+  // shared bucket can't lock every member out.
+  const ip = clientIp(c);
+  const key = `about-surfaces:${ip}`;
+  if (ip !== "unknown" && !tryConsume(key, ABOUT_SURFACES_LIMIT)) {
+    c.header("Cache-Control", "no-store");
+    c.header("Retry-After", String(retryAfterSeconds(key, ABOUT_SURFACES_LIMIT)));
+    return c.text("Too many requests. Try again in a minute.", 429);
+  }
   // The numbers on this page are privacy claims. If this server's settings
   // can't be read, say so (503, never cached) rather than state defaults that
   // may not be true here.

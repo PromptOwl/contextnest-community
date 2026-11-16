@@ -293,6 +293,30 @@ describe("binding a channel: the one notice links the member explainer", () => {
   });
 });
 
+describe("the notice never states a default retention it can't confirm", () => {
+  it("when the settings can't be read, no notice is posted (its claim is released, as when Slack refuses the post)", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { postEnableNotice } = await import("../src/surfaces/services/notice-service.js");
+    slack.convs.set("C_NOSET", { info: { id: "C_NOSET", name: "noset-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_NOSET", nest_id: N }, root.apiKey);
+    expect(b.status).toBe(201);
+    // Reset the claim so the notice can be attempted again, then hide the settings table.
+    await getDb().run("UPDATE surface_bindings SET notice_posted_at = NULL WHERE id = ?", [b.data.binding.id]);
+    const before = slack.posted.length;
+    await getDb().run("ALTER TABLE surface_settings RENAME TO surface_settings_cr3_hidden");
+    try {
+      expect(await postEnableNotice(b.data.binding.id)).toBe(false);
+    } finally {
+      await getDb().run("ALTER TABLE surface_settings_cr3_hidden RENAME TO surface_settings");
+    }
+    expect(slack.posted.slice(before).filter((p) => p.channel === "C_NOSET")).toEqual([]);
+    const row = (await getDb().get("SELECT notice_posted_at FROM surface_bindings WHERE id = ?", [b.data.binding.id])) as { notice_posted_at: string | null };
+    expect(row.notice_posted_at).toBeNull();
+    // Once the settings read again, the notice goes out.
+    expect(await postEnableNotice(b.data.binding.id)).toBe(true);
+  });
+});
+
 describe("AC-CR-16: GET /about/surfaces", () => {
   it("AC-CR-16: an anonymous visitor gets the page with the never list and '@Nest skip me', and no nest, channel or user names", async () => {
     const res = await app.request("/about/surfaces");
@@ -350,6 +374,18 @@ describe("AC-CR-16: GET /about/surfaces", () => {
       await getDb().run("ALTER TABLE surface_settings_cr3_hidden RENAME TO surface_settings");
     }
     expect((await app.request("/about/surfaces")).status).toBe(200);
+  });
+
+  it("is rate-limited per client IP (public and unauthenticated), answering 429 with Retry-After", async () => {
+    const { ABOUT_SURFACES_LIMIT } = await import("../src/surfaces/about-page.js");
+    const from = (ip: string) => app.request("/about/surfaces", { headers: { "x-forwarded-for": ip } });
+    for (let i = 0; i < ABOUT_SURFACES_LIMIT.max; i++) expect((await from("203.0.113.7")).status).toBe(200);
+    const limited = await from("203.0.113.7");
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(limited.headers.get("cache-control")).toBe("no-store");
+    // Another client is unaffected.
+    expect((await from("203.0.113.8")).status).toBe(200);
   });
 
   it("escapes the org name it shows", async () => {
