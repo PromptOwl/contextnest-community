@@ -38,6 +38,18 @@ export async function resolveCallerEmail(userId: string | undefined): Promise<st
 }
 
 /**
+ * `canReadNode` for a caller known only by id: resolves the email so route
+ * handlers don't each repeat the lookup. Use this at the route layer.
+ */
+export async function callerCanReadNode(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+): Promise<boolean> {
+  return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
+}
+
+/**
  * True when the caller can read this node.
  *
  * Resolution order:
