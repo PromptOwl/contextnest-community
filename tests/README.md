@@ -85,6 +85,31 @@ Reports land in `tests/test-results/` (HTML report at `tests/test-results/html/i
 - Number test cases (`TC-0xx`) and keep titles behavior-focused.
 - Never hardcode credentials — everything comes from `tests/.env/`.
 
+## Running against your own build
+
+`tests/e2e-server/start.mjs` starts this checkout's build on localhost with a fresh database, so the suite tests your code and not a deployed server. It needs no secrets.
+
+```bash
+npm run build
+
+# The two accounts are created on the fresh server. Pick any values.
+export TEST_ACCOUNT1_ALIAS=primary_user  TEST_ACCOUNT1_USER=e2e-admin@example.com   TEST_ACCOUNT1_PW='E2e-local-Admin-1!'
+export TEST_ACCOUNT2_ALIAS=secondary_user TEST_ACCOUNT2_USER=e2e-member@example.com TEST_ACCOUNT2_PW='E2e-local-Member-1!'
+
+node tests/e2e-server/start.mjs &          # server on http://localhost:3838
+node tests/e2e-server/start.mjs wait       # returns once it is seeded
+
+BASE_URL=http://localhost:3838 npx playwright test --project=test-suite
+```
+
+What the launcher sets up:
+
+- The built server (`node dist/index.js`) on a fresh SQLite data folder in the system temp folder, in key auth mode, with the feature switches on (`tests/e2e-server/lib.mjs`).
+- The first account as the server admin and the second as an ordinary member, plus three `qa-…@example.com` people in the directory for the collaborator and steward suites.
+- A license answer served on `127.0.0.1:4010`, so the server runs as a licensed enterprise server without calling PromptOwl. This is for tests only.
+
+Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without building the server (the UI still needs `npm run build:ui`). `E2E_SERVER_PORT`, `E2E_LICENSE_PORT` and `E2E_DATA_ROOT` override the ports and the data folder.
+
 ## CI
 
 `.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.
