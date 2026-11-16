@@ -1,5 +1,47 @@
 # @promptowl/contextnest-community
 
+## 3.1.0
+
+### Minor Changes
+
+- v3.1.0 — MCP endpoints that stop reconnect loops, metacognition tools moved to the nest endpoint, and folders in card view.
+
+  **Upgrade note:** `context_metacognition_*` tools are no longer on the server-level `/mcp`. This only affects servers with `FEATURE_METACOGNITION` on. Any harness that calls them there must connect to `/nests/:id/mcp` instead, where the same tools work without the `nest` argument. MCP clients that used GET or DELETE on either endpoint now get `405`.
+
+- dd16298: Metacognition tools are now on `/nests/:id/mcp` only. The server-level `/mcp` no longer lists or accepts `context_metacognition_*`, so connect to the nest's endpoint to set up or run an agent. Tools that can change a public docs site now declare `openWorldHint: true`.
+
+### Patch Changes
+
+- 24e57ba: The Documents tab's card view now shows folders. Open one to scope into it, and use the same actions as list view, including delete, without switching views.
+- aa92486: A link to a document that doesn't exist now says "Not found" in the breadcrumb and browser tab, instead of "Untitled".
+- 5299fbe: MCP endpoints (`/mcp` and `/nests/:id/mcp`) now answer GET and DELETE with 405 instead of opening an SSE stream that closed at once. MCP clients stop reconnecting in a loop, which had pinned the server's CPU and made Cloud Run turn requests away with 429s.
+- ee08361: Reloading a document with the cursor still in a field no longer loses the edit. Unsaved changes, including View blocks, come back with the restored draft banner.
+
+## 3.0.0
+
+### Major Changes
+
+- v3.0.0 — Views you can edit in the app, generated summary blocks, and MCP tools that declare what they do.
+
+  **Breaking change:** a rotated or revoked `cnst_` key on `/mcp` and `/nests/:id/mcp` now gets `403` with `code: "invalid_key"` instead of `401`. Any MCP client or monitor that treats `401` as the signal for a dead key must also handle `403`. REST routes still answer `401`.
+
+  **Deprecated:** `dry_run` on `context_metacognition_configure` still works. Use `context_metacognition_preview` instead.
+
+### Minor Changes
+
+- d81c769: Every MCP tool now declares `readOnlyHint`, `destructiveHint` and `openWorldHint` in `tools/list`, on `/mcp` and `/nests/:id/mcp`, so clients can warn before a risky call and the ChatGPT app can pass OpenAI's review. New read-only tool `context_metacognition_preview` checks an agent config without saving; `context_metacognition_configure` now only saves, and its `dry_run` still works but is deprecated.
+- ceaac08: Views can now be created and edited in the app. A View's block list (node, list and callout blocks) is edited under its intro, with a preview that refreshes on save, and it appears in the sidebar's Views group. Other block kinds stay in place as locked rows. A node block that can't be shown now reads "This content is unavailable." for every cause, and `/health` reports `type_view_enabled`.
+- 6afd645: View pages now render `summary` blocks: a model-written summary of the documents a selector matches, labeled "Generated summary" and listing the `id@version` of every source. It covers the approved version of each document, is cached against that exact set plus style and model, and regenerates only when one of them changes. A selector matching more than `max_nodes` (default 25) covers the first ones by id and says so. MCP `context_get` on a view adds the same text, label and sources to its prose. Each generated summary is a model call on the nest's model key, so it uses credits on PromptOwl's gateway.
+
+### Patch Changes
+
+- 37cf724: Board columns no longer scroll sideways or cut off task cards. A busy card's bottom row now wraps inside the card, and a very long tag shortens with an ellipsis instead of pushing past the column.
+- 83eedcd: If a share on one page is revoked while Hootie is answering, Hootie can no longer open that page for the rest of the answer. It now re-checks access to the specific page right before reading it, and refuses the read if that check fails.
+- c0124bc: A rotated or revoked API key on an MCP endpoint now fails with a clear "invalid or revoked" error instead of opening a sign-in screen that couldn't fix it. `/mcp` and `/nests/:id/mcp` answer a dead `cnst_` key with 403 `invalid_key`; REST routes still answer 401.
+- 55b3dd5: MCP clients now see a plain title on every tool, a description on every parameter, and clearer tool descriptions. `initialize` reports `serverInfo` with the title "ContextNest" and the real server version. Tool names, inputs, results and permissions are unchanged.
+- c21dd83: The licensing guide and the Editors tooltip on Settings → License now say that editors on Self-Hosted are counted and billed per person, instead of "Included". No change to limits or enforcement.
+- 655061b: A named system now shows its configured name everywhere it appears on a document: version history (with a System badge), the compare menu and the Collaborators tab show the name instead of its generated `@system.contextnest.invalid` address.
+
 ## 2.5.0
 
 ### Minor Changes

@@ -12,7 +12,7 @@
  * five blocked items on the November board is such a draft — "Zephyr
  * Acquisition Ledger" — and must never reach her, in any byte of the stream.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import {
   describeModelError as realDescribeModelError,
   ModelRefusedError as RealModelRefusedError,
@@ -53,7 +53,14 @@ function parseSse(text: string): SseEvent[] {
 }
 
 // ── The scripted model (a fake of B's streamRound) ─────────────────────────
-let scriptedRounds: Array<{ text?: string; calls?: Array<{ name: string; input: unknown }>; hold?: boolean }> = [];
+let scriptedRounds: Array<{
+  text?: string;
+  calls?: Array<{ name: string; input: unknown }>;
+  hold?: boolean;
+  /** Runs after the round's text, before it hands back its tool calls — a
+   *  removal or revocation landing between the model asking and the run. */
+  after?: () => Promise<void>;
+}> = [];
 let scriptedAnswer = "Hoot.";
 let modelRounds: Array<{ system: string; messages: any[]; tools: string[]; toolChoice?: string }> = [];
 let rejectTools = false;
@@ -62,6 +69,8 @@ let rejectTools = false;
 let mcpCalls: Array<{ tool: string; args: any; ctx: any }> = [];
 /** An op that answers with an error result, for one test. */
 let failOp: string | null = null;
+/** When set, the per-node access check throws this (a DB failure). */
+let openNodeFault: Error | null = null;
 
 const TEST_GATEWAY = { baseUrl: "http://127.0.0.1:9", key: "sk-po-test", defaultModel: "default-claude/claude-sonnet-5" };
 
@@ -104,6 +113,7 @@ beforeAll(() => {
         return { toolCalls: [], assistant: [{ type: "text", text: scriptedAnswer }] };
       }
       if (round.text) yield round.text;
+      if (round.after) await round.after();
       const toolCalls = (round.calls ?? []).map((c, i) => ({ id: `call_${n}_${i}`, name: c.name, input: c.input }));
       return {
         toolCalls,
@@ -131,10 +141,21 @@ beforeAll(() => {
       },
     };
   });
+  vi.doMock("../src/governance/mention-notify.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../src/governance/mention-notify.js")>();
+    return {
+      ...actual,
+      canOpenNode: async (...args: Parameters<typeof actual.canOpenNode>) => {
+        if (openNodeFault) throw openNodeFault;
+        return actual.canOpenNode(...args);
+      },
+    };
+  });
 });
 afterAll(() => {
   vi.doUnmock("../src/hootie/model.js");
   vi.doUnmock("../src/mcp/tools.js");
+  vi.doUnmock("../src/governance/mention-notify.js");
 });
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -934,5 +955,326 @@ describe("security r1 F8 — the wall-clock cap is a deadline", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(modelRounds).toHaveLength(2);
     expect(done(events).answer).toContain("I stopped looking after");
+  });
+});
+
+// ─── Access changing mid-question ──────────────────────────────────────────
+
+describe("removed from the nest mid-question: the call never runs, no further round, nothing reaches the stream", () => {
+  let scratch: string;
+  let docId: string;
+  let collabId: string;
+  let boardScratch: string;
+
+  async function addOmar() {
+    const r = await jsonRequest(app, "POST", `/nests/${scratch}/collaborators`, { email: omar.email, permission: "read" }, owner.apiKey);
+    expect(r.status).toBeLessThan(300);
+    const roster = await jsonRequest(app, "GET", `/nests/${scratch}/collaborators`, undefined, owner.apiKey);
+    collabId = roster.data.collaborators.find((c: any) => c.email === omar.email).id;
+  }
+  const removeOmar = async () => {
+    expect((await jsonRequest(app, "DELETE", `/nests/${scratch}/collaborators/${collabId}`, undefined, owner.apiKey)).status).toBe(200);
+  };
+
+  beforeAll(async () => {
+    // Private, no stewardship: per-node reads (canReadNode) admit any caller
+    // here, so only the live access re-check can stop a removed one.
+    scratch = (await jsonRequest(app, "POST", "/nests", { name: "Removal Scratch" }, owner.apiKey)).data.nest.id;
+    const doc = await jsonRequest(app, "POST", `/nests/${scratch}/nodes`, {
+      title: "Launch checklist",
+      content: "# Launch\n\nREMOVED_BODY_MARKER",
+      tags: ["pn"],
+    }, owner.apiKey);
+    docId = doc.data.node.id;
+    const board = await jsonRequest(app, "POST", `/nests/${scratch}/boards`, {
+      name: "Removal board",
+      config: { dimension: "tag", filterTags: ["pn"] },
+    }, owner.apiKey);
+    expect(board.status).toBe(201);
+    boardScratch = board.data.board.id;
+  });
+  beforeEach(addOmar);
+  afterEach(async () => {
+    // Back in for the next case (a no-op if still a member).
+    const roster = await jsonRequest(app, "GET", `/nests/${scratch}/collaborators`, undefined, owner.apiKey);
+    const row = roster.data.collaborators.find((c: any) => c.email === omar.email);
+    if (row) await jsonRequest(app, "DELETE", `/nests/${scratch}/collaborators/${row.id}`, undefined, owner.apiKey);
+  });
+
+  const emptyDone = (events: SseEvent[]) => {
+    const d = done(events);
+    expect(d.answer).toBe("");
+    expect(d.cited).toEqual([]);
+  };
+
+  it("list_nodes", async () => {
+    scriptedRounds = [{ calls: [{ name: "list_nodes", input: {} }], after: removeOmar }, { text: "never" }];
+    const { status, text, events } = await chat(omar, "zzz qqq", scratch);
+    expect(status).toBe(200);
+    expect(mcpCalls.filter((c) => c.tool === "context_list")).toEqual([]);
+    expect(modelRounds).toHaveLength(1);
+    expect(events.map((e) => e.event)).toEqual(["meta", "done"]);
+    emptyDone(events);
+    expect(text).not.toContain("Launch checklist");
+  });
+
+  it("get_node on an id read before the removal", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "get_node", input: { id: docId } }], after: removeOmar },
+      { text: "never" },
+    ];
+    const { text, events } = await chat(omar, "zzz qqq", scratch);
+    expect(mcpCalls.map((c) => c.tool)).toEqual(["context_list"]);
+    expect(modelRounds).toHaveLength(2);
+    expect(statusTexts(events)).toEqual(["Listed documents"]);
+    emptyDone(events);
+    expect(text).not.toContain("REMOVED_BODY_MARKER");
+    for (const r of modelRounds) expect(JSON.stringify(r.messages)).not.toContain("REMOVED_BODY_MARKER");
+  });
+
+  it("board_items on a board listed before the removal", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_boards", input: {} }] },
+      { calls: [{ name: "board_items", input: { board: boardScratch } }], after: removeOmar },
+      { text: "never" },
+    ];
+    const { text, events } = await chat(omar, "zzz qqq", scratch);
+    expect(mcpCalls.map((c) => c.tool)).toEqual(["context_boards"]);
+    expect(modelRounds).toHaveLength(2);
+    emptyDone(events);
+    expect(text).not.toContain("Launch checklist");
+    for (const r of modelRounds) expect(JSON.stringify(r.messages)).not.toContain("Launch checklist (nodes");
+  });
+
+  it("the searched-before-no broadening (H1) is gated too: removed after a thin answer, no broadening and an empty done", async () => {
+    scriptedRounds = [{ text: "The nest doesn't say.", after: removeOmar }];
+    scriptedAnswer = "never";
+    const { text, events } = await chat(omar, "when does testing begin?", scratch);
+    expect(modelRounds).toHaveLength(1);
+    expect(events.some((e) => e.event === "status")).toBe(false);
+    emptyDone(events);
+    expect(text).not.toContain("never");
+  });
+
+  it("control: still a member, the same reads run", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "get_node", input: { id: docId } }] },
+      { text: "ok" },
+    ];
+    await chat(omar, "zzz qqq", scratch);
+    expect(mcpCalls.map((c) => c.tool)).toEqual(["context_list", "context_get"]);
+    expect(resultsAfter(1)[0].content).toContain("REMOVED_BODY_MARKER");
+  });
+});
+
+describe("a share revoked mid-question: the read tools check THAT page right before reading it (canOpenNode)", () => {
+  const UNAVAILABLE = "That isn't available to this person.";
+  let shareNest: string;
+  let aId: string;
+  let bId: string;
+  let grantB: string;
+
+  beforeAll(async () => {
+    // Private, no stewardship: canReadNode admits anyone, and Gina still
+    // holds a share on A, so the nest-level re-check passes. Only a per-node
+    // check stops a read of B.
+    shareNest = (await jsonRequest(app, "POST", "/nests", { name: "Share Revoke" }, owner.apiKey)).data.nest.id;
+    aId = (await jsonRequest(app, "POST", `/nests/${shareNest}/nodes`, { title: "Alpha share", content: "# A\n\nALPHA_MARKER" }, owner.apiKey)).data.node.id;
+    bId = (await jsonRequest(app, "POST", `/nests/${shareNest}/nodes`, { title: "Bravo share", content: "# B\n\nBRAVO_MARKER" }, owner.apiKey)).data.node.id;
+  });
+
+  async function grant(nodeId: string) {
+    const r = await jsonRequest(app, "POST", `/nests/${shareNest}/grants`, { target_type: "document", target: nodeId, email: grantee.email, role: "read" }, owner.apiKey);
+    expect(r.status).toBe(201);
+    return r.data.grant.id as string;
+  }
+  beforeEach(async () => {
+    const existing = await jsonRequest(app, "GET", `/nests/${shareNest}/grants`, undefined, owner.apiKey);
+    for (const g of existing.data.grants) await jsonRequest(app, "DELETE", `/nests/${shareNest}/grants/${g.id}`, undefined, owner.apiKey);
+    await grant(aId);
+    grantB = await grant(bId);
+  });
+  const revokeB = async () => {
+    expect((await jsonRequest(app, "DELETE", `/nests/${shareNest}/grants/${grantB}`, undefined, owner.apiKey)).status).toBe(200);
+  };
+  /** B's body reached neither the stream nor any round the model was sent. */
+  const expectNoBravo = (text: string) => {
+    expect(text).not.toContain("BRAVO_MARKER");
+    for (const r of modelRounds) expect(r.system + JSON.stringify(r.messages)).not.toContain("BRAVO_MARKER");
+  };
+
+  it("get_node B: the op never runs, the model gets the fixed copy, nothing of B reaches it or the stream", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "get_node", input: { id: bId } }], after: revokeB },
+      { text: "ok" },
+    ];
+    const { status, text } = await chat(grantee, "zzz qqq", shareNest);
+    expect(status).toBe(200);
+    const listed = resultsAfter(0)[0].content as string;
+    expect(listed).toContain("Alpha share");
+    expect(listed).toContain("Bravo share");
+    const read = resultsAfter(1)[0];
+    expect(read.is_error).toBe(true);
+    expect(read.content).toContain(UNAVAILABLE);
+    expect(mcpCalls.filter((c) => c.tool === "context_get")).toEqual([]);
+    expectNoBravo(text);
+  });
+
+  it("node_relations B is checked the same way", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "node_relations", input: { id: bId } }], after: revokeB },
+      { text: "ok" },
+    ];
+    const { text } = await chat(grantee, "zzz qqq", shareNest);
+    const read = resultsAfter(1)[0];
+    expect(read.is_error).toBe(true);
+    expect(read.content).toContain(UNAVAILABLE);
+    expect(mcpCalls.filter((c) => c.tool === "context_relations")).toEqual([]);
+    expectNoBravo(text);
+  });
+
+  it("the page she still holds reads normally after B's share goes", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "get_node", input: { id: aId } }], after: revokeB },
+      { text: "ok" },
+    ];
+    await chat(grantee, "zzz qqq", shareNest);
+    expect(resultsAfter(1)[0].content).toContain("ALPHA_MARKER");
+  });
+
+  it("control: with both shares, get_node B and node_relations B read B", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "get_node", input: { id: bId } }, { name: "node_relations", input: { id: bId } }] },
+      { text: "ok" },
+    ];
+    await chat(grantee, "zzz qqq", shareNest);
+    const [read, relations] = resultsAfter(1);
+    expect(read.content).toContain("BRAVO_MARKER");
+    expect(relations.is_error).toBeFalsy();
+    expect(mcpCalls.map((c) => c.tool)).toEqual(["context_list", "context_get", "context_relations"]);
+  });
+
+  it.each([
+    ["get_node", "context_get"],
+    ["node_relations", "context_relations"],
+  ])("when the check itself fails, %s is refused: fails closed, with both shares still held", async (name, op) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      {
+        calls: [{ name, input: { id: bId } }],
+        after: async () => {
+          openNodeFault = new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+      { text: "ok" },
+    ];
+    try {
+      const { status, text } = await chat(grantee, "zzz qqq", shareNest);
+      expect(status).toBe(200);
+      const read = resultsAfter(1)[0];
+      expect(read.is_error).toBe(true);
+      expect(read.content).toContain(UNAVAILABLE);
+      expect(read.content).not.toContain("SQLITE_BUSY");
+      expect(mcpCalls.filter((c) => c.tool === op)).toEqual([]);
+      expectNoBravo(text);
+    } finally {
+      openNodeFault = null;
+      log.mockRestore();
+    }
+  });
+
+  it("list_nodes run again after the revocation leaves B out: its grant check is live", async () => {
+    scriptedRounds = [
+      { calls: [{ name: "list_nodes", input: {} }] },
+      { calls: [{ name: "list_nodes", input: { limit: 10 } }], after: revokeB },
+      { text: "ok" },
+    ];
+    await chat(grantee, "zzz qqq", shareNest);
+    expect(resultsAfter(0)[0].content).toContain("Bravo share");
+    const after = resultsAfter(1)[0].content as string;
+    expect(after).toContain("Alpha share");
+    expect(after).not.toContain("Bravo share");
+  });
+
+  it("open mode has no per-person access: reads on someone else's private nest still work", async () => {
+    // Anonymous there: no nest permission and no grant of its own, admitted
+    // by the middleware and by canStillAsk (access.ts).
+    process.env.AUTH_MODE = "open";
+    try {
+      scriptedRounds = [
+        { calls: [{ name: "list_nodes", input: {} }] },
+        { calls: [{ name: "get_node", input: { id: bId } }, { name: "node_relations", input: { id: bId } }] },
+        { text: "ok" },
+      ];
+      const { status } = await chatRaw(null, { message: "zzz qqq" }, {}, shareNest);
+      expect(status).toBe(200);
+      const [read, relations] = resultsAfter(1);
+      expect(read.content).toContain("BRAVO_MARKER");
+      expect(relations.is_error).toBeFalsy();
+    } finally {
+      process.env.AUTH_MODE = "key";
+    }
+  });
+});
+
+describe("board_items after a revocation: the page stays out of the rows (its grant check is live)", () => {
+  // Only a nest member is offered board tools, and a member reads the whole
+  // nest (a grant-only caller gets none: security r1 F4). So a share can only
+  // narrow a board for someone who started the question as a member and lost
+  // that too: the tool is still in their turn, and the nest re-check passes on
+  // the share they keep.
+  it.each([
+    ["ungoverned", false],
+    ["governed", true],
+  ])("%s nest: a member left with one share mid-question sees only that page", async (kind, governed) => {
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: `Board ${kind}` }, owner.apiKey)).data.nest.id;
+    const addDoc = async (title: string) => {
+      const r = await jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content: `# ${title}\n\nBody.`, tags: ["bo"] }, owner.apiKey);
+      expect(r.status).toBe(201);
+      return r.data.node.id as string;
+    };
+    const shareOn = async (target: string) => {
+      const r = await jsonRequest(app, "POST", `/nests/${nest}/grants`, { target_type: "document", target, email: omar.email, role: "read" }, owner.apiKey);
+      expect(r.status).toBe(201);
+      return r.data.grant.id as string;
+    };
+    const kept = await addDoc("Kept page");
+    const lost = await addDoc("Lost page");
+    const board = await jsonRequest(app, "POST", `/nests/${nest}/boards`, { name: "Share board", config: { dimension: "tag", filterTags: ["bo"] } }, owner.apiKey);
+    expect(board.status).toBe(201);
+    if (governed) await jsonRequest(app, "PATCH", `/nests/${nest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    // Shares first: a share to someone who can already read is refused.
+    await shareOn(kept);
+    const lostGrant = await shareOn(lost);
+    expect((await jsonRequest(app, "POST", `/nests/${nest}/collaborators`, { email: omar.email, permission: "read" }, owner.apiKey)).status).toBeLessThan(300);
+    const roster = await jsonRequest(app, "GET", `/nests/${nest}/collaborators`, undefined, owner.apiKey);
+    const rowId = roster.data.collaborators.find((c: any) => c.email === omar.email).id;
+
+    const id = board.data.board.id;
+    scriptedRounds = [
+      { calls: [{ name: "list_boards", input: {} }] },
+      { calls: [{ name: "board_items", input: { board: id } }] },
+      {
+        calls: [{ name: "board_items", input: { board: id, limit: 50 } }],
+        after: async () => {
+          expect((await jsonRequest(app, "DELETE", `/nests/${nest}/collaborators/${rowId}`, undefined, owner.apiKey)).status).toBe(200);
+          expect((await jsonRequest(app, "DELETE", `/nests/${nest}/grants/${lostGrant}`, undefined, owner.apiKey)).status).toBe(200);
+        },
+      },
+      { text: "ok" },
+    ];
+    await chat(omar, "zzz qqq", nest);
+    expect(resultsAfter(1)[0].content).toContain("Lost page");
+    const after = resultsAfter(2)[0];
+    expect(after.is_error).toBeFalsy();
+    expect(after.content).toContain("Kept page");
+    expect(after.content).not.toContain("Lost page");
   });
 });

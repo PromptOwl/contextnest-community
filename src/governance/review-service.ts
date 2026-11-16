@@ -690,7 +690,7 @@ export async function reject(params: {
       params.nestId,
       params.nodeId,
       params.rejectedBy,
-      { requestedBy: pending.requested_by },
+      { requestedBy: pending.requested_by, ignoreAdminFolders: true },
     );
     if (!check.allowed) {
       throw new Error(check.reason);

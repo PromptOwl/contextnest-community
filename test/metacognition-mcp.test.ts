@@ -2,7 +2,7 @@
  * Metacognition over MCP (CU-wdqcq05rqq), and metacognition as an owner/admin
  * feature end to end.
  *
- * The MCP tools (context_metacognition_list / _suggest / _configure / _run / _remove) wrap the same
+ * The MCP tools (context_metacognition_list / _suggest / _preview / _configure / _run / _remove) wrap the same
  * service functions the REST routes call, so the gates, parseConfig's messages,
  * the 409s and the saved config are the REST ones. Every metacognition action
  * — list, view, stats, run, configure, remove, and pointing a schedule or hook
@@ -25,7 +25,7 @@ const MCP_HEADERS = {
   Accept: "application/json, text/event-stream",
 };
 
-const TOOLS = ["context_metacognition_list", "context_metacognition_suggest", "context_metacognition_configure", "context_metacognition_run", "context_metacognition_remove"];
+const TOOLS = ["context_metacognition_list", "context_metacognition_suggest", "context_metacognition_preview", "context_metacognition_configure", "context_metacognition_run", "context_metacognition_remove"];
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -153,6 +153,75 @@ describe("who sees the tools", () => {
     expect(configure.description).toMatch(/type agent/i);
     expect(configure.description).toMatch(/approved/i);
     expect(configure.description).toContain('"persona"');
+  });
+});
+
+describe("one operation per tool (OpenAI review)", () => {
+  const described = async (name: string) => (await listTools(owner.apiKey)).find((t) => t.name === name)!;
+
+  it("preview validates and summarizes, and saves nothing", async () => {
+    const r = await call("context_metacognition_preview", { agent: "nodes/scout", ...CONFIG });
+    expect(r.result?.isError).not.toBe(true);
+    const data = r.result.structuredContent;
+    expect(data.saved).toBe(false);
+    expect(data).not.toHaveProperty("dry_run");
+    expect(data.node_id).toBe("nodes/scout");
+    expect(data.summary).toContain("Archivist");
+    expect(text(r)).toMatch(/nothing saved/i);
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/metacognition`, undefined, owner.apiKey);
+    expect(rest.data.agents.map((a: any) => a.node_id)).not.toContain("nodes/scout");
+  });
+
+  it("preview is refused for a writer who doesn't administer the nest", async () => {
+    const out = await direct("context_metacognition_preview", { agent: "nodes/scout", ...CONFIG }, editor);
+    expect(out.isError).toBe(true);
+    expect(outText(out)).toMatch(/owner or an admin/);
+  });
+
+  it("preview has no dry_run field, because it never saves", async () => {
+    const preview = await described("context_metacognition_preview");
+    expect(Object.keys(preview.inputSchema.properties)).not.toContain("dry_run");
+  });
+
+  it("preview refuses what configure would refuse, with the same message", async () => {
+    const bad = { agent: "nodes/scout", persona: { name: "A", avatar: "https://x.test/a.png" } };
+    const preview = await call("context_metacognition_preview", bad);
+    const dryRun = await call("context_metacognition_configure", { ...bad, dry_run: true });
+    expect(preview.result?.isError).toBe(true);
+    expect(text(preview)).toBe(text(dryRun));
+  });
+
+  it("configure still honours dry_run for existing callers, and says it is deprecated", async () => {
+    const configure = await described("context_metacognition_configure");
+    expect(configure.inputSchema.properties.dry_run.description).toMatch(/deprecated/i);
+    expect(configure.inputSchema.properties.dry_run.description).toContain("context_metacognition_preview");
+    const r = await call("context_metacognition_configure", { agent: "nodes/scout", ...CONFIG, dry_run: true });
+    expect(r.result.structuredContent.saved).toBe(false);
+  });
+
+  it("each tool states its one operation and its side effects", async () => {
+    const suggest = await described("context_metacognition_suggest");
+    expect(suggest.description).toMatch(/read-only/i);
+    expect(suggest.description).toMatch(/fetches nothing/i);
+    expect(suggest.inputSchema.properties.agent.description).toBeTruthy();
+
+    const preview = await described("context_metacognition_preview");
+    expect(preview.description).toMatch(/read-only/i);
+
+    const configure = await described("context_metacognition_configure");
+    expect(configure.description).toMatch(/replaces/i);
+    expect(configure.description).toMatch(/feeds/i);
+    expect(configure.description).toContain("context_metacognition_preview");
+
+    const run = await described("context_metacognition_run");
+    expect(run.description).toMatch(/one run/i);
+    expect(run.description).toMatch(/feeds/i);
+    expect(run.description).toMatch(/model/i);
+    expect(run.description).toMatch(/never publishes/i);
+    expect(run.description).toMatch(/access requests/i);
+    expect(run.description).toMatch(/withdraws/i);
+    expect(run.description).toMatch(/deleting/i);
+    expect(run.inputSchema.properties.inputs.description).toBeTruthy();
   });
 });
 
@@ -334,64 +403,38 @@ describe("system keys", () => {
 });
 
 describe("the server-wide /mcp", () => {
-  it("advertises the tools with a required nest argument", async () => {
-    const tools = await listTools(owner.apiKey, "/mcp");
-    for (const t of TOOLS) {
-      const def = tools.find((x) => x.name === t);
-      expect(def, t).toBeTruthy();
-      expect(def!.inputSchema.required).toContain("nest");
+  // The ChatGPT app connects here, and what a run does depends on its saved
+  // config, so no tool list can show it up front. The per-nest endpoint keeps them.
+  it("lists none of the tools, for any caller who may use them per nest", async () => {
+    for (const who of [owner, admin, root]) {
+      const names = (await listTools(who.apiKey, "/mcp")).map((t) => t.name);
+      for (const t of TOOLS) expect(names, `${who.email}: ${t}`).not.toContain(t);
     }
   });
 
-  it("without nest it is a validation error; with nest it behaves as the per-nest endpoint", async () => {
-    const missing = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: {} }, owner.apiKey);
-    expect(isError(missing)).toBe(true);
-    const viaServer = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, owner.apiKey);
-    const viaNest = await call("context_metacognition_list", {});
-    expect(isError(viaServer)).toBe(false);
-    expect(viaServer.result.structuredContent).toEqual(viaNest.result.structuredContent);
-    const suggestServer = await mcp(
-      "/mcp",
-      "tools/call",
-      { name: "context_metacognition_suggest", arguments: { nest: nestId, agent: "nodes/scout" } },
-      owner.apiKey,
-    );
-    const suggestNest = await call("context_metacognition_suggest", { agent: "nodes/scout" });
-    expect(isError(suggestServer)).toBe(false);
-    expect(suggestServer.result.structuredContent).toEqual(suggestNest.result.structuredContent);
-    const dry = await mcp(
-      "/mcp",
-      "tools/call",
-      { name: "context_metacognition_configure", arguments: { nest: "Meta MCP", agent: "nodes/scout", ...CONFIG, persona: { name: "Scout" }, dry_run: true } },
-      owner.apiKey,
-    );
-    expect(isError(dry)).toBe(false);
-    expect(dry.result.structuredContent.summary).toContain("Scout will read gtm and ops");
-  });
-
-  it("an admin of another nest sees them but is refused on a nest where they only write", async () => {
-    const other = (await jsonRequest(app, "POST", "/nests", { name: "Editor Own" }, editor.apiKey)).data.nest?.id;
-    expect(other).toBeTruthy();
-    const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
-    for (const t of TOOLS) expect(names).toContain(t);
-    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, editor.apiKey);
-    expect(r.result?.isError).toBe(true);
-    expect(text(r)).toMatch(/owner or an admin/);
-    const own = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: other } }, editor.apiKey);
-    expect(isError(own)).toBe(false);
-    await jsonRequest(app, "DELETE", `/nests/${other}`, undefined, editor.apiKey);
-  });
-
-  it("a writer doesn't see them and is refused a call naming the nest", async () => {
-    const names = (await listTools(editor.apiKey, "/mcp")).map((t) => t.name);
-    for (const t of TOOLS) expect(names).not.toContain(t);
+  it("refuses a call, and nothing is saved or started", async () => {
+    const before = (await call("context_metacognition_list", {})).result.structuredContent;
     for (const [name, args] of [
       ["context_metacognition_list", { nest: nestId }],
-      ["context_metacognition_suggest", { nest: nestId, agent: "nodes/scout" }],
+      ["context_metacognition_configure", { nest: nestId, agent: "nodes/scout", ...CONFIG, persona: { name: "Scout" } }],
+      ["context_metacognition_run", { nest: nestId, agent: "nodes/scout" }],
     ] as const) {
-      const r = await mcp("/mcp", "tools/call", { name, arguments: args }, editor.apiKey);
+      const r = await mcp("/mcp", "tools/call", { name, arguments: args }, owner.apiKey);
       expect(isError(r), name).toBe(true);
     }
+    expect((await call("context_metacognition_list", {})).result.structuredContent).toEqual(before);
+  });
+
+  it("the agent manual says they are not on /mcp", async () => {
+    const manual = await (await app.request("/llms.txt")).text();
+    expect(manual).toContain("context_metacognition_run");
+    expect(manual).not.toMatch(/also on\s+`[^`]*\/mcp` with `nest`/);
+    expect(manual).toMatch(/FEATURE_METACOGNITION` is on too; not on\s+`[^`]*\/mcp`/);
+  });
+
+  it("still lists them per nest for its owner", async () => {
+    const names = (await listTools(owner.apiKey)).map((t) => t.name);
+    for (const t of TOOLS) expect(names).toContain(t);
   });
 });
 
@@ -471,72 +514,6 @@ describe("metacognition is owner/admin only on REST too", () => {
     // Stopping spend stays at write: a writer may still delete it.
     const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/schedules/${id}`, undefined, editor.apiKey);
     expect(del.status).toBe(200);
-  });
-});
-
-describe("which requests on the server-level /mcp consider the metacognition tools", () => {
-  it("tools/list and metacognition calls do, batched or not; other calls and junk don't", async () => {
-    const { requestMayUseMetacognition } = await import("../src/mcp/metacognition-tools.js");
-    const call = (name: string) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name } });
-    expect(requestMayUseMetacognition({ jsonrpc: "2.0", id: 1, method: "tools/list" })).toBe(true);
-    expect(requestMayUseMetacognition(call("context_metacognition_run"))).toBe(true);
-    expect(requestMayUseMetacognition(call("context_get"))).toBe(false);
-    expect(requestMayUseMetacognition([call("context_get"), call("context_metacognition_list")])).toBe(true);
-    expect(requestMayUseMetacognition([call("context_get")])).toBe(false);
-    expect(requestMayUseMetacognition([{ jsonrpc: "2.0", id: 2, method: "tools/list" }])).toBe(true);
-    expect(requestMayUseMetacognition(null)).toBe(false);
-    expect(requestMayUseMetacognition("tools/list")).toBe(false);
-  });
-
-  it("a body with no content-length (chunked) is still read, but only up to its cap", async () => {
-    const send = (payload: string) => {
-      const bytes = new TextEncoder().encode(payload);
-      const body = new ReadableStream({
-        start(ctrl) {
-          ctrl.enqueue(bytes);
-          ctrl.close();
-        },
-      });
-      return app.request("/mcp", {
-        method: "POST",
-        headers: { ...MCP_HEADERS, Authorization: `Bearer ${owner.apiKey}` },
-        body,
-        duplex: "half",
-      } as any);
-    };
-    const names = async (res: Response) => {
-      const ct = res.headers.get("content-type") || "";
-      const j = ct.includes("application/json")
-        ? await res.json()
-        : JSON.parse((await res.text()).split("\n").find((l) => l.startsWith("data: "))!.slice(6));
-      return (j.result?.tools ?? []).map((t: any) => t.name) as string[];
-    };
-    const small = await names(await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })));
-    expect(small).toContain("context_metacognition_list");
-    // Past the cap the peek gives up (the request itself is still served).
-    const big = await names(
-      await send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { pad: "x".repeat(70 * 1024) } } })),
-    );
-    expect(big).toContain("nest_index");
-    expect(big).not.toContain("context_metacognition_list");
-  });
-
-  it("a server admin who owns no nest is offered them, and may use them on any nest", async () => {
-    const names = (await listTools(root.apiKey, "/mcp")).map((t) => t.name);
-    expect(names).toContain("context_metacognition_list");
-    const r = await mcp("/mcp", "tools/call", { name: "context_metacognition_list", arguments: { nest: nestId } }, root.apiKey);
-    expect(isError(r)).toBe(false);
-  });
-
-  it("a key scoped to a nest the caller only writes in isn't offered them, though they own another", async () => {
-    const own = (await jsonRequest(app, "POST", "/nests", { name: "Editor Scoped" }, editor.apiKey)).data.nest.id;
-    const minted = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nestId }, editor.apiKey);
-    expect(minted.status).toBe(201);
-    const names = (await listTools(minted.data.api_key, "/mcp")).map((t) => t.name);
-    expect(names).not.toContain("context_metacognition_list");
-    // Unscoped, the same person (owner of `own`) is offered them.
-    expect((await listTools(editor.apiKey, "/mcp")).map((t) => t.name)).toContain("context_metacognition_list");
-    await jsonRequest(app, "DELETE", `/nests/${own}`, undefined, editor.apiKey);
   });
 });
 

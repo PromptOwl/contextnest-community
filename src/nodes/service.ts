@@ -96,6 +96,7 @@ import {
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { nestDoneTags, nestTaskRules, storeDefaultTaskRules } from "../nests/service.js";
+import { validateInstructions, writeInstructions } from "../nests/instructions-service.js";
 import {
   applyExclusiveNamespaces,
   bareTag,
@@ -496,6 +497,16 @@ export interface NodeResponse extends TaskFields {
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
+  /** Who sealed the latest version: the human and, when the write named one,
+   *  the agent (`client`, spec §9.4). Node detail only, never to a public
+   *  reader — like `collaborators`, it names the nest's people. */
+  last_edit?: {
+    version: number;
+    edited_by: string;
+    edited_by_system?: string;
+    edited_at: string;
+    client?: ClientMetadata;
+  };
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -1720,6 +1731,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
+  /** An agent registered through the agent event API (po-1186): where it
+   *  executes, its runtime label and its accountable owner, stored as
+   *  `metadata.agent`. Agent nodes only. */
+  agent?: { executes: string; runtime: string | null; owner: string };
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -2224,6 +2239,7 @@ async function createNodeOnce(
       ...(input.provenance ? { provenance: input.provenance } : {}),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
+      ...(input.agent && input.type === "agent" ? { agent: input.agent } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
@@ -2501,6 +2517,39 @@ async function stageImportedFilesInner(
       return !segs.includes("_suggestions") && !segs.includes(".context");
     })
     .map((f) => (/^context\.md$/i.test(String(f.path)) ? { ...f, path: "CONTEXT.md" } : f));
+  // The engine's import slugifies paths, so it would land this as `context.md`,
+  // which `readContextMd` doesn't find on a case-sensitive disk. Instructions
+  // aren't a document anyway: they go through their own write, with a revision.
+  const instructions = carried.find((f) => f.path === "CONTEXT.md");
+  const staged = await stageVaultFiles(
+    nestId,
+    carried.filter((f) => f.path !== "CONTEXT.md"),
+    userEmail,
+  );
+  if (!instructions) return staged;
+  try {
+    const content = validateInstructions(instructions.content);
+    await writeInstructions(nestId, content, {
+      authorEmail: userEmail,
+      note: "Imported with the folder",
+      source: "push",
+    });
+    return { ...staged, written: staged.written + 1 };
+  } catch (err) {
+    if (!(err instanceof ValidationError)) throw err;
+    return {
+      ...staged,
+      rejected: [...staged.rejected, "CONTEXT.md"],
+      problems: [...staged.problems, `CONTEXT.md: ${err.message}`],
+    };
+  }
+}
+
+async function stageVaultFiles(
+  nestId: string,
+  carried: Array<{ path: string; content: string }>,
+  userEmail: string
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
   // View addresses (see views/collision.ts): a document arriving at a view's
   // <view>/view/… address, or a view arriving over an occupied one, is refused

@@ -1707,7 +1707,7 @@ function MaturityBoardInner({
                     />
                   );
                   return (
-                    <div className="mt-2 flex min-w-0 items-center gap-1.5 min-h-6">
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 min-h-6">
                       {n.priority && priorityCtl}
                       {shownTags.slice(0, 3).map((t) => (
                         <TagPill key={t} tag={t} label={surfaceName.get(bareTag(t).replace(/^surface:/, ""))} />

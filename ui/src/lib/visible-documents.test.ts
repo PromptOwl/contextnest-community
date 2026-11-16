@@ -7,6 +7,7 @@ import {
   visibleDocuments,
   hasActiveFilters,
   documentsTabIsEmpty,
+  childFolders,
 } from "./visible-documents";
 
 const doc = (id: string, over: Record<string, any> = {}) => ({
@@ -162,5 +163,22 @@ describe("documentsTabIsEmpty", () => {
     expect(
       documentsTabIsEmpty({ visibleCount: 2, folderCount: 0, filtering: true }),
     ).toBe(false);
+  });
+});
+
+describe("childFolders", () => {
+  const known = ["gtm", "gtm/deals", "gtm/deals/q1", "gtmx", "ops"].map((path) => ({ path, total: 1 }));
+  const paths = (base: string) => childFolders(known, base).map((f) => f.path);
+
+  it("lists only the top level at the nest root", () => {
+    expect(paths("")).toEqual(["gtm", "gtmx", "ops"]);
+  });
+
+  it("lists direct children of a folder, not deeper ones or name-prefix siblings", () => {
+    expect(paths("gtm")).toEqual(["gtm/deals"]);
+  });
+
+  it("is empty for a leaf folder", () => {
+    expect(paths("gtm/deals/q1")).toEqual([]);
   });
 });

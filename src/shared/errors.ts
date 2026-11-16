@@ -74,6 +74,25 @@ export class ConflictError extends AppError {
 }
 
 /**
+ * An error whose JSON body carries a machine-readable `code` (and optional
+ * extra fields / headers), for APIs agents parse: the agent event API's
+ * `idempotency_conflict` (409), schema violations naming the field (422) and
+ * `rate_limited` (429 + Retry-After). Rendered by app.onError.
+ */
+export class CodedError extends AppError {
+  constructor(
+    statusCode: number,
+    message: string,
+    public code: string,
+    public extra: Record<string, unknown> = {},
+    public headers: Record<string, string> = {},
+  ) {
+    super(statusCode, message);
+    this.name = "CodedError";
+  }
+}
+
+/**
  * The write would land as a draft for a reviewer, and the caller asked for
  * publish-or-nothing (WriteOptions.publishOnly — bulk board edits). 409: the
  * document's governance, not the request, is what stands in the way.

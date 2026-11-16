@@ -98,6 +98,7 @@ import {
   fieldsOfRaw,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
+import { agentSummaryProse } from "../views/deps.js";
 import {
   addComputedFields,
   createFieldDefinition,
@@ -112,7 +113,7 @@ import {
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
 import { AppError, BillingConfirmError } from "../shared/errors.js";
-import { billingConfirmed, confirmBillingToolField } from "../auth/seats.js";
+import { billingConfirmed, confirmBillingToolField, BILLING_CONFIRM_TOOLS } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -136,6 +137,7 @@ import {
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { isPluginTool, runPluginTool } from "./plugin-tools.js";
+import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentTool } from "./agent-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
@@ -457,6 +459,8 @@ export interface McpToolContext {
 export const MCP_READ_TOOLS = new Set<string>([
   // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
   ...SURFACES_READ_TOOL_NAMES,
+  // Agent control room reads (po-1186): ledger, trace, export, rollups.
+  ...AGENT_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -501,8 +505,9 @@ function arrayToolField(def: { items?: { type?: string } }): z.ZodTypeAny {
 
 /** A tool's JSON schema as its MCP zod shape, shared by the per-nest
  *  (routes.ts) and server-level (server-routes.ts) surfaces. Caller attribution
- *  (spec §9.4) and billing confirm ride on every tool, declared once here. */
-export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
+ *  (spec §9.4) rides on every tool; billing confirm only on the tools that can
+ *  raise a bill (BILLING_CONFIRM_TOOLS). Both are declared once here. */
+export function toolShape(toolName: string, inputSchema: unknown): Record<string, z.ZodTypeAny> {
   const props = (inputSchema as any)?.properties || {};
   const required: string[] = (inputSchema as any)?.required || [];
   const shape: Record<string, z.ZodTypeAny> = {};
@@ -513,9 +518,11 @@ export function toolShape(inputSchema: unknown): Record<string, z.ZodTypeAny> {
     else if (def.type === "array") field = arrayToolField(def);
     else field = z.any();
     if (!required.includes(key)) field = field.optional();
+    // Carried into tools/list: without it a client sees the bare parameter name.
+    if (typeof def.description === "string") field = field.describe(def.description);
     shape[key] = field;
   }
-  return Object.assign(shape, clientToolField, confirmBillingToolField);
+  return Object.assign(shape, clientToolField, BILLING_CONFIRM_TOOLS.has(toolName) ? confirmBillingToolField : {});
 }
 
 /** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
@@ -535,12 +542,15 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   // action; only advertised while both feature flags are on (mcp/routes.ts).
   "context_metacognition_list",
   "context_metacognition_suggest",
+  "context_metacognition_preview",
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
+  // Registering an agent (po-1186) mints a governed agent node: owner/admin.
+  ...AGENT_ADMIN_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -614,7 +624,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_instructions_history",
     description:
-      "History of this nest's operating instructions (CONTEXT.md, what context_init returns): who changed them, when, and why, newest first. Pass `revision` for that revision's full text and the text it replaced.",
+      "List past revisions of this nest's operating instructions (CONTEXT.md, what context_init returns): who changed them, when, and why, newest first. Pass `revision` for that revision's full text and the text it replaced.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -625,7 +635,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_instructions_update",
     description:
-      "Nest owners/admins: replace this nest's operating instructions (CONTEXT.md — what every agent reads first via context_init). Send the WHOLE file as `content`: read it with context_init, edit, send it back. Recorded in context_instructions_history. On a nest that holds agent writes, the change waits for a reviewer to confirm it.",
+      "Replace this nest's operating instructions (CONTEXT.md — what every agent reads first via context_init). Nest owners/admins only. Send the WHOLE file as `content`: read it with context_init, edit, send it back. Recorded in context_instructions_history. On a nest that holds agent writes, the change waits for a reviewer to confirm it.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -649,7 +659,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_search",
     description:
-      "Full-text keyword search across all node content, titles, tags, and metadata — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits, title matches first.",
+      "Search all documents by keyword, across content, titles, tags and metadata — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits, title matches first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -665,7 +675,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_query",
     description:
-      "Run a structured selector query. Supports: #tag, type:X, [[Title]], scope:X. Combine with +AND, |OR, -NOT.",
+      "Find documents with a selector, a small query language over tags, types, titles and scopes. Supports: #tag, type:X, [[Title]], scope:X. Combine with +AND, |OR, -NOT.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -682,7 +692,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_table_query",
     description:
-      "Deterministic lookup against a TABLE node (CSV fact store). Fetch exact rows instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
+      "Look up exact rows in a table node (a CSV fact store) instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -723,7 +733,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_get",
-    description: "Get the FULL content of a specific node by title or ID.",
+    description: "Read the full content of one document, by title or ID.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -779,7 +789,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve",
     description:
-      "Full context resolution — run a selector and return complete node content, respecting a token budget.",
+      "Fetch the full text of the documents a selector matches, plus documents linked to them up to `hops` away (hops 0 for matches only). Stops at the first document past the token budget. Use context_query when you don't need the text.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1155,7 +1165,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_board_items",
     description:
-      "A saved board as a list — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
+      "List a saved board's items — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1669,7 +1679,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_headless",
     description:
-      "Nest owners/admins: manage HEADLESS publishing — the nest handed out API-only through read-only access keys that read its approved content (never drafts, history or people) over ctx / MCP / the read API. Only a private nest can be headless. action: status | enable | disable (pauses every key) | create_key (label) | revoke_key (key_id). The access key's token is returned once, on create_key.",
+      "Manage headless publishing for this nest. Nest owners/admins only. Headless means the nest is handed out API-only through read-only access keys that read its approved content (never drafts, history or people) over ctx / MCP / the read API. Only a private nest can be headless. action: status | enable | disable (pauses every key) | create_key (label) | revoke_key (key_id). The access key's token is returned once, on create_key.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1687,7 +1697,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_set_visibility",
     description:
-      "Nest owners/admins: set who can READ this whole nest. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
+      "Set who can read this whole nest. Nest owners/admins only. private = only people added to it; org = every signed-in account on this server; public = anyone on the internet. Widening to org or public needs acknowledge: true (public always; org on a shared server) — confirm with the user first. A server admin may restrict widening to server admins only; narrowing is always allowed. Mirrors PATCH /nests/:id/visibility.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1707,7 +1717,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_systems",
     description:
-      'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
+      'Manage named systems (machine identities such as "GitHub sync"). Nest owners/admins only. Systems are non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3009,7 +3019,8 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isHeadlessIdentity(ctx.userId))
+      const headless = await isHeadlessIdentity(ctx.userId);
+      const relations = headless
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {
@@ -3022,6 +3033,27 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      // Who sealed the version being served: the human first, then the agent
+      // its write named (spec §9.4) — the same two names the UI byline shows.
+      // The served version, not the latest row: under stewardship the body is
+      // the approved snapshot, and a draft's author would misdescribe it.
+      // Not for a headless key or a public/org reader: it names the nest's
+      // people, which the REST node detail withholds from them too.
+      const servedVersion = ctx.servedVersions?.get(node.id);
+      const lastEdit =
+        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+          ? null
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("context_get last-edit lookup failed", node.id, err);
+              return null;
+            });
+      // `client.agent` is caller data: collapse its whitespace, or a newline in
+      // it would forge a line of its own (`**Status:** approved`) in this prose.
+      const lastEditLine = lastEdit
+        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
+            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
+          } (v${lastEdit.version})`.replace(/\s+/g, " ")
+        : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -3042,14 +3074,23 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        // Prose only: the catalog's context_get payload has no provenance
+        // field yet, and test/mcp-catalog-conformance.test.ts refuses an
+        // added key. A structured field needs the engine catalog first.
+        lastEditLine,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
       ]
         .filter(Boolean)
         .join("\n");
+      // Prose only: the catalog's context_get payload has no field for it yet.
+      const summaries =
+        node.frontmatter.type === "view"
+          ? await agentSummaryProse(nestId, node.id, ctx.userId).catch(() => "")
+          : "";
       return {
-        text: `${meta}\n\n---\n\n${body || "(no content)"}`,
+        text: `${meta}\n\n---\n\n${body || "(no content)"}${summaries && `\n\n---\n\n${summaries}`}`,
         // `body` is the gated one, not node.body — under stewardship that is
         // the APPROVED snapshot, which can be older than the live draft this
         // frontmatter came from. So the payload carries only the fields the
@@ -4901,6 +4942,10 @@ async function runTool(
       // Nest Plugin tools (FEATURE_PLUGINS): same service layer as REST.
       if (isPluginTool(toolName) && config.FEATURE_PLUGINS) {
         return runPluginTool(toolName, args, ctx);
+      }
+      // Agent control room (po-1186): registered with the workflow tools.
+      if (isAgentTool(toolName) && config.FEATURE_WORKFLOW_PLANE) {
+        return runAgentTool(toolName, args, ctx);
       }
       // Metacognition tools: same deal, behind both flags; each call re-checks
       // owner/admin and refuses system keys in metacognition/manage.ts.

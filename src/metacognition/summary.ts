@@ -1,6 +1,6 @@
 /**
  * A metacognition agent's config in plain words — what an MCP harness shows the
- * person before it saves one (context_metacognition_configure dry_run), and the line
+ * person before it saves one (context_metacognition_preview), and the line
  * context_metacognition_list gives each agent.
  *
  * Pure: the parsed config in, one paragraph out. The wording follows the scope

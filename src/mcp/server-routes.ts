@@ -19,15 +19,16 @@
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
- * Metacognition (`context_metacognition_list` / `_suggest` / `_configure` / `_run` / `_remove`, nest
- * required) is offered to people who own or administer a nest while its flags
- * are on, and re-checked on the named nest per call.
+ * Metacognition (`context_metacognition_*`) is per-nest only: what a run does
+ * depends on the agent's saved config, so a tool list can't show it up front,
+ * and this is the endpoint the ChatGPT app connects to.
  *
  * Governance tools that manage people or nest settings (`context_approve`,
  * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import { mcpNoStream } from "./routes.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -45,7 +46,6 @@ import {
 import {
   resolveNestPermission,
   permissionLevel,
-  isServerAdminUserId,
   type NestPermission,
 } from "../shared/access.js";
 import {
@@ -66,19 +66,16 @@ import {
   toolShape,
   type ToolResult,
 } from "./tools.js";
+import { toolAnnotations, toolTitle } from "./annotations.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
-import {
-  METACOGNITION_TOOL_DEFINITIONS,
-  isMetacognitionTool,
-  requestMayUseMetacognition,
-} from "./metacognition-tools.js";
-import { metacognitionEnabled } from "../metacognition/manage.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -97,9 +94,6 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_request_access",
   "context_task_log",
   "context_bulk_update",
-  "context_metacognition_configure",
-  "context_metacognition_run",
-  "context_metacognition_remove",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -345,7 +339,7 @@ export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
+      "List every nest these credentials can read, with name, id, permission and document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -366,11 +360,9 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
-  // Metacognition agents (CU-wdqcq05rqq): the per-nest definitions with
-  // `nest` required. Advertised per request only while both feature flags are
-  // on and the caller administers some nest (createServerMcp); each call
-  // re-checks owner/admin on the named nest.
-  ...METACOGNITION_TOOL_DEFINITIONS.map(withNestArg),
+  // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
+  // GET /rollups twins). Advertised only while the workflow plane is on.
+  ...AGENT_ORG_TOOL_DEFINITIONS,
 ];
 
 /**
@@ -386,6 +378,8 @@ export const SERVER_TOOL_DEFINITIONS = [
  */
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
   "context_query",
   "context_search",
   "context_list",
@@ -444,6 +438,9 @@ async function handleServerToolCall(
   // them (incl. the context_create bootstrap write).
   if (capability === "read" && !MCP_READ_TOOLS.has(toolName)) {
     return `This API key is read-only and cannot call "${toolName}". Read-only keys may only read, query, search, and export. Mint a read-write key for changes.`;
+  }
+  if (isAgentOrgTool(toolName)) {
+    return runAgentOrgTool(toolName, args, { userId, apiKeyId, nestScope, capability });
   }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -639,14 +636,11 @@ function createServerMcp(
   c: Context<AuthEnv>,
   headless = false,
   capability: "read" | "write" = "write",
-  /** Offer the metacognition tools: flags on, and a person with a full
-   *  credential who owns or administers at least one nest (route handler). */
-  offerMetacognition = false,
   /** Returned in the `initialize` result (connect-instructions.ts). */
   instructions?: string,
 ): McpServer {
   const server = new McpServer(
-    { name: "contextnest-server", version: "1.0.0" },
+    { name: "contextnest-server", title: "ContextNest", version: SERVICE_VERSION },
     { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
@@ -657,9 +651,10 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
-    if (isMetacognitionTool(tool.name) && !offerMetacognition) continue;
-    const shape = toolShape(tool.inputSchema);
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    if (isAgentOrgTool(tool.name) && !config.FEATURE_WORKFLOW_PLANE) continue;
+    const shape = toolShape(tool.name, tool.inputSchema);
+    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
       const granted = c.get("oauthScope");
@@ -694,80 +689,11 @@ function createServerMcp(
   return server;
 }
 
-/**
- * Does this caller get the metacognition tools on the server-level endpoint?
- * Both flags on, a person (not a system or access key), and owner/admin on at
- * least one nest these credentials reach — the per-nest endpoint's rule, over
- * every nest, since the nest is only named at call time.
- */
-async function offersMetacognition(c: Context<AuthEnv>, userId: string): Promise<boolean> {
-  if (!metacognitionEnabled()) return false;
-  // The server is rebuilt per request, so only pay for the lookup when this
-  // request can use the answer: a tools/list, or a call to one of these tools
-  // (which re-checks owner/admin on the named nest anyway). The peek never
-  // reads past 64 KB: those requests are a few KB at most, so anything bigger
-  // (declared, or read so far on a chunked body) is some other write.
-  const CAP = 64 * 1024;
-  if (Number(c.req.header("content-length") ?? 0) > CAP) return false;
-  const text = await readCapped(c.req.raw.clone().body, CAP);
-  if (text === null) return false;
-  let body: unknown = null;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return false;
-  }
-  const wants = requestMayUseMetacognition(body);
-  if (!wants) return false;
-  if (await isSystemUser(userId)) return false;
-  const person = (await getDb().get("SELECT COALESCE(is_service, 0) AS s FROM users WHERE id = ?", [userId])) as
-    | { s: number }
-    | undefined;
-  if (config.AUTH_MODE !== "open" && (!person || person.s)) return false;
-  // Open mode is the owner everywhere; a server admin administers any nest
-  // (resolveNestPermission), the ones it can only reach by link included.
-  if (config.AUTH_MODE === "open" || (await isServerAdminUserId(userId))) return true;
-  // Owning a nest settles it without a lookup per nest; otherwise check the
-  // nests shared with the caller (no document counts — buildNestIndex's cost).
-  const scope = c.get("nestScope");
-  const owned = (await listNests(userId)).filter((n) => !scope || n.id === scope);
-  if (owned.length) return true;
-  for (const n of await listSharedNests(userId)) {
-    if (scope && n.id !== scope) continue;
-    const perm = await resolveNestPermission(n.id, userId);
-    if (perm === "owner" || perm === "admin") return true;
-  }
-  return false;
-}
-
-/** The stream's text, or null once it passes `cap` bytes (or can't be read). */
-async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number): Promise<string | null> {
-  if (!stream) return "";
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > cap) {
-        await reader.cancel().catch(() => {});
-        return null;
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return null;
-  }
-  return new TextDecoder().decode(Buffer.concat(chunks));
-}
-
 export const serverMcpRoutes = new Hono<AuthEnv>();
 
-// POST/GET/DELETE /mcp — stateless, one server per request, same transport
-// shape as the per-nest endpoint.
-serverMcpRoutes.all("/", async (c) => {
+// POST /mcp — stateless, one server per request, same transport shape as the
+// per-nest endpoint. Every other method gets 405 (see mcpNoStream).
+serverMcpRoutes.post("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
   const headless = await isHeadlessIdentity(userId);
@@ -798,7 +724,6 @@ serverMcpRoutes.all("/", async (c) => {
     c,
     headless,
     capability,
-    !headless && capability === "write" && (await offersMetacognition(c, userId)),
     instructions,
   );
 
@@ -814,6 +739,7 @@ serverMcpRoutes.all("/", async (c) => {
     await server.server.close();
   }
 });
+serverMcpRoutes.all("/", mcpNoStream);
 
 // ─── GET /index — the person nest index ──────────────────────────────────
 
@@ -967,11 +893,11 @@ Streamable HTTP, stateless. Two endpoints:
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
-  - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too — also on
-    \`${B}/mcp\` with \`nest\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
-    (a starting config read off the agent document), \`context_metacognition_configure\`
-    (call with \`dry_run: true\` first and show the person the returned \`summary\`
-    before saving), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
+  - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too; not on
+    \`${B}/mcp\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
+    (a starting config read off the agent document), \`context_metacognition_preview\`
+    (validates a config and saves nothing: show the person the returned \`summary\`),
+    \`context_metacognition_configure\` (saves it), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
     \`workflow_runs_list { agent, agent_stats: true }\`
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`

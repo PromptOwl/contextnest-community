@@ -4,6 +4,8 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2507,6 +2509,69 @@ export function runMigrations(db: Database.Database): void {
       db.exec(surfacesS3AlterSqlite());
     })();
     recordMigration("082_surfaces_seeds");
+  }
+
+  // 083: cached `summary` block text, keyed by its exact input set.
+  if (!hasMigration("083_view_summaries")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS view_summaries (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        cache_key TEXT NOT NULL,
+        text TEXT NOT NULL,
+        refs TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, cache_key)
+      )
+    `);
+    recordMigration("083_view_summaries");
+  }
+
+  // 086: agent control room, CR1 (po-1186). The decision ledger is a view over
+  //   runs, run steps and the Surfaces tables, so these are columns, not a new
+  //   table. 084 and 085 are taken on open branches (onboarding, comment
+  //   mentions); ids match by string.
+  //   - runs.idempotency_key: one run per (nest, key) for an external agent's
+  //     retried start; runs.external_ref: the caller's own id, shown, never
+  //     trusted; runs.source: runner | external | server:metacognition |
+  //     server:surfaces (backfilled from claimed_by / triggered_by).
+  //   - runs.verdict / runs.reason_code: the strongest `decision` step's
+  //     verdict, written with the step so the ledger can filter on it in SQL.
+  //   - run_steps.client_key: one step per (run, key).
+  //   - surface_windows.run_id: the listener's run for the window it judged,
+  //     the run → window hop the ledger trace needs.
+  if (!hasMigration("086_control_room_ledger")) {
+    db.transaction(() => {
+      const cols = (table: string) =>
+        new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+      const runCols = cols("runs");
+      if (!runCols.has("idempotency_key")) db.exec("ALTER TABLE runs ADD COLUMN idempotency_key TEXT");
+      if (!runCols.has("source")) db.exec("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'runner'");
+      if (!runCols.has("external_ref")) db.exec("ALTER TABLE runs ADD COLUMN external_ref TEXT");
+      if (!runCols.has("verdict")) db.exec("ALTER TABLE runs ADD COLUMN verdict TEXT");
+      if (!runCols.has("reason_code")) db.exec("ALTER TABLE runs ADD COLUMN reason_code TEXT");
+      if (!cols("run_steps").has("client_key")) db.exec("ALTER TABLE run_steps ADD COLUMN client_key TEXT");
+      if (!cols("surface_windows").has("run_id")) db.exec("ALTER TABLE surface_windows ADD COLUMN run_id TEXT");
+      db.exec(controlRoomLedgerIndexesAndBackfill());
+    })();
+    recordMigration("086_control_room_ledger");
+  }
+
+  // 090: a run's cost and tokens on the run (po-1186 CR1 review). Written
+  //   with the trace at close (run-service closeRun), like `verdict`, so the
+  //   ledger's totals and rollups aggregate in SQL instead of parsing every
+  //   run's trace. Backfilled from the traces already stored.
+  if (!hasMigration("090_control_room_run_totals")) {
+    db.transaction(() => {
+      const runCols = new Set((db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+      if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
+      if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
+      const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
+      for (const r of db.prepare("SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").iterate() as Iterable<{ id: string; trace: string }>) {
+        const t = runTotals(r.trace);
+        set.run(t.costMicros, t.tokens, r.id);
+      }
+    })();
+    recordMigration("090_control_room_run_totals");
   }
 }
 
