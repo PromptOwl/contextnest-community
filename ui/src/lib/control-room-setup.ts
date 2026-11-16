@@ -284,10 +284,11 @@ export function dryRunSummary(t: DryRunTree): string {
  * (src/surfaces/services/notice-service.ts enableNotice). Shown before
  * "Turn on" so the admin sees the exact words.
  */
-export function noticeParagraphs(nest: string): string[] {
+/** The wizard's preview of the enable notice; `ttlHours` is this server's buffer_ttl_hours, as in the posted notice. */
+export function noticeParagraphs(nest: string, ttlHours: number): string[] {
   return [
     `Nest is now listening here for ${nest}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve.`,
-    "What it keeps: only summaries a named person approves; messages are cleared within 24 hours.",
+    `What it keeps: only summaries a named person approves; messages are cleared within ${ttlHours} hours.`,
     "React 🧠 to a message to ask Nest to keep it. Say @Nest skip me and it won't use your messages. This server's administrators can read every nest.",
   ];
 }

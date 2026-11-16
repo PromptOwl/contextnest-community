@@ -199,3 +199,11 @@ describe("AC-CR-14: the dry run shows created vs already there", () => {
     expect(dryRunSummary(t)).toMatch(/already here/);
   });
 });
+
+describe("noticeParagraphs: the wizard's preview matches the notice the server posts", () => {
+  it("states this server's buffer TTL, not a fixed 24 hours", async () => {
+    const { noticeParagraphs } = await import("./control-room-setup");
+    expect(noticeParagraphs("Revenue", 12).join(" ")).toMatch(/messages are cleared within 12 hours/);
+    expect(noticeParagraphs("Revenue", 24).join(" ")).toMatch(/messages are cleared within 24 hours/);
+  });
+});

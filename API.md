@@ -2776,7 +2776,7 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
 - `GET /surfaces/bindings?nest_id=`: server admins see every binding; others see bindings on nests they own or administer.
 - `POST /surfaces/bindings/preview` `{ install_id, conversation_id, nest_id, explicit_public_bind?, ext_capture_enabled? }` (nest owner/admin): dry-run guard, `{ would_bind, guard, disclosure }`.
   - For a private channel or DM, the caller must also be a current member (or a server admin). Otherwise the answer is a uniform `404` with no counts. The same applies to create.
-- `POST /surfaces/bindings` (same body, nest owner/admin): `201 { binding, guard, disclosure }`.
+- `POST /surfaces/bindings` (same body, nest owner/admin): `201 { binding, guard, disclosure, notice_posted }`. `notice_posted` says whether the one enable notice went out. It is `false` when Slack refused the post or the settings couldn't be read; the notice is retried the next time the binding is created.
   - `409 { code: "guard_refused", guard, guard_detail }` when capture isn't safe, or when the members can't be read.
   - `422` for `explicit_public_bind` on a private, DM or externally shared conversation.
   - `ext_capture_enabled` defaults to false.

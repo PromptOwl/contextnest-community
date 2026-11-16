@@ -417,7 +417,8 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_create": {
         const out = await createBindingWithListener(bindArgs());
-        return { text: `Bound ${out.binding.conversation_id} → this nest (${out.binding.status}). ${SERVER_ADMIN_DISCLOSURE}`, data: out };
+        const unnoticed = out.notice_posted ? "" : " The enable notice wasn't posted: members haven't been told yet.";
+        return { text: `Bound ${out.binding.conversation_id} → this nest (${out.binding.status}).${unnoticed} ${SERVER_ADMIN_DISCLOSURE}`, data: out };
       }
       case "context_surfaces_binding_update": {
         refuseListener(args);
