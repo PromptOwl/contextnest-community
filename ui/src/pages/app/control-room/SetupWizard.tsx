@@ -385,7 +385,8 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
         setCreds(r.install.credentials ?? {});
         setManifest(r.manifest ?? null);
       })
-      .catch(() => {});
+      // Without this read every field shows "Not saved": say so, or the admin re-enters secrets.
+      .catch((e) => live && toast.error(errText(e, "Couldn't read the saved Slack values. Reload to try again.")));
     return () => {
       live = false;
     };

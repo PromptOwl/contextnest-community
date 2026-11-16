@@ -122,7 +122,10 @@ aboutSurfacesRoutes.get("/", async (c) => {
   // The numbers on this page are privacy claims. If this server's settings
   // can't be read, say so (503, never cached) rather than state defaults that
   // may not be true here.
-  const settings = await getSettings().catch(() => null);
+  const settings = await getSettings().catch((err) => {
+    console.warn("[surfaces] about page: settings unreadable", err instanceof Error ? err.message : String(err));
+    return null;
+  });
   if (!settings) {
     c.header("Cache-Control", "no-store");
     return c.text("This page is unavailable right now. Try again in a minute.", 503);
