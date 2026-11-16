@@ -537,9 +537,19 @@ describe("AC-EED-05: with sign-in turned off (open mode), the one user still dec
     const id = await stageLocal(nest, PRICING);
     const outsider = await registerUser(open, `outsider-${Date.now()}@eed.test`, "Outsider");
     const asKey = (path: string) => jsonRequest(open, "GET", path, undefined, outsider.apiKey);
-    expect((await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits`)).data?.pending ?? null).toBeNull();
-    expect((await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits/${id}`)).status).not.toBe(200);
+    // Control: the local user reads all three.
+    expect((await call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits`)).data.pending.suggestion_id).toBe(id);
+    expect((await call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits/${id}`)).status).toBe(200);
+    expect((await call("GET", `/nests/${nest}/external-edits`)).data.total).toBeGreaterThanOrEqual(1);
+    // The outsider's key: answered like a node with no edit, an unknown id, an empty list.
+    const pending = await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits`);
+    expect(pending.status).toBe(200);
+    expect(pending.data).toEqual({ pending: null });
+    const detail = await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits/${id}`);
+    expect(detail.status).toBe(404);
+    expect(detail.data).toEqual({ error: "Suggestion not found" });
     const list = await asKey(`/nests/${nest}/external-edits`);
-    expect(JSON.stringify(list.data ?? {})).not.toContain(id);
+    expect(list.status).toBe(200);
+    expect(list.data).toMatchObject({ entries: [], total: 0 });
   });
 });

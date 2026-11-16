@@ -30,6 +30,9 @@ export const StreamToolInput = z.object({
   author: z.string().optional().describe("Only versions by this email. Comma-separate several (any of them)."),
   tag: z.string().optional().describe("Only documents carrying this tag. Comma-separate several (any of them)."),
   type: z.string().optional().describe("Only documents of this type. Comma-separate several (any of them)."),
+  // Plain z.number() on purpose: tools/list is built by toolShape, which maps
+  // only type "number"; .int() would emit "integer" and be advertised untyped,
+  // and min/max are not carried. streamToolResult enforces whole numbers in range.
   limit: z.number().optional().describe("Posts to return, 1-100 (default 25)."),
   offset: z.number().optional().describe("Skip this many posts (paging)."),
 });

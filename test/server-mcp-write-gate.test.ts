@@ -168,6 +168,47 @@ describe("server-level /mcp licensed reads — unlicensed, past the Free tier", 
     const out = await callServerTool(app, "context_versions", { nest: "whatever", title: "T" }, 12);
     expect(out).toContain("no valid PromptOwl license");
   });
+
+  it("every gated tool's REST twin is refused the same way (503), so the two lists stay in step", async () => {
+    const { SERVER_LICENSED_READ_TOOLS } = await import("../src/mcp/server-routes.js");
+    const nest = (await (await app.request("/nests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Gated" }) })).json()).nest?.id;
+    // A gated MCP tool must name the REST read it mirrors here; a new one fails until it does.
+    const restTwin: Record<string, string> = {
+      context_stream: "/me/stream",
+      context_versions: `/nests/${nest ?? "x"}/nodes/nodes/any/versions`,
+    };
+    expect([...SERVER_LICENSED_READ_TOOLS].sort()).toEqual(Object.keys(restTwin).sort());
+    for (const [tool, path] of Object.entries(restTwin)) {
+      const res = await app.request(path);
+      expect(res.status, `${tool} → GET ${path}`).toBe(503);
+    }
+  });
+});
+
+describe("server-level /mcp licensed reads — unlicensed and suspended", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp(() => ({
+      getCurrentLicense: () => ({ valid: false, tier: "none" }),
+      isSuspended: () => true,
+      getSuspensionReason: () => "tos",
+    }));
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("words the refusal for a read, not a write", async () => {
+    const out = await callServerTool(app, "context_versions", { nest: "whatever", title: "T" }, 40);
+    expect(out).toContain("suspended by PromptOwl; version history is unavailable");
+    expect(out).toContain("tos");
+    expect(out).not.toContain("writes are blocked");
+  });
 });
 
 describe("server-level /mcp licensed reads — licensed", () => {

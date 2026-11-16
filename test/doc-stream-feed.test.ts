@@ -10,6 +10,8 @@
  *   AC-ST-06 live pill: `facets=0` makes the `since` poll cheap
  *   AC-ST-08 MCP parity: `context_stream` (per-nest and server-level)
  *   AC-ST-09 access: nothing for a document the viewer can't open
+ *   AC-ST-11..14 (po-1375): serializer round trip, exact auto-publish stamp,
+ *            every publish reason, zod-generated context_stream schema
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, authed, resetAuthRateLimit } from "./helpers.js";
@@ -340,7 +342,7 @@ describe("doc stream as a feed (po-1214)", () => {
   });
 
   // ── po-1375: the #561 review leftovers ─────────────────────────────────────
-  it("AC-ST-04 (po-1375): Given client blocks written by serializeClient, When stored, Then AGENT_SQL files a string agent as an agent post and everything else as a person's", async () => {
+  it("AC-ST-11 (po-1375): Given client blocks written by serializeClient, When stored, Then AGENT_SQL files a string agent as an agent post and everything else as a person's", async () => {
     const { serializeClient } = await import("../src/shared/client-metadata.js");
     const { AGENT_SQL } = await import("../src/governance/stream-service.js");
     const d = await db();
@@ -362,7 +364,7 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(await isAgent(undefined)).toBe(false);
   });
 
-  it("AC-ST-03 (po-1375): Given a person's note that starts like the server's stamp, Then the post keeps it; the server's own stamp, old or new, shows no note", async () => {
+  it("AC-ST-12 (po-1375): Given a person's note that starts like the server's stamp, Then the post keeps it; the server's own stamp, old or new, shows no note", async () => {
     const { personNote } = await import("../src/governance/stream-service.js");
     const { autoPublishNote } = await import("../src/nodes/service.js");
     expect(personNote("Auto-published on Tuesday after the sync")).toBe("Auto-published on Tuesday after the sync");
@@ -372,13 +374,19 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(personNote(autoPublishNote("create", "no stewards configured"))).toBeNull();
     expect(personNote(autoPublishNote("edit", "owner/admin self-approve"))).toBeNull();
     expect(personNote(autoPublishNote("edit", "task — board work skips review"))).toBeNull();
-    // Stamps stored before the reasons were reworded (2026-07) still read as stamps.
-    expect(personNote("Auto-published on edit (no stewards)")).toBeNull();
+    // Every stamp ever stored (git history of nodes/service.ts) still reads as a stamp,
+    // including the reason reworded in 2026-07.
+    for (const legacy of [
+      "Auto-published on create (no stewards configured)",
+      "Auto-published on edit (no stewards)",
+      "Auto-published on create (owner/admin self-approve)",
+      "Auto-published on edit (owner/admin self-approve)",
+    ]) expect(personNote(legacy), legacy).toBeNull();
     expect(personNote("  ")).toBeNull();
     expect(personNote(null)).toBeNull();
   });
 
-  it("AC-ST-03 (po-1375): Given every reason the server auto-publishes with, Then its create and edit stamps read as stamps (no reason may hold a parenthesis or newline)", async () => {
+  it("AC-ST-13 (po-1375): Given every reason the server auto-publishes with, Then its create and edit stamps read as stamps (no reason may hold a parenthesis or newline)", async () => {
     const { autoPublishNote, isAutoPublishStamp, AUTO_PUBLISH_REASONS } = await import("../src/nodes/service.js");
     const reasons = Object.values(AUTO_PUBLISH_REASONS);
     expect(reasons.length).toBeGreaterThanOrEqual(5);
@@ -388,7 +396,7 @@ describe("doc stream as a feed (po-1214)", () => {
     }
   });
 
-  it("AC-ST-08 (po-1375): Given context_stream, Then its input schema is the one generated from zod (StreamToolInput)", async () => {
+  it("AC-ST-14 (po-1375): Given context_stream, Then its input schema is the one generated from zod (StreamToolInput)", async () => {
     const { TOOL_DEFINITIONS } = await import("../src/mcp/tools.js");
     const { StreamToolInput } = await import("../src/mcp/stream-tool.js");
     const { mcpInputSchema } = await import("../src/workflow/agent-event-schema.js");
