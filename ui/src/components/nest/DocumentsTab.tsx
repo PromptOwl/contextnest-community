@@ -40,6 +40,8 @@ import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
 import { rowLastEdit } from "@/lib/version-author";
 import { LastEditText } from "./DocumentsHome";
+import { ListRowActions } from "./ListRowActions";
+import { useMediaQuery } from "@/lib/use-media-query";
 import {
   LifecycleStatusBadge, SubmitForReviewModal, ReasonDialog, VersionHistoryModal,
   type DocumentLifecycleStatus, type Steward, type ReviewRequest, type Version,
@@ -179,6 +181,9 @@ export function DocumentsTab({
   viewMode,
 }: Props) {
   const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
+  // Phone width (below Tailwind's sm): list rows show the ⋮ menu, not the
+  // hover buttons. Same breakpoint NestView folds its header actions at.
+  const isPhone = useMediaQuery("(max-width: 639px)");
   const qc = useQueryClient();
   // Per-node comment counts drive the activity and "most comments" sorts —
   // a Documents-tab need, so it is read here, not on the nest page.
@@ -1496,13 +1501,13 @@ export function DocumentsTab({
                       </div>
                       {/* On a phone there is no hover, and the hidden buttons
                           still took the row's width and squeezed the title to
-                          nothing: list rows get the cards' ⋮ menu instead. */}
-                      {!cards && <div className="shrink-0 sm:hidden">{actionMenu}</div>}
+                          nothing: list rows get the cards' ⋮ menu instead.
+                          One set is mounted, never both (one pin per row). */}
                       {!cards && (
-                        <div
-                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100 max-sm:hidden"
-                          onClick={(e) => e.stopPropagation()}
-                        >
+                        <ListRowActions
+                          phone={isPhone}
+                          menu={actionMenu}
+                          inline={<>
                           {canSubmit && (
                             <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                               <Send className="h-3.5 w-3.5 mr-1" />
@@ -1560,7 +1565,8 @@ export function DocumentsTab({
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           )}
-                        </div>
+                          </>}
+                        />
                       )}
                     </div>
                   );
