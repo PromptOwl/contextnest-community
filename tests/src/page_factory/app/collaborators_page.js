@@ -10,6 +10,10 @@
  *
  * Owners and admins get the whole tab. An editor gets only the add form, with
  * everyone's role shown read-only. A viewer doesn't get the tab at all.
+ *
+ * On a shared deployment (`/health` `shared_deployment: true`, as on nest-dev)
+ * the add form opens on Team (po-1178), so `goto()` switches it to Person
+ * unless asked not to.
  */
 
 import logger from '../../helper/logger/logger.js';
@@ -55,6 +59,8 @@ class CollaboratorsPage {
 
     // ── Add a person / team ────────────────────────────────────────────────
     this.personInput = page.getByTestId('collab-person-input');
+    this.addPersonHeading = page.getByText('Add a person', { exact: true });
+    this.addTeamHeading = page.getByText('Add a team', { exact: true });
     this.addForm = page.locator('form').filter({ has: this.personInput });
     this.roleSelect = this.addForm.getByRole('combobox').last();
     this.addButton = this.addForm.getByRole('button', { name: 'Add', exact: true });
@@ -97,11 +103,26 @@ class CollaboratorsPage {
     });
   }
 
-  /** Open a nest's Collaborators tab and wait for the roster. */
-  async goto(nestId) {
+  /**
+   * Open a nest's Collaborators tab and wait for the roster. The add form is
+   * switched to Person (a shared deployment opens it on Team); pass
+   * `{ person: false }` to see it as it opens.
+   */
+  async goto(nestId, { person = true } = {}) {
     this._log(`Opening the Collaborators tab of nest ${nestId}`);
     await this._open(`/nest/${nestId}?tab=collaborators`);
     await this.peopleWithAccess.waitFor({ state: 'visible' });
+    if (person) await this.usePersonForm();
+  }
+
+  /** Switch the add form to Person when it is on Team. */
+  async usePersonForm() {
+    await this.addPersonHeading.or(this.addTeamHeading).first().waitFor({ state: 'visible' });
+    if (await this.addTeamHeading.isVisible()) {
+      this._log('The add form opened on Team; switching to Person');
+      await this.personMode.click();
+    }
+    await this.personInput.waitFor({ state: 'visible' });
   }
 
   /** Follow a Collaborators link, without waiting for the tab (it may be withheld). */
@@ -199,7 +220,7 @@ class CollaboratorsPage {
 
   // ── Visibility ─────────────────────────────────────────────────────────────
 
-  /** Choose a visibility tier from the menu (Private, Organization, Public). */
+  /** Choose a visibility tier from the menu (Private, Organization or Share with a team…, Public). */
   async chooseVisibility(label) {
     this._log(`Choosing visibility ${label}`);
     await this.visibilitySelect.click();

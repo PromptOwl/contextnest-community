@@ -24,6 +24,10 @@
  *   for the teardown and the orphan sweeper. Teams are AUTO_ names deleted the
  *   same way. The notifications a nest raised are marked read first.
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
+ * - On a shared deployment (`/health` `shared_deployment`, as on nest-dev) the
+ *   add form opens on Team and the visibility menu offers "Share with a
+ *   team…" in place of Organization (po-1178). `goto()` switches the form to
+ *   Person; CN-COLLAB-001 and CN-COLLAB-024 check both kinds of server.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
@@ -129,11 +133,16 @@ test.describe('Collaborators', () => {
   test('CN-COLLAB-001: Verify that the owner sees the Collaborators tab with visibility, API-only access and People with access', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-owner');
 
-    await owner.page.goto(owner.nest.id);
+    await owner.page.goto(owner.nest.id, { person: false });
     await expect(owner.page.collaboratorsTab).toHaveAttribute('aria-selected', 'true');
     await expect(owner.page.visibilitySelect).toBeVisible();
     await expect(owner.page.headlessPanel).toBeVisible();
     await expect(owner.page.peopleWithAccess).toBeVisible();
+    // A shared deployment opens the add form on Team (po-1178); Person is one click away.
+    if (await owner.api.sharedDeployment()) {
+      await expect(owner.page.addTeamHeading).toBeVisible();
+      await owner.page.usePersonForm();
+    }
     await expect(owner.page.personInput).toBeVisible();
   });
 
@@ -484,7 +493,9 @@ test.describe('Collaborators', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-public-cancel');
 
     await owner.page.goto(owner.nest.id);
-    expect(await owner.page.visibilityOptions()).toEqual(['Private', 'Organization', 'Public']);
+    // A shared deployment offers team sharing in place of Organization (po-1178).
+    const middle = (await owner.api.sharedDeployment()) ? 'Share with a team…' : 'Organization';
+    expect(await owner.page.visibilityOptions()).toEqual(['Private', middle, 'Public']);
     await owner.page.chooseVisibility('Public');
     await expect(owner.page.visibilityDialog).toContainText('Make this nest public?');
     await owner.page.visibilityDialog.getByRole('button', { name: 'Cancel' }).click();
