@@ -336,6 +336,14 @@ ${config.AUTH_MODE === "key" ? `
       .catch((err) => console.error("[metacognition] orphan sweep failed", err));
   }
 
+  // Distill jobs (PO-1185) run in this process too: any still "running" from a
+  // previous process will never finish, and would block that person's next
+  // distill until it went stale. Close them.
+  void import("./onboarding/distill.js")
+    .then((m) => m.recoverOrphanedDistills())
+    .then((n) => n && console.log(`[distill] closed ${n} job(s) left running by a previous process`))
+    .catch((err) => console.error("[distill] orphan sweep failed", err));
+
   // Rate-limit bucket GC — bounded keys can still accumulate across a long
   // uptime; sweep expired buckets every 10 minutes.
   setInterval(() => sweepStale(), 10 * 60_000).unref?.();

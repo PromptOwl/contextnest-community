@@ -75,6 +75,7 @@ import {
   filterAccessible,
   canReadNode,
   readsWholeNest,
+  ownDraftIds,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import { isHeadlessIdentity } from "../auth/headless.js";
@@ -254,6 +255,11 @@ const slugify = (s: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+
+/** The change note the server writes when it publishes a write itself
+ *  ("Auto-published on create (<reason>)"). The document stream reads the
+ *  prefix to tell this stamp from a note a person wrote (po-1214). */
+export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
 
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
@@ -1189,13 +1195,23 @@ export async function listNodesForCaller(
     ? await versions.getApprovedVersions(nestId)
     : null;
 
+  // A visibility-only reader sees the live draft (and its real status) of the
+  // documents they edit — a write grantee's, or their own proposal — and
+  // approved content for everything else, as in the single-node read.
+  const own = publicReader
+    ? await ownDraftIds(nestId, userId, userEmail, nodes)
+    : new Set<string>();
   let accessible = await filterAccessible(
     nestId,
     userId,
     userEmail,
-    nodes,
+    own.size ? nodes.filter((n) => !own.has(n.id)) : nodes,
     approvedVersions ?? undefined,
   );
+  if (own.size) {
+    const kept = new Set(accessible.map((n) => n.id));
+    accessible = nodes.filter((n) => kept.has(n.id) || own.has(n.id));
+  }
 
   // Share grants (a caller with NO nest-wide permission sees exactly the
   // documents their grants cover) are narrowed inside filterAccessible, on both
@@ -1238,6 +1254,7 @@ export async function listNodesForCaller(
     const keep = await Promise.all(
       accessible.map(async (d) => {
         const a = await loadApproved(d.id);
+        if (own.has(d.id)) return matchesFields(d.frontmatter.type, storedFieldsOf(d.frontmatter.metadata));
         return !!a && matchesFields(d.frontmatter.type, fieldsOfRaw(d.id, a.raw));
       }),
     );
@@ -1255,7 +1272,7 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayState, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions && !own.size
     ? [null, null]
     : await Promise.all([
         versions.getDisplayState(nestId),
@@ -1313,10 +1330,11 @@ export async function listNodesForCaller(
       }
 
       // Field values from the approved version, never the live draft.
-      const approved = approvedFields ? await loadApproved(doc.id) : null;
-      if (approvedFields) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
+      const isOwn = own.has(doc.id);
+      const approved = approvedFields && !isOwn ? await loadApproved(doc.id) : null;
+      if (approvedFields && !isOwn) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
 
-      if (approvedVersions) {
+      if (approvedVersions && !isOwn) {
         const wanted = approvedVersions.get(doc.id);
         if (wanted != null) {
           r.content = approved ? bodyOnly(doc.id, approved.raw) : "";
@@ -2351,7 +2369,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `Auto-published on create (${publishReason})`;
+          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -3378,7 +3396,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `Auto-published on edit (${publishReason})`;
+          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

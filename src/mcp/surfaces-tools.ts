@@ -45,7 +45,9 @@ import { randomBytes } from "crypto";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { createBindingWithListener } from "../surfaces/services/listener-service.js";
-import { createInstall } from "../surfaces/services/install-store.js";
+import { createInstall, getInstall } from "../surfaces/services/install-store.js";
+import { listInstallChannels, channelListFailure, TRUNCATED_NOTE, SlackChannelsListInput } from "../surfaces/adapters/slack/channels.js";
+import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 import { buildManifest } from "../surfaces/adapters/slack/manifest.js";
 import { getSettings } from "../surfaces/services/settings-service.js";
 import { updateSettingsWithEffects } from "../surfaces/services/dm-service.js";
@@ -55,6 +57,8 @@ import { budgetView, getBudget, setCap } from "../surfaces/services/spend-servic
 import { disconnectInstall } from "../surfaces/services/lifecycle-service.js";
 import { SettingsError } from "../surfaces/core/settings.js";
 import { listWindows } from "../surfaces/services/report-service.js";
+import { coldStart } from "../surfaces/services/cold-start-service.js";
+import { ColdStartMcpInput } from "../surfaces/cold-start-schema.js";
 
 const BINDING_ID = { type: "string", description: "Binding id (context_surfaces_bindings_list shows them)." } as const;
 const BIND_FIELDS = {
@@ -179,6 +183,13 @@ export const SURFACES_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_surfaces_slack_channels_list",
+    description:
+      "List the Slack channels a connected install could listen in: only the public and private channels the Nest bot was added to, with privacy, Slack Connect, member count and any existing binding. Never DMs, archived channels or message text. Server admin only.",
+    // Generated from the shared zod schema: no inline literal (lint:mcp-schemas).
+    inputSchema: mcpInputSchema(SlackChannelsListInput),
+  },
+  {
     name: "context_surfaces_settings_get",
     description: "Read the Surfaces settings (quiet window, window age, buffer TTL, gate minimum, propose threshold, card limits, timezone, DM capture). Server admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
@@ -296,6 +307,14 @@ export const SURFACES_TOOL_DEFINITIONS = [
     description: "List the seeds this nest has applied (id, version, source). no_seed = true means its conversations propose nowhere yet. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, required: [] as string[] },
   },
+  {
+    // po-1186 CR2: twin of GET /surfaces/cold-start?nest_id=. Schema generated
+    // from the zod object the REST route shares (src/surfaces/cold-start-schema.ts).
+    name: "context_surfaces_cold_start",
+    description:
+      "How fast this seeded nest is filling up: the seed's folders and how many approved documents each holds (the seed's own CONTEXT and thesis excluded), folder coverage, the time from the seed to the first approved document, the org mirror's people and areas proposed vs accepted, and a cumulative count per day. no_seed = true when no seed is applied. Owner/admin only.",
+    inputSchema: mcpInputSchema(ColdStartMcpInput),
+  },
 ];
 
 export const SURFACES_TOOL_NAMES = new Set(SURFACES_TOOL_DEFINITIONS.map((t) => t.name));
@@ -395,7 +414,8 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_create": {
         const out = await createBindingWithListener(bindArgs());
-        return { text: `Bound ${out.binding.conversation_id} → this nest (${out.binding.status}). ${SERVER_ADMIN_DISCLOSURE}`, data: out };
+        const unnoticed = out.notice === "failed" ? " The enable notice wasn't posted: members haven't been told yet." : "";
+        return { text: `Bound ${out.binding.conversation_id} → this nest (${out.binding.status}).${unnoticed} ${SERVER_ADMIN_DISCLOSURE}`, data: out };
       }
       case "context_surfaces_binding_update": {
         refuseListener(args);
@@ -458,6 +478,19 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         const install = await createInstall({ surface: "slack", mode: "manifest", tenantKey: `pending:${randomBytes(8).toString("hex")}`, homeNestId: nestId, installedByUserId: ctx.userId });
         const manifest = buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: install.id });
         return { text: `Install ${install.id} created. Create the Slack app from the manifest, then save its credentials in Surfaces.`, data: { install_id: install.id, manifest } };
+      }
+      case "context_surfaces_slack_channels_list": {
+        await requireOrgAdmin(ctx);
+        const install = await getInstall(reqStr(args.install_id, "install_id"));
+        if (!install || install.surface !== "slack") throw new NotFoundError("Install not found");
+        if (install.status !== "active") throw new AppError(409, "Finish connecting Slack first: this install isn't active yet.");
+        const out = await listInstallChannels(install).catch((err) => {
+          const f = channelListFailure(err);
+          throw new AppError(f.status, f.error);
+        });
+        const rows = out.channels.map((ch) => `${ch.is_private ? "private" : "public"} ${ch.id} ${ch.name ?? ""}${ch.binding ? ` (bound: ${ch.binding.status})` : ""}`).join("\n");
+        const text = (rows || "The bot isn't in any channel yet. Add it to a channel in Slack first.") + (out.truncated ? `\n${TRUNCATED_NOTE}` : "");
+        return { text, data: out };
       }
       case "context_surfaces_settings_get": {
         await requireOrgAdmin(ctx);
@@ -567,6 +600,15 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
         const { seedStatus } = await import("../surfaces/services/seed-service.js");
         const status = await seedStatus(ctx.nestId, ctx.userId);
         return { text: status.no_seed ? "No seed applied: conversations bound here propose nowhere yet." : status.applied.map((a) => `${a.seed_id}@${a.version}`).join(", "), data: status };
+      }
+      case "context_surfaces_cold_start": {
+        const cs = await coldStart(ctx.nestId, ctx.userId);
+        if (cs.no_seed) return { text: "No seed applied to this nest yet, so there is no cold start to show. Apply a starter in Control room → Setup.", data: cs };
+        const first = cs.first_approved ? `${Math.round(cs.first_approved.after_seed_ms / 60_000)} min after the seed` : "none yet";
+        return {
+          text: `${cs.seed!.id} v${cs.seed!.version}: ${cs.coverage.covered} of ${cs.coverage.total} folders have an approved document; first approved ${first}.\n${cs.folders.map((f) => `- ${f.path} ${f.approved}`).join("\n")}`,
+          data: cs,
+        };
       }
       default:
         return { text: `Unknown surfaces tool: ${toolName}`, isError: true, data: { code: "VALIDATION_FAILED", message: `Unknown surfaces tool: ${toolName}` } };

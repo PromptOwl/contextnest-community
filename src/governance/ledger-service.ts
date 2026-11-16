@@ -264,7 +264,7 @@ export function ledgerWhere(
 
 /**
  * One aggregate group: the tally of every ledger row with this UTC day, nest,
- * agent, binding and source. Totals and rollups sum these; SQL does the
+ * agent, binding, source and reason code. Totals and rollups sum these; SQL does the
  * per-row work (`TALLY_SQL`).
  */
 export interface AggRow {
@@ -275,6 +275,8 @@ export interface AggRow {
   agent_node: string | null;
   binding_id: string | null;
   source: string;
+  /** The verdict's reason code (rollups by=reason). */
+  reason_code: string | null;
   entries: number | string;
   failed: number | string | null;
   no_op: number | string | null;
@@ -355,7 +357,7 @@ const TALLY_SQL = `COUNT(*) AS entries,
 const num = (v: unknown) => Number(v) || 0;
 
 /** Add one aggregate group into a tally (mutates). */
-export function addToTally(t: Tally & { cost_micros: number }, r: Omit<AggRow, "day" | "last_at" | "nest_id" | "agent_node" | "binding_id" | "source">): void {
+export function addToTally(t: Tally & { cost_micros: number }, r: Omit<AggRow, "day" | "last_at" | "nest_id" | "agent_node" | "binding_id" | "source" | "reason_code">): void {
   t.entries += num(r.entries);
   t.runs += num(r.entries);
   t.failed += num(r.failed);
@@ -379,19 +381,26 @@ export function finishTally(t: Tally & { cost_micros: number }): Tally {
 
 /**
  * The rows matching the filters, aggregated in SQL by UTC day × nest × agent
- * × binding × source (totals + rollups). Bounded by days × groups, never by
- * the number of rows, and never reads a run's trace.
+ * × binding × source (totals + rollups), and × reason code only when the
+ * caller groups by reason (`byReason`; otherwise `reason_code` is null and
+ * adds no rows). Bounded by days × groups, never by the number of rows, and
+ * never reads a run's trace.
  */
-export async function aggregateRows(scope: LedgerScope, f: LedgerFilters): Promise<{ rows: AggRow[]; range: { from: string; to: string } }> {
+export async function aggregateRows(
+  scope: LedgerScope,
+  f: LedgerFilters,
+  opts: { byReason?: boolean } = {},
+): Promise<{ rows: AggRow[]; range: { from: string; to: string } }> {
   const range = ledgerRange(f);
   const owners = await personalOwners(scope.nestIds);
   const redacted = new Set(scope.nestIds.filter((id) => n1Redacts(owners, id, scope.viewerUserId)));
   const { sql, args } = ledgerWhere(scope, f, range, redacted);
   const rows = (await getDb().all(
     `SELECT substr(l.at, 1, 10) AS day, MAX(l.at) AS last_at, l.nest_id, l.agent_node, l.binding_id, l.source,
+            ${opts.byReason ? "l.reason_code" : "NULL AS reason_code"},
             ${TALLY_SQL}
        FROM ${LEDGER_UNION_AGG} ${sql}
-      GROUP BY substr(l.at, 1, 10), l.nest_id, l.agent_node, l.binding_id, l.source`,
+      GROUP BY substr(l.at, 1, 10), l.nest_id, l.agent_node, l.binding_id, l.source${opts.byReason ? ", l.reason_code" : ""}`,
     args as any,
   )) as AggRow[];
   return { rows, range };
