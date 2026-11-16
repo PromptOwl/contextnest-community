@@ -20,6 +20,7 @@ import {
   listUserGrants,
   grantCoversNode,
 } from "./grants-service.js";
+import { ownsWorkingDraft } from "./org-contribution.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -66,11 +67,31 @@ async function canReadNodeBase(
   userEmail: string,
 ): Promise<boolean> {
   if (await isPublicReader(nestId, userId)) {
-    return (await getApprovedVersion(nestId, nodeId)) !== null;
+    return (
+      (await getApprovedVersion(nestId, nodeId)) !== null ||
+      (await seesOwnDraft(nestId, nodeId, userId, userEmail))
+    );
   }
   if (!(await isStewardshipEnabled(nestId))) return true;
   if ((await canUserAccess(nestId, nodeId, userEmail)).allowed) return true;
   return (await resolveNodeGrant(nestId, userId, nodeId)) !== null;
+}
+
+/**
+ * A visibility-only reader (org/public nest, no collaborator row) normally sees
+ * approved content only. Two exceptions, both for ONE document: they hold a
+ * `write` share grant on it (they can edit it, so they must see the draft they
+ * edit), or its working copy is their own unreviewed draft (an org
+ * contributor's proposal). Neither widens what they see elsewhere in the nest.
+ */
+export async function seesOwnDraft(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+): Promise<boolean> {
+  if ((await resolveNodeGrant(nestId, userId, nodeId)) === "write") return true;
+  return !!userEmail && (await ownsWorkingDraft(nestId, nodeId, userEmail));
 }
 
 /**

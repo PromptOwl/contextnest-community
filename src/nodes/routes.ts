@@ -24,6 +24,7 @@ import { tableRefReport } from "../tables/refs.js";
 import {
   resolveCallerEmail,
   canReadNode,
+  seesOwnDraft,
 } from "../governance/access-guard.js";
 import { isPublicReader, permissionLevel } from "../shared/access.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -669,7 +670,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // A pending Surfaces edit is a chat-derived draft: below write, serve the
   // approved body as a public reader gets it (security round 2, M1d).
   const surfaceEdit = await approvedOnlyForSurfaceEdit(nestId, nodeId, userId);
-  if (publicReader || approvedOnly || surfaceEdit) {
+  // A write grantee, or a contributor on their own proposal, reads the draft
+  // they edit (seesOwnDraft) — approved-only would hide what they just saved.
+  const approvedBody = publicReader && !(await seesOwnDraft(nestId, nodeId, userId, userEmail));
+  if (approvedBody || approvedOnly || surfaceEdit) {
     let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
