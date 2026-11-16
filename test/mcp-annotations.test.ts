@@ -68,6 +68,7 @@ const READ_ONLY = [
   "context_agent_rollups",
   "context_agent_ledger_org",
   "context_agent_rollups_org",
+  "context_surfaces_cold_start",
 ];
 
 /** Can overwrite or remove something that already exists. */

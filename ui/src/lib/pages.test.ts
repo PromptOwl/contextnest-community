@@ -92,11 +92,15 @@ describe("dashboard rail groups", () => {
     );
   });
 
-  it("lists the Control room to admins only, and only while Surfaces is on (po-1186)", () => {
+  it("lists the Control room to server admins and nest owners/admins, only while Surfaces is on (po-1186)", () => {
     const ids = (caps: Parameters<typeof appRail>[0]) =>
       appRail(caps).groups.flatMap((g) => g.pages).map((p) => p.id);
     expect(ids({ isAdmin: true })).not.toContain("control-room");
     expect(ids({ isAdmin: false, surfacesEnabled: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: true, administersNest: false })).not.toContain("control-room");
+    // Decision 3 (2026-11-09): a nest owner/admin sees their nests in the Control room.
+    expect(ids({ isAdmin: false, surfacesEnabled: true, administersNest: true })).toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: false, administersNest: true })).not.toContain("control-room");
     expect(ids({ isAdmin: true, surfacesEnabled: true })).toContain("control-room");
     expect(appRail({ isAdmin: true, surfacesEnabled: true }).groups.find((g) => g.id === "workspace")?.pages.map((p) => p.id)).toContain("control-room");
     expect(visibleAppPage("control-room", { isAdmin: true }).id).toBe(DEFAULT_PAGE_ID);

@@ -8,6 +8,7 @@
  * the read is measured slow, and then only as a rebuildable derivative.
  */
 import { getDb } from "../db/client.js";
+import { dbTimeMs } from "../shared/db-time.js";
 import { PRIVATE_CONVERSATION, PRIVATE_TITLE, n1Redacts, personalOwners } from "../surfaces/n1.js";
 import { AGENT_API_VERSION } from "../workflow/agent-event-schema.js";
 import {
@@ -20,8 +21,14 @@ import {
   type Tally,
 } from "./ledger-service.js";
 
+/** A ledger time as an instant (shared parser); an unreadable time sorts first. */
+const atMs = (at: string | null | undefined): number => {
+  const t = dbTimeMs(at);
+  return Number.isFinite(t) ? t : -Infinity;
+};
+
 export type Grain = "day" | "week";
-export type GroupBy = "agent" | "nest" | "binding" | "none";
+export type GroupBy = "agent" | "nest" | "binding" | "reason" | "none";
 
 /** UTC day of an ISO timestamp, or the Monday of its ISO week. */
 export function bucketOf(at: string, grain: Grain): string {
@@ -37,8 +44,12 @@ export interface RollupRow extends Tally {
   bucket: string;
   key: string;
   label: string | null;
-  /** The nest the key belongs to (by agent / binding / nest); null for by=none. */
+  /** The nest the key belongs to (by agent / binding / nest); null for by=reason and by=none. */
   nest_id: string | null;
+  /** The latest ledger row in the group (po-1186 CR2: "last report", "last activity"). */
+  last_at: string;
+  /** That latest row's source (surfaces | metacognition | runner | external): what kind of agent it is. */
+  source: string;
 }
 
 export async function rollups(
@@ -57,17 +68,27 @@ export async function rollups(
   const grain: Grain = f.grain ?? "day";
   const by: GroupBy = f.by ?? "agent";
   // q is a ledger-page search, not a rollup dimension.
-  const { rows, range } = await aggregateRows(scope, { ...f, q: undefined });
+  const { rows, range } = await aggregateRows(scope, { ...f, q: undefined }, { byReason: by === "reason" });
   const owners = await personalOwners(scope.nestIds);
-  const groups = new Map<string, { bucket: string; key: string; nestId: string; tally: ReturnType<typeof emptyTally> }>();
+  const groups = new Map<string, { bucket: string; key: string; nestId: string; lastAt: string; source: string; tally: ReturnType<typeof emptyTally> }>();
   const total = emptyTally();
   for (const r of rows) {
-    const key = by === "agent" ? r.agent_node ?? "(none)" : by === "nest" ? r.nest_id : by === "binding" ? r.binding_id ?? "(none)" : "all";
-    // r is already a SQL aggregate (one UTC day × nest × agent × binding × source).
+    const key =
+      by === "agent"
+        ? r.agent_node ?? "(none)"
+        : by === "nest"
+          ? r.nest_id
+          : by === "binding"
+            ? r.binding_id ?? "(none)"
+            : by === "reason"
+              ? r.reason_code ?? "(none)"
+              : "all";
+    // r is already a SQL aggregate (one UTC day × nest × agent × binding × source, × reason for by=reason).
     const bucket = bucketOf(r.day, grain);
     const id = `${bucket}\u0000${by === "agent" || by === "binding" ? `${r.nest_id}\u0000${key}` : key}`;
     let g = groups.get(id);
-    if (!g) groups.set(id, (g = { bucket, key, nestId: r.nest_id, tally: emptyTally() }));
+    if (!g) groups.set(id, (g = { bucket, key, nestId: r.nest_id, lastAt: r.last_at, source: r.source, tally: emptyTally() }));
+    if (atMs(r.last_at) > atMs(g.lastAt)) (g.lastAt = r.last_at), (g.source = r.source);
     addToTally(g.tally, r);
     addToTally(total, r);
   }
@@ -97,7 +118,15 @@ export async function rollups(
   };
   const out: RollupRow[] = [];
   for (const g of groups.values()) {
-    out.push({ bucket: g.bucket, key: g.key, label: await labelOf(g), nest_id: by === "none" ? null : g.nestId, ...finishTally(g.tally) });
+    out.push({
+      bucket: g.bucket,
+      key: g.key,
+      label: await labelOf(g),
+      nest_id: by === "none" || by === "reason" ? null : g.nestId,
+      last_at: g.lastAt,
+      source: g.source,
+      ...finishTally(g.tally),
+    });
   }
   out.sort((a, b) => (a.bucket === b.bucket ? a.key.localeCompare(b.key) : a.bucket < b.bucket ? -1 : 1));
   return {
