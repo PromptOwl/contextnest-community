@@ -3,6 +3,9 @@ name: Engine Convergence
 # Guards the API convergence contract (docs/prds/api-convergence.md, Phase 3) and the
 # "Engine & CLI Sync Discipline" rule in CLAUDE.md: no new inline MCP schemas, and the
 # TypeScript surface stays green against the pinned engine.
+#
+# Also runs the unit tests (vitest) on every pull request: four SQLite shards, the
+# Postgres-gated tests against a service container, and one summary job.
 
 on:
   push:
@@ -39,3 +42,97 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+  # ── Unit tests (vitest) ───────────────────────────────────────────────────
+  # `npm test` in four shards that run at the same time, on SQLite. A file runs
+  # in exactly one shard. Change the shard list and the `/4` together.
+  unit:
+    name: Unit tests (vitest ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test -- --shard=${{ matrix.shard }}/4
+
+  # The tests that need a real Postgres are gated on TEST_DATABASE_URL and skip
+  # in the shards above. They run here, against a service container. The files
+  # are found by searching for the variable, so a new gated test joins this job
+  # without an edit here.
+  unit-postgres:
+    name: Unit tests (Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cnst
+          POSTGRES_PASSWORD: cnst
+          POSTGRES_DB: cnst_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cnst -d cnst_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      TEST_DATABASE_URL: postgres://cnst:cnst@localhost:5432/cnst_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the Postgres-gated tests
+        run: |
+          files=$(grep -rl --include='*.test.ts' --include='*.test.tsx' 'TEST_DATABASE_URL' test ui/src | sort)
+          if [ -z "$files" ]; then
+            echo "::error::No test file names TEST_DATABASE_URL. The Postgres job would run nothing."
+            exit 1
+          fi
+          echo "Postgres-gated test files:"
+          echo "$files"
+          npm test -- $files
+
+  # One name for branch protection: green only when every shard and the
+  # Postgres job are green.
+  unit-all:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: [unit, unit-postgres]
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Check every unit test job passed
+        run: |
+          echo "shards: ${{ needs.unit.result }}, postgres: ${{ needs.unit-postgres.result }}"
+          [ "${{ needs.unit.result }}" = "success" ] && [ "${{ needs.unit-postgres.result }}" = "success" ]
