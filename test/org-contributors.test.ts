@@ -522,6 +522,13 @@ describe("org contributors — drafts without being added", () => {
     expect(get.data.node.content.trim()).toBe("Bob's idea.");
   });
 
+  it("lists their own proposal in the Documents list with its real status", async () => {
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, bob.apiKey);
+    const row = (list.data.nodes ?? list.data).find((n: any) => n.id === bobDoc);
+    expect(row).toBeTruthy();
+    expect(row.status).not.toBe("published");
+  });
+
   it("does not see other people's drafts — not in their list, the node list, the node itself, or the review queue", async () => {
     const mine = await jsonRequest(app, "GET", `/nests/${nestId}/contributions/mine`, undefined, carol.apiKey);
     expect(mine.status).toBe(200);

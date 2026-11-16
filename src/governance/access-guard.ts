@@ -19,8 +19,9 @@ import {
   resolveNodeGrant,
   listUserGrants,
   grantCoversNode,
+  grantRoleForNode,
 } from "./grants-service.js";
-import { ownsWorkingDraft } from "./org-contribution.js";
+import { ownsWorkingDraft, ownWorkingDraftIds } from "./org-contribution.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -92,6 +93,32 @@ export async function seesOwnDraft(
 ): Promise<boolean> {
   if ((await resolveNodeGrant(nestId, userId, nodeId)) === "write") return true;
   return !!userEmail && (await ownsWorkingDraft(nestId, nodeId, userEmail));
+}
+
+/**
+ * List form of `seesOwnDraft`: of `nodes`, the ids a visibility-only reader
+ * sees as the live draft rather than the approved snapshot. Two queries for the
+ * whole list, not one per node. Surfaces drafts stay hidden as in `canReadNode`.
+ */
+export async function ownDraftIds(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  nodes: Array<{ id: string }>,
+): Promise<Set<string>> {
+  const grants = (await listUserGrants(nestId, userId)).filter((g) => g.role === "write");
+  const owned = userEmail ? await ownWorkingDraftIds(nestId, userEmail) : new Set<string>();
+  const hidden = await hiddenSurfaceDrafts(nestId);
+  const hideSurface = anyHidden(hidden) && !(await seesSurfaceDrafts(nestId, userId));
+  return new Set(
+    nodes
+      .filter(
+        (n) =>
+          (owned.has(n.id) || grantRoleForNode(grants, n.id) === "write") &&
+          !(hideSurface && isHidden(hidden, n.id)),
+      )
+      .map((n) => n.id),
+  );
 }
 
 /**
