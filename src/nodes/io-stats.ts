@@ -57,17 +57,32 @@ export function instrumentStorage<S extends object>(nestId: string, storage: S):
 }
 
 /** Record I/O for `fn` on `nestId` and log one summary line labelled `label`. */
-export async function withIoStats<T>(nestId: string, label: string, fn: () => Promise<T>): Promise<T> {
-  // A nested recording (finalize inside a one-shot import) folds into the outer one.
+export async function withIoStats<T>(
+  nestId: string,
+  label: string,
+  fn: () => Promise<T>,
+  tag: "import" | "write" = "import",
+): Promise<T> {
+  // A nested recording (finalize inside a one-shot import, a write inside
+  // another write on the same nest) folds into the outer one.
   if (active.has(nestId)) return fn();
   active.set(nestId, new Map());
   const t = performance.now();
+  // Imports run for seconds to minutes, single writes for milliseconds.
+  const fmt = (ms: number) => (tag === "import" ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`);
   try {
     return await fn();
   } finally {
     const stats = [...active.get(nestId)!].sort((a, b) => b[1].ms - a[1].ms);
     active.delete(nestId);
-    const parts = stats.map(([op, s]) => `${op} ${s.n}x/${(s.ms / 1000).toFixed(1)}s`);
-    console.log(`[import] io ${label}: nest=${nestId} total=${((performance.now() - t) / 1000).toFixed(1)}s ${parts.join(", ")}`);
+    // A write touches dozens of pure path helpers; under 1ms they are noise.
+    const shown = tag === "write" ? stats.filter(([, s]) => s.ms >= 1) : stats;
+    const parts = shown.map(([op, s]) => `${op} ${s.n}x/${fmt(s.ms)}`);
+    console.log(`[${tag}] io ${label}: nest=${nestId} total=${fmt(performance.now() - t)} ${parts.join(", ")}`);
   }
+}
+
+/** `withIoStats` for one document write (create, update, delete, move, approve). */
+export function withWriteStats<T>(nestId: string, label: string, fn: () => Promise<T>): Promise<T> {
+  return withIoStats(nestId, label, fn, "write");
 }

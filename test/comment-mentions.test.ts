@@ -114,7 +114,7 @@ describe("comment mentions", () => {
 
     const rows = await mentions(editor);
     expect(rows).toHaveLength(1);
-    expect(rows[0].message).toContain(owner.email);
+    expect(rows[0].message).toContain("Owner mentioned you");
     expect(rows[0].message).toContain("comment");
     expect(rows[0].message).toContain("Kickoff");
     // The inbox row links to the document the comment is on.
@@ -132,7 +132,7 @@ describe("comment mentions", () => {
     expect(rows).toHaveLength(2);
     // The inbox is newest-first; assert the reviewer's mention is in there
     // rather than which end it lands on.
-    expect(rows.some((r) => r.message.includes(reviewer.email))).toBe(true);
+    expect(rows.some((r) => r.message.includes("Reviewer mentioned you"))).toBe(true);
   });
 
   it("notifies a name added in a reply", async () => {

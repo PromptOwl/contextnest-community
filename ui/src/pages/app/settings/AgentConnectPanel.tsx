@@ -11,7 +11,7 @@
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Copy, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -21,7 +21,7 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { copyTextWithToast } from "../../../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   DEFAULT_HARNESS,
   HARNESSES,
@@ -76,19 +76,11 @@ export function AgentConnectPanel({
               setup, and nothing to redo when someone is added to another nest.
             </CardDescription>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              copyTextWithToast(
-                renderAllHarnessDocs(ctx),
-                "All connection instructions copied",
-              )
-            }
-          >
-            <Copy className="h-4 w-4 mr-1.5" />
-            Copy all
-          </Button>
+          <CopyButton
+            text={renderAllHarnessDocs(ctx)}
+            label="Copy all"
+            toastMessage="All connection instructions copied"
+          />
         </div>
       </CardHeader>
 
@@ -165,16 +157,12 @@ export function AgentConnectPanel({
                 {selected.where}
               </div>
             </div>
-            <Button
-              size="sm"
+            <CopyButton
+              text={body}
               variant="ghost"
-              onClick={() =>
-                copyTextWithToast(body, `${selected.name} steps copied`)
-              }
-            >
-              <Copy className="h-4 w-4 mr-1.5" />
-              Copy
-            </Button>
+              label="Copy"
+              toastMessage={`${selected.name} steps copied`}
+            />
           </div>
           <article className="prose prose-sm dark:prose-invert max-w-none">
             <ReactMarkdown

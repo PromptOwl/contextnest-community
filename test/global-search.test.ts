@@ -99,6 +99,22 @@ describe("GET /search", () => {
     expect(data.nodes.map((n: any) => n.title)).toEqual(["Widget Pricing"]);
   });
 
+  it("matches accented text when the query omits the accents, and keeps them in the hit", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestA}/nodes`,
+      { title: "Café Menu", content: "# today: crème brûlée" },
+      owner.apiKey,
+    );
+    for (const q of ["cafe", "CAFÉ", "creme%20brulee"]) {
+      for (const path of [`/nests/${nestA}/search?q=${q}`, `/search?q=${q}`]) {
+        const { data } = await jsonRequest(app, "GET", path, undefined, owner.apiKey);
+        expect(data.nodes.map((n: any) => n.title)).toEqual(["Café Menu"]);
+      }
+    }
+  });
+
   it("includes nests the caller only reads as a public Viewer", async () => {
     // A public nest is reached by visibility alone — no collaborator or steward
     // row — so it was the one readable category global search used to skip.

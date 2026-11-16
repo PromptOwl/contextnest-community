@@ -189,7 +189,7 @@ describe("a reply notifies the thread's participants", () => {
 
     const ownerRows = await ofKind(owner, "comment_reply");
     expect(ownerRows).toHaveLength(ownerBefore + 1);
-    expect(ownerRows[0].message).toContain(editor.email);
+    expect(ownerRows[0].message).toContain("Eddie Editor replied");
     expect(ownerRows[0].message).toContain("Launch Plan");
     // The inbox row opens the document the thread is on.
     expect(ownerRows[0].node_id).toBe(DOC);

@@ -42,3 +42,10 @@ export function nestPath(nestId: string | null | undefined, view?: string | null
   const base = `/nest/${encodeURIComponent(nestId)}`;
   return view ? `${base}/${view}` : base;
 }
+
+/** The link to one document: the nest's URL plus `?doc=<node id>`. It is only
+ *  an address — opening it still goes through the server's access rules, so a
+ *  person without access to the nest or the document gets nothing from it. */
+export function documentLink(origin: string, nestId: string, nodeId: string): string {
+  return `${origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
+}

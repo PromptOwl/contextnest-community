@@ -46,7 +46,10 @@ export function startRunRetention(): void {
       .then((n) => {
         if (n > 0) console.log(`[runs] pruned ${n} run(s) older than ${config.RUN_RETENTION_DAYS} days`);
       })
-      .catch((err) => console.error("[runs] retention prune failed", err));
+      .catch((err) => console.error("[runs] retention prune failed", err))
+      .then(() => import("../surfaces/services/identity-service.js"))
+      .then((m) => m.purgeLinkArtifacts())
+      .catch((err) => console.error("[surfaces] link token/review purge failed", err));
   timer = setInterval(pass, PRUNE_EVERY_MS);
   timer.unref?.();
   pass();

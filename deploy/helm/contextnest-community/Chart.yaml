@@ -1,0 +1,20 @@
+apiVersion: v2
+name: contextnest-community
+description: ContextNest Community Edition, the self-hosted context governance server for AI workflows.
+type: application
+# Chart version. Bump on any change under deploy/helm/contextnest-community.
+version: 0.1.0
+# The server release this chart was written and tested against. The default
+# image tag is this value; set image.tag to run another release.
+appVersion: "2.3.0"
+home: https://github.com/PromptOwl/contextnest-community
+sources:
+  - https://github.com/PromptOwl/contextnest-community
+keywords:
+  - contextnest
+  - context
+  - governance
+  - mcp
+maintainers:
+  - name: PromptOwl
+    url: https://promptowl.ai

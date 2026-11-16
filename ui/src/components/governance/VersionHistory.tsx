@@ -22,6 +22,7 @@ import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
 import { formatClient, type ClientAttribution } from "@/lib/client-attribution";
+import { versionAgent, clientTitle } from "@/lib/version-author";
 import { NEVER_PUBLISHED_HINT } from "./version-hints";
 
 export interface Version {
@@ -34,6 +35,8 @@ export interface Version {
    */
   diff?: string;
   editedBy: string;
+  /** Display name when `editedBy` is a named system's generated address. */
+  editedBySystem?: string;
   editedAt: string;
   changeNote?: string;
   status: "draft" | "pending_review" | "approved" | "published" | "rejected";
@@ -118,6 +121,19 @@ interface VersionHistoryProps {
 
 /** What the preview pane shows for the selected version. */
 type PreviewMode = "changes" | "content" | "vs-current";
+
+/** Who wrote a version: a system by its name and badge, anyone else by email. */
+function EditedBy({ version }: { version: Version }) {
+  if (!version.editedBySystem) return <>{version.editedBy}</>;
+  return (
+    <span title={version.editedBy}>
+      {version.editedBySystem}{" "}
+      <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+        System
+      </Badge>
+    </span>
+  );
+}
 
 function formatDate(dateStr: string) {
   const date = parseServerDate(dateStr);
@@ -459,7 +475,7 @@ export function VersionHistory({
                 )}
               </div>
               <div className="text-xs text-muted-foreground">
-                {formatDate(previewVersion.editedAt)} · {previewVersion.editedBy}
+                {formatDate(previewVersion.editedAt)} · <EditedBy version={previewVersion} />
                 {previewVersion.changeNote && ` · ${previewVersion.changeNote}`}
               </div>
               {previewVersion.resolutionNote && (
@@ -654,13 +670,30 @@ export function VersionHistory({
                       <div className="text-xs text-muted-foreground break-words">
                         By:{" "}
                         <span className="font-medium text-foreground/80">
-                          {version.editedBy}
+                          <EditedBy version={version} />
                         </span>
                       </div>
+                      {/* The agent the write named sits under the human, on
+                          its own line and in the same type — two writers, not
+                          one. Session and custom keys go to the hover title.
+                          A block with no agent keeps the old "Client:" line,
+                          in its old place under the date. */}
+                      {version.client && versionAgent(version) ? (
+                        <div
+                          className="text-xs text-muted-foreground break-words"
+                          title={clientTitle(version.client)}
+                          data-testid="version-agent"
+                        >
+                          Agent:{" "}
+                          <span className="font-medium text-foreground/80">
+                            {versionAgent(version)}
+                          </span>
+                        </div>
+                      ) : null}
                       <div className="text-xs text-muted-foreground">
                         {formatDate(version.editedAt)}
                       </div>
-                      {version.client && (
+                      {version.client && !versionAgent(version) && (
                         <div className="text-xs text-muted-foreground break-words">
                           Client:{" "}
                           <span className="font-mono text-foreground/70">

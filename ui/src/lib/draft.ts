@@ -9,6 +9,8 @@ export type LocalDraft = {
   content: string;
   tags: string[];
   schedule: string;
+  /** A View's block list, when it has one. */
+  view?: unknown;
   /** Server version the draft was taken from; a newer server copy wins. */
   baseVersion?: number;
   /** Epoch ms of the last park; drives eviction order when quota bites. */

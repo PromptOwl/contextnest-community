@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Globe2, Copy, MessageSquareText, Lock, KeyRound } from "lucide-react";
+import { Globe2, MessageSquareText, Lock, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,11 +8,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   nestSummary,
   serverMcpUrl,
   allNestsChatPrompt,
+  ctxLoginCommand,
+  PLUGIN_SETUP_COMMANDS,
   type NestCountRow,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
@@ -48,6 +50,7 @@ export function AllNestsBar({
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
   const prompt = allNestsChatPrompt(serverUrl, openMode);
+  const loginCmd = openMode ? null : ctxLoginCommand(serverUrl);
 
   return (
     <>
@@ -73,7 +76,7 @@ export function AllNestsBar({
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>Connect all my nests</DialogTitle>
             <DialogDescription>
@@ -82,21 +85,20 @@ export function AllNestsBar({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
+          {/* Only the body scrolls, so the close button stays in view. */}
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
             <div>
               <p className="mb-1.5 text-xs font-medium text-muted-foreground">
                 Server (MCP) endpoint
               </p>
               <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
                 <code className="min-w-0 flex-1 truncate text-xs">{mcp}</code>
-                <Button
+                <CopyButton
+                  text={mcp}
                   variant="ghost"
-                  size="sm"
                   aria-label="Copy endpoint"
-                  onClick={() => copyTextWithToast(mcp, "Endpoint copied")}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </Button>
+                  toastMessage="Endpoint copied"
+                />
               </div>
             </div>
 
@@ -137,15 +139,31 @@ export function AllNestsBar({
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed">
                 {prompt}
               </pre>
-              <Button
-                variant="outline"
-                size="sm"
+              <CopyButton
+                text={prompt}
                 className="mt-2"
-                onClick={() => copyTextWithToast(prompt, "Prompt copied")}
-              >
-                <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
-                Copy "chat with all my nests"
-              </Button>
+                icon={MessageSquareText}
+                label={'Copy "chat with all my nests"'}
+                toastMessage="Prompt copied"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Or connect from your computer
+              </p>
+              <CommandRow
+                title="Claude Code plugin"
+                note={`Type each line inside Claude Code. Setup asks where your notes should live; to use this server, choose Other and enter ${serverUrl}.`}
+                text={PLUGIN_SETUP_COMMANDS}
+              />
+              {loginCmd && (
+                <CommandRow
+                  title="Terminal (ctx 3.4+)"
+                  note="Opens your browser to approve; every nest you can open here then appears in ctx vault list. Signing in uploads nothing. No browser sign-in on this server? Add --key-stdin and paste your key."
+                  text={loginCmd}
+                />
+              )}
             </div>
 
             <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
@@ -161,5 +179,34 @@ export function AllNestsBar({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/** A labelled, copyable command for the "connect from your computer" list. */
+function CommandRow({
+  title,
+  note,
+  text,
+}: {
+  title: string;
+  note: string;
+  text: string;
+}) {
+  return (
+    <div className="rounded-md border bg-muted/40 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium">{title}</span>
+        <CopyButton
+          text={text}
+          variant="ghost"
+          aria-label={`Copy: ${title}`}
+          toastMessage="Command copied"
+        />
+      </div>
+      <p className="mb-1.5 text-xs text-muted-foreground">{note}</p>
+      <pre className="overflow-x-auto rounded bg-background p-2 text-[11px]">
+        {text}
+      </pre>
+    </div>
   );
 }

@@ -25,6 +25,8 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startSurfacesGuardLoop } from "./surfaces/services/guard-runner.js";
+import { startSurfacesIngestLoops } from "./surfaces/services/lifecycle-service.js";
 import { startRunRetention } from "./workflow/run-retention.js";
 import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
@@ -33,10 +35,30 @@ import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
+import { assertWritable, DataDirError } from "./shared/data-dir-check.js";
+import { installJsonLogs } from "./shared/json-logs.js";
+import { startUpdateCheck } from "./ops/update-check.js";
+
+if (config.LOG_FORMAT === "json") installJsonLogs();
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
   parseTrustedProxies(config.TRUSTED_PROXIES);
+
+  // Refuse to boot, with the chown fix, on a data directory this user can't
+  // write (e.g. a volume left root-owned by an older image that ran as root).
+  // SKIP_DATA_DIR_CHECK=1 is the escape hatch for storage where permission
+  // bits don't reflect what the server can actually write. Read from the
+  // process env directly, not `config`: this runs before the DB-backed
+  // settings overlay exists, and it is deploy-env only by design.
+  const dataDirWarning = process.env.SKIP_DATA_DIR_CHECK === "1" ? null : assertWritable([
+    { label: "DATA_ROOT", path: config.DATA_ROOT },
+    { label: "NEST_STORAGE_ROOT", path: config.NEST_STORAGE_ROOT, children: true },
+    ...(config.DB_DRIVER === "sqlite"
+      ? [{ label: "DATABASE_PATH", path: config.DATABASE_PATH, file: true }]
+      : []),
+  ]);
+  if (dataDirWarning) console.warn(`\n  ⚠️  ${dataDirWarning.replace(/\n/g, "\n     ")}\n`);
 
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
@@ -164,6 +186,7 @@ async function main() {
 
   // Start telemetry
   startTelemetryLoop();
+  startUpdateCheck();
   trackEvent("server.start", {
     tier: license.tier,
     org: license.org,
@@ -189,7 +212,7 @@ async function main() {
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
   Auth:      ${authDesc}
   Telemetry: ${config.TELEMETRY_ENABLED ? "on" : "off"}
-  Hootie:    ${config.HOOTIE_ENABLED ? "on" : "off (default since 1.28 — enable in Settings → General or set HOOTIE_ENABLED=true)"}
+  Hootie:    ${config.HOOTIE_ENABLED ? "on" : "off (default since 1.28 — enable in Server settings → Hootie or set HOOTIE_ENABLED=true)"}
   ────────────────────────────────────
 
   To switch auth modes, set the AUTH_MODE env var:
@@ -253,6 +276,16 @@ ${config.AUTH_MODE === "key" ? `
         nest documents behind it, is written to the logs. Testing only.
     `);
   }
+  // The visibility caps fail open to `owners` on anything but `admins`, so a
+  // typo (`admin`) would silently leave publishing open — say so at boot.
+  for (const key of ["NEST_PUBLIC_VISIBILITY", "NEST_ORG_VISIBILITY"] as const) {
+    const raw = process.env[key]?.trim().toLowerCase();
+    if (raw && raw !== "owners" && raw !== "admins") {
+      console.warn(
+        `  ⚠️  ${key}=${process.env[key]} is not 'owners' or 'admins' — treated as 'owners' (nest owners can widen).`,
+      );
+    }
+  }
 
   // Parse DOCS_SITES now, so an entry for this server's own host warns at boot.
   void config.DOCS_SITES;
@@ -268,10 +301,31 @@ ${config.AUTH_MODE === "key" ? `
   startScheduler();
   startRunRetention();
 
+  // Surfaces guard re-check loop (no-op unless FEATURE_SURFACES is on).
+  startSurfacesGuardLoop();
+  startSurfacesIngestLoops();
+
   // Review SLA escalation (per-nest review_sla_hours). Independent of the
   // workflow plane — that loop above is a no-op unless its flag is on, and
   // review governance isn't. Inert while no nest sets an SLA.
   startReviewSlaLoop();
+
+  // Writes defer their checkpoint and index update to the seal queue; seal
+  // what a previous process queued and never got to.
+  void import("./nodes/seal-queue.js")
+    .then((m) => m.resumeSeals())
+    .then((n) => n && console.log(`[seal] resuming queued writes in ${n} nest(s)`))
+    .catch((err) => console.error("[seal] resume failed", err));
+
+  // Cloud Run sends SIGTERM, then kills after 10s. Let a running seal finish
+  // and release its lease, so the next instance does not wait out a dead one;
+  // the rest stays queued for it. Exits itself: a listener replaces Node's
+  // default exit on SIGTERM.
+  process.once("SIGTERM", () => {
+    const exit = () => process.exit(0);
+    setTimeout(exit, 8_000).unref();
+    void import("./nodes/seal-queue.js").then((m) => m.stopSeals()).finally(exit);
+  });
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.
@@ -293,6 +347,8 @@ ${config.AUTH_MODE === "key" ? `
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  // An unusable data directory is an operator fix, not a bug: message only.
+  if (err instanceof DataDirError) console.error(`Fatal: ${err.message}`);
+  else console.error("Fatal:", err);
   process.exit(1);
 });

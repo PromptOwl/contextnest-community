@@ -59,6 +59,18 @@ export function isFieldDimension(d: DimensionKind): d is "assignee" | "priority"
   return d === "assignee" || d === "priority";
 }
 
+/** The nest's workflow order for a tag group (task_rules.stage_order). A tag
+ *  board grouped by that namespace opens in this order, not alphabetically,
+ *  until someone reorders it by hand. */
+export interface StageOrder {
+  namespace: string;
+  order: string[];
+}
+
+/** `"stage:"` / `"Stage"` / `"stage:in-review"` → `"stage"`. */
+export const namespaceKey = (ns: string | undefined): string =>
+  (ns ?? "").trim().replace(/^#/, "").split(":")[0]!.trim().toLowerCase();
+
 /** Linear's order, most urgent first. */
 export const PRIORITY_ORDER = ["urgent", "high", "medium", "low"];
 const PRIORITY_COLUMN_LABELS: Record<string, string> = {
@@ -100,6 +112,9 @@ const STATUS_LABELS: Record<string, string> = {
 
 export interface BoardConfig {
   dimension: DimensionKind;
+  /** The nest's priority levels, for a priority board's columns and labels.
+   *  Absent: the built-in four. */
+  priorityLevels?: readonly { key: string; label: string }[];
   /** For the "field" dimension: the custom field whose values are columns. */
   field?: FieldDefinition;
   /** For the "tag" dimension: the namespace, e.g. "stage" groups by stage:* . */
@@ -174,6 +189,43 @@ export function folderOf(id: string): string {
   const rel = id.startsWith("nodes/") ? id.slice("nodes/".length) : id;
   const i = rel.lastIndexOf("/");
   return i === -1 ? "" : rel.slice(0, i);
+}
+
+/** A tag group in use: `stage:` with how many distinct values and cards carry it. */
+export interface TagGroup {
+  namespace: string;
+  values: number;
+  cards: number;
+}
+
+/**
+ * The tag groups (`stage:`, `surface:`) the nodes use, most used first, for the
+ * board's group picker. Flat tags have no group. `ticket:` is left out: every
+ * task has its own number, so its "values" are one per card and it can't be
+ * columns.
+ */
+export function tagNamespaces(nodes: BoardNode[]): TagGroup[] {
+  const by = new Map<string, { values: Set<string>; cards: number }>();
+  for (const n of nodes) {
+    const seen = new Set<string>();
+    for (const raw of n.tags) {
+      const t = raw.replace(/^#/, "");
+      const i = t.indexOf(":");
+      if (i <= 0) continue;
+      const ns = t.slice(0, i).toLowerCase();
+      if (ns === "ticket") continue;
+      const e = by.get(ns) ?? { values: new Set<string>(), cards: 0 };
+      e.values.add(t.slice(i + 1).toLowerCase());
+      if (!seen.has(ns)) {
+        e.cards++;
+        seen.add(ns);
+      }
+      by.set(ns, e);
+    }
+  }
+  return [...by]
+    .map(([namespace, e]) => ({ namespace, values: e.values.size, cards: e.cards }))
+    .sort((a, b) => b.cards - a.cards || (a.namespace < b.namespace ? -1 : 1));
 }
 
 /** Value carried by the first `ns:*` tag, or null. ["stage:review"] / "stage" → "review". */
@@ -331,21 +383,29 @@ export function migrateLayout(key: string, layout: ColumnLayout): ColumnLayout {
 }
 
 /** The BoardConfig for the active dimension: its own layout, nothing else's. */
-export function resolveConfig(s: BoardSettings, fieldDefs: FieldDefinition[] = []): BoardConfig {
+export function resolveConfig(
+  s: BoardSettings,
+  fieldDefs: FieldDefinition[] = [],
+  priorityLevels?: readonly { key: string; label: string }[],
+  stageOrder?: StageOrder,
+): BoardConfig {
   const layout = s.layouts[layoutKey(s)] ?? {};
   const field =
     s.dimension === "field" ? fieldDefs.find((d) => d.key === s.fieldKey) : undefined;
   return {
     dimension: s.dimension,
     field,
+    priorityLevels,
     tagNamespace: s.tagNamespace,
     // Status defaults to the lifecycle order until the user reorders it.
     columnOrder:
       layout.columnOrder ??
-      (s.dimension === "status"
+      (s.dimension === "tag" && stageOrder && namespaceKey(s.tagNamespace) === stageOrder.namespace
+        ? stageOrder.order
+        : s.dimension === "status"
         ? STATUS_ORDER
         : s.dimension === "priority"
-          ? PRIORITY_ORDER
+          ? (priorityLevels?.map((l) => l.key) ?? PRIORITY_ORDER)
           : field
             ? fieldColumnOrder(field)
             : undefined),
@@ -437,7 +497,9 @@ function uncategorizedLabel(d: DimensionKind, field?: FieldDefinition): string {
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension, config.field);
   if (config.dimension === "field" && config.field) return fieldKeyLabel(config.field, key);
-  if (config.dimension === "priority") return PRIORITY_COLUMN_LABELS[key] ?? key;
+  if (config.dimension === "priority") {
+    return config.priorityLevels?.find((l) => l.key === key)?.label ?? PRIORITY_COLUMN_LABELS[key] ?? key;
+  }
   if (key === "" && config.dimension === "folder") return "(root)";
   // A status the server grew but this map hasn't: spaces beat raw snake_case,
   // since the heading is rendered with CSS `capitalize`.
@@ -606,6 +668,45 @@ export type MovePlan =
   | { kind: "unsupported"; reason: string };
 
 /**
+ * The card as it will look once `plan` (plus a lane change's `extra` fields)
+ * lands — shown right away on drop, so the card moves before the server
+ * answers. A folder move guesses the new id; the background reload corrects it.
+ */
+export function optimisticMove(
+  node: BoardNode,
+  plan: MovePlan | null,
+  extra: { fields?: Record<string, unknown>; [k: string]: unknown } = {},
+): BoardNode {
+  const next: BoardNode = { ...node };
+  const custom: Record<string, unknown> = {};
+  if (plan?.kind === "move-folder") {
+    const slug = node.id.slice(node.id.lastIndexOf("/") + 1);
+    next.id = plan.folder && plan.folder !== UNCATEGORIZED ? `nodes/${plan.folder}/${slug}` : `nodes/${slug}`;
+  } else if (plan?.kind === "retag") {
+    next.tags = plan.tags;
+  } else if (plan?.kind === "set-fields") {
+    Object.assign(next, plan.fields);
+  } else if (plan?.kind === "set-custom") {
+    Object.assign(custom, plan.fields);
+  }
+  const { fields: extraFields, ...extraTop } = extra;
+  Object.assign(next, extraTop);
+  Object.assign(custom, extraFields ?? {});
+  for (const k of ["assignee", "priority", "due", "parent"] as const) {
+    if ((next as any)[k] === null) delete (next as any)[k];
+  }
+  if (Object.keys(custom).length > 0) {
+    const fields = { ...(node.fields ?? {}) };
+    for (const [k, v] of Object.entries(custom)) {
+      if (v === null) delete fields[k];
+      else fields[k] = v;
+    }
+    next.fields = fields;
+  }
+  return next;
+}
+
+/**
  * What moving `node` into column `targetKey` requires. Pure — the caller runs
  * the actual write. A move into the node's current column is a no-op and
  * reported as unsupported so the UI skips a pointless request.
@@ -753,6 +854,7 @@ export function buildLanes(
   lane: SwimlaneKind,
   labelOf: (key: string) => string,
   field?: FieldDefinition,
+  priorityKeys: readonly string[] = PRIORITY_ORDER,
 ): Lane[] {
   const groups = new Map<string, BoardNode[]>();
   for (const n of nodes) {
@@ -764,7 +866,7 @@ export function buildLanes(
   const keys = [...groups.keys()].filter((k) => k !== UNCATEGORIZED);
   const fieldOrder = lane === "field" && field ? fieldColumnOrder(field) : undefined;
   if (lane === "priority") {
-    keys.sort((a, b) => PRIORITY_ORDER.indexOf(a) - PRIORITY_ORDER.indexOf(b));
+    keys.sort((a, b) => priorityKeys.indexOf(a) - priorityKeys.indexOf(b));
   } else if (fieldOrder) {
     keys.sort((a, b) => fieldOrder.indexOf(a) - fieldOrder.indexOf(b));
   } else {

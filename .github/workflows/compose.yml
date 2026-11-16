@@ -1,0 +1,42 @@
+# compose.yml — checks for the Docker Compose bundle in deploy/compose.
+#
+# Builds the image from this PR, starts the bundle on localhost (Caddy issues a
+# local certificate) and waits for https://localhost/readyz through Caddy
+# (deploy/compose/ci/smoke.sh, which also validates the file).
+#
+# Actions are pinned by commit SHA.
+
+name: Compose bundle
+
+on:
+  pull_request:
+    branches: [ "development", "main" ]
+    paths:
+      - "deploy/compose/**"
+      - "Dockerfile"
+      - ".github/workflows/compose.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compose-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Compose smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build image
+        run: docker build -t contextnest-community:ci .
+
+      - name: Smoke
+        env:
+          CONTEXTNEST_IMAGE: contextnest-community
+          CONTEXTNEST_VERSION: ci
+        run: sh deploy/compose/ci/smoke.sh

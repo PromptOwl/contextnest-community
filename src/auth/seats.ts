@@ -10,13 +10,27 @@ import { BillingConfirmError, PlanLimitError } from "../shared/errors.js";
 /** Per request: whether the caller confirmed a billed-class raise (X-Confirm-Billing). */
 export const billingConfirmed = new AsyncLocalStorage<boolean>();
 
-/** The MCP counterpart of X-Confirm-Billing, offered on every tool. */
+/** The MCP counterpart of X-Confirm-Billing, offered on BILLING_CONFIRM_TOOLS. */
 export const confirmBillingToolField = {
   confirm_billing: z
     .boolean()
     .optional()
     .describe("Set true only after the user agreed to a change that raises what someone is billed."),
 };
+
+/**
+ * The MCP tools that can raise what someone is billed, and so take
+ * `confirm_billing`. A tool's definition lists only the inputs it uses: a read
+ * tool that mentions billing misdescribes itself to the agent and to anyone
+ * reviewing the definitions. A new tool that reaches assertCanGrant goes here,
+ * or the agent has no way to confirm the raise.
+ */
+export const BILLING_CONFIRM_TOOLS: ReadonlySet<string> = new Set([
+  "context_assign_steward",
+  "context_grant",
+  "context_resolve_access_request",
+  "context_share_nest",
+]);
 
 /**
  * Billing per person (pricing spec §3.3): each person bills once, at their

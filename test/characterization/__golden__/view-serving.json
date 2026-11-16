@@ -1,0 +1,134 @@
+{
+  "artifact /hosted": {
+    "status": 200,
+    "contentType": "text/html; charset=UTF-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": "1",
+    "cacheControl": null,
+    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
+    "bodyLength": 210
+  },
+  "artifact /hosted?embed=1": {
+    "status": 200,
+    "contentType": "text/html; charset=UTF-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": "1",
+    "cacheControl": null,
+    "bodySha256": "6de1804c72700cc4f932ec31616c57723d1b29f91125fe4989eacea896496797",
+    "bodyLength": 10547
+  },
+  "artifact /hosted?v=1": {
+    "status": 200,
+    "contentType": "text/html; charset=UTF-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": "1",
+    "cacheControl": null,
+    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
+    "bodyLength": 210
+  },
+  "artifact /p/:slug": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
+    "bodyLength": 210
+  },
+  "artifact /p/:slug/view": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
+    "bodyLength": 210
+  },
+  "artifact ?format=raw": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "3de33dc3c06cfb7df1bc2e879e1da9ef43e48b2fd6081cc472ed7c0829141513",
+    "bodyLength": 210
+  },
+  "artifact ?format=raw&frontmatter=1": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "1d5405048d5725af597fc5dd974ef44a6c8e39a4636a73991ba72b86d507de4e",
+    "bodyLength": 449
+  },
+  "document /hosted": {
+    "status": 404,
+    "contentType": "application/json",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": null,
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "125a1ac855a76442bcc3412548c10f622476cd42cb811788b78b0cf0ccd4f831",
+    "bodyLength": 33
+  },
+  "document /p/:slug": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "6f4ced131e30eded1f5773185c1e02e7cace424743da0f2f13e65c05f5463c3f",
+    "bodyLength": 1349
+  },
+  "document /p/:slug/view": {
+    "status": 200,
+    "contentType": "text/html; charset=utf-8",
+    "csp": "sandbox allow-scripts allow-popups allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": "no-referrer",
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "6f4ced131e30eded1f5773185c1e02e7cace424743da0f2f13e65c05f5463c3f",
+    "bodyLength": 1349
+  },
+  "document ?format=raw": {
+    "status": 200,
+    "contentType": "text/markdown; charset=utf-8",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "869d0dba88dfde520c42d6f971e794c22225fdd319eceab5dd7175709d9fa6b6",
+    "bodyLength": 63
+  },
+  "document ?format=raw&frontmatter=1": {
+    "status": 200,
+    "contentType": "text/markdown; charset=utf-8",
+    "csp": "frame-ancestors 'self'",
+    "xContentTypeOptions": "nosniff",
+    "referrerPolicy": null,
+    "xArtifactSnapshot": null,
+    "cacheControl": null,
+    "bodySha256": "a431950356fbc1b91d05e97cc9ac6d96505ffe97151caa7d0b0bf65c1b40e812",
+    "bodyLength": 297
+  }
+}

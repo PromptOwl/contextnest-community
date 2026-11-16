@@ -18,6 +18,11 @@ describe("matchNests", () => {
     expect(matchNests(nests, "nest_c").map((n) => n.id)).toEqual(["nest_c"]);
   });
 
+  it("ignores accents", () => {
+    expect(matchNests([{ id: "n", name: "Équipe Café" }], "equipe cafe").map((n) => n.title))
+      .toEqual(["Équipe Café"]);
+  });
+
   it("requires every term to match", () => {
     expect(matchNests(nests, "team knowledge").map((n) => n.id)).toEqual(["nest_a"]);
     expect(matchNests(nests, "team sales")).toEqual([]);

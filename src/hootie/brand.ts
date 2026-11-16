@@ -3,7 +3,7 @@
  *
  * Server-level (the assistant is the same on every page and nest), stored as
  * ordinary server settings (HOOTIE_NAME, HOOTIE_LOGO_URL, HOOTIE_ACCENT_COLOR,
- * HOOTIE_GREETING) so the deploy env and Settings → General both work, with
+ * HOOTIE_GREETING) so the deploy env and Server settings → Hootie both work, with
  * the usual precedence (db/settings.ts).
  *
  * Custom identity is an ENTERPRISE entitlement. It is enforced twice:

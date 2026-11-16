@@ -10,7 +10,9 @@
  * Columns are a registry rather than hard-wired JSX so more can join without
  * touching the table: a custom field becomes a column with `fieldColumn`.
  */
-import { PRIORITY_ORDER, type BoardNode } from "./board-dimensions";
+import { type BoardNode } from "./board-dimensions";
+
+const DEFAULT_PRIORITY_KEYS = ["urgent", "high", "medium", "low"];
 
 // ── Columns ─────────────────────────────────────────────────────────────────
 
@@ -47,6 +49,8 @@ export interface ListContext {
   /** Column keys the node sits in on this board (board-dimensions cardColumnKeys). */
   columnsOf: (n: BoardNode) => string[];
   columnLabel: (key: string) => string;
+  /** The nest's priority keys, most urgent first (default: the built-in four). */
+  priorityKeys?: readonly string[];
 }
 
 export const LIST_COLUMNS: ListColumn[] = [
@@ -75,11 +79,11 @@ export const LIST_COLUMNS: ListColumn[] = [
   {
     id: "priority",
     label: "Priority",
-    width: "104px",
+    width: "150px",
     sortable: true,
     hideBelow: "md",
-    value: (n) => {
-      const i = PRIORITY_ORDER.indexOf(n.priority ?? "");
+    value: (n, c) => {
+      const i = (c.priorityKeys ?? DEFAULT_PRIORITY_KEYS).indexOf(n.priority ?? "");
       return i === -1 ? null : i;
     },
   },

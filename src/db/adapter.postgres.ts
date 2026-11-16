@@ -77,7 +77,8 @@ class PgQuerier implements Querier {
 export class PostgresAdapter extends PgQuerier implements DatabaseAdapter {
   readonly dialect = "postgres" as const;
 
-  constructor(private readonly pool: Pool) {
+  // Public (read-only) so /metrics can report the pool's connection counts.
+  constructor(readonly pool: Pool) {
     super(pool);
   }
 

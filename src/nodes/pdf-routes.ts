@@ -1,8 +1,10 @@
 /**
  * PDF documents (CU-wdqcq02pmh) — a PDF uploaded as a governed `pdf` node.
  *
- *   POST /nests/:nestId/nodes/pdf            multipart `file` (+ title, folder,
- *                                            tags, nodeId, changeNote)
+ *   POST /nests/:nestId/nodes/pdf            multipart `file` or JSON
+ *                                            { filename?, content_base64 | url }
+ *                                            (+ title, folder, tags, nodeId,
+ *                                            changeNote)
  *   GET  /nests/:nestId/nodes/:nodeId/pdf    the binary (?version=N,
  *                                            ?approved_only=1, ?download=1)
  *
@@ -28,7 +30,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { createHash } from "node:crypto";
-import { isPdf, readPdfBinary } from "@promptowl/contextnest-engine";
+import { readPdfBinary } from "@promptowl/contextnest-engine";
 import type { NestStorage } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
@@ -38,20 +40,19 @@ import {
   PayloadTooLargeError,
   ValidationError,
 } from "../shared/errors.js";
-import { assertSafeNodeId } from "../shared/node-id.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { isPublicReader } from "../shared/access.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import * as versions from "../governance/version-service.js";
-import * as stewardship from "../governance/stewardship-service.js";
 import { engineCache } from "./engine.js";
+import { getNodeForCaller, toNodeResponse, PDF_NODE_TYPE } from "./service.js";
 import {
-  createNode,
-  getNodeForCaller,
-  toNodeResponse,
-  updateNode,
-  PDF_NODE_TYPE,
-} from "./service.js";
+  assertDocumentUploadNotGated,
+  pdfTooLargeMessage,
+  readUploadRequest,
+  savePdfUpload,
+  stewardsFor,
+} from "./upload-service.js";
 
 export const pdfNodeRoutes = new Hono<AuthEnv>();
 
@@ -63,48 +64,12 @@ export function pdfMaxRequestBytes(): number {
   return config.PDF_MAX_BYTES + 1024 * 1024;
 }
 
-/** The one 413 message for an oversized PDF, whichever gate refuses it. */
-export function pdfTooLargeMessage(bytes?: number): string {
-  const size = bytes === undefined ? "" : `${(bytes / (1024 * 1024)).toFixed(1)} MB, `;
-  return `PDF too large (${size}max ${config.PDF_MAX_BYTES / (1024 * 1024)} MB)`;
-}
-
-function tooLarge(bytes: number): PayloadTooLargeError {
-  return new PayloadTooLargeError(pdfTooLargeMessage(bytes));
-}
-
-/** A multipart field as one trimmed string ("" when absent or a file). */
-function field(body: Record<string, unknown>, name: string): string {
-  const v = body[name];
-  const one = Array.isArray(v) ? v[0] : v;
-  return typeof one === "string" ? one.trim() : "";
-}
-
-/** Tags from repeated `tags` fields and/or a comma-separated list. */
-function tagsField(body: Record<string, unknown>): string[] | undefined {
-  const v = body["tags"];
-  if (v === undefined) return undefined;
-  const raw = (Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === "string");
-  const tags = raw
-    .flatMap((s) => s.split(","))
-    .map((t) => t.trim().replace(/^#/, ""))
-    .filter(Boolean);
-  return tags;
-}
-
-/** A readable title from an uploaded file name ("Q3 report.pdf" → "Q3 report"). */
-function titleFromFilename(name: string): string {
-  return name
-    .split(/[/\\]/)
-    .pop()!
-    .replace(/\.pdf$/i, "")
-    .replace(/[_]+/g, " ")
-    .trim()
-    .slice(0, 200);
-}
+export { pdfTooLargeMessage };
 
 // POST /nests/:nestId/nodes/pdf — write tier (app.ts: every non-GET node route
 // requires write; nest-scope steward editors are admitted like a create).
+// Multipart `file`, or a JSON body { filename?, content_base64 } / { url }
+// (upload-service.ts) with the same fields.
 //
 // The first handler caps the body as it is READ: the Content-Length gates (here
 // and in app.ts) only see a declared length, and a chunked upload without one
@@ -126,82 +91,27 @@ pdfNodeRoutes.post(
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
-      if (Number.isFinite(len) && len > pdfMaxRequestBytes()) throw tooLarge(len);
+      if (Number.isFinite(len) && len > pdfMaxRequestBytes()) {
+        throw new PayloadTooLargeError(pdfTooLargeMessage(len));
+      }
     }
 
-    const body = (await c.req.parseBody({ all: true })) as Record<string, unknown>;
-    const fileField = Array.isArray(body["file"]) ? body["file"][0] : body["file"];
-    if (!(fileField instanceof File)) {
-      throw new ValidationError('multipart field "file" (a PDF) is required');
-    }
-    const file = fileField;
-    // Size first — a File property, so an oversized upload is refused before
-    // arrayBuffer() materializes a second copy of it.
-    if (file.size > config.PDF_MAX_BYTES) throw tooLarge(file.size);
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    // The bytes decide, not the name or the declared type: a PDF begins with
-    // %PDF-. (The engine checks again, and also refuses encrypted/unreadable
-    // files — those come back as a 400 from the service.)
-    if (!isPdf(bytes)) {
-      throw new ValidationError("That file is not a PDF (it does not start with %PDF-).");
-    }
-
-    const userEmail = await resolveCallerEmail(c.get("userId"));
-    const title = field(body, "title");
-    const tags = tagsField(body);
-    const client = attributeRequest(c, undefined);
-    const pdf = { bytes, filename: file.name || undefined };
-
-    // Replace: a new version of an existing pdf node, through updateNode — the
-    // same review lock, draft/publish decision and version rows as any edit.
-    const targetId = field(body, "nodeId");
-    if (targetId) {
-      // The node-id chokepoint in app.ts guards path params only; this id
-      // arrives in the body, so it is checked here before it becomes a path.
-      assertSafeNodeId(targetId);
-      const changeNote = field(body, "changeNote") || "Replaced the PDF";
-      const { node, version } = await updateNode(
-        nestId,
-        targetId,
-        {
-          pdf,
-          ...(title ? { title } : {}),
-          ...(tags ? { tags } : {}),
-          changeNote,
-          client,
-        },
-        userEmail,
-      );
-      return c.json({ node: toNodeResponse(node), version });
-    }
-
-    const folder = field(body, "folder");
-    const { node, version } = await createNode(
+    // Before the body is read, so a held nest never fetches a URL for nothing.
+    await assertDocumentUploadNotGated({
       nestId,
-      {
-        title: title || titleFromFilename(file.name || "") || "Untitled PDF",
-        content: "",
-        type: PDF_NODE_TYPE,
-        ...(tags ? { tags } : {}),
-        ...(folder ? { folder } : {}),
-        client,
-        pdf,
-      },
-      userEmail,
-    );
-    const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
+      userId: c.get("userId"),
+      keyId: c.get("apiKeyId") ?? null,
+      agentSurface: false,
+    });
+    const { upload, fields } = await readUploadRequest(c, "pdf");
+    const userEmail = await resolveCallerEmail(c.get("userId"));
+    const saved = await savePdfUpload(nestId, upload, fields, userEmail, attributeRequest(c, undefined));
+    if (!saved.created) return c.json({ node: toNodeResponse(saved.node), version: saved.version });
     return c.json(
       {
-        node: toNodeResponse(node),
-        version,
-        stewards:
-          resolved.length > 0
-            ? resolved.map((r) => ({
-                email: r.steward.userEmail,
-                role: r.steward.role,
-                source: r.source,
-              }))
-            : undefined,
+        node: toNodeResponse(saved.node),
+        version: saved.version,
+        stewards: await stewardsFor(nestId, saved.node.id),
       },
       201,
     );

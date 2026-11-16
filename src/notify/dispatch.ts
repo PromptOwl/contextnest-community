@@ -31,6 +31,8 @@ export interface ConnectorEvent {
   message: string; // human sentence, already composed by the caller
   subjectId?: string; // node id / run id the event is about
   actor?: string; // who did it
+  /** The run that raised it, for the message log (when it isn't the subject). */
+  runId?: string;
 }
 
 interface ConnectorRow {
@@ -54,7 +56,13 @@ const EVENT_EMOJI: Record<string, string> = {
   access_requested: ":key:",
   access_approved: ":key:",
   access_denied: ":no_entry_sign:",
+  agent_notify: ":bell:",
 };
+
+/** Kinds that go to a nest's OWN connector rows only, never the server-wide
+ *  Slack/Teams webhooks: an agent's notification carries text a model wrote
+ *  for that nest, and the server-wide channel is shared by every nest. */
+const NEST_ONLY_KINDS = new Set(["agent_notify"]);
 
 /** Event kinds review-service ALSO sends through notify.ts's debounced
  *  digest (notifyNestEvent) — i.e. the kinds a server-wide webhook already
@@ -220,7 +228,8 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
 export async function hasAnyConnector(nestId: string, kind: string): Promise<boolean> {
   if (
     (config.SLACK_WEBHOOK_URL || config.MSTEAMS_WEBHOOK_URL) &&
-    !DIGEST_DELIVERED_KINDS.has(kind)
+    !DIGEST_DELIVERED_KINDS.has(kind) &&
+    !NEST_ONLY_KINDS.has(kind)
   ) {
     return true;
   }
@@ -248,14 +257,21 @@ export async function hasAnyConnector(nestId: string, kind: string): Promise<boo
  * backgrounded and failure-proof by construction.
  */
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
+  // A sealed personal nest: no server-wide or per-nest connector delivery
+  // (re-review R3-H1b).
+  {
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    if (await sealedNest(ev.nestId)) return;
+  }
   const db = getDb();
   const nestName = await resolveNestName(ev.nestId);
   // Message-log context: who caused it, and the run when a run is the subject.
   const logCtx = {
     nestId: ev.nestId,
     ...senderFor(ev.actor),
-    runId: ev.kind.startsWith("run_") ? (ev.subjectId ?? null) : null,
+    runId: ev.runId ?? (ev.kind.startsWith("run_") ? (ev.subjectId ?? null) : null),
   };
+  const serverWide = !DIGEST_DELIVERED_KINDS.has(ev.kind) && !NEST_ONLY_KINDS.has(ev.kind);
 
   // Implicit server-wide Slack + Microsoft Teams connectors (super-admin
   // Settings). MSTEAMS_*, never "teams": that name means user groups here.
@@ -267,7 +283,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   // kinds (it collapses bursts into one message); these implicit connectors
   // deliver only the kinds the digest path never sees (run_failed).
   // Per-nest connector rows below are unaffected: they are dispatch-only.
-  if (config.SLACK_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
+  if (config.SLACK_WEBHOOK_URL && serverWide) {
     void postWebhook(
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
@@ -276,7 +292,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
     );
   }
 
-  if (config.MSTEAMS_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
+  if (config.MSTEAMS_WEBHOOK_URL && serverWide) {
     void postWebhook(
       config.MSTEAMS_WEBHOOK_URL,
       formatBody("teams", nestName, ev),

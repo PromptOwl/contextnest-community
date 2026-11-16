@@ -1,0 +1,176 @@
+/**
+ * What an MCP client is told when it connects (CU-wdqcq05rn0).
+ *
+ * The `initialize` result carries an optional `instructions` string, which
+ * most clients (Claude Code, Cursor, …) put into the model's system prompt.
+ * The server fills it with the nest's operating instructions (CONTEXT.md) and
+ * its always-include documents, so the rules arrive whether or not the agent
+ * ever calls `context_init`. Delivery is all the server can guarantee: an
+ * outside client may still ignore them.
+ *
+ * Both MCP endpoints are stateless — a server is built per HTTP request — so
+ * the text is only resolved for the request that IS an `initialize`; tool
+ * calls don't pay for it.
+ */
+import { getInstructions } from "../nests/instructions-service.js";
+import {
+  alwaysIncludeDocs,
+  fitBudget,
+  newBudget,
+  PER_DOCUMENT_OVERHEAD,
+  readableAlwaysInclude,
+  renderStandingInstructions,
+  type StandingCaller,
+  type StandingDocument,
+  type StandingSection,
+} from "../governance/always-include-service.js";
+
+/** CONTEXT.md can be up to 256 KB; the connect message carries at most this
+ *  much of it, cut at a line, with a pointer to `context_init` for the rest. */
+export const CONNECT_CONTEXT_MD_CHARS = 24_000;
+
+/** An `initialize` request is a few hundred bytes; a body past this is a tool
+ *  call (a bulk update, a long document) and isn't parsed a second time. */
+const MAX_INITIALIZE_BYTES = 16 * 1024;
+
+/** How many nests the server-wide connect message resolves at once. */
+const NEST_CONCURRENCY = 8;
+
+/** Is this JSON-RPC request (or batch) an `initialize`? Reads a clone, so the
+ *  transport still gets the body. Anything unparseable is "no". */
+export async function isInitializeRequest(req: Request): Promise<boolean> {
+  if (req.method !== "POST") return false;
+  const length = Number(req.headers.get("content-length"));
+  if (Number.isFinite(length) && length > MAX_INITIALIZE_BYTES) return false;
+  try {
+    // No content-length (chunked, in-process) → read the clone, but stop past the cap.
+    const text = await readCapped(req.clone(), MAX_INITIALIZE_BYTES);
+    if (text === null) return false;
+    const body = JSON.parse(text) as unknown;
+    const msgs = Array.isArray(body) ? body : [body];
+    return msgs.some(
+      (m) => !!m && typeof m === "object" && (m as { method?: unknown }).method === "initialize",
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The body as text, or null once it passes `max` bytes. */
+async function readCapped(req: Request, max: number): Promise<string | null> {
+  const reader = req.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      // Not awaited: a tee branch's cancel settles only once the transport's branch is done.
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function clipContextMd(text: string): string {
+  if (text.length <= CONNECT_CONTEXT_MD_CHARS) return text;
+  const cut = text.lastIndexOf("\n", CONNECT_CONTEXT_MD_CHARS);
+  return `${text.slice(0, cut > 0 ? cut : CONNECT_CONTEXT_MD_CHARS)}\n\n(CONTEXT.md continues — call context_init for the full text.)`;
+}
+
+/**
+ * Per-nest endpoint: CONTEXT.md, then the nest's always-include documents the
+ * caller can read. A headless access key reads approved documents only, and
+ * CONTEXT.md is not a reviewed document (its tool, `context_init`, is closed to
+ * those keys), so it gets the standing documents alone. Never throws — a
+ * connect must not fail because the instructions couldn't be assembled.
+ */
+export async function nestConnectInstructions(
+  nestId: string,
+  caller: StandingCaller,
+  opts: { headless: boolean },
+): Promise<string | undefined> {
+  const parts: string[] = [];
+  try {
+    if (!opts.headless) {
+      const { content } = await getInstructions(nestId);
+      if (content.trim()) {
+        parts.push(`# Vault Instructions (CONTEXT.md)\n\n${clipContextMd(content.trim())}`);
+      }
+    }
+    const set = await alwaysIncludeDocs(nestId, caller);
+    const block = renderStandingInstructions([{ set }], {
+      fetchHint: opts.headless ? "read them with context_get" : "read them with context_get or context_init",
+    });
+    if (block) parts.push(block);
+  } catch (err) {
+    console.error(`[mcp] ${nestId}: connect instructions unavailable`, err);
+  }
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
+/**
+ * Server-wide endpoint: every readable nest's always-include documents under
+ * ONE budget, nests in name order, plus a pointer to the per-nest endpoint's
+ * `context_init` (which this endpoint doesn't have). Nests resolve a few at a
+ * time, spending the budget in order; once nothing more can fit, the rest
+ * aren't resolved, only counted. A nest that can't be resolved is named.
+ */
+export async function serverConnectInstructions(
+  nests: Array<{ id: string; name: string }>,
+  caller: StandingCaller,
+  baseUrl: string,
+): Promise<string | undefined> {
+  const ordered = [...nests].sort(
+    (a, b) => a.name.localeCompare(b.name, "en") || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const budget = newBudget();
+  const sections: StandingSection[] = [];
+  const failed: string[] = [];
+  let checked = 0;
+  // Stop once no document could fit what's left of the budget.
+  while (checked < ordered.length && budget.remaining >= PER_DOCUMENT_OVERHEAD) {
+    const batch = ordered.slice(checked, checked + NEST_CONCURRENCY);
+    const resolved = await Promise.all(
+      batch.map((n) =>
+        readableAlwaysInclude(n.id, caller).catch((err): StandingDocument[] | null => {
+          console.error(`[mcp] ${n.id}: standing instructions unavailable`, err);
+          return null;
+        }),
+      ),
+    );
+    batch.forEach((n, j) => {
+      const docs = resolved[j];
+      if (docs === null) failed.push(n.name);
+      else sections.push({ nest: n, set: fitBudget(docs, budget) });
+    });
+    checked += batch.length;
+  }
+  const unchecked = ordered.length - checked;
+  const lines = [
+    "Each nest has operating instructions (CONTEXT.md). Before working in a nest, read them: " +
+      `connect to ${baseUrl}/nests/<nest-id>/mcp and call context_init (nest_index lists the ids).`,
+  ];
+  const block = renderStandingInstructions(sections, {
+    heading: "Standing instructions",
+    fetchHint: "read them with context_get and the nest argument",
+  });
+  if (block) lines.push("", block);
+  if (unchecked) {
+    lines.push(
+      "",
+      `The budget is spent; ${unchecked} more nest${unchecked === 1 ? " was" : "s were"} not checked for standing instructions — connect to that nest's own endpoint, or call context_init there.`,
+    );
+  }
+  if (failed.length) {
+    lines.push(
+      "",
+      `Standing instructions could not be loaded for: ${failed.map((f) => `"${f.replace(/\s+/g, " ")}"`).join(", ")} — connect to that nest's own endpoint, or call context_init there.`,
+    );
+  }
+  return lines.join("\n");
+}

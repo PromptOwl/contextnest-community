@@ -18,12 +18,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertCircle,
   Check,
-  Copy,
   Loader2,
   UploadCloud,
   X,
@@ -53,7 +53,6 @@ export function PushConfirmationModal({
   const [error, setError] = useState<string | null>(null);
   const [alwaysAllow, setAlwaysAllow] = useState(false);
   const [deciding, setDeciding] = useState<null | "confirm" | "reject">(null);
-  const [copied, setCopied] = useState(false);
   // Manifest row whose content is expanded for reading; null = none.
   const [openRow, setOpenRow] = useState<number | null>(null);
 
@@ -71,16 +70,6 @@ export function PushConfirmationModal({
   }, [nestId, pendingId]);
 
   const label = pending?.submitter_label || pending?.submitter_email || "an API key";
-
-  const copyId = () => {
-    try {
-      void navigator.clipboard?.writeText(nestId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked — no-op */
-    }
-  };
 
   const decide = async (kind: "confirm" | "reject") => {
     setDeciding(kind);
@@ -136,19 +125,16 @@ export function PushConfirmationModal({
               {/* Nest identity — name + id verbatim, copyable. */}
               <div className="rounded-lg border p-3 space-y-1">
                 <div className="text-sm font-medium">{pending.nest_name}</div>
-                <button
-                  type="button"
-                  onClick={copyId}
-                  className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground hover:text-foreground"
-                  title="Copy nest id"
-                >
+                <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
                   {nestId}
-                  {copied ? (
-                    <Check className="h-3 w-3 text-green-600" />
-                  ) : (
-                    <Copy className="h-3 w-3" />
-                  )}
-                </button>
+                  <CopyButton
+                    text={nestId}
+                    variant="ghost"
+                    className="h-6 px-1.5"
+                    title="Copy nest id"
+                    aria-label="Copy nest id"
+                  />
+                </div>
               </div>
 
               {/* Who + when. */}

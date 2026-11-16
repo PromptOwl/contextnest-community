@@ -3,6 +3,9 @@ import {
   visibilityNeedsAcknowledgement,
   visibilityTierHint,
   visibilityConfirmCopy,
+  visibilityBlockedReason,
+  visibilityMenuOptions,
+  settleVisibilityChange,
 } from "./visibility-confirm";
 
 // Who a tier reaches depends on what the server is. 'org' = every account on
@@ -67,5 +70,97 @@ describe("visibilityConfirmCopy — the acknowledgement dialog", () => {
     expect(c.body).toMatch(/other organi[sz]ations/i);
     expect(c.body).not.toMatch(/anyone on the internet/i);
     expect(c.confirm.length).toBeGreaterThan(0);
+  });
+});
+
+// Server admins can stop owners widening a nest (NEST_PUBLIC_VISIBILITY /
+// NEST_ORG_VISIBILITY = admins). The picker disables a blocked tier and says
+// why; the server refuses it regardless.
+describe("visibilityBlockedReason", () => {
+  const open = { publicBy: "owners", orgBy: "owners", isServerAdmin: false } as const;
+  const locked = { publicBy: "admins", orgBy: "admins", isServerAdmin: false } as const;
+
+  it("defaults (owners) block nothing", () => {
+    for (const t of ["private", "org", "public"] as const) {
+      expect(visibilityBlockedReason(t, "private", open)).toBeNull();
+    }
+  });
+
+  it("admins-only tiers are blocked for an owner, with a reason naming the server admin", () => {
+    expect(visibilityBlockedReason("public", "private", locked)).toMatch(/server admin/i);
+    expect(visibilityBlockedReason("org", "private", locked)).toMatch(/server admin/i);
+    expect(visibilityBlockedReason("public", "org", { ...open, publicBy: "admins" })).toMatch(/public/i);
+    expect(visibilityBlockedReason("org", "private", { ...open, orgBy: "admins" })).toMatch(/organization/i);
+  });
+
+  it("narrowing and staying put are never blocked", () => {
+    expect(visibilityBlockedReason("private", "public", locked)).toBeNull();
+    expect(visibilityBlockedReason("org", "public", locked)).toBeNull();
+    expect(visibilityBlockedReason("public", "public", locked)).toBeNull();
+  });
+
+  it("a server admin is never blocked", () => {
+    const admin = { ...locked, isServerAdmin: true };
+    expect(visibilityBlockedReason("public", "private", admin)).toBeNull();
+    expect(visibilityBlockedReason("org", "private", admin)).toBeNull();
+  });
+});
+
+// The nest header's visibility button used to flip private <-> public only,
+// with Organization reachable from the ⋯ menu alone. Every visibility control
+// now draws its choices from one list (task
+// community-nest-header-visibility-button-skips-organization).
+describe("visibilityMenuOptions — what every visibility control offers", () => {
+  const ctx = { sharedDeployment: false };
+  const open = { publicBy: "owners", orgBy: "owners", isServerAdmin: false } as const;
+
+  it("offers Private, Organization and Public from every tier", () => {
+    for (const current of ["private", "org", "public"] as const) {
+      const opts = visibilityMenuOptions(current, ctx, open);
+      expect(opts.map((o) => o.value)).toEqual(["private", "org", "public"]);
+      expect(opts.map((o) => o.label)).toEqual(["Private", "Organization", "Public"]);
+      expect(opts.filter((o) => o.current).map((o) => o.value)).toEqual([current]);
+      expect(opts.every((o) => !o.disabled)).toBe(true);
+    }
+  });
+
+  it("an org nest can go straight to private or public — no detour", () => {
+    const opts = visibilityMenuOptions("org", ctx, open);
+    expect(opts.find((o) => o.value === "private")!.disabled).toBe(false);
+    expect(opts.find((o) => o.value === "public")!.disabled).toBe(false);
+  });
+
+  it("a tier the server caps is disabled with the reason in place of its hint", () => {
+    const opts = visibilityMenuOptions("private", ctx, { ...open, publicBy: "admins" });
+    const pub = opts.find((o) => o.value === "public")!;
+    expect(pub.disabled).toBe(true);
+    expect(pub.hint).toMatch(/server admin/i);
+    expect(opts.find((o) => o.value === "org")!.disabled).toBe(false);
+  });
+
+  it("hints are worded for the deployment", () => {
+    const shared = visibilityMenuOptions("private", { sharedDeployment: true }, open);
+    expect(shared.find((o) => o.value === "org")!.hint).toMatch(/other organi/i);
+  });
+});
+
+describe("settleVisibilityChange — what the control shows after a save", () => {
+  it("takes the server's answer on success", async () => {
+    const r = await settleVisibilityChange("private", "org", async () => ({ visibility: "org" }));
+    expect(r).toEqual({ visibility: "org", error: null });
+  });
+
+  it("reverts to the PREVIOUS value on failure, never the inverse of the target", async () => {
+    const r = await settleVisibilityChange("org", "public", async () => {
+      throw new Error("Only a server admin can make nests public on this server.");
+    });
+    expect(r.visibility).toBe("org");
+    expect(r.error).toMatch(/server admin/);
+  });
+
+  it("reports a server that answered with a different tier", async () => {
+    const r = await settleVisibilityChange("private", "public", async () => ({ visibility: "private" }));
+    expect(r.visibility).toBe("private");
+    expect(r.error).toMatch(/did not accept/i);
   });
 });

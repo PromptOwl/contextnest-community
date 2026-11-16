@@ -1,0 +1,12 @@
+# Two pods: Postgres via a connection string + ReadWriteMany storage. Renders.
+replicaCount: 2
+postgres:
+  url: postgres://contextnest:secret@postgres.db.svc:5432/contextnest
+  ssl: true
+  poolMax: 5
+persistence:
+  accessMode: ReadWriteMany
+  storageClass: nfs-client
+config:
+  env:
+    DRIFT_SCAN_INTERVAL_MS: "0"

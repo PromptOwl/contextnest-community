@@ -239,6 +239,14 @@ it("folds a pending deletion/archive request into pagination.total, matching wha
   const shownAfter = after.data.items.length + after.data.waiting.length;
   expect(shownAfter - shownBefore).toBe(1);
   expect(after.data.pagination.total - before.data.pagination.total).toBe(1);
+
+  // The badge count (CU-wdqcq0658p) is only what waits on the caller: alice's
+  // own pending reviews and bob's flag sit in `waiting` and stay out of it.
+  // Everything here fits one page, so it equals items.length exactly.
+  expect(after.data.waiting_on_me_total).toBe(after.data.items.length);
+  const bobWork = await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey);
+  expect(bobWork.data.waiting.some((w: any) => w.nest_id === nestId && w.type === "deletion")).toBe(true);
+  expect(bobWork.data.waiting_on_me_total).toBe(bobWork.data.items.length);
 });
 
 it("a review verdict notification carries the document it is about", async () => {

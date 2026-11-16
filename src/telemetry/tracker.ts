@@ -23,6 +23,15 @@ export async function trackEvent(
 
   try {
     const db = getDb();
+    // A sealed personal nest: no node ids, titles or selectors in telemetry —
+    // the nest id and numbers only (re-review R3-H1 sweep).
+    const nestId = typeof data?.nestId === "string" ? data.nestId : null;
+    if (nestId && data) {
+      const { sealedNest } = await import("../surfaces/sealed.js");
+      if (await sealedNest(nestId)) {
+        data = Object.fromEntries(Object.entries(data).filter(([k, v]) => k === "nestId" || typeof v === "number" || typeof v === "boolean"));
+      }
+    }
     await db.run(
       "INSERT INTO telemetry_events (event, data_json) VALUES (?, ?)",
       [event, data ? JSON.stringify(data) : null],

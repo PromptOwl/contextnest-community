@@ -434,16 +434,17 @@ export async function revokeGrant(
 /**
  * Delete codes and tokens that can never be used again. Used codes are kept a
  * day past expiry so a late replay is still detected and revokes the grant.
+ * Expired (not revoked) tokens are kept CLIENT_IDLE_DAYS so Connected apps can
+ * show the app as expired, to reconnect, instead of it silently vanishing.
  */
 export async function purgeExpired(): Promise<void> {
   const db = getDb();
-  const now = iso(0);
   await db.run("DELETE FROM oauth_codes WHERE expires_at < ?", [iso(-86400)]);
   await db.run(
     `DELETE FROM oauth_tokens
       WHERE COALESCE(refresh_expires_at, expires_at) < ?
          OR (revoked_at IS NOT NULL AND revoked_at < ?)`,
-    [now, sqlTime(-86400)],
+    [iso(-CLIENT_IDLE_DAYS * 86400), sqlTime(-86400)],
   );
   // Registration is open, so clients that never connected (or whose tokens
   // are all gone) would pile up. A client removed here re-registers.
@@ -476,22 +477,25 @@ export interface ConnectedApp {
   redirectOrigin: string | null;
   connectedAt: string;
   lastUsedAt: string | null;
+  /** No token can be used any more: reconnect from the app itself. */
+  expired: boolean;
 }
 
 /**
- * What the user sees under "Connected apps": one row per client with a token
- * that can still be used — an unexpired access token, or a refresh token that
- * can mint one.
+ * What the user sees under "Connected apps": one row per client with an
+ * unrevoked token. A client whose tokens have all expired is listed as
+ * expired (until purgeExpired drops it) rather than vanishing; revoked ones —
+ * disconnected, or signed out by a password change — are not listed.
  */
 export async function listConnectedApps(
   userId: string,
 ): Promise<ConnectedApp[]> {
   const rows = (await getDb().all(
-    `SELECT t.client_id, t.client_name, t.scope, t.created_at, t.last_used_at, c.redirect_uris
+    `SELECT t.client_id, t.client_name, t.scope, t.created_at, t.last_used_at, c.redirect_uris,
+            COALESCE(t.refresh_expires_at, t.expires_at) AS usable_until
        FROM oauth_tokens t LEFT JOIN oauth_clients c ON c.client_id = t.client_id
-      WHERE t.user_id = ? AND t.revoked_at IS NULL
-        AND COALESCE(t.refresh_expires_at, t.expires_at) > ?`,
-    [userId, iso(0)],
+      WHERE t.user_id = ? AND t.revoked_at IS NULL`,
+    [userId],
   )) as Array<{
     client_id: string;
     client_name: string;
@@ -499,6 +503,7 @@ export async function listConnectedApps(
     created_at: string;
     last_used_at: string | null;
     redirect_uris: string | null;
+    usable_until: string;
   }>;
   // Grouped here rather than in SQL: the scope union has no portable
   // aggregate across SQLite and Postgres.
@@ -513,16 +518,25 @@ export async function listConnectedApps(
         redirectOrigin: firstOrigin(r.redirect_uris),
         connectedAt: r.created_at,
         lastUsedAt: null,
+        expired: true,
       };
       apps.set(r.client_id, app);
     }
+    if (!expired(r.usable_until)) app.expired = false;
     for (const s of r.scope.split(" ").filter(Boolean))
       if (!app.scopes.includes(s)) app.scopes.push(s);
     if (r.created_at < app.connectedAt) app.connectedAt = r.created_at;
     if (r.last_used_at && (!app.lastUsedAt || r.last_used_at > app.lastUsedAt))
       app.lastUsedAt = r.last_used_at;
   }
-  return [...apps.values()].sort((a, b) => b.connectedAt.localeCompare(a.connectedAt));
+  // Reconnecting through DCR registers a new client id, so once the app is
+  // back, its expired predecessor is noise.
+  const live = new Set(
+    [...apps.values()].filter((a) => !a.expired).map((a) => `${a.clientName}\n${a.redirectOrigin}`),
+  );
+  return [...apps.values()]
+    .filter((a) => !a.expired || !live.has(`${a.clientName}\n${a.redirectOrigin}`))
+    .sort((a, b) => b.connectedAt.localeCompare(a.connectedAt));
 }
 
 function firstOrigin(redirectUris: string | null): string | null {

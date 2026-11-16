@@ -45,10 +45,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import * as api from "../../lib/api";
-import { UNCATEGORIZED, type BoardColumn, type BoardNode, type DimensionKind } from "../../lib/board-dimensions";
+import { UNCATEGORIZED, namespaceKey, type BoardColumn, type BoardNode, type DimensionKind } from "../../lib/board-dimensions";
 import {
-  PRIORITY_LABELS,
-  PRIORITIES,
   formatDue,
   isPickedDue,
   localToday,
@@ -76,7 +74,9 @@ import {
   type ListSort,
 } from "../../lib/board-list";
 import { timeAgo } from "../nest/node-display";
-import { Avatar, DueChip, PriorityIcon, TypeIcon, type Person } from "./CardParts";
+import { Avatar, DueChip, PriorityIcon, TicketChip, TypeIcon, type Person } from "./CardParts";
+import { ticketOf, visibleTags } from "../../lib/ticket";
+import { levelLabel, usePriorityLevels } from "../../lib/priorities";
 
 const DIMENSION_NAMES: Record<DimensionKind, string> = {
   folder: "Folder",
@@ -94,6 +94,8 @@ interface Props {
   dimension: DimensionKind;
   /** A field board's field label — the column header instead of "Field". */
   fieldLabel?: string;
+  /** On a tag board, the grouped namespace — its tags are the sections, so the Tags column omits them. */
+  tagNamespace?: string;
   /** The board's columns with their cards, in board order. */
   sections: ListSection[];
   /** The board's columns (move targets). */
@@ -155,6 +157,7 @@ export function BoardListView({
   boardId,
   dimension,
   fieldLabel,
+  tagNamespace,
   sections,
   boardColumns,
   allNodes,
@@ -172,11 +175,12 @@ export function BoardListView({
   onChanged,
 }: Props) {
   const today = localToday();
+  const levels = usePriorityLevels();
   const columnName = dimension === "field" && fieldLabel ? fieldLabel : DIMENSION_NAMES[dimension];
   const titles = useMemo(() => new Map(allNodes.map((n) => [n.id, n.title])), [allNodes]);
   const ctx: ListContext = useMemo(
-    () => ({ titleOf: (id) => titles.get(id), columnsOf, columnLabel }),
-    [titles, columnsOf, columnLabel],
+    () => ({ titleOf: (id) => titles.get(id), columnsOf, columnLabel, priorityKeys: levels.map((l) => l.key) }),
+    [titles, columnsOf, columnLabel, levels],
   );
   // The list's own width, not the window's: the nest sidebar takes a share.
   const [width, setWidth] = useState(1080);
@@ -320,6 +324,7 @@ export function BoardListView({
             ) : (
               <TypeIcon type={n.type} />
             )}
+            <TicketChip ticket={ticketOf(n.tags)} />
             <span className={`truncate ${done ? "text-muted-foreground" : "text-foreground"}`}>{n.title}</span>
           </span>
         );
@@ -354,7 +359,7 @@ export function BoardListView({
         return n.priority ? (
           <span className="flex items-center gap-1.5 text-muted-foreground">
             <PriorityIcon priority={n.priority} />
-            {PRIORITY_LABELS[n.priority as keyof typeof PRIORITY_LABELS] ?? n.priority}
+            {levelLabel(levels, n.priority)}
           </span>
         ) : (
           <span className="text-muted-foreground/50">—</span>
@@ -377,21 +382,26 @@ export function BoardListView({
         ) : (
           <span className="text-muted-foreground/50">—</span>
         );
-      case "tags":
-        return n.tags.length ? (
-          <span className="flex min-w-0 items-center gap-1 overflow-hidden" title={n.tags.join(" ")}>
-            {n.tags.slice(0, 2).map((t) => (
+      case "tags": {
+        // The ticket number is the ID, and the grouped tag group is the section
+        // header — neither belongs in the chips.
+        const ns = dimension === "tag" ? namespaceKey(tagNamespace) : "";
+        const shown = visibleTags(n.tags).filter((t) => !ns || namespaceKey(t.includes(":") ? t : "") !== ns);
+        return shown.length ? (
+          <span className="flex min-w-0 items-center gap-1 overflow-hidden" title={shown.join(" ")}>
+            {shown.slice(0, 2).map((t) => (
               <span key={t} className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                 {t.replace(/^#/, "")}
               </span>
             ))}
-            {n.tags.length > 2 && (
-              <span className="text-[10px] text-muted-foreground">+{n.tags.length - 2}</span>
+            {shown.length > 2 && (
+              <span className="text-[10px] text-muted-foreground">+{shown.length - 2}</span>
             )}
           </span>
         ) : (
           <span className="text-muted-foreground/50">—</span>
         );
+      }
       case "updated": {
         const at = n.updated_at || n.created_at;
         return at ? (
@@ -637,13 +647,13 @@ export function BoardListView({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-40">
-                {PRIORITIES.map((p) => (
+                {levels.map((p) => (
                   <DropdownMenuItem
-                    key={p}
+                    key={p.key}
                     className="gap-2"
-                    onSelect={() => ask({ action: `Set priority to ${PRIORITY_LABELS[p]}`, patch: { priority: p } })}
+                    onSelect={() => ask({ action: `Set priority to ${p.label}`, patch: { priority: p.key } })}
                   >
-                    <PriorityIcon priority={p} /> {PRIORITY_LABELS[p]}
+                    <PriorityIcon priority={p.key} /> {p.label}
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />

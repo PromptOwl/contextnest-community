@@ -18,7 +18,10 @@ export const TASK_NODE_TYPE: string = "task";
 
 /** Linear's four levels, most urgent first. Absent = no priority. */
 export const TASK_PRIORITIES = ["urgent", "high", "medium", "low"] as const;
-export type TaskPriority = (typeof TASK_PRIORITIES)[number];
+/** A priority key. The built-ins are urgent/high/medium/low, but a nest can
+ *  define its own levels (task_rules.priorities), so any slug is carried. */
+export type TaskPriority = string;
+const PRIORITY_SLUG = /^[a-z0-9][a-z0-9-]{0,19}$/;
 
 export interface TaskFieldsPatch {
   /** Email of someone on the nest's roster. */
@@ -85,9 +88,9 @@ export function taskFieldsOf(metadata: unknown): TaskFields {
   const dueRaw = m.due instanceof Date ? m.due.toISOString().slice(0, 10) : str(m.due);
   if (dueRaw && DATE_RE.test(dueRaw)) out.due = dueRaw;
   const priority = str(m.priority);
-  if (priority && (TASK_PRIORITIES as readonly string[]).includes(priority)) {
-    out.priority = priority as TaskPriority;
-  }
+  // Read leniently: the nest's configured levels are enforced on WRITE, so a
+  // level removed later doesn't make an existing task unreadable.
+  if (priority && PRIORITY_SLUG.test(priority)) out.priority = priority;
   const parent = str(m.parent);
   if (parent) out.parent = parent;
   const movedAt = str(m.moved_at);
@@ -98,6 +101,9 @@ export function taskFieldsOf(metadata: unknown): TaskFields {
 }
 
 export interface TaskFieldsContext {
+  /** The nest's priority keys (looked up only when a priority is being set);
+   *  absent: the built-ins. */
+  priorities?: () => Promise<readonly string[]>;
   nodeId: string | null;
   /** Lower-cased emails of everyone on the nest's roster. */
   roster: () => Promise<Set<string>>;
@@ -159,9 +165,10 @@ export async function applyTaskFields(
   if (patch.priority !== undefined) {
     const next =
       patch.priority === null || patch.priority === "" ? null : String(patch.priority);
-    if (next !== null && !(TASK_PRIORITIES as readonly string[]).includes(next)) {
+    const allowed = ctx.priorities ? await ctx.priorities() : TASK_PRIORITIES;
+    if (next !== null && !(allowed as readonly string[]).includes(next)) {
       throw new ValidationError(
-        `priority must be one of ${TASK_PRIORITIES.join(", ")}, got "${patch.priority}"`,
+        `priority must be one of ${allowed.join(", ")}, got "${patch.priority}"`,
       );
     }
     set("priority", next);
@@ -235,10 +242,10 @@ export function parseTaskFieldsFilter(raw: {
   if (assignee) out.assignee = assignee.toLowerCase();
   const priority = str("priority", raw.priority);
   if (priority) {
-    if (priority !== "none" && !(TASK_PRIORITIES as readonly string[]).includes(priority)) {
-      throw new ValidationError(
-        `priority must be one of ${TASK_PRIORITIES.join(", ")} or none, got "${priority}"`,
-      );
+    // Shape only: a filter that matches nothing is harmless, and the nest's
+    // own levels aren't known here.
+    if (priority !== "none" && !PRIORITY_SLUG.test(priority)) {
+      throw new ValidationError(`priority must be a priority key or none, got "${priority}"`);
     }
     out.priority = priority;
   }

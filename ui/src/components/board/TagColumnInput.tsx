@@ -24,10 +24,16 @@ const optionId = (i: number) => `${LIST_ID}-${i}`;
 export function TagColumnInput({
   suggestions,
   onAdd,
+  autoFocus,
+  onClose,
 }: {
   /** Every tag not yet a column, most used first (board-dimensions tagSuggestions). */
   suggestions: Array<{ value: string; count: number }>;
   onAdd: (value: string) => void;
+  /** Focus the box on mount (it was opened from the "+ Column" button). */
+  autoFocus?: boolean;
+  /** Escape pressed: the owner may collapse the box again. */
+  onClose?: () => void;
 }) {
   const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
@@ -85,8 +91,10 @@ export function TagColumnInput({
               setActive((i) => Math.max(i - 1, 0));
             } else if (e.key === "Escape") {
               setOpen(false);
+              onClose?.();
             }
           }}
+          autoFocus={autoFocus}
           placeholder="add column…"
           role="combobox"
           aria-expanded={open}
@@ -141,7 +149,7 @@ export function TagColumnInput({
             ))}
             {rows.length === 0 && (
               <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                Every tag is already a column.
+                Every tag in use is already a column. Type a name to add an empty one.
               </div>
             )}
           </div>

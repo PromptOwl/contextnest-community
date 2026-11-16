@@ -37,6 +37,18 @@ npx @promptowl/contextnest-community
 
 The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
 
+### Docker and Kubernetes
+
+Each release also publishes a container image, `ghcr.io/promptowl/contextnest-community:<version>` (and `:latest`). It runs as a non-root user (uid 1000) and keeps everything under `/data`:
+
+```bash
+docker run -p 3838:3838 -v contextnest-data:/data ghcr.io/promptowl/contextnest-community:latest
+```
+
+For a single VM with HTTPS and PostgreSQL, use the Compose bundle in [`deploy/compose`](./deploy/compose/README.md): set two values in `.env`, then `docker compose up -d`.
+
+For Kubernetes, use the Helm chart in [`deploy/helm/contextnest-community`](./deploy/helm/contextnest-community/README.md): `helm install cn deploy/helm/contextnest-community`. See [CONFIGURATION.md → Kubernetes (Helm)](./CONFIGURATION.md#kubernetes-helm).
+
 ## License setup
 
 ContextNest Community Edition requires a PromptOwl Community License key (`pk_...`). Getting and activating one:
@@ -105,6 +117,7 @@ Inside a nest: the document tree, plus **Board** (documents as cards by folder, 
 Point any agent at `<server>/llms.txt` — it is the complete manual (endpoints, MCP tools, selector grammar). The short version:
 
 - **Claude Code plugin** — `/plugin marketplace add promptowl/contextnest`, `/plugin install contextnest`, then `/contextnest:setup` walks you through connecting (browser sign-in, no key to paste).
+- **Terminal sign-in** — install the CLI (`npm i -g @promptowl/contextnest-cli`, Node 20+), then `ctx login <server>` (ctx 3.4+), e.g. `ctx login https://nest.promptowl.ai`. It opens your browser to approve and registers the server as one alias, named after the host (`promptowl` here): every nest you can reach shows up in `ctx vault list` as `<alias>/<nest>`. Signing in uploads nothing. A server without browser sign-in takes a key instead: add `--key-stdin` and paste a key from the Connect dialog.
 - **MCP** — `<server>/mcp` for everything the key can read, `<server>/nests/<id>/mcp` for one nest with the full toolset. Claude Code, Cursor and VS Code connect over HTTP with `Authorization: Bearer cnst_…`; Claude Desktop goes through `npx -y mcp-remote`.
 - **REST** — `POST /nests/<id>/context` with a selector (`#tag`, `[[Title]]`, `type:document`, combined with `+ | -`) returns assembled context plus a trace. Full reference: [API.md](./API.md).
 - **ctx CLI** — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
@@ -170,8 +183,8 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 
 **Next release (unreleased)**
 
-- **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Settings → General, or set `HOOTIE_ENABLED=true`.
-- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
+- **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Server settings → Hootie, or set `HOOTIE_ENABLED=true`.
+- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Server settings → Hootie. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
 - **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`), own model keys or gateway (`byok`) and enterprise single sign-on (`sso`: Entra ID, Okta or any OIDC issuer; Google sign-in is on every plan) come with Enterprise and can also be granted to, or removed from, a single licence. Without `byok`, Hootie and agent runs use the PromptOwl model gateway on credits. The server picks up a change on its next licence check (about a minute).
 
 Full release notes live in [CHANGELOG.md](./CHANGELOG.md).

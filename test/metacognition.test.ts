@@ -251,7 +251,8 @@ describe("a run", () => {
       ),
       say("Proposed one pricing fix."),
     ];
-    const start = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, editor.apiKey);
+    // Running an agent is owner/admin only (CU-wdqcq05rqq); a writer gets 403.
+    const start = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
     expect(start.status).toBe(202);
     const done = await waitForRun(start.data.run_id);
 

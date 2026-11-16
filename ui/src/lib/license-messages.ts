@@ -46,8 +46,8 @@ export interface LicenseNotice {
 export const EXPIRY_NOTICE_DAYS = 14;
 /** Inside this many days of a change, a notice can't be dismissed. */
 export const CHANGE_SOON_DAYS = 3;
-/** How long a dismissal lasts. */
-export const DISMISS_DAYS = 7;
+/** How long a dismissal lasts (CU-wdqcq0658c: a week brought it straight back). */
+export const DISMISS_DAYS = 30;
 
 function formatDate(iso: string | null | undefined): string | null {
   if (!iso) return null;

@@ -56,6 +56,8 @@ beforeAll(async () => {
   outsider = await registerUser(app, "outsider@acme.com", "Outsider");
   const { data } = await jsonRequest(app, "POST", "/nests", { name: "Projects" }, owner.apiKey);
   nestId = data.nest.id;
+  // These tests assert exact tag lists, so keep ticket numbers out of them.
+  await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { task_rules: { ticket_numbering: false } }, owner.apiKey);
   // Governed, no self-approve: an editor's documents draft. The case a board
   // move would otherwise get stuck in.
   await jsonRequest(

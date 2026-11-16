@@ -14,6 +14,9 @@ export interface TurnRequest {
   messages: Anthropic.MessageParam[];
   tools: Anthropic.Tool[];
   max_tokens: number;
+  /** Set (e.g. 0 for the Surfaces judge) → a plain, untuned call at this
+   *  temperature: adaptive thinking requires the default temperature. */
+  temperature?: number;
 }
 
 export interface TurnResult {
@@ -63,6 +66,9 @@ export async function createTurn(params: {
     messages: withMemoryBreakpoint(request.messages),
     tools: request.tools,
   };
+  if (request.temperature !== undefined) {
+    return (await client.messages.create({ ...base, temperature: request.temperature }, { signal })) as TurnResult;
+  }
   if (!plainModels.has(key)) {
     try {
       // `as any`: this SDK version's params type predates `output_config`.

@@ -145,7 +145,12 @@ export async function getVersions(
 ): Promise<DocumentVersion[]> {
   const db = getDb();
   const rows = (await db.all(
-    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC",
+    `SELECT nv.*, sa.name AS system_name
+       FROM node_versions nv
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ? AND nv.node_id = ?
+      ORDER BY nv.version DESC`,
     [nestId, nodeId],
   )) as any[];
 
@@ -161,6 +166,32 @@ export async function getVersion(
   const row = (await db.get(
     "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = ?",
     [nestId, nodeId, version],
+  )) as any;
+  return row ? rowToVersion(row) : null;
+}
+
+/**
+ * Who sealed one version — the human (`editedBy`, with the system account's
+ * name when it is one) and the call's `client` block — without its body.
+ * `version` omitted means the latest row. Backs the "last edited by" line on
+ * the node detail and on context_get, so both name the same two writers the
+ * version list does.
+ */
+export async function getVersionAttribution(
+  nestId: string,
+  nodeId: string,
+  version?: number,
+): Promise<DocumentVersion | null> {
+  const row = (await getDb().get(
+    `SELECT nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
+            nv.client_json, sa.name AS system_name
+       FROM node_versions nv
+       LEFT JOIN users u ON u.email = nv.author
+       LEFT JOIN system_accounts sa ON sa.user_id = u.id
+      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? "" : " AND nv.version = ?"}
+      ORDER BY nv.version DESC
+      LIMIT 1`,
+    version === undefined ? [nestId, nodeId] : [nestId, nodeId, version],
   )) as any;
   return row ? rowToVersion(row) : null;
 }
@@ -583,6 +614,15 @@ export async function getDisplayStatus(
 export async function getDisplayStatuses(
   nestId: string,
 ): Promise<Map<string, DisplayStatus>> {
+  return (await getDisplayState(nestId)).statuses;
+}
+
+/** getDisplayStatuses plus the live (approved) version per node, which the same
+ *  queries already read — a row whose newer version is in review or sent back
+ *  is still serving this one. */
+export async function getDisplayState(
+  nestId: string,
+): Promise<{ statuses: Map<string, DisplayStatus>; approved: Map<string, number> }> {
   const db = getDb();
   const [pendingRows, currentRows, approvedRows] = await Promise.all([
     db.all(
@@ -622,7 +662,7 @@ export async function getDisplayStatuses(
       ),
     );
   }
-  return statuses;
+  return { statuses, approved };
 }
 
 // ─── My Drafts ──────────────────────────────────────────────────────────
@@ -768,6 +808,7 @@ function rowToVersion(row: any): DocumentVersion {
     version: row.version,
     content: "", // Content lives on disk, not in the versions table
     editedBy: row.author,
+    editedBySystem: row.system_name ?? undefined,
     editedAt: row.created_at,
     changeNote: row.change_note || undefined,
     status: row.status,

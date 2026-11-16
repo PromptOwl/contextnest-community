@@ -5,6 +5,7 @@ import {
   HOOTIE_PANEL_MIN,
   clampPanelWidth,
   hootieAccentStyle,
+  linkCitations,
   hootieGreeting,
   pushesContent,
   readableOn,
@@ -56,5 +57,48 @@ describe("Hootie branding in the panel", () => {
     expect(
       hootieGreeting({ name: "Ava", logo_url: null, accent_color: null, greeting: "Welcome to Acme." }),
     ).toBe("Welcome to Acme.");
+  });
+});
+
+// Resolution rules are the server module's (test/hootie-citations.test.ts);
+// these cases cover how the panel renders them.
+const live = { id: "nodes/projects/nov/project-november-live-dashboard", title: "Project November — Live Dashboard" };
+const plan = { id: "nodes/q3-plan", title: "Q3 Plan — Owner’s Review" };
+
+describe("Hootie answer text — every [[link]] renders", () => {
+  const cite = (n: { id: string }) => `#cite:${encodeURIComponent(n.id)}`;
+
+  it("a slug or id link becomes a chip labelled with the node's title", () => {
+    expect(linkCitations("Open [[project-november-live-dashboard]].", [live])).toBe(
+      `Open [Project November — Live Dashboard](${cite(live)}).`,
+    );
+    expect(linkCitations("Open [[nodes/q3-plan]].", [plan])).toBe(`Open [Q3 Plan — Owner’s Review](${cite(plan)}).`);
+  });
+
+  it("a near-title (case, dash, quote) becomes the same chip", () => {
+    expect(linkCitations("[[q3 plan - owner's review]]", [plan])).toBe(`[Q3 Plan — Owner’s Review](${cite(plan)})`);
+  });
+
+  it("an alias is shown, its target resolved", () => {
+    expect(linkCitations("[[q3-plan|the plan]]", [plan])).toBe(`[the plan](${cite(plan)})`);
+  });
+
+  it("an unresolved link is plain text: no brackets, nothing clickable", () => {
+    expect(linkCitations("See [[Something not retrieved]].", [live])).toBe("See Something not retrieved.");
+    expect(linkCitations("See [[Nope|that one]].", [])).toBe("See that one.");
+    // Before the answer is done nothing is cited yet: still no raw brackets.
+    expect(linkCitations("[[project-november-live-dashboard]]", undefined)).toBe("project-november-live-dashboard");
+  });
+
+  it("a title with markdown punctuation can't break out of the link label", () => {
+    const odd = { id: "nodes/odd", title: "Odd ] [title](x) \\ name" };
+    const out = linkCitations("[[odd]]", [odd]);
+    expect(out).toBe(`[Odd \\] \\[title\\](x) \\\\ name](${cite(odd)})`);
+  });
+
+  it("leaves text without links untouched", () => {
+    expect(linkCitations("Just **text** and [a link](https://x.y).", [live])).toBe(
+      "Just **text** and [a link](https://x.y).",
+    );
   });
 });

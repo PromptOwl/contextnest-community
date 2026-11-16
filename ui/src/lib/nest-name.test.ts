@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   confirmableName,
+  withNestName,
   nestNameProblem,
   MAX_NEST_NAME_LENGTH,
 } from "./nest-name";
@@ -49,5 +50,19 @@ describe("nest name length", () => {
     expect(nestNameProblem("n".repeat(MAX_NEST_NAME_LENGTH + 1))).toMatch(
       /100 characters/,
     );
+  });
+});
+
+describe("withNestName", () => {
+  it("renames a view of the same nest", () => {
+    const view = { page: "board", nestId: "n1", nestName: "Old", tab: "x" };
+    expect(withNestName(view, "n1", "New")).toEqual({ ...view, nestName: "New" });
+  });
+
+  it("leaves a view of another nest, or a view with no nest, untouched", () => {
+    const other = { page: "nest", nestId: "n2", nestName: "Other" };
+    const dash = { page: "dashboard" };
+    expect(withNestName(other, "n1", "New")).toBe(other);
+    expect(withNestName(dash, "n1", "New")).toBe(dash);
   });
 });

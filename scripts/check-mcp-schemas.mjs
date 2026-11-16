@@ -27,16 +27,39 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //
 // Engine module not importable yet (adopt descriptors once it is):
 //   40->41 context_table_query; 41->42 context_delete; 47->49 nest_create/context_create bootstrap.
-// Repo governance tables, not engine ops (promote upstream, then adopt + lower):
+//   Repo governance tables, not engine ops (promote upstream, then adopt + lower):
 //   42->43 context_move; 43->46 deletion-request trio; 46->47 context_my_drafts;
 //   49->52 comment tools (CU-wdqcq01uqn); 45->48 access-request trio (CU-wdqcq041jn, ContextNest#167);
 //   48->51 task-relation trio (edges table); 51->55 custom-field defs (ContextNest#178);
+//   52->56 server-level write tools (CU-wdqcq02cxu), then 56->45 once they derived from per-nest.
 //   55->58 boards + bulk update; 58->59 context_task_log; 59->61 headless + systems (CU-wdqcq0538g);
 //   61->63 instructions history/update (CU-wdqcq05mty; instructions_revisions table);
-//   63->66 Nest Plugins trio (CU-wdqcq05raz; nest_plugins registry — the engine's `sync`
+//   63->68 metacognition list/suggest/configure/run/remove (CU-wdqcq05rqq; metacognition_agents table).
+//   Repo upload routes, not engine ops (asset store + /nodes/pdf + /nodes/office):
+//   68->69 context_upload (community-nest-upload-files-over-mcp-without-handling-binaries).
+//   69->70 context_set_visibility (twin of PATCH /nests/:id/visibility; Community-only: nest visibility is
+//   server state the engine does not model, so there is no engine op to consume).
+//   70->83 Surfaces S1 (src/mcp/surfaces-tools.ts): context_surfaces_status, bindings_list, binding_preview/create/update/
+//   delete/recheck/resume, links_list, link_revoke/unblock, link_reviews_list, link_review_decide — REST twins of /surfaces/*;
+//   Community-only tables (surface_bindings, surface_identity_links) the engine does not model, so no engine op exists
+//   (ContextNest#238: promote upstream or confirm Community-only; covers the S2a, S2b and S3 tools below too).
+//   83->87 Surfaces S2a (src/mcp/surfaces-tools.ts): context_surfaces_slack_install_create, settings_get, settings_update,
+//   windows_list — REST twins of POST /surfaces/slack/installs, GET/PATCH /surfaces/settings, GET /surfaces/windows; Community-only
+//   tables (surface_installs, surface_settings, surface_windows) the engine does not model, so no engine op exists.
+//   87->93 Surfaces S2b (src/mcp/surfaces-tools.ts): context_surfaces_proposals_list, my_pending, commits_list, budget_get,
+//   budget_update, disconnect — REST twins of GET /surfaces/proposals, /pending, /commits, GET/PATCH /surfaces/nests/:id/budget,
+//   DELETE /surfaces/installs/:id; Community-only tables (surface_proposals, surface_commits, surface_nest_budgets) the engine
+//   does not model, so no engine op exists.
+//   93->94 Surfaces S2b round 4: context_surfaces_binding_invite — twin of POST /surfaces/bindings/:id/invite (/nest invite);
+//   Community-only binding state the engine does not model.
+//   94->97 Surfaces S3 (src/mcp/surfaces-tools.ts): context_surfaces_seed_apply, seed_list, seed_status — twins of
+//   POST /surfaces/seeds/apply, GET /surfaces/seeds, GET /surfaces/seeds/status; Community-only seed state
+//   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
+//   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
+//   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
+//   98->101 Nest Plugins trio (CU-wdqcq05raz; nest_plugins registry — the engine's `sync`
 //   ops take settings per call, these act on stored per-nest config).
-// 52->56 server-level write tools (CU-wdqcq02cxu), then 56->45 once they derived from per-nest.
-const BASELINE = 66;
+const BASELINE = 101;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
@@ -76,10 +99,10 @@ console.log(`\ninline \`inputSchema: {\` literals in src/mcp/: ${total} (baselin
 if (total > BASELINE) {
   console.error(
     `\n✗ ${total - BASELINE} new inline MCP schema(s) added.\n` +
-      `  MCP tool schemas must import from @promptowl/contextnest-engine/api, not be\n` +
-      `  hand-written inline. See CLAUDE.md "Engine & CLI Sync Discipline" and\n` +
-      `  docs/prds/api-convergence.md. If this is intentional convergence work, do it\n` +
-      `  upstream in PromptOwl/ContextNest first.`,
+    `  MCP tool schemas must import from @promptowl/contextnest-engine/api, not be\n` +
+    `  hand-written inline. See CLAUDE.md "Engine & CLI Sync Discipline" and\n` +
+    `  docs/prds/api-convergence.md. If this is intentional convergence work, do it\n` +
+    `  upstream in PromptOwl/ContextNest first.`,
   );
   process.exit(1);
 }
@@ -87,7 +110,7 @@ if (total > BASELINE) {
 if (total < BASELINE) {
   console.error(
     `\n✗ Inline schema count dropped to ${total}. Nice — now lower BASELINE to ${total}\n` +
-      `  in scripts/check-mcp-schemas.mjs so the ratchet holds the new floor.`,
+    `  in scripts/check-mcp-schemas.mjs so the ratchet holds the new floor.`,
   );
   process.exit(1);
 }

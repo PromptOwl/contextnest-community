@@ -12,9 +12,10 @@ import type { OperationContext } from "@promptowl/contextnest-engine/api";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { resolveNestPath, isImportedNest } from "../nests/service.js";
 import { FlatNestStorage } from "./flat-storage.js";
-import { syncIndexedNode, markIndexStale } from "./node-index.js";
+import { syncIndexedNode, markIndexStale, indexedManifest } from "./node-index.js";
 import { instrumentStorage, timed } from "./io-stats.js";
 import { isMetaFile } from "./meta-files.js";
+import { enqueueSeal, sealedFor } from "./seal-queue.js";
 
 /**
  * How long a nest's discovered-document set stays cached, in ms.
@@ -413,6 +414,13 @@ class NestEngineCache {
     let engine = this.cache.get(nestId);
     if (!engine) {
       const nestPath = resolveNestPath(nestId);
+      // No agent configs (CLAUDE.md, .cursorrules, …): this server never hands
+      // them to a coding agent, and they embed the document list, so every
+      // write rewrote five files on the storage mount for nobody.
+      // The manifest comes from node_index, which every document write already
+      // updates (withDiscoveryCache below): the index update and the checkpoint
+      // then read the nest from the database instead of crawling the mount.
+      const options = { agentConfigs: false, manifest: () => indexedManifest(nestId) };
       // Imported nests discover markdown anywhere in the copied folder;
       // default nests keep the engine's structured (nodes/) layout.
       const { storage, invalidate, desync, cachedDocument } = withDiscoveryCache(
@@ -420,10 +428,11 @@ class NestEngineCache {
         instrumentStorage(
           nestId,
           (await isImportedNest(nestId))
-            ? new FlatNestStorage(nestPath)
-            : new NestStorage(nestPath),
+            ? new FlatNestStorage(nestPath, options)
+            : new NestStorage(nestPath, options),
         ),
       );
+      nestOfStorage.set(storage, nestId);
       const histories = withHistoryCache(storage);
       const query = new GraphQueryEngine(storage as any);
       const versions = new VersionManager(storage);
@@ -460,6 +469,41 @@ export const engineCache = new NestEngineCache();
 export const engineApi = createEngineApi();
 
 /**
+ * Ops that honour `deferSeal`: they write the document and its version, and
+ * leave the checkpoint and the index update to the seal queue.
+ */
+const DEFERS_SEAL = new Set([
+  "context_create",
+  "context_update",
+  "context_publish",
+  "context_delete",
+  "context_import_pdf",
+]);
+/** Ops that read the checkpoint or context.yaml: they wait for queued seals. */
+const READS_SEALED = new Set(["context_query", "context_resolve", "context_verify"]);
+
+// Each op is timed as `engine:<op>` while a write on its nest is recorded
+// (io-stats): the vault lock and the checkpoint run inside the op, not on
+// storage, so this total is the only place their cost shows.
+const nestOfStorage = new WeakMap<object, string>();
+const runOp = engineApi.run.bind(engineApi);
+engineApi.run = (async (op: any, input: any, ctx: OperationContext) => {
+  const nestId = nestOfStorage.get(ctx.storage);
+  if (!nestId) return runOp(op, input, ctx);
+  if (READS_SEALED.has(op)) await sealedFor(nestId);
+  const result: any = await timed(nestId, `engine:${op}`, () => runOp(op, input, ctx));
+  if (ctx.deferSeal && DEFERS_SEAL.has(op) && result?.id && !result.unchanged) {
+    // ponytail: a crash between the write above and this row leaves the write
+    // out of the index and checkpoints until `ctx index` or the next write in
+    // its folder; one DB transaction with the write would close it.
+    await enqueueSeal(nestId, result.id, result.status === "published" || "chain_hash" in result);
+  }
+  return result;
+}) as typeof engineApi.run;
+
+export { sealedFor };
+
+/**
  * Build an OperationContext for one nest. `onProgress` is the engine's
  * transport-agnostic progress sink — supply it for long batch operations
  * (import/publish) to drive a progress stream; omit it and the operation runs
@@ -477,5 +521,7 @@ export async function opContext(
     pdfMaxBytes: config.PDF_MAX_BYTES,
     ioConcurrency: config.IMPORT_IO_CONCURRENCY,
   };
-  return { storage, query, versions, actor, onProgress, limits };
+  // deferSeal: the checkpoint and the index update run after the response,
+  // batched per nest (seal-queue.ts).
+  return { storage, query, versions, actor, onProgress, limits, deferSeal: true };
 }

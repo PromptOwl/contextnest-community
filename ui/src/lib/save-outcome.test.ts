@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { saveOutcome } from "./save-outcome";
+import { canSaveTagsAlone, saveOutcome } from "./save-outcome";
 
 const base = {
   isNew: false,
@@ -48,5 +48,23 @@ describe("saveOutcome mirrors the server's publish gate", () => {
 
   it("is pending while the author revises their own submission", () => {
     expect(saveOutcome({ ...base, isOwnPendingReview: true, stewardshipEnabled: false })).toBe("pending");
+  });
+});
+
+describe("canSaveTagsAlone", () => {
+  const ok = { isNew: false, status: "published", outcome: "publish" as const, otherFieldsDirty: false };
+
+  it("saves a tag change on a clean published doc whose save publishes", () => {
+    expect(canSaveTagsAlone(ok)).toBe(true);
+    expect(canSaveTagsAlone({ ...ok, status: "approved" })).toBe(true);
+  });
+
+  it("waits for Save on a new doc, a draft, a save that drafts, or other unsaved edits", () => {
+    expect(canSaveTagsAlone({ ...ok, isNew: true })).toBe(false);
+    expect(canSaveTagsAlone({ ...ok, status: "draft" })).toBe(false);
+    expect(canSaveTagsAlone({ ...ok, status: "pending_review" })).toBe(false);
+    expect(canSaveTagsAlone({ ...ok, outcome: "draft" })).toBe(false);
+    expect(canSaveTagsAlone({ ...ok, outcome: "pending" })).toBe(false);
+    expect(canSaveTagsAlone({ ...ok, otherFieldsDirty: true })).toBe(false);
   });
 });

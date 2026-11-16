@@ -1,0 +1,38 @@
+ContextNest Community {{ default .Chart.AppVersion .Values.image.tag }} is installed as "{{ include "contextnest-community.fullname" . }}" in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+
+Open it at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+Reach it from your machine:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "contextnest-community.fullname" . }} 3838:{{ .Values.service.port }}
+  curl http://127.0.0.1:3838/health
+Then open http://127.0.0.1:3838
+{{- end }}
+
+{{- if and (not .Values.secrets.promptowlKey) (not .Values.existingSecret) }}
+
+No license key is set: the server runs on the Free tier (up to 10 users).
+Install a PromptOwl license key (pk_...) from the browser License Setup page,
+or via secrets.promptowlKey / existingSecret (PROMPTOWL_KEY).
+{{- end }}
+
+{{- if and (not .Values.existingSecret) (or .Values.secrets.promptowlKey .Values.secrets.secretsKey .Values.secrets.env .Values.postgres.url .Values.postgres.password) }}
+
+Note: secrets were passed as chart values, so they are also stored in the Helm
+release history. For production, put them in a Secret you manage and use
+existingSecret / postgres.existingSecret (see the chart README).
+{{- end }}
+
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence.enabled=false. Every nest is lost when the pod restarts.
+{{- else if not .Values.persistence.existingClaim }}
+
+Data lives on PVC {{ include "contextnest-community.claimName" . }}. It is kept on
+"helm uninstall" (resource-policy: keep); delete it yourself to remove the nests.
+{{- end }}

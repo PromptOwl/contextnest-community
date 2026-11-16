@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest, settleSeals } from "./helpers.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -27,7 +27,8 @@ beforeAll(async () => {
 
 afterAll(() => env.cleanup());
 
-const indexText = (): string => {
+const indexText = async (): Promise<string> => {
+  await settleSeals();
   const p = join(env.dataDir, "nests", nestId, "context.yaml");
   return existsSync(p) ? readFileSync(p, "utf-8") : "";
 };
@@ -42,7 +43,7 @@ describe("deleting a node re-indexes the vault", () => {
       owner.apiKey,
     );
     const nodeId = created.data.node.id;
-    expect(indexText()).toContain("doomed-doc");
+    expect(await indexText()).toContain("doomed-doc");
 
     const del = await jsonRequest(
       app,
@@ -55,7 +56,7 @@ describe("deleting a node re-indexes the vault", () => {
 
     // The file is gone AND the index no longer advertises it.
     expect(existsSync(join(env.dataDir, "nests", nestId, `${nodeId}.md`))).toBe(false);
-    expect(indexText()).not.toContain("doomed-doc");
+    expect(await indexText()).not.toContain("doomed-doc");
   });
 
   it("leaves the other nodes in the index alone", async () => {
@@ -80,7 +81,7 @@ describe("deleting a node re-indexes the vault", () => {
       undefined,
       owner.apiKey,
     );
-    const text = indexText();
+    const text = await indexText();
     expect(text).toContain("keeper-doc");
     expect(text).not.toContain("goner-doc");
   });

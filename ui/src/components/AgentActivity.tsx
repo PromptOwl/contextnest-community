@@ -245,6 +245,11 @@ export function AgentActivity({
                             {" "}· {h.comments} comment{h.comments === 1 ? "" : "s"}
                           </span>
                         )}
+                        {(h.notifications ?? 0) > 0 && (
+                          <span className="text-muted-foreground">
+                            {" "}· {h.notifications} notification{h.notifications === 1 ? "" : "s"}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-1.5 text-right">
                         {onOpenRun && (

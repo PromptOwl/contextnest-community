@@ -42,9 +42,36 @@ export interface TraceEvent {
   client?: ClientMetadata;
 }
 
+/**
+ * Round 8 (re-review R4-H1): a credential in an /auth/* path never reaches the
+ * trace. `/auth/reset/<anything>` is stored as `/auth/reset/[token]`, and any
+ * other token-shaped segment (32+ base64url characters that isn't a uuid)
+ * under /auth/ as `[redacted]`. Ids (uuids) stay readable for the audit.
+ */
+export function redactAuthPath(path: string): string {
+  if (!/^\/auth\//.test(path)) return path;
+  if (/^\/auth\/reset\/./.test(path)) return "/auth/reset/[token]";
+  return path
+    .split("/")
+    .map((seg) =>
+      /^[A-Za-z0-9_-]{32,}$/.test(seg) && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)
+        ? "[redacted]"
+        : seg,
+    )
+    .join("/");
+}
+
 export async function logTraceEvent(e: TraceEvent): Promise<void> {
   try {
     const db = getDb();
+    if (e.path) e = { ...e, path: redactAuthPath(e.path) };
+    // A sealed personal nest: nothing after its id reaches the trace — node
+    // ids are slugs of titles (re-review R3-H1c).
+    const traceNest = e.nestId ?? (e.path ? (/^\/nests\/([^/?]+)/.exec(e.path)?.[1] ?? null) : null);
+    if (traceNest) {
+      const { sealedNest } = await import("../surfaces/sealed.js");
+      if (await sealedNest(traceNest)) e = { ...e, path: e.path ? `/nests/${traceNest}/[sealed]` : e.path };
+    }
     await db.run(
       `INSERT INTO api_events
          (ts, kind, method, path, tool, nest_id, user_id, user_email, status, duration_ms, client_json)

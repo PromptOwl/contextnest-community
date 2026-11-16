@@ -25,6 +25,7 @@ export interface AgentRunSummary {
   approved: number;
   rejected: number;
   comments: number;
+  notifications: number;
   error: string | null;
 }
 
@@ -36,6 +37,7 @@ export interface AgentStats {
   est_cost_usd: number;
   proposals: { made: number; approved: number; rejected: number; pending: number; withdrawn: number; approval_rate: number | null };
   comments: number;
+  notifications: number;
   access_requests: number;
   blocked_by_scope: number;
   last_run_at: string | null;
@@ -113,7 +115,7 @@ export async function agentStats(
   )) as RunRow[];
 
   // Only the steps that carry an outcome: proposals and access (write),
-  // comments (notify), scope blocks (also on reads) and per-turn usage. Bounded
+  // comments and notifications (notify), scope blocks (also on reads) and per-turn usage. Bounded
   // to the runs scanned above, so the read/external bulk is never loaded.
   const steps = runs.length
     ? ((await db.all(
@@ -127,10 +129,10 @@ export async function agentStats(
       )) as Array<{ run_id: string; action: string; detail: string }>)
     : [];
 
-  const perRun = new Map<string, { reviews: string[]; comments: number; stepTokens: number; access: number; blocked: number }>();
+  const perRun = new Map<string, { reviews: string[]; comments: number; notifications: number; stepTokens: number; access: number; blocked: number }>();
   const bucket = (id: string) => {
     let b = perRun.get(id);
-    if (!b) perRun.set(id, (b = { reviews: [], comments: 0, stepTokens: 0, access: 0, blocked: 0 }));
+    if (!b) perRun.set(id, (b = { reviews: [], comments: 0, notifications: 0, stepTokens: 0, access: 0, blocked: 0 }));
     return b;
   };
   for (const s of steps) {
@@ -139,6 +141,8 @@ export async function agentStats(
     const b = bucket(s.run_id);
     if (d.kind === "proposal" && typeof d.review_id === "string") b.reviews.push(d.review_id);
     if (d.tool === "comment") b.comments++;
+    // Sent ones only; a refused notify is a step too.
+    if (d.tool === "notify" && d.kind === "notification") b.notifications++;
     if (d.kind === "access_request" || typeof d.access_request_id === "string") b.access++;
     if (d.kind === "access_needed") b.blocked++;
     if (d.usage !== undefined) b.stepTokens += usageTotal(d.usage);
@@ -165,6 +169,7 @@ export async function agentStats(
     est_cost_usd: 0,
     proposals: { made: 0, approved: 0, rejected: 0, pending: 0, withdrawn: 0, approval_rate: null },
     comments: 0,
+    notifications: 0,
     access_requests: 0,
     blocked_by_scope: 0,
     last_run_at: runs[0]?.started_at ?? null,
@@ -199,6 +204,7 @@ export async function agentStats(
       else stats.proposals.withdrawn++;
     }
     stats.comments += b?.comments ?? 0;
+    stats.notifications += b?.notifications ?? 0;
     stats.access_requests += b?.access ?? 0;
     stats.blocked_by_scope += b?.blocked ?? 0;
 
@@ -221,6 +227,7 @@ export async function agentStats(
         approved,
         rejected,
         comments: b?.comments ?? 0,
+        notifications: b?.notifications ?? 0,
         error,
       });
     }

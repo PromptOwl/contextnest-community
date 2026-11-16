@@ -27,6 +27,8 @@ describe("public docs site", () => {
   let nestId: string;
   let privateId: string;
   let noReaderId: string;
+  /** CU-wdqcq05ran: one nest per home_node form, each with a root convention page. */
+  const homeNests: Record<string, string> = {};
 
   const get = (path: string, headers: Record<string, string> = HTML) =>
     app.request(`http://localhost${path}`, { headers });
@@ -49,6 +51,12 @@ describe("public docs site", () => {
       "docs/guides",
     );
     await add("Advanced", "# Advanced\n\nApproved advanced text.", "docs/guides");
+    // CU-wdqcq05raw: comments, filenames and aliased wikilinks in a table.
+    await add(
+      "Matrix",
+      "# Matrix\n\n<!-- editor note: do not ship -->\n\nEdit CONTEXT.md first.\n\n| Guide | Use |\n| --- | --- |\n| [[docs/guides/advanced|Deep dive]] | later |",
+      "docs/guides",
+    );
 
     // Governed from here on: new docs and edits wait for review.
     await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, owner.apiKey);
@@ -59,6 +67,24 @@ describe("public docs site", () => {
     expect(vis.status, JSON.stringify(vis.data)).toBe(200);
     const rm = await jsonRequest(app, "PATCH", `/nests/${nestId}/reader-mode`, { enabled: true, home_node: "nodes/docs/welcome" }, owner.apiKey);
     expect(rm.status, JSON.stringify(rm.data)).toBe(200);
+
+    // CU-wdqcq05ran: each nest has a root `overview` (what the naming convention
+    // picks) and a `welcome` one folder down (what home_node designates).
+    for (const [name, home] of [
+      ["Home Slug", "welcome"],
+      ["Home Mixed Case", "Nodes/Docs/Guides/WELCOME"],
+      ["Home Missing", "no-such-page"],
+    ] as const) {
+      const n = await jsonRequest(app, "POST", "/nests", { name }, owner.apiKey);
+      const id = n.data.nest.id;
+      homeNests[name] = id;
+      // Both under "docs", so the site strips it and overview sits at the root.
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Overview", content: "# Overview\n\nconvention page", folder: "docs" }, owner.apiKey);
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Welcome", content: "# Welcome\n\ndesignated home", folder: "docs/guides" }, owner.apiKey);
+      await jsonRequest(app, "PATCH", `/nests/${id}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+      const hrm = await jsonRequest(app, "PATCH", `/nests/${id}/reader-mode`, { enabled: true, home_node: home }, owner.apiKey);
+      expect(hrm.status, JSON.stringify(hrm.data)).toBe(200);
+    }
 
     const priv = await jsonRequest(app, "POST", "/nests", { name: "Private Docs" }, owner.apiKey);
     privateId = priv.data.nest.id;
@@ -90,6 +116,54 @@ describe("public docs site", () => {
     expect(html.match(/<h1[\s>]/g)?.length).toBe(1);
     // No app bundle: the content is in the HTML, not behind JavaScript.
     expect(html).not.toContain('id="root"');
+  });
+
+  // The MCP endpoint answers agents with a key; a browser GET only gets the
+  // auth error, so the footer copies its URL instead of linking to it.
+  it("offers the MCP URL as a copy button, not a link", async () => {
+    const html = await (await get("/d/acme-docs/")).text();
+    expect(html).toContain(`data-copy-text="http://localhost/nests/${nestId}/mcp"`);
+    expect(html).not.toMatch(/<a [^>]*href="[^"]*\/mcp"/);
+    expect(html).toContain("[data-copy-text]");
+  });
+
+  // A dark brand accent stays readable on the dark page: lifted toward white there.
+  it("lightens a brand accent in dark mode only", async () => {
+    const id = homeNests["Home Slug"];
+    const res = await jsonRequest(app, "PATCH", `/nests/${id}/branding`, { accent_color: "#142a80" }, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    const html = await siteHome("Home Slug");
+    expect(html).toContain("--accent:#142a80;");
+    expect(html).toMatch(/prefers-color-scheme:dark\)\{:root\{[^}]*--accent:color-mix\(in srgb,#142a80 45%,#fff\)/);
+  });
+
+  // CU-wdqcq05ran: home_node resolves on the site the way the reader resolves
+  // it — full id or bare slug, case-insensitively — not by exact id only.
+  const siteHome = async (name: string) => {
+    const { buildSiteFiles } = await import("../src/site/build.js");
+    const files = await buildSiteFiles(homeNests[name], "https://site.example.com");
+    return String(files["index.html"]);
+  };
+
+  it("makes a bare-slug home_node the home page, as the reader does", async () => {
+    const html = await siteHome("Home Slug");
+    expect(html).toMatch(/<title>Welcome[^<]*Home Slug<\/title>/);
+    expect(html).toContain("designated home");
+    // And through the live /d/<key>/ route, not just the static export.
+    const res = await get("/d/home-slug/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/<title>Welcome[^<]*Home Slug<\/title>/);
+  });
+
+  it("matches a home_node full id case-insensitively", async () => {
+    const html = await siteHome("Home Mixed Case");
+    expect(html).toMatch(/<title>Welcome[^<]*Home Mixed Case<\/title>/);
+  });
+
+  it("falls back to the naming convention when home_node matches no page", async () => {
+    const html = await siteHome("Home Missing");
+    expect(html).toMatch(/<title>Overview[^<]*Home Missing<\/title>/);
+    expect(html).toContain("convention page");
   });
 
   it("serves a page at its clean path, wikilinks as plain anchors", async () => {
@@ -126,6 +200,17 @@ describe("public docs site", () => {
       // Code stays as written.
       expect(out).toContain("`[[docs/guides/advanced]]` stays code.");
     }
+  });
+
+  it("renders table wikilinks, plain filenames and no HTML comments, in every output (CU-wdqcq05raw)", async () => {
+    const html = await (await get("/d/acme-docs/guides/matrix")).text();
+    expect(html).toContain('<td><a href="/d/acme-docs/guides/advanced">Deep dive</a></td>');
+    expect(html).not.toContain("http://CONTEXT.md");
+    expect(html).toContain("Edit CONTEXT.md first.");
+    const twin = await (await get("/d/acme-docs/guides/matrix.md", {})).text();
+    const full = await (await get("/d/acme-docs/llms-full.txt", {})).text();
+    for (const out of [html, twin, full]) expect(out).not.toContain("editor note");
+    expect(twin).toContain("| [Deep dive](http://localhost/d/acme-docs/guides/advanced) | later |");
   });
 
   it("escapes raw HTML and leaves code alone", async () => {
@@ -198,6 +283,37 @@ describe("public docs site", () => {
     const b = await get(`/?nest=${nestId}&doc=nodes/docs/guides/setup`);
     expect(b.status).toBe(301);
     expect(b.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
+  });
+
+  it("301s the SPA URL for any anonymous GET or HEAD, whatever it Accepts (CU-wdqcq05raw)", async () => {
+    const want = "http://localhost/d/acme-docs/";
+    // Plain curl, a link checker or an AI fetcher: no Accept, generic UA.
+    const bare = await get(`/nest/${nestId}`, {});
+    expect(bare.status).toBe(301);
+    expect(bare.headers.get("location")).toBe(want);
+    // The answer depends on Accept and User-Agent too, so caches must key on them.
+    expect(bare.headers.get("vary")).toMatch(/Accept/);
+    // Only a crawler's JSON-only 301 depends on the UA as well.
+    expect(bare.headers.get("vary")).not.toMatch(/User-Agent/);
+    const bot = await get(`/nest/${nestId}`, { "User-Agent": "GPTBot/1.2", Accept: "application/json" });
+    expect(bot.status).toBe(301);
+    expect(bot.headers.get("vary")).toMatch(/User-Agent/);
+    const mozilla = await get(`/nest/${nestId}`, { "User-Agent": "Mozilla/5.0" });
+    expect(mozilla.status).toBe(301);
+    const any = await get(`/nest/${nestId}`, { Accept: "*/*" });
+    expect(any.status).toBe(301);
+    const head = await app.request(`http://localhost/nest/${nestId}`, { method: "HEAD" });
+    expect(head.status).toBe(301);
+    expect(head.headers.get("location")).toBe(want);
+    const doc = await get(`/?nest=${nestId}&doc=nodes/docs/guides/setup`, {});
+    expect(doc.status).toBe(301);
+    expect(doc.headers.get("location")).toBe("http://localhost/d/acme-docs/guides/setup");
+    // API clients keep their answer: a bearer token, or JSON-only Accept.
+    expect((await get(`/nest/${nestId}`, authed(owner.apiKey))).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json" })).status).not.toBe(301);
+    // axios' default: JSON first, with */* as a fallback — still an API client.
+    expect((await get(`/nest/${nestId}`, { Accept: "application/json, text/plain, */*" })).status).not.toBe(301);
+    expect((await get(`/nest/${nestId}?app=1`, {})).status).not.toBe(301);
   });
 
   it("picks up a newly approved version without a restart", async () => {

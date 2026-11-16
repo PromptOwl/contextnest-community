@@ -1373,7 +1373,7 @@ function ThreadCard({
                 {fmtTime(c.createdAt)}
               </span>
             </div>
-            <div className="whitespace-pre-wrap break-words">{c.body}</div>
+            <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{c.body}</div>
           </li>
         ))}
       </ul>

@@ -20,11 +20,13 @@ import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
 import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
-import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import { applyArtifactSandboxHeaders, isHtmlBody } from "../shared/artifact-sandbox.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { isSecureRequest } from "../auth/sessions.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { readArtifact, createThread } from "../annotations/service.js";
+import { renderPublicViewPage } from "../views/render.js";
+import { readViewVersion } from "../views/deps.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
@@ -384,11 +386,31 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   if (artifact.version == null) return c.html(unavailablePage(), 404);
   const type = String(artifact.type ?? "document");
   const body = artifact.html ?? "";
-  const isHtml = type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
+  const isHtml = isHtmlBody(type, body);
 
   await publish.logView(row.id, viewerEmail);
   applyArtifactSandboxHeaders(c);
   const overlays = overlayMarkup(row, viewerEmail);
+  // A §1.12 view: its own approved intro and one neutral placeholder per
+  // block. /p has no nest-user viewer, so it never resolves another node,
+  // never frames an artifact and never carries nest-data.
+  if (type === "view") {
+    // Title and block count from the APPROVED version, like the body: the
+    // live title may be an unapproved rename.
+    let blockCount = 0;
+    let title = row.node_id;
+    try {
+      const approved = await readViewVersion(row.nest_id, row.node_id, artifact.version);
+      blockCount = approved.meta?.blocks.length ?? 0;
+      title = approved.title || row.node_id;
+    } catch {
+      blockCount = 0;
+    }
+    const page = renderPublicViewPage({ title, intro: body, blockCount });
+    return c.body(withOverlays(page, overlays), 200, {
+      "Content-Type": "text/html; charset=utf-8",
+    });
+  }
   if (isHtml) {
     return c.body(withOverlays(body, overlays), 200, {
       "Content-Type": "text/html; charset=utf-8",
@@ -759,7 +781,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
     docTitle: "A document has been shared with you",
     path: "PromptOwl · ContextNest",
     link,
-  });
+  }, { nestId: row.nest_id });
   return c.html(sentPage());
 });
 

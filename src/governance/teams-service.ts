@@ -648,7 +648,7 @@ export async function shareTeamWithNest(params: {
         link,
         permission: role,
         by: caller?.email || undefined,
-      });
+      }, { nestId: params.nestId });
       // The inbox message names the access level in collaborator terms, so a
       // team viewer reads "Viewer" the way a directly invited one does.
       const permission = teamRoleToPermission(role) ?? role;

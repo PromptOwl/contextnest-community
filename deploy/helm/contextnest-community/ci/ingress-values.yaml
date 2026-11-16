@@ -1,0 +1,39 @@
+# Ingress with TLS, a created ServiceAccount, scheduling and extra env.
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  hosts:
+    - host: nest.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: nest-tls
+      hosts:
+        - nest.example.com
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: contextnest@example.iam.gserviceaccount.com
+config:
+  publicBaseUrl: https://nest.example.com
+  env:
+    TELEMETRY_ENABLED: true
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: contextnest
+    effect: NoSchedule
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: kubernetes.io/arch
+              operator: In
+              values: [amd64, arm64]

@@ -17,11 +17,26 @@ export interface InboxRow {
   createdAt?: string;
 }
 
+/** How an inbox message names a person: their display name, else the email. */
+export async function personLabel(email: string): Promise<string> {
+  const row = (await getDb().get(
+    "SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+    [email],
+  )) as { name: string | null } | undefined;
+  return row?.name?.trim() || email;
+}
+
 export async function insertNotification(
   row: InboxRow,
   ctx: OutboundContext & { from?: string | null } = {},
 ): Promise<void> {
   const email = row.userEmail.toLowerCase();
+  // A sealed personal nest notifies its owner only (re-review R3-H1a).
+  if (row.nestId) {
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    const sealed = await sealedNest(row.nestId);
+    if (sealed && sealed.ownerEmail.toLowerCase() !== email) return;
+  }
   await getDb().run(
     `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,

@@ -78,6 +78,8 @@ communitySiteRoutes.post("/", async (c) => {
   try {
     const site = await createCommunitySite({ name, url, secret, is_active });
     await loadActiveCommunitySites();
+    // Round 8: every sealed-nest owner hears about a change to the SSO sites.
+    await import("../surfaces/signin-alerts.js").then((m) => m.alertSealedOwnersConfigChanged("single sign-on sites")).catch(() => undefined);
     return c.json(serializeSite(site), 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -129,6 +131,8 @@ communitySiteRoutes.patch("/:id", async (c) => {
     const site = await updateCommunitySite(id, patch);
     if (!site) return c.json({ error: "Community site not found." }, 404);
     await loadActiveCommunitySites();
+    // Round 8: every sealed-nest owner hears about a change to the SSO sites.
+    await import("../surfaces/signin-alerts.js").then((m) => m.alertSealedOwnersConfigChanged("single sign-on sites")).catch(() => undefined);
     return c.json(serializeSite(site));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -146,5 +150,7 @@ communitySiteRoutes.delete("/:id", async (c) => {
   const removed = await deleteCommunitySite(id);
   if (!removed) return c.json({ error: "Community site not found." }, 404);
   await loadActiveCommunitySites();
+  // Round 8: every sealed-nest owner hears about a change to the SSO sites.
+  await import("../surfaces/signin-alerts.js").then((m) => m.alertSealedOwnersConfigChanged("single sign-on sites")).catch(() => undefined);
   return c.json({ ok: true, id });
 });

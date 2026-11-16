@@ -3,8 +3,9 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { lazyChunk } from "../lib/lazy-chunk";
+import { OrgContributorPanel } from "./OrgContribution";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -16,7 +17,7 @@ import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
   FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
+  Pencil, Trash2, Globe, Building2, FolderInput, Users,
   FileStack, FolderPlus, X, ListChecks,
   Activity, BookOpen, Archive, Eye, Palette, History,
   KeyRound,
@@ -41,16 +42,6 @@ import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
 import { PublicSiteDialog } from "./PublicSiteDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { UploadingOverlay } from "./UploadingOverlay";
@@ -86,7 +77,6 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -144,6 +134,8 @@ interface NestViewProps {
   onTabChange?: (tab: string) => void;
   /** Open the settings dialog once the nest has loaded (deep link). */
   initialSettings?: boolean;
+  /** The nest's name was saved — App updates every place that shows it. */
+  onRenamed?: (name: string) => void;
 }
 
 /** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
@@ -169,8 +161,9 @@ export function NestView({
   initialTab,
   onTabChange,
   initialSettings,
+  onRenamed,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode, sharedDeployment, docStreamEnabled } = useAuth();
+  const { isAdmin, adminStatus, authMode, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -186,6 +179,8 @@ export function NestView({
   const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
+    // Our own save echoing back via onRenamed — resetting would eat typing since.
+    if (nestName === lastSavedName.current) return;
     setEditableName(nestName);
     lastSavedName.current = nestName;
   }, [nestName, nestId]);
@@ -205,6 +200,7 @@ export function NestView({
       await api.updateNest(nestId, { name: trimmed });
       lastSavedName.current = trimmed;
       setRenameError(null);
+      onRenamed?.(trimmed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to rename nest";
       setRenameError(msg);
@@ -278,6 +274,7 @@ export function NestView({
   const [reviewSlaHours, setReviewSlaHours] = useState<number | null>(null);
   const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const [alwaysIncludeTags, setAlwaysIncludeTags] = useState<string[]>(["always-include"]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
   // Held agent writes awaiting confirmation (reviewer view). Empty when the
@@ -286,13 +283,6 @@ export function NestView({
   // The held push whose confirm modal is open, if any.
   const [openPushId, setOpenPushId] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
-  const [visibilitySaving, setVisibilitySaving] = useState(false);
-  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
-  // becomes readable by anyone on the internet, outside your organization.
-  const [confirmPublic, setConfirmPublic] = useState(false);
-  // What the new readers will see beside the name. Prefilled from the nest on
-  // open and saved on confirm, same as NestVisibilityControl's dialog.
-  const [publicDescriptionDraft, setPublicDescriptionDraft] = useState("");
   // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
   // read-only presentation to the clean docs reader; reader_home_node names the
   // designated landing/hub node (empty → resolve by convention).
@@ -368,6 +358,9 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
+  // Nest meta + settings have landed: enough for the document tree, which
+  // need not wait on the review/deletion queues that initialLoad covers.
+  const [shellReady, setShellReady] = useState(false);
   // The change open in the Review tab's pane. Mirrored into ?review= so a
   // review can be linked and survives a refresh (CU-wdqcq05mhk).
   const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
@@ -488,15 +481,22 @@ export function NestView({
       // Re-expanding a folder already on screen is not a reason to re-read
       // it; only an explicit refresh (a mutation) is.
       if (!opts.refresh && loadedFolders.current.has(folder)) return;
-      setLoadingFolders((prev) => new Set(prev).add(folder));
-      try {
-        const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
+      const apply = (res: { nodes: any[] }) => {
         loadedFolders.current.add(folder);
         setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
         ]);
+      };
+      const query = reads.folderNodes(nestId, folder);
+      // Paint the cached level at once and refresh behind it; a stale entry
+      // used to block the tree on the network. A mutation refresh skips this.
+      const cached = opts.refresh ? undefined : qc.getQueryData(query.queryKey);
+      if (cached) apply(cached);
+      else setLoadingFolders((prev) => new Set(prev).add(folder));
+      try {
+        apply(await qc.fetchQuery(query));
       } catch (e: any) {
         console.error("[NestView] listFolderNodes failed", nestId, folder, e);
         toast.error(e?.message || "Failed to load folder");
@@ -514,6 +514,12 @@ export function NestView({
   /** The nest-wide shape. Describes the whole nest whatever level is open,
    *  so it is read once per nest rather than once per folder expanded. */
   const fetchCensus = useCallback(async () => {
+    // Same paint-then-refresh as fetchLevel.
+    const cached = qc.getQueryData(reads.census(nestId).queryKey);
+    if (cached) {
+      setCensus(cached.census);
+      setCensusSettled(true);
+    }
     try {
       const { census: fresh } = await qc.fetchQuery(reads.census(nestId));
       setCensus(fresh);
@@ -536,7 +542,8 @@ export function NestView({
 
 
   const openFolderInDocuments = (folder: string) => {
-    setFolderFilter(folder);
+    // "Root" is the loose top-level bucket — its "View all" is the unscoped list.
+    setFolderFilter(folder && folder !== "Root" ? folder : null);
     setActiveTab("documents");
   };
 
@@ -578,32 +585,33 @@ export function NestView({
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [, queueData, deletionData, settingsData] =
+    // The reads below go through the shared cache (same keys and invalidation
+    // as the hook-based screens) so returning from a document paints from
+    // memory instead of re-fetching. Read imperatively rather than via hooks to
+    // keep each call's own error fallback — a failing node list must still let
+    // the settings response apply, per the note above.
+    // The queues are started now but awaited last: the tree needs only the
+    // nest meta and settings, so they no longer hold it back (shellReady).
+    const queueRead = grantOnly
+      ? empty({ requests: [], total: 0 })
+      : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
+        console.error("[NestView] getReviewQueue failed", nestId, e);
+        toast.error(e?.message || "Failed to load review queue");
+        return { requests: [], total: 0 };
+      });
+    // Pending AND declined in one call: pending drives the admin queue,
+    // declined is how the person who asked learns the verdict.
+    const deletionRead = grantOnly
+      ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
+      : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
+        console.error("[NestView] getDeletionRequests failed", nestId, e);
+        return { requests: [] as api.DeletionRequest[], total: 0 };
+      });
+    const [, settingsData] =
       await Promise.all([
-        // The five reads below go through the shared cache (same keys and
-        // invalidation as the hook-based screens) so returning from a document
-        // paints from memory instead of re-fetching. Read imperatively rather
-        // than via hooks to keep each call's own error fallback — a failing
-        // node list must still let the settings response apply, per the note
-        // above.
         // Documents come from the folder levels currently on screen, not one
         // whole-nest listing — see fetchLevel.
         reloadLevels(),
-        grantOnly
-          ? empty({ requests: [], total: 0 })
-          : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-            console.error("[NestView] getReviewQueue failed", nestId, e);
-            toast.error(e?.message || "Failed to load review queue");
-            return { requests: [], total: 0 };
-          }),
-        // Pending AND declined in one call: pending drives the admin queue,
-        // declined is how the person who asked learns the verdict.
-        grantOnly
-          ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
-          : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-            console.error("[NestView] getDeletionRequests failed", nestId, e);
-            return { requests: [] as api.DeletionRequest[], total: 0 };
-          }),
         grantOnly
           ? empty({
             stewardship_enabled: false,
@@ -623,8 +631,6 @@ export function NestView({
             };
           }),
       ]);
-    setReviewQueue(queueData.requests);
-    setDeletionRequests(deletionData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
@@ -632,6 +638,9 @@ export function NestView({
     setReviewSlaHours((settingsData as api.NestSettings).review_sla_hours ?? null);
     setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
+    setAlwaysIncludeTags(
+      (settingsData as Partial<api.NestSettings>).always_include_tags ?? ["always-include"],
+    );
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -649,6 +658,10 @@ export function NestView({
     }
     setRoles(nestMeta?.roles ?? []);
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
+    setShellReady(true);
+    const [queueData, deletionData] = await Promise.all([queueRead, deletionRead]);
+    setReviewQueue(queueData.requests);
+    setDeletionRequests(deletionData.requests);
     setLoading(false);
     setInitialLoad(false);
   }, [nestId, qc, reloadLevels]);
@@ -895,10 +908,11 @@ export function NestView({
   const stats = {
     total: census?.total ?? nodes.length,
     pending: census?.statuses?.pending_review ?? 0,
-    // "published" is the engine's terminal post-approve status (approve writes
-    // 'published'; no-steward creates auto-publish) — both mean AI-visible,
-    // so the AI Ready card counts them together.
+    // Documents with a live published version — one whose newer version is in
+    // review or sent back is still served to agents. The status sum is the
+    // fallback for an older server.
     approved:
+      census?.aiReady ??
       (census?.statuses?.approved ?? 0) + (census?.statuses?.published ?? 0),
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
@@ -1035,71 +1049,6 @@ export function NestView({
   };
 
 
-  // Inline visibility toggle from the header (owner/admin only). Optimistic
-  // flip with revert on failure, mirroring ShareNestDialog so the control
-  // never lies about server state. Surfaces the public/private switch outside
-  // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
-  const applyVisibility = async (
-    next: api.NestVisibility,
-    acknowledgePublic?: boolean,
-  ) => {
-    const prev = visibility;
-    setVisibility(next);
-    setVisibilitySaving(true);
-    try {
-      const result = await api.setNestVisibility(
-        nestId,
-        next,
-        acknowledgePublic,
-      );
-      if (result?.visibility) setVisibility(result.visibility);
-    } catch (err: any) {
-      setVisibility(prev); // revert
-      toast.error(err?.message || "Failed to change visibility");
-    } finally {
-      setVisibilitySaving(false);
-    }
-  };
-
-  const handleVisibilityToggle = async () => {
-    // Going public makes the nest readable by anyone on the internet, outside
-    // your organization — confirm first (and send acknowledge_public). Going
-    // back to private is unguarded.
-    // Minimal UX improvement: when the nest is Organization-visible, route to
-    // the full three-tier control on the Collaborators tab so callers discover
-    // the Private option too (org → private path). (Bugfix)
-    if (visibility === "org") {
-      setActiveTab("collaborators");
-      return;
-    }
-    if (visibility !== "public") {
-      setPublicDescriptionDraft(nestDescription ?? "");
-      setConfirmPublic(true);
-      return;
-    }
-    await applyVisibility("private");
-  };
-
-  // Confirm publishing: save a newly written description first — best-effort,
-  // because a failed description save must not block the publish the user just
-  // acknowledged — then apply with the acknowledgement.
-  const confirmPublicWiden = async () => {
-    setConfirmPublic(false);
-    const next = publicDescriptionDraft.trim();
-    if (next && next !== (nestDescription ?? "").trim()) {
-      try {
-        await api.updateNest(nestId, { description: next });
-        setNestDescription(next);
-      } catch (err: any) {
-        toast.error(
-          err?.message || "Failed to save the description — publishing anyway",
-        );
-      }
-    }
-    await applyVisibility("public", true);
-  };
-
-  const publicConfirmCopy = visibilityConfirmCopy("public", { sharedDeployment });
 
   // Public Docs Reader Mode config (server admin, or this nest's own
   // owner/admin — see canManageReaderMode below). Optimistic flip with
@@ -1166,10 +1115,11 @@ export function NestView({
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
 
-  const kindForFile = (name: string): "document" | "artifact" | "pdf" | null => {
+  const kindForFile = (name: string): "document" | "artifact" | "pdf" | "office" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
     if (ext === "pdf") return "pdf";
+    if (ext === "pptx" || ext === "docx" || ext === "xlsx") return "office";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1179,7 +1129,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md, .html or .pdf files to add them to this vault.");
+        toast.error("Drop .md, .html, .pdf, .pptx, .docx or .xlsx files to add them to this vault.");
         return;
       }
       setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
@@ -1187,7 +1137,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf|pptx|docx|xlsx)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1201,11 +1151,23 @@ export function NestView({
           }
           try {
             // A PDF is uploaded as bytes and becomes a governed `pdf` document
-            // (the server extracts its text); everything else is read as text.
+            // (the server extracts its text); a .pptx/.docx/.xlsx becomes a markdown
+            // document with the original kept as a download; everything else
+            // is read as text.
+            // Markdown frontmatter supplies the title and tags (CU-wdqcq0657f).
+            const md =
+              type === "document" ? (await import("@/lib/import-frontmatter")).importedMarkdown(await file.text()) : null;
             const res =
               type === "pdf"
                 ? await api.createPdfNode(nestId, file, { title, folder })
-                : await api.createNode(nestId, { title, content: await file.text(), type, folder });
+                : type === "office"
+                  ? await api.createOfficeNode(nestId, file, { title, folder })
+                  : await api.createNode(
+                      nestId,
+                      md
+                        ? { title: md.title ?? title, content: md.body, tags: md.tags, type, folder }
+                        : { title, content: await file.text(), type, folder },
+                    );
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1299,7 +1261,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact · .pdf → PDF document
+              .md → document · .html → hosted artifact · .pdf → PDF document · .pptx/.docx/.xlsx → document
             </div>
           </div>
         </div>
@@ -1414,52 +1376,24 @@ export function NestView({
         }
         badges={
           <>
-            {/* Visibility — an inline toggle for owner/admin (so the public/
-              private switch isn't buried in the Share dialog), a read-only
-              badge for everyone else. Gated on !initialLoad (not `loading`,
+            {/* Visibility — a three-tier menu for owner/admin (so the switch
+              isn't buried in the Share dialog), a read-only badge for
+              everyone else. Gated on !initialLoad (not `loading`,
               which flips on every background refetch too — see its
               definition above) so the header never flashes the "private"
               default before the real value lands from fetchData. */}
             {!initialLoad && (canManage ? (
-              // Two-state on purpose: a header shortcut for the common flip,
-              // private <-> public. An org nest routes to the full three-tier
-              // control on the Collaborators tab instead (see
-              // handleVisibilityToggle), since it can move either direction.
-              // Choosing among all three tiers lives in NestVisibilityControl
-              // (Collaborators tab / Share dialog), which is also where each
-              // tier is explained.
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleVisibilityToggle}
-                disabled={visibilitySaving}
-                className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
-                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-                  : ""
-                  }`}
-                title={
-                  visibility === "public"
-                    ? "Public — anyone with the URL can read. Click to make private."
-                    : visibility === "org"
-                      ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
-                      : "Private. Click to make public (anyone with the URL can read)."
-                }
-              >
-                {visibilitySaving ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : visibility === "public" ? (
-                  <Globe className="h-3.5 w-3.5" />
-                ) : visibility === "org" ? (
-                  <Building2 className="h-3.5 w-3.5" />
-                ) : (
-                  <Lock className="h-3.5 w-3.5" />
-                )}
-                {visibility === "public"
-                  ? "Public"
-                  : visibility === "org"
-                    ? "Organization"
-                    : "Private"}
-              </Button>
+              // All three tiers, the acknowledgements and the server's
+              // admins-only caps — the same control as the Collaborators tab
+              // and the document top bar, behind the header's badge button.
+              <NestVisibilityControl
+                nestId={nestId}
+                variant="header"
+                onChanged={fetchData}
+                onError={(m) => {
+                  if (m) toast.error(m);
+                }}
+              />
             ) : (
               visibility !== "private" && (
                 <Badge
@@ -1615,7 +1549,7 @@ export function NestView({
               ref={importInputRef}
               type="file"
               multiple
-              accept=".md,.markdown,.txt,.html,.htm,.pdf"
+              accept=".md,.markdown,.txt,.html,.htm,.pdf,.pptx,.docx,.xlsx"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void importFiles(e.target.files);
@@ -2005,9 +1939,12 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
+          {/* An org contributor's way in (CU-wdqcq05rz6); renders nothing for
+              anyone else. */}
+          <OrgContributorPanel nestId={nestId} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <OverviewTab
-              initialLoad={initialLoad || !censusSettled}
+              initialLoad={!shellReady || !censusSettled}
               stats={stats}
               recentlyEdited={recentlyEdited}
               recentlyEditedCount={recentlyEditedCount}
@@ -2019,7 +1956,6 @@ export function NestView({
               onOpenDocument={onOpenDocument}
               onOpenFolder={openFolderInDocuments}
               nestName={editableName}
-              loadedFolders={loadedFolderPaths}
               loadingFolders={loadingFolders}
               onExpandFolder={fetchLevel}
               description={nestDescription}
@@ -2059,7 +1995,7 @@ export function NestView({
               onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
               initialTags={initialTags}
-              initialLoad={initialLoad}
+              initialLoad={!shellReady}
               loading={loading}
               nodes={nodes}
               census={census}
@@ -2080,6 +2016,7 @@ export function NestView({
               stewardshipEnabled={stewardshipEnabled}
               allowSelfApprove={allowSelfApprove}
               primeTags={primeTags}
+              alwaysIncludeTags={alwaysIncludeTags}
               visibility={visibility}
               hasRoleOnNode={hasRoleOnNode}
               canReviewNode={canReviewNode}
@@ -2124,6 +2061,7 @@ export function NestView({
                 currentUser={currentEmail}
                 canEditDocs={canEditDocs}
                 primeTags={primeTags}
+                alwaysIncludeTags={alwaysIncludeTags}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />
@@ -2275,6 +2213,7 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          alwaysIncludeTags={alwaysIncludeTags}
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
@@ -2296,6 +2235,7 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setAlwaysIncludeTags(next.alwaysIncludeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
             setReviewSlaHours(next.reviewSlaHours);
@@ -2355,6 +2295,7 @@ export function NestView({
               setEditableName(updated.name);
               lastSavedName.current = updated.name;
               setRenameError(null);
+              onRenamed?.(updated.name);
             }
             setNestDescription(updated.description);
             setShowRename(false);
@@ -2372,7 +2313,7 @@ export function NestView({
           </DialogHeader>
           <div className="grid gap-2">
             {[
-              { ref: importInputRef, label: "Files", detail: ".md, .html or .pdf — one or many", testId: undefined },
+              { ref: importInputRef, label: "Files", detail: ".md, .html, .pdf, .pptx, .docx or .xlsx — one or many", testId: undefined },
               { ref: pdfInputRef, label: "Upload PDF", detail: "Becomes a PDF document with its text extracted", testId: "nest-upload-pdf" },
               { ref: importDirRef, label: "Whole vault", detail: "A folder, keeping its structure", testId: undefined },
             ].map((o) => (
@@ -2622,42 +2563,6 @@ export function NestView({
         />
       )}
 
-      {/* Outside-org publish acknowledgement — flipping a nest to public makes
-          it readable by anyone on the internet, outside your organization.
-          Confirm sends acknowledge_public:true; the server 409s without it. */}
-      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{publicConfirmCopy.title}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {publicConfirmCopy.body}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {/* What those readers will see beside the name. Prefilled from the
-              nest; an empty one can be written here and is saved on confirm. */}
-          <div className="space-y-1.5">
-            <Label htmlFor="nest-public-description" className="text-xs">
-              {(nestDescription ?? "").trim()
-                ? "Description readers will see"
-                : "This nest has no description — readers will only see its name. Add one? (optional)"}
-            </Label>
-            <Textarea
-              id="nest-public-description"
-              value={publicDescriptionDraft}
-              onChange={(e) => setPublicDescriptionDraft(e.target.value)}
-              placeholder="What this nest is for, and who it's meant for"
-              rows={2}
-              data-testid="nest-public-description"
-            />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void confirmPublicWiden()}>
-              {publicConfirmCopy.confirm}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
 
       {showAssignSteward && (

@@ -57,6 +57,8 @@ beforeAll(async () => {
   ed2 = await registerUser(app, "ed2@acme.com", "Ed2");
   const { data } = await jsonRequest(app, "POST", "/nests", { name: "Sprint" }, owner.apiKey);
   nestId = data.nest.id;
+  // These tests assert exact tag lists, so keep ticket numbers out of them.
+  await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { task_rules: { ticket_numbering: false } }, owner.apiKey);
   await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: ann.email, permission: "write" }, owner.apiKey);
   await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: rita.email, permission: "read" }, owner.apiKey);
 
@@ -247,6 +249,26 @@ describe("governance: nodes that need review are skipped, never drafted", () => 
 });
 
 describe("custom-field boards", () => {
+  it("bulk-sets custom fields; a re-run is unchanged and a bad value is refused", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "FieldPatch" }, owner.apiKey);
+    const f = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${f}/fields`, {
+      key: "severity", label: "Severity", type: "select", options: ["low", "high"],
+    }, owner.apiKey);
+    await create(owner, { title: "p1", type: "task" }, f);
+    await create(owner, { title: "p2", type: "task", fields: { severity: "low" } }, f);
+    const ids = ["nodes/p1", "nodes/p2"];
+    const first = await bulk(owner, { ids, patch: { fields: { severity: "high" } } }, f);
+    expect(first.data).toMatchObject({ updated: 2, unchanged: 0 });
+    expect((await get("p1", f)).fields?.severity ?? (await get("p1", f)).metadata?.fields?.severity).toBe("high");
+    const again = await bulk(owner, { ids, patch: { fields: { severity: "high" } } }, f);
+    expect(again.data).toMatchObject({ updated: 0, unchanged: 2 });
+    const bad = await bulk(owner, { ids, patch: { fields: { severity: "nope" } } }, f);
+    expect(bad.data.failed ?? bad.data.results.filter((r: any) => r.outcome === "failed").length).toBeTruthy();
+    const empty = await bulk(owner, { ids, patch: { fields: {} } }, f);
+    expect(empty.status).toBe(400);
+  });
+
   it("groups by the field, applies filterFields, and refuses a bulk move", async () => {
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Fields" }, owner.apiKey);
     const f = data.nest.id;

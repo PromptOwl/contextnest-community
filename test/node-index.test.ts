@@ -14,6 +14,7 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  settleSeals,
 } from "./helpers.js";
 import { getDb } from "../src/db/client.js";
 
@@ -156,6 +157,7 @@ describe("node_index — write-through", () => {
     // arrived, until some unrelated write in the nest triggered a regen.
     await createNode("Relocating", { folder: "alpha" });
     const abcIndex = vaultPath("nodes", "alpha", "INDEX.md");
+    await settleSeals();
     expect(readFileSync(abcIndex, "utf-8")).toContain("relocating");
 
     const res = await jsonRequest(

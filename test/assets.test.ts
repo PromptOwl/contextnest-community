@@ -2,7 +2,7 @@
  * Per-nest media assets: multipart upload (write-tier) + immutable serving
  * (read-tier). Uuid-only filenames are the traversal defense; SVG is
  * excluded v1 (stored-XSS surface). Images cap at 10 MB, video (mp4/webm)
- * at 100 MB — enforced per type in the POST handler, with the asset route
+ * at VIDEO_MAX_MB (default 30 MB) — enforced per type in the POST handler, with the asset route
  * alone exempted from the global MAX_BODY_BYTES Content-Length cap.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";

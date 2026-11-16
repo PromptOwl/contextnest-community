@@ -30,7 +30,7 @@ Setting the key up for the first time is covered in [README.md → License setup
 | Price | $0, no card | Per user (talk to us) | Talk to us |
 | **Users** (nest owners, admins, reviewers, Account Owners) | 10 | The number you bought (30 by default) | Unlimited |
 | **Account Owners** (license owner + server admins) | 1 | Unlimited | Unlimited |
-| **Editors** | None | Included | Unlimited |
+| **Editors** | None | Billed per person, $1 each | Unlimited |
 | **Viewers** | Unlimited, free | Unlimited, free | Unlimited, free |
 | **Model credits** per user, per month | 1,000 | 5,000 | 5,000 |
 | **Your own model key** (BYOK) | No | No | Yes |
@@ -43,7 +43,7 @@ Enterprise features (`byok`, `sso`, `hootie_branding`) are **on by default** wit
 
 A server that already signs in through an enterprise provider keeps working without `sso`; only switching providers or turning SSO back on needs Enterprise.
 
-A **trial** key behaves like Self-Hosted until it ends.
+A **trial** key behaves like Self-Hosted until it ends, but nobody is billed during the trial.
 
 ### Getting a key and changing plan
 
@@ -68,6 +68,8 @@ Each person is counted **once**, at the highest role they hold on **any** nest o
 | **User** | Owns a nest, nest admin, steward **reviewer** or **admin**, server admin (superadmin), license owner |
 | **Editor** (subscriber) | Nest collaborator with **write**, steward **editor**, a **write** grant |
 | **Viewer** (free) | Read-only access, or no role at all |
+
+On **Self-Hosted**, editors have no limit, but each one is counted and billed per person. PromptOwl bills them from the counts your server sends on each [license check](#what-each-check-sends).
 
 Some examples:
 

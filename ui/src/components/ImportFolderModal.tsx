@@ -14,6 +14,7 @@
  * Neither prompt can be fully suppressed — both are browser security gates.
  */
 import { useState, useRef } from "react";
+import { stripSharedRoot } from "@/lib/zip-root";
 import JSZip from "jszip";
 import * as api from "../lib/api";
 import type { ImportedFile } from "../lib/api";
@@ -121,12 +122,14 @@ async function collectFromHandle(
  *  Lets the import reuse POST /nests/import with no bundle-specific endpoint. */
 async function expandZip(file: File, out: ImportedFile[]): Promise<void> {
   const zip = await JSZip.loadAsync(file);
+  const found: ImportedFile[] = [];
   for (const entry of Object.values(zip.files)) {
     if (entry.dir) continue;
     const segs = entry.name.split("/");
     if (segs.some(isSkippedDir) || !TEXT_FILE.test(segs[segs.length - 1])) continue;
-    out.push({ path: entry.name, content: await entry.async("string") });
+    found.push({ path: entry.name, content: await entry.async("string") });
   }
+  out.push(...stripSharedRoot(found));
 }
 
 /** Collect text files from a webkitdirectory <input> FileList (fallback path). */

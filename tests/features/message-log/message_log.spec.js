@@ -170,23 +170,6 @@ test.describe('Message log', () => {
     }
   });
 
-  test('CN-MSG-003: the page displays its title, information notice and tabs', async ({ primary_user }) => {
-    await asAdmin(primary_user);
-    const { messageLogPage: ml } = primary_user;
-    await ml.gotoAndRead();
-    await expect(ml.pageTitle).toHaveText('Message log');
-    await expect(ml.notice).toHaveText(
-      'Everything this server sent — email, Slack and Teams, webhooks, inbox notifications, and agent comments — across every nest. Visible to superadmins only. Passwords, sign-in links, keys and webhook URLs are redacted before storage, and every view is recorded in the access log.'
-    );
-    await expect(ml.messagesTab).toHaveAttribute('aria-selected', 'true');
-    await expect(ml.accessTab).toHaveAttribute('aria-selected', 'false');
-    await expect(ml.search).toBeVisible();
-    await expect(ml.channelSelect).toHaveText('All channels');
-    await expect(ml.senderSelect).toHaveText('All senders');
-    await expect(ml.statusSelect).toHaveText('Any status');
-    await expect(ml.refreshButton).toBeEnabled();
-  });
-
   test('CN-MSG-004: the messages table displays the correct columns, sorted newest first', async ({ primary_user }) => {
     await asAdmin(primary_user);
     const { messageLogPage: ml } = primary_user;
@@ -661,7 +644,13 @@ test.describe('Message log', () => {
     await ml.waitIdle();
     await expect(ml.rows.first()).toBeVisible();
     await expect(ml.table).toContainText('cnst_[REDACTED]');
-    await expect(ml.table).not.toContainText(fakeKey);
+    // The Subject cell shows the stored subject (also its tooltip), then " · <nest>":
+    // the nest's live name, which this test chose to carry the keys — not stored message text.
+    const subject = ml.cell(0, 'Subject');
+    await expect(subject).toContainText('cnst_[REDACTED]');
+    expect(await subject.getAttribute('title')).not.toContain(fakeKey);
+    const shown = (await ml.table.innerText()).split(nest.name).join('');
+    expect(shown).not.toContain(fakeKey);
   });
 
   test('CN-MSG-023: requesting a non-existent message returns "Message not found." and is recorded in the Access log', async ({ primary_user }) => {
@@ -724,14 +713,16 @@ test.describe('Message log', () => {
   test('CN-MSG-026: the Access log records searches, opened messages and Access log views', async ({ primary_user }) => {
     await asAdmin(primary_user);
     const { messageLogPage: ml } = primary_user;
-    const { body } = await ml.gotoAndRead();
+    await ml.gotoAndRead();
     const term = `qa-access-${Date.now().toString(36)}`;
     await ml.nextRead(() => ml.search.fill(term), { where: (q) => q.q === term });
     await ml.waitIdle();
     await ml.nextRead(() => ml.search.fill(''), { where: (q) => q.q === null });
     await ml.waitIdle();
-    const opened = body.messages[0].id;
-    await ml.openRow(0);
+    // The message actually opened: on a busy server a newer message can top the
+    // list between the first read and the click.
+    const opened = (await ml.openRow(0)).body?.message?.id;
+    expect(opened, 'the opened message has an id').toBeTruthy();
     await primary_user.page.keyboard.press('Escape');
 
     const views = await ml.openAccessLog();

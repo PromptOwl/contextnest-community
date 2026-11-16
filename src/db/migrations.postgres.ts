@@ -1,5 +1,11 @@
 import type { DatabaseAdapter } from "./adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
+import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
+import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -98,7 +104,23 @@ export const HISTORICAL_MIGRATIONS = [
   "070_instructions_revisions",
   "071_node_pins",
   "072_nest_plugins",
+  "073_nest_always_include_tags",
+  "074_org_contributions",
+  "075_node_index_manifest",
+  "076_nest_write_jobs",
+  "077_nest_seal_leases",
+  "078_task_rules_ticket_counters",
+  "079_surfaces_core",
+  "080_surfaces_ingest",
+  "081_surfaces_cards",
+  "082_surfaces_seeds",
+  "083_view_summaries",
+  "086_control_room_ledger",
+  "090_control_room_run_totals",
 ];
+
+/** Migration ids whose Postgres backfill must run once, not on every boot. */
+const ONE_TIME_BACKFILLS = ["086_control_room_ledger", "090_control_room_run_totals"];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
   await db.exec(`
@@ -863,6 +885,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
+  // One-time backfills run under their migration id. The ids are in
+  // HISTORICAL_MIGRATIONS (seeded just below), so read what was pending first.
+  const pendingOnce = new Set<string>();
+  for (const id of ONE_TIME_BACKFILLS) {
+    if (!(await db.get("SELECT id FROM schema_migrations WHERE id = ?", [id]))) pendingOnce.add(id);
+  }
+
   // Seed historical migration ids as already-applied (idempotent).
   for (const id of HISTORICAL_MIGRATIONS) {
     await db.run(
@@ -1297,6 +1326,115 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest_plugin ON plugin_runs(nest_id, plugin, started_at);
   `);
+
+  // Migration 073 parity: which tags mark a document always-include.
+  await db.exec(
+    "ALTER TABLE nests ADD COLUMN IF NOT EXISTS always_include_tags TEXT NOT NULL DEFAULT 'always-include'",
+  );
+
+  // Migration 074 parity: org contributors (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_contributions TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS org_domains TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TEXT;
+  `);
+
+  // Migration 075 parity: each document's engine manifest entry.
+  await db.exec("ALTER TABLE node_index ADD COLUMN IF NOT EXISTS manifest_json TEXT");
+
+  // Migration 076 parity: the seal queue (src/nodes/seal-queue.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_write_jobs (
+      id BIGSERIAL PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      published INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_nest_write_jobs_nest ON nest_write_jobs(nest_id, id);
+  `);
+
+  // Migration 077 parity: which instance seals a nest (seal-queue.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_seal_leases (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      owner TEXT NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+  `);
+
+  // Migration 078 parity: task rules + ticket counters (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS task_rules TEXT;
+    CREATE TABLE IF NOT EXISTS nest_ticket_counters (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      prefix TEXT NOT NULL,
+      last_value INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (nest_id, prefix)
+    );
+  `);
+
+  // Migration 079 parity: Surfaces core tables (shared DDL, see migrations.ts).
+  await db.exec(surfacesS1Ddl(NOW));
+  // Migration 080 parity: Surfaces ingestion tables (S2a).
+  await db.exec(surfacesS2aDdl(NOW, "BIGINT"));
+  // Migration 081 parity: Surfaces cards, commit audit, usage, DM (S2b).
+  await db.exec(surfacesS2bDdl(NOW));
+  await db.exec(surfacesS2bAlterPostgres());
+  // Re-review R3-L2: an earlier 081 created surface_personal_nests without `sealed`.
+  await db.exec("ALTER TABLE surface_personal_nests ADD COLUMN IF NOT EXISTS sealed INTEGER NOT NULL DEFAULT 1");
+  // Migration 082 parity: Surfaces seeds (S3).
+  await db.exec(surfacesS3Ddl(NOW));
+  await db.exec(surfacesS3AlterPostgres());
+  // Migration 083 parity: cached `summary` block text.
+  await db.exec(`
+      CREATE TABLE IF NOT EXISTS view_summaries (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        cache_key TEXT NOT NULL,
+        text TEXT NOT NULL,
+        refs TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, cache_key)
+      )
+  `);
+
+  // Migration 086 parity: agent control room ledger columns (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'runner';
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS external_ref TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS verdict TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS reason_code TEXT;
+    ALTER TABLE run_steps ADD COLUMN IF NOT EXISTS client_key TEXT;
+    ALTER TABLE surface_windows ADD COLUMN IF NOT EXISTS run_id TEXT;
+  `);
+  // Once, like SQLite: a re-run on a later boot would attach an old run-less
+  // window to an unrelated, newer listener run.
+  if (pendingOnce.has("086_control_room_ledger")) {
+    await db.exec(controlRoomLedgerIndexesAndBackfill("postgres"));
+  }
+
+  // Migration 090 parity: a run's cost and tokens on the run (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS est_cost_micros BIGINT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS tokens BIGINT;
+  `);
+  if (pendingOnce.has("090_control_room_run_totals")) {
+    // Keyset pages, so a large runs table is never held in memory at once.
+    let after = "";
+    for (;;) {
+      const page = (await db.all(
+        "SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL AND id > ? ORDER BY id LIMIT 500",
+        [after],
+      )) as Array<{ id: string; trace: string }>;
+      if (!page.length) break;
+      for (const r of page) {
+        const t = runTotals(r.trace);
+        await db.run("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?", [t.costMicros, t.tokens, r.id]);
+      }
+      after = page[page.length - 1].id;
+    }
+  }
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

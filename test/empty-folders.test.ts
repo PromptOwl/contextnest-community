@@ -11,6 +11,7 @@ import {
   createTestApp,
   jsonRequest,
   registerUser,
+  settleSeals,
 } from "./helpers";
 
 describe("nodes: empty folders", () => {
@@ -133,6 +134,7 @@ describe("nodes: empty folders", () => {
     expect(
       folders.data.folders.find((f: any) => f.path === "gtm/deals").count,
     ).toBe(1);
+    await settleSeals();
     const index = readFileSync(
       join(env.dataDir, "nests", nestId, "nodes", "gtm", "deals", "INDEX.md"),
       "utf-8",

@@ -127,7 +127,7 @@ jobs:
             --service-account="$SERVICE_ACCOUNT" \
             --port=3838 --env-vars-file=env.yaml \
             --network=default --subnet=default --vpc-egress=private-ranges-only \
-            --add-volume="name=nests,type=cloud-storage,bucket=$BUCKET" \
+            --add-volume="name=nests,type=cloud-storage,bucket=$BUCKET,mount-options=uid=1000;gid=1000" \
             --add-volume-mount="volume=nests,mount-path=/mnt/nests" \
             --add-cloudsql-instances="$SQL_INSTANCE" \
             --min-instances=1 --max-instances=1 --allow-unauthenticated

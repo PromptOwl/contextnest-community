@@ -20,8 +20,6 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
   Loader2,
@@ -38,21 +36,28 @@ import { useAuth } from "../auth/AuthContext";
 import { reads } from "@/lib/queries";
 import {
   chatWithHootie,
+  type HootieAnswerOnly,
   type HootieMention,
   type HootieNode,
   type HootieTurn,
 } from "@/lib/api";
 import { MentionTextarea } from "./MentionTextarea";
+import { HootieAnswerMarkdown } from "./HootieAnswer";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import hootieIcon from "../assets/hootie.svg";
 import {
   HOOTIE_PANEL_DEFAULT,
   clampPanelWidth,
+  pendingLabel,
+  withDelta,
+  withStatus,
   hootieAccentStyle,
   hootieGreeting,
   pushesContent,
   readPanelWidth,
   savePanelWidth,
+  answerReadyLine,
+  answerOnlyBanner,
 } from "@/lib/hootie-panel";
 
 /** Where the page is; the panel derives its scope from it. */
@@ -73,8 +78,12 @@ interface Message {
   mention?: HootieMention | null;
   /** Assistant only: still streaming in. */
   pending?: boolean;
+  /** Assistant only: what Hootie is doing before the answer (a search). */
+  status?: string;
   /** Assistant only: the model call failed; content is the explanation. */
   failed?: boolean;
+  /** Assistant only: answered without tools, and why. */
+  answerOnly?: HootieAnswerOnly | null;
 }
 
 interface NestOption {
@@ -152,6 +161,9 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  /** What the polite live region says: status lines and the final line only
+   *  — never the streamed answer (AC-H1-09). */
+  const [liveLine, setLiveLine] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -274,12 +286,25 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
         {
           delta: (text) =>
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === answerId ? { ...m, content: m.content + text } : m,
-              ),
+              prev.map((m) => (m.id === answerId ? withDelta(m, text) : m)),
             ),
-          done: (d) =>
-            patch({ content: d.answer, cited: d.cited, mention: d.mention, pending: false }),
+          status: (s) => {
+            setLiveLine(s.text);
+            setMessages((prev) =>
+              prev.map((m) => (m.id === answerId ? withStatus(m, s.text) : m)),
+            );
+          },
+          done: (d) => {
+            setLiveLine(answerReadyLine({ actions: 0, proposals: 0, answerOnly: d.answer_only === "tools_refused" }));
+            patch({
+              content: d.answer,
+              cited: d.cited,
+              mention: d.mention,
+              answerOnly: d.answer_only ?? null,
+              pending: false,
+              status: undefined,
+            });
+          },
           error: (text) => patch({ content: text, failed: true, pending: false }),
         },
         ctrl.signal,
@@ -430,6 +455,9 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
             <PickNest name={name} nests={nests} onPick={pickNest} />
           ) : (
             <>
+              <HootieLiveRegion line={liveLine} />
+              {/* The feed is deliberately not a live region: a screen reader
+                  hears status lines and "Answer ready", not every token. */}
               <div ref={listRef} className="flex-1 overflow-y-auto bg-muted/30 px-4 py-4">
                 {messages.length === 0 && (
                   <Welcome
@@ -589,8 +617,8 @@ function NoKeyNotice({
       <p className="text-base font-semibold">{name} needs an API key</p>
       <p className="text-muted-foreground">
         {isAdmin
-          ? `Add an Anthropic API key under Settings → General and ${name} can answer from your nests.`
-          : "Ask your server admin to add an Anthropic API key under Settings → General."}
+          ? `Add an Anthropic API key under Server settings → Hootie and ${name} can answer from your nests.`
+          : "Ask your server admin to add an Anthropic API key under Server settings → Hootie."}
       </p>
       {isAdmin && onOpenSettings && (
         <Button size="sm" variant="outline" onClick={onOpenSettings}>
@@ -689,11 +717,23 @@ function Welcome({
 }
 
 /**
- * An answer with its citations. `[[Title]]` in the text becomes a chip for a
- * cited node; a wiki link the server didn't resolve stays as plain text, so
- * nothing reads as clickable that isn't.
+ * An answer with its citations. `[[X]]` in the text becomes a chip for a
+ * cited node; a wiki link the server didn't resolve becomes plain text
+ * without its brackets. Images and other links never render as such — see
+ * HootieAnswer.tsx: nothing in an answer is fetched or clickable unless the
+ * server cited it.
  */
-function AnswerBubble({
+/** The panel's one live region (AC-H1-09): polite, off-screen, one line at
+ *  a time — status lines and the final "Answer ready" line. */
+export function HootieLiveRegion({ line }: { line: string }) {
+  return (
+    <div role="status" aria-live="polite" className="sr-only" data-testid="hootie-live">
+      {line}
+    </div>
+  );
+}
+
+export function AnswerBubble({
   name,
   message,
   nestId,
@@ -705,21 +745,6 @@ function AnswerBubble({
   onOpenNode: (nestId: string, nodeId: string) => void;
 }) {
   const cited = message.cited ?? [];
-  const byTitle = useMemo(
-    () => new Map(cited.map((n) => [n.title.toLowerCase(), n])),
-    [cited],
-  );
-  // Rewrite [[Title]] → [Title](#cite:<id>) for the cited ones; the link
-  // renderer below turns those hrefs into chips.
-  const source = useMemo(
-    () =>
-      message.content.replace(/\[\[([^\]]+)\]\]/g, (whole, title: string) => {
-        const n = byTitle.get(title.trim().toLowerCase());
-        return n ? `[${title.trim()}](#cite:${encodeURIComponent(n.id)})` : whole;
-      }),
-    [message.content, byTitle],
-  );
-
   if (message.failed) {
     return (
       <div className="flex items-start gap-2 rounded-2xl rounded-tl-md border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-sm text-destructive">
@@ -730,9 +755,18 @@ function AnswerBubble({
   }
   return (
     <div>
+      {message.answerOnly === "tools_refused" && (
+        <div
+          className="mb-1.5 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+          data-testid="hootie-answer-only"
+        >
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{answerOnlyBanner(name)}</span>
+        </div>
+      )}
       <div className="rounded-2xl rounded-tl-md border bg-background px-3.5 py-2.5 text-sm shadow-sm">
         {message.pending && !message.content ? (
-          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label={`${name} is thinking`}>
+          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label={message.status ?? `${name} is thinking`}>
             <span className="flex gap-1">
               {[0, 150, 300].map((d) => (
                 <span
@@ -742,37 +776,18 @@ function AnswerBubble({
                 />
               ))}
             </span>
-            <span className="text-xs">Reading the nest…</span>
+            <span className="text-xs" data-testid="hootie-status">
+              {pendingLabel(message)}
+            </span>
           </span>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ href, children }) => {
-                  if (href?.startsWith("#cite:")) {
-                    const id = decodeURIComponent(href.slice(6));
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => onOpenNode(nestId, id)}
-                        className="inline-flex items-center rounded-md border border-primary/20 bg-primary/5 px-1.5 py-0.5 align-baseline text-xs font-medium text-primary no-underline hover:bg-primary/10"
-                        data-testid="hootie-citation"
-                      >
-                        {children}
-                      </button>
-                    );
-                  }
-                  return (
-                    <a href={href} target="_blank" rel="noreferrer">
-                      {children}
-                    </a>
-                  );
-                },
-              }}
-            >
-              {source}
-            </ReactMarkdown>
+            <HootieAnswerMarkdown
+              content={message.content}
+              cited={message.cited}
+              nestId={nestId}
+              onOpenNode={onOpenNode}
+            />
           </div>
         )}
       </div>

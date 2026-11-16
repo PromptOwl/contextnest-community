@@ -9,12 +9,30 @@
  * checkExists uses.
  */
 
+import { extractTableRefs, makeRefResolver, type TableRef } from "./table-refs";
+
 const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
 export interface BacklinkNode {
   id: string;
   title: string;
   content?: string;
+  /** Node type; a `table` node's `:ref` cells are typed links. */
+  type?: string;
+}
+
+/** A table's typed links to the target: the column (edge type) and the row
+ *  keys whose ref cell points here. */
+export interface BacklinkRef {
+  column: string;
+  rows: string[];
+}
+
+export interface Backlink {
+  id: string;
+  title: string;
+  /** Only on a table whose `:ref` cells point here. */
+  refs?: BacklinkRef[];
 }
 
 function bareSlug(idOrTarget: string): string {
@@ -149,11 +167,25 @@ export function staleAliasLinks(
   return out;
 }
 
+/** Parsed refs per node object. The editor re-runs findBacklinks on every
+ *  title keystroke over the same cached node list, so a big table's CSV is
+ *  parsed once per fetch, not once per keystroke. Keyed on the content too,
+ *  in case a caller mutates a node in place. */
+const refCache = new WeakMap<object, { content: string; refs: TableRef[] }>();
+function tableRefsOf(node: BacklinkNode): TableRef[] {
+  const content = node.content ?? "";
+  const hit = refCache.get(node);
+  if (hit && hit.content === content) return hit.refs;
+  const refs = extractTableRefs(content);
+  refCache.set(node, { content, refs });
+  return refs;
+}
+
 /** Nodes (other than the target itself) whose content links to the target. */
 export function findBacklinks(
   nodes: BacklinkNode[],
   target: { id: string; title: string },
-): Array<{ id: string; title: string }> {
+): Backlink[] {
   const targetId = target.id.toLowerCase();
   const targetTitle = (target.title ?? "").toLowerCase();
   const targetSlug = bareSlug(target.id).toLowerCase();
@@ -167,13 +199,45 @@ export function findBacklinks(
     );
   };
 
-  const out: Array<{ id: string; title: string }> = [];
+  // Ref cells resolve exactly as the server does (priority order, bare =
+  // exact id), so the panel never credits a ref the graph and query don't.
+  // Built lazily: a nest with no table pays nothing.
+  let resolveRef: ReturnType<typeof makeRefResolver> | null = null;
+  const out: Backlink[] = [];
   for (const node of nodes) {
     if (node.id.toLowerCase() === targetId) continue;
+    // A table's :ref cells link by [[…]] OR a bare id, typed by column.
+    const refs: BacklinkRef[] = [];
+    if (node.type === "table") {
+      resolveRef ??= makeRefResolver(nodes);
+      const groups = new Map<string, Set<string>>();
+      for (const r of tableRefsOf(node)) {
+        if (resolveRef(r.target, !!r.bare) !== target.id) continue;
+        let rows = groups.get(r.column);
+        if (!rows) groups.set(r.column, (rows = new Set()));
+        rows.add(r.row);
+      }
+      for (const [column, rows] of groups) refs.push({ column, rows: [...rows] });
+    }
+    if (refs.length) {
+      out.push({ id: node.id, title: node.title, refs });
+      continue;
+    }
     const targets = extractWikiLinkTargets(node.content ?? "");
-    if (targets.some(matches)) out.push({ id: node.id, title: node.title });
+    // A table's [[…]] resolve as the graph does (first title wins), so a ref
+    // cell naming a same-titled node never shows up here as an untyped link.
+    const linked =
+      node.type === "table"
+        ? targets.some((t) => (resolveRef ??= makeRefResolver(nodes))(t, false) === target.id)
+        : targets.some(matches);
+    if (linked) out.push({ id: node.id, title: node.title });
   }
   return out;
+}
+
+/** "account · r1, r3" — one label per edge type, for the backlinks panel. */
+export function backlinkRefLabels(b: Backlink): string[] {
+  return (b.refs ?? []).map((r) => `${r.column} · ${r.rows.join(", ")}`);
 }
 
 /** Delete-confirm warning for docs that link here; "" when none. */

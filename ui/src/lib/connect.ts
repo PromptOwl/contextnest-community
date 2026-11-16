@@ -13,6 +13,7 @@
  * generated prompts must not tell an agent to send an Authorization header or
  * ask the user for a credential that does not exist.
  */
+import { cloudServer } from "./setup-page";
 
 export interface NestCountRow {
   document_count?: number | string | null;
@@ -150,6 +151,34 @@ export function ctxCliConnectSnippet(
     `ctx vault add ${a} --url ${base}/nests/${nestId}/mcp${auth}`,
     `ctx query "#tag" --vault ${a}`,
   ].join("\n");
+}
+
+/** Typed inside Claude Code, one line at a time. `/contextnest:setup` asks
+ *  where the notes live (this server or only this computer) and connects. */
+export const PLUGIN_SETUP_COMMANDS =
+  "/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup";
+
+/**
+ * `ctx login` (CLI 3.4+): browser sign-in that registers the whole server as
+ * one alias, every reachable nest as `<alias>/<nest>`. No `--as`: ctx names
+ * the alias from the host (nest.promptowl.ai → promptowl) and picks a free one
+ * when that name is taken. Built from the origin only, so nothing
+ * shell-special reaches the command. null when ctx would refuse the server:
+ * plain http to anything but loopback (see cloudServer).
+ */
+export function ctxLoginCommand(serverUrl: string): string | null {
+  const origin = cloudServer(serverUrl);
+  return origin ? `ctx login ${origin}` : null;
+}
+
+/**
+ * The terminal sign-in /setup offers, or null. Not in cloud mode (section 1
+ * already signs in), not while the auth mode is unknown (`authMode` null until
+ * /health answers, and after it fails), never in open mode (no sign-in there).
+ */
+export function setupSignInCommand(origin: string, authMode: string | null, cloud: boolean): string | null {
+  if (cloud || authMode === null || authMode === "open") return null;
+  return ctxLoginCommand(origin);
 }
 
 /**

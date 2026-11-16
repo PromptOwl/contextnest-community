@@ -36,6 +36,10 @@ export type AuthEnv = {
     /** Kind of principal behind the credential (see PrincipalKind). */
     principalKind?: PrincipalKind;
     nestPermission: NestPermission;
+    /** Set by the /nests access gate (app.ts) when THIS request is an org
+     *  contributor's create or propose (CU-wdqcq05rz6). The permission stays
+     *  'read'; only the node create/update handlers act on this. */
+    orgContribution?: boolean;
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
     // and the push allowlist attribute to — and key on — the exact credential
@@ -51,6 +55,9 @@ export type AuthEnv = {
     clientMetadata?: Record<string, string | number | boolean | undefined>;
   };
 };
+
+/** The server-level and per-nest MCP endpoints. */
+const MCP_PATH = /^\/(nests\/[^/]+\/)?mcp(\/|$)/;
 
 /**
  * Two transports accepted:
@@ -141,9 +148,11 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     );
   }
   if (key) {
+    // 403 on MCP routes: mcp-remote answers any 401 with an OAuth sign-in, which
+    // can't help because it keeps sending the configured key over the new token.
     return c.json(
       { error: "This API key is invalid or has been revoked — generate a new one.", code: "invalid_key" },
-      401,
+      MCP_PATH.test(c.req.path) ? 403 : 401,
     );
   }
   return c.json(

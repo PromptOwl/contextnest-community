@@ -9,6 +9,7 @@ import {
   groupByColumn,
   migrateLayout,
   planMove,
+  optimisticMove,
   resolveConfig,
   STATUS_ORDER,
   UNCATEGORIZED,
@@ -690,5 +691,30 @@ describe("migrateLayout — layouts saved before tag keys dropped the \"#\"", ()
     const l = { columnOrder: ["gtm/deals"], hiddenColumns: ["draft"] };
     expect(migrateLayout("folder", l)).toBe(l);
     expect(migrateLayout("status", l)).toBe(l);
+  });
+});
+
+describe("optimisticMove", () => {
+  it("a folder move re-homes the card under the target folder", () => {
+    const n = node({ id: "nodes/projects/backlog/fix-login" });
+    expect(optimisticMove(n, { kind: "move-folder", folder: "projects/in-review" }).id).toBe(
+      "nodes/projects/in-review/fix-login",
+    );
+    expect(optimisticMove(n, { kind: "move-folder", folder: UNCATEGORIZED }).id).toBe("nodes/fix-login");
+  });
+
+  it("a retag replaces the tag set; a field move sets or clears the field", () => {
+    const n = node({ id: "t", tags: ["#todo"], assignee: "ada@acme.dev" });
+    expect(optimisticMove(n, { kind: "retag", tags: ["#done"] }).tags).toEqual(["#done"]);
+    expect(optimisticMove(n, { kind: "set-fields", fields: { priority: "high" } }).priority).toBe("high");
+    expect("assignee" in optimisticMove(n, { kind: "set-fields", fields: { assignee: null } })).toBe(false);
+  });
+
+  it("merges custom fields from the plan and a lane change, null removing a key", () => {
+    const n = node({ id: "t", fields: { stage: "a", size: "s" } });
+    const out = optimisticMove(n, { kind: "set-custom", fields: { stage: "b" } }, { fields: { size: null }, assignee: "bob@acme.dev" });
+    expect(out.fields).toEqual({ stage: "b" });
+    expect(out.assignee).toBe("bob@acme.dev");
+    expect(n.fields).toEqual({ stage: "a", size: "s" }); // input untouched
   });
 });

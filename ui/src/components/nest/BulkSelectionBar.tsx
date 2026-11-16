@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FolderInput, Loader2, Tag, Trash2, X } from "lucide-react";
+import { FolderInput, Loader2, Send, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/api";
 import { prettyFolderPath } from "../FolderTree";
@@ -13,12 +13,13 @@ import {
 } from "@/components/ui/select";
 
 type Row = { id: string; title?: string; outcome: string; code?: string; reason?: string };
-type Action = "move" | "tag" | "delete";
+type Action = "move" | "tag" | "delete" | "submit";
 
 const splitTags = (s: string) => s.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
 
 /**
- * Actions on the documents ticked in the Documents list: move, tag, delete.
+ * Actions on the documents ticked in the Documents list: move, tag, delete,
+ * submit for review.
  * Each document is its own governed write on the server, so a batch is not a
  * transaction — what couldn't be done (under review, no permission, …) is listed
  * per document after the rest went through.
@@ -29,17 +30,20 @@ export function BulkSelectionBar({
   folders,
   canEdit,
   canDelete,
+  canSubmit = false,
   onClear,
   onDone,
 }: {
   nestId: string;
-  nodes: { id: string; title?: string }[];
+  nodes: { id: string; title?: string; status?: string }[];
   /** Every folder path in the nest. */
   folders: string[];
   /** Whether the caller may edit every selected document (move, tag). */
   canEdit: boolean;
   /** Whether the caller may delete every selected document outright. */
   canDelete: boolean;
+  /** Whether any selected document is a draft the caller may submit. */
+  canSubmit?: boolean;
   onClear: () => void;
   onDone: () => void;
 }) {
@@ -69,6 +73,26 @@ export function BulkSelectionBar({
         const r = await api.bulkDeleteNodes(nestId, ids);
         res = r;
         done = r.done;
+      } else if (action === "submit") {
+        // Drafts only, five at a time, through the row button's own call; the
+        // server's refusal (e.g. no permission) becomes that row's reason.
+        const drafts = nodes.filter((x) => x.status === "draft").map((x) => x.id);
+        const results: Row[] = nodes
+          .filter((x) => x.status !== "draft")
+          .map((x) => ({ id: x.id, outcome: "skipped", reason: "Not a draft" }));
+        for (let i = 0; i < drafts.length; i += 5) {
+          const batch = drafts.slice(i, i + 5);
+          const settled = await Promise.allSettled(batch.map((id) => api.submitForReview(nestId, id)));
+          settled.forEach((s, j) =>
+            results.push(
+              s.status === "fulfilled"
+                ? { id: batch[j], outcome: "updated" }
+                : { id: batch[j], outcome: "failed", reason: (s.reason as any)?.message || "Submit failed" },
+            ),
+          );
+        }
+        done = results.filter((r) => r.outcome === "updated").length;
+        res = { requested: ids.length, skipped: ids.length - drafts.length, failed: drafts.length - done, results };
       } else {
         const r = await api.bulkUpdateNodes(
           nestId,
@@ -79,7 +103,8 @@ export function BulkSelectionBar({
         res = r;
         done = r.updated;
       }
-      const verb = action === "move" ? "Moved" : action === "delete" ? "Deleted" : "Tagged";
+      const verb =
+        action === "move" ? "Moved" : action === "delete" ? "Deleted" : action === "submit" ? "Submitted" : "Tagged";
       const notDone = res.results.filter((r) => r.outcome === "skipped" || r.outcome === "failed");
       if (done > 0) toast.success(`${verb} ${done} of ${res.requested} document${res.requested === 1 ? "" : "s"}`);
       else if (notDone.length === 0) toast.info("Nothing to change");
@@ -117,6 +142,12 @@ export function BulkSelectionBar({
               </Button>
             </>
           )}
+          {canSubmit && (
+            <Button size="sm" variant="outline" className="h-8" onClick={() => setAction("submit")} data-testid="bulk-submit">
+              <Send className="h-3.5 w-3.5 mr-1.5" />
+              Submit for review
+            </Button>
+          )}
           {canDelete && (
             <Button
               size="sm"
@@ -143,6 +174,7 @@ export function BulkSelectionBar({
               {action === "move" && `Move ${n} document${n === 1 ? "" : "s"}`}
               {action === "tag" && `Tag ${n} document${n === 1 ? "" : "s"}`}
               {action === "delete" && `Delete ${n} document${n === 1 ? "" : "s"}?`}
+              {action === "submit" && `Submit ${n} document${n === 1 ? "" : "s"} for review`}
             </DialogTitle>
           </DialogHeader>
           {action === "move" && (
@@ -191,6 +223,12 @@ export function BulkSelectionBar({
               annotations. It cannot be undone. Ones under review are skipped and listed.
             </p>
           )}
+          {action === "submit" && (
+            <p className="text-sm text-muted-foreground">
+              Each draft goes to its reviewers. Ones that aren't drafts or that you can't submit are
+              skipped and listed.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="ghost" disabled={busy} onClick={close}>Cancel</Button>
             <Button
@@ -200,7 +238,7 @@ export function BulkSelectionBar({
               data-testid="bulk-confirm"
             >
               {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {action === "move" ? "Move" : action === "tag" ? "Apply tags" : "Delete"}
+              {action === "move" ? "Move" : action === "tag" ? "Apply tags" : action === "submit" ? "Submit" : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

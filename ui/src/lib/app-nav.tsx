@@ -23,6 +23,8 @@ export interface AppNav {
   ) => void;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
+  /** Return to the page this one was opened from (the header bell), if any. */
+  goBack?: () => void;
 }
 
 const AppNavContext = createContext<AppNav | null>(null);

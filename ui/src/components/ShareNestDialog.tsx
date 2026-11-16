@@ -34,6 +34,7 @@ import { CollaboratorManager } from "./CollaboratorManager";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { TeamShareManager } from "./TeamShareManager";
 import { useAuth } from "../auth/AuthContext";
+import { CopyLinkRow } from "./CopyLinkRow";
 
 interface ShareNestDialogProps {
   nestId: string;
@@ -46,6 +47,8 @@ interface ShareNestDialogProps {
    *  looking for a tab that isn't rendered. Passed in — the caller already
    *  holds the nest settings, and this dialog need not fetch them again. */
   stewardshipEnabled?: boolean;
+  /** Opened from a document: its link, offered first. Absent elsewhere. */
+  documentUrl?: string;
 }
 
 export function ShareNestDialog({
@@ -54,6 +57,7 @@ export function ShareNestDialog({
   onClose,
   onChanged,
   stewardshipEnabled = false,
+  documentUrl,
 }: ShareNestDialogProps) {
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
@@ -87,6 +91,13 @@ export function ShareNestDialog({
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
+          )}
+
+          {documentUrl && (
+            <CopyLinkRow
+              url={documentUrl}
+              hint="The link opens for people who can see this nest: its visibility and the access below decide who."
+            />
           )}
 
           {/* Visibility — same control the Collaborators tab renders. */}

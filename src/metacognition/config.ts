@@ -50,6 +50,35 @@ export interface MetacognitionConfig {
   mcp_servers: McpServerConfig[];
   /** Model override; default is the nest's Hootie model. */
   model: string | null;
+  /** Who the agent may notify, and how. Empty recipients = notify is off. */
+  notify: NotifyConfig;
+}
+
+/**
+ * Who a run may notify. The owner picks the people; the model only picks one
+ * of these keys (the tool's `to` is an enum of them), never an address of its
+ * own — a name it read in a feed or an MCP result must not be able to page
+ * anyone. "owner" is the nest owner and "reviewers" the reviewer stewards,
+ * both resolved when it sends; an email must be a nest member when saved and
+ * is checked again when it sends.
+ */
+export interface NotifyConfig {
+  recipients: string[];
+  channels: NotifyChannel[];
+  /** Notifications per run. */
+  max_per_run: number;
+}
+
+export type NotifyChannel = "email" | "connectors";
+export const NOTIFY_CHANNELS: readonly NotifyChannel[] = ["email", "connectors"];
+/** Recipient keys that aren't an email: resolved to people when it sends. */
+export const NOTIFY_ROLES = ["owner", "reviewers"] as const;
+const MAX_NOTIFY_RECIPIENTS = 20;
+const EMAIL_RE = /^[a-z0-9.!#$%&'*+=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+/** Is notify switched on for this config? (Configs saved before it existed have no block.) */
+export function notifyOn(c: Pick<MetacognitionConfig, "notify">): boolean {
+  return !!c.notify && c.notify.recipients.length > 0 && c.notify.channels.length > 0;
 }
 
 /** Defaults, and the ceilings no config can exceed. */
@@ -59,6 +88,8 @@ export const CAPS = {
   max_seconds: { default: 300, min: 10, max: 1_800 },
   max_proposals: { default: 5, min: 0, max: 20 },
   max_comments: { default: 5, min: 0, max: 20 },
+  /** notify.max_per_run: each one lands in a person's mailbox or a channel. */
+  max_notifications: { default: 3, min: 1, max: 10 },
 } as const;
 
 const NAME_RE = /^[A-Za-z0-9][\w .'-]{0,59}$/;
@@ -126,7 +157,57 @@ export function urlAllowed(raw: string): boolean {
   return config.METACOGNITION_ALLOW_PRIVATE_URLS ? /^https?:\/\//i.test(raw) : isSafeConnectorUrl(raw);
 }
 
-export function parseConfig(input: unknown): MetacognitionConfig {
+function parseNotify(v: unknown, members: Set<string> | undefined): NotifyConfig {
+  const off: NotifyConfig = { recipients: [], channels: [], max_per_run: CAPS.max_notifications.default };
+  if (v === undefined || v === null) return off;
+  if (typeof v !== "object" || Array.isArray(v)) throw new ValidationError("notify must be an object");
+  const n = v as Record<string, unknown>;
+  const max_per_run = clamp(n.max_per_run, CAPS.max_notifications, "notify.max_per_run");
+  const rIn = n.recipients ?? [];
+  if (!Array.isArray(rIn) || rIn.length > MAX_NOTIFY_RECIPIENTS) {
+    throw new ValidationError(`notify.recipients must be a list (max ${MAX_NOTIFY_RECIPIENTS})`);
+  }
+  const recipients = [
+    ...new Set(
+      rIn.map((r) => {
+        if (typeof r !== "string") throw new ValidationError("notify.recipients: each one is an email, \"owner\" or \"reviewers\"");
+        const s = r.trim().toLowerCase();
+        if ((NOTIFY_ROLES as readonly string[]).includes(s)) return s;
+        if (s.length > 254 || !EMAIL_RE.test(s)) {
+          throw new ValidationError(`notify.recipients: "${r.slice(0, 80)}" is not an email, "owner" or "reviewers"`);
+        }
+        // Only people already on the nest: the agent can't be pointed at an
+        // outside address, by its owner or by anything it reads.
+        if (members && !members.has(s)) {
+          throw new ValidationError(`notify.recipients: ${s} is not a member of this nest`);
+        }
+        return s;
+      }),
+    ),
+  ];
+  const cIn = n.channels ?? [];
+  if (!Array.isArray(cIn)) throw new ValidationError(`notify.channels must be a list of ${NOTIFY_CHANNELS.join(", ")}`);
+  const channels = [
+    ...new Set(
+      cIn.map((ch) => {
+        if (!NOTIFY_CHANNELS.includes(ch as NotifyChannel)) {
+          throw new ValidationError(`notify.channels: "${String(ch).slice(0, 40)}" is not one of ${NOTIFY_CHANNELS.join(", ")}`);
+        }
+        return ch as NotifyChannel;
+      }),
+    ),
+  ];
+  if (!recipients.length) return { ...off, max_per_run };
+  if (!channels.length) throw new ValidationError("notify.channels: pick at least one way to reach them (email, connectors)");
+  return { recipients, channels, max_per_run };
+}
+
+/**
+ * `members` (lower-cased emails of the nest's people) is supplied by the PUT
+ * route so a notify recipient must be on the nest when saved; without it the
+ * shape is still checked, and the send-time check still applies.
+ */
+export function parseConfig(input: unknown, opts: { members?: Set<string> } = {}): MetacognitionConfig {
   const b = (input && typeof input === "object" ? input : {}) as Record<string, any>;
   const persona = (b.persona ?? {}) as Record<string, unknown>;
   const name = str(persona.name, "persona.name", 60);
@@ -217,6 +298,7 @@ export function parseConfig(input: unknown): MetacognitionConfig {
             if (!/^[\w./:@-]+$/.test(m)) throw new ValidationError("model is not a model name");
             return m;
           })(),
+    notify: parseNotify(b.notify, opts.members),
   };
 }
 

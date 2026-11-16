@@ -20,6 +20,12 @@ export async function discoverForSearch(
   return storage.discoverDocuments({ includeRetired: true });
 }
 
+/** Lowercase with accents stripped, so "cafe" finds "Café". For comparing
+ *  only — hits keep their original text. */
+export function fold(s: string): string {
+  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
 /**
  * How well a hit's TITLE answers the query — the only ranking signal, because
  * the title is what someone typing a document's name is aiming at.
@@ -33,8 +39,8 @@ export async function discoverForSearch(
  * search hits with the same rule.
  */
 export function titleScore(title: string, query: string): number {
-  const t = (title || "").toLowerCase();
-  const q = query.trim().toLowerCase();
+  const t = fold(title || "");
+  const q = fold(query.trim());
   if (!q) return 0;
   if (t === q) return 4;
 
@@ -64,7 +70,7 @@ export function titleScore(title: string, query: string): number {
 }
 
 /** Free-text match over title, body, type and tags. Every whitespace-separated
- *  term must appear somewhere (AND), case-insensitive substring — the same rule
+ *  term must appear somewhere (AND), case- and accent-insensitive substring — the same rule
  *  the per-nest and cross-nest search routes both run on. Title matches sort
  *  first (see titleScore); ties keep discovery order, since Array#sort is
  *  stable. Cross-nest search re-sorts the merged list by the same score, so
@@ -74,18 +80,18 @@ export function matchDocuments<T extends ContextNode>(
   documents: T[],
   query: string,
 ): T[] {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = fold(query).split(/\s+/).filter(Boolean);
   if (terms.length === 0) return [];
   return documents
     .filter((node) => {
-      const haystack = [
-        node.frontmatter.title,
-        node.body || "",
-        node.frontmatter.type || "",
-        ...(node.frontmatter.tags || []),
-      ]
-        .join(" ")
-        .toLowerCase();
+      const haystack = fold(
+        [
+          node.frontmatter.title,
+          node.body || "",
+          node.frontmatter.type || "",
+          ...(node.frontmatter.tags || []),
+        ].join(" "),
+      );
       return terms.every((term) => haystack.includes(term));
     })
     .sort(
@@ -100,9 +106,10 @@ export function matchDocuments<T extends ContextNode>(
  *  the body when no term is in the body (title/tag-only match). */
 function bodySnippet(body: string, query?: string): string {
   const flat = body.replace(/\s+/g, " ").trim();
-  const terms = (query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = fold(query || "").split(/\s+/).filter(Boolean);
+  const folded = fold(flat);
   const at = terms
-    .map((t) => flat.toLowerCase().indexOf(t))
+    .map((t) => folded.indexOf(t))
     .filter((i) => i >= 0)
     .sort((a, b) => a - b)[0];
   if (at === undefined || at < 80) return flat.slice(0, 200);

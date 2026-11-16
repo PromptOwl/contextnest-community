@@ -20,12 +20,17 @@ An external runner (Hootie, Claude, a Temporal worker, cron + curl) executes a w
 
 Run history: `GET /nests/{nest}/runs?agent=&status=` · full trace: `GET /runs/{run_id}`. Below write tier the freeform payloads — run `inputs`, run `trace`, and each step's `detail` — are redacted to `null`; a read-tier caller still sees the run's existence, agent, status, timing and step order.
 
+### Reporting instead of running (agent event API, po-1186)
+
+An agent that executes elsewhere and only needs to **report** what it did starts its run with `report_only: true` — no bundle is built, the response is just `{run_id}` — and records typed steps: `decision` (verdict `no_op|propose|act|escalate`, a reason code, its own one-line summary and references as evidence, never message text), `proposal` (a review it opened, which back-links the review to the run) and `outcome` (something it did outside the nest). Close with `usage`, `est_cost_usd` and `summary`. Every start and step takes an `Idempotency-Key`, so a retried hook never writes twice; a different body under the same key is a `409 idempotency_conflict`. External reports need a nest-scoped key. These runs land in the **decision ledger** (`GET /nests/{nest}/ledger`, trace `GET /ledger/{entry}`, rollups `GET /nests/{nest}/rollups`) beside the Slack listener's windows and metacognition runs. See API.md, "Agent event API and decision ledger", and the `context_agent_*` MCP tools.
+
 ## MCP tools
 
 The same build-and-execute surface is available to MCP agents on any nest's `/mcp` endpoint (advertised only when the flag is on). Each tool calls the same service/validator code as its REST route, so behaviour can't drift.
 
 - **Build** — `workflow_edge_types_list` · `workflow_edge_type_upsert` · `workflow_edge_type_delete` · `workflow_edges_list` · `workflow_edge_create` (DAG cycle guard + condition validation) · `workflow_edge_delete`.
-- **Execute** (the agent is the runner) — `workflow_run` (→ bundle + run_id) · `workflow_run_step` · `workflow_run_close` · `workflow_run_get` · `workflow_runs_list`.
+- **Execute** (the agent is the runner) — `workflow_run` (→ bundle + run_id) · `workflow_run_step` · `workflow_run_close` · `workflow_run_get` · `workflow_runs_list`. `workflow_run` and `workflow_run_step` take an optional `idempotency_key`.
+- **Report and audit** (po-1186) — `context_agent_register` · `context_agent_run_start` (report-only by default) · `context_agent_run_step` · `context_agent_run_close` · `context_agent_ledger` · `context_agent_ledger_trace` · `context_agent_ledger_export` · `context_agent_rollups`; org-wide `context_agent_ledger_org` / `context_agent_rollups_org` on the server-level `/mcp`.
 
 Write tools need write tier; run-detail tools scope the `run_id` to the caller's nest. Redaction matches the REST read tier.
 
@@ -35,12 +40,13 @@ A read-only **Runs** tab (nest header, shown when the flag is on) lists a nest's
 
 ## The one exception: metacognition agents
 
-With `FEATURE_METACOGNITION=true`, an owner or admin can make an agent document a **metacognition agent** (`PUT /nests/:id/metacognition/:node`). Those the server runs itself — everything else here is still executed by external runners. The boundary moves only as far as it has to:
+With `FEATURE_METACOGNITION=true`, an owner or admin can make an agent document a **metacognition agent** (`PUT /nests/:id/metacognition/:node`, or the `context_metacognition_configure` MCP tool). Everything about one — listing, running, stats, its schedules and hooks — is owner/admin only. Those the server runs itself — everything else here is still executed by external runners. The boundary moves only as far as it has to:
 
 - **Claimed at creation.** A metacognition run is inserted with `claimed_by = "server:metacognition"`, whichever way it starts (manual trigger, `POST /run/:agent`, a schedule, an inbound hook), so a poll-mode runner never sees it, and `/runnables` leaves these agents out. Only the server appends its steps; a person can still cancel it.
 - **Proposals only.** The loop's tools read (in the agent's own nest, within its configured folders or grants given to the persona, capped by its pinned owner's access; approved text only) and propose: an edit or a new document lands as a draft submitted for review, authored by the agent's persona (a service identity), never published. Comments are comments. Nothing approves, publishes, deletes or changes permissions.
+- **Notifies only whom its owner chose.** With a `notify` block configured, the agent can send a short note (`notify`) to the nest owner, the reviewers, or named members, by email and/or the nest's own Slack/Teams/webhook connectors (event `agent_notify`; never the server-wide webhooks). The model picks one of the configured keys and never an address; each recipient is re-checked as a current member when it sends; at most `notify.max_per_run` per run and `METACOGNITION_NOTIFY_PER_DAY` per agent per day; a note about a document not open to the whole nest never goes to a channel; the text is stripped of markup and every link except this nest's own documents is broken. Off by default.
 - **Untrusted inputs fenced.** Feeds (configured list only), MCP results (configured servers, allow-listed tools only), trigger inputs and even the nest's own document text reach the model fenced as data. Outbound requests check the resolved address at connect time (no private addresses, no DNS rebinding), follow no redirects, and cap response size.
-- **Bounded.** Caps on turns, tokens, wall-clock seconds and proposals per run, one run per agent at a time, the plane's per-nest concurrency cap.
+- **Bounded.** Caps on turns, tokens, wall-clock seconds, proposals, comments and notifications per run, one run per agent at a time, the plane's per-nest concurrency cap.
 - **Observable.** Every reasoning step and tool call is a run step; the run's trace carries the persona, model, token usage, a cost estimate and who pays (`promptowl_credits` or `own_key`), and the closing summary.
 - **Reflective.** Each run is shown the agent's recent runs and the verdicts on its proposals (rejection notes included), and withdraws its own rejected drafts so the working copy is the approved text again.
 

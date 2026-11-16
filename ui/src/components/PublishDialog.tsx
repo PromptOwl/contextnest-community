@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -35,8 +36,6 @@ import {
   UserCheck,
   Loader2,
   AlertCircle,
-  Copy,
-  Check,
   Eye,
   Ban,
 } from "lucide-react";
@@ -77,7 +76,6 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newLink, setNewLink] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const [links, setLinks] = useState<api.Publication[]>([]);
   const [loadingLinks, setLoadingLinks] = useState(true);
@@ -175,16 +173,6 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
       setError(e?.message || "Could not publish this document");
     } finally {
       setCreating(false);
-    }
-  }
-
-  async function handleCopy(link: string) {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      setError("Could not copy — select the link and copy it manually.");
     }
   }
 
@@ -377,9 +365,7 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
                 <p className="text-xs font-semibold text-muted-foreground">Your link</p>
                 <div className="mt-1 flex items-center gap-2">
                   <code className="flex-1 truncate text-sm">{newLink}</code>
-                  <Button size="sm" variant="outline" onClick={() => handleCopy(newLink)}>
-                    {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
+                  <CopyButton text={newLink} />
                 </div>
               </div>
             )}
@@ -424,14 +410,7 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
                     </div>
                     <div className="mt-2 flex items-center gap-2">
                       <code className="flex-1 truncate text-xs">{linkFor(p)}</code>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleCopy(linkFor(p))}
-                        title="Copy link"
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                      </Button>
+                      <CopyButton text={linkFor(p)} title="Copy link" />
                       <Button
                         size="sm"
                         variant="outline"

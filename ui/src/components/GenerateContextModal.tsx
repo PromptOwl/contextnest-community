@@ -4,7 +4,6 @@
  * API. Discoverability: most people don't realize the nest is writable by an
  * agent, so this spells out the endpoint + a ready-to-paste prompt.
  */
-import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -12,9 +11,8 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { copyTextWithToast } from "../lib/clipboard";
-import { Sparkles, Copy, Check, Key } from "lucide-react";
+import { CopyButton } from "@/components/ui/copy-button";
+import { Sparkles, Key } from "lucide-react";
 
 interface Props {
   isOpen: boolean;
@@ -28,31 +26,11 @@ interface Props {
 }
 
 function CopyBlock({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false);
   return (
     <div className="rounded-md border bg-muted/40">
       <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 px-2 text-xs"
-          onClick={async () => {
-            if (!(await copyTextWithToast(text))) return;
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-        >
-          {copied ? (
-            <>
-              <Check className="h-3 w-3 mr-1" /> Copied
-            </>
-          ) : (
-            <>
-              <Copy className="h-3 w-3 mr-1" /> Copy
-            </>
-          )}
-        </Button>
+        <CopyButton text={text} variant="ghost" className="h-6 px-2" label="Copy" />
       </div>
       <pre className="overflow-x-auto px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words">
         {text}

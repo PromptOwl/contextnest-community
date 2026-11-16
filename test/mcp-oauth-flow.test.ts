@@ -156,24 +156,20 @@ describe("MCP OAuth — end to end", () => {
     expect(body).not.toContain("Bob Private");
   });
 
-  it("issues a refresh token only when offline_access was granted", async () => {
+  it("issues a refresh token even when the client did not ask for offline_access", async () => {
     enable();
     const app = await createTestApp("key");
     const alice = await registerUser(app, "alice@example.com");
     const clientId = await register(app);
     const cookie = await signIn(app, "alice@example.com", "testpass");
 
+    // A local app that skipped the challenge's scope used to get a one-hour
+    // token and nothing to renew it with.
     const a = pkce();
     const codeA = await getCode(app, clientId, cookie, a.challenge, "nests:read");
-    const noRefresh = await (await exchange(app, clientId, codeA, a.verifier)).json();
-    expect(noRefresh.refresh_token).toBeUndefined();
-
-    const b = pkce();
-    const codeB = await getCode(
-      app, clientId, cookie, b.challenge, "nests:read offline_access",
-    );
-    const withRefresh = await (await exchange(app, clientId, codeB, b.verifier)).json();
-    expect(withRefresh.refresh_token).toMatch(/^[0-9a-f]{64}$/);
+    const tok = await (await exchange(app, clientId, codeA, a.verifier)).json();
+    expect(tok.refresh_token).toMatch(/^[0-9a-f]{64}$/);
+    expect(tok.scope).toBe("nests:read offline_access");
   });
 
   it("rotates the refresh token and kills the old one", async () => {
@@ -741,6 +737,17 @@ describe("MCP OAuth — purge", () => {
     expect(await resolveAccessToken(live.accessToken)).not.toBeNull();
     expect(await resolveAccessToken(dead.accessToken)).toBeNull();
   });
+
+  it("keeps a recently expired token so Connected apps can show it", async () => {
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    const { issueTokens, purgeExpired } = await import("../src/auth/oauth-store.js");
+    const { getDb } = await import("../src/db/client.js");
+    await issueTokens({ userId: alice.userId, clientId: "c", clientName: "C", scope: "nests:read", resource: null, withRefresh: false });
+    await getDb().run(`UPDATE oauth_tokens SET expires_at = '${new Date(Date.now() - 86400_000).toISOString()}'`);
+    await purgeExpired();
+    expect(await getDb().all("SELECT id FROM oauth_tokens")).toHaveLength(1);
+  });
 });
 
 // ─── Security hardening (review of #367) ──────────────────────────────────
@@ -1062,13 +1069,33 @@ describe("MCP OAuth — connected apps", () => {
     ).toBe(403);
   });
 
-  it("leaves dead grants off the list", async () => {
+  it("lists an expired grant as expired instead of hiding it, and Remove clears it", async () => {
     enable();
     const app = await createTestApp("key");
-    const { cookie } = await grantFor(app, "alice@example.com", "nests:read");
-    expect(await list(app, cookie)).toHaveLength(1);
+    const { clientId, cookie } = await grantFor(app, "alice@example.com", "nests:read");
+    expect((await list(app, cookie))[0].expired).toBe(false);
     const { getDb } = await import("../src/db/client.js");
-    await getDb().run("UPDATE oauth_tokens SET expires_at = '2000-01-01T00:00:00.000Z'");
+    const past = "2000-01-01T00:00:00.000Z";
+    await getDb().run(`UPDATE oauth_tokens SET expires_at = '${past}', refresh_expires_at = '${past}'`);
+    expect(await list(app, cookie)).toMatchObject([{ clientId, expired: true }]);
+    expect((await disconnect(app, cookie, clientId)).status).toBe(200);
     expect(await list(app, cookie)).toEqual([]);
+  });
+
+  it("drops the expired row once the same app has reconnected", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const { clientId: old, cookie } = await grantFor(app, "alice@example.com");
+    const { getDb } = await import("../src/db/client.js");
+    const past = "2000-01-01T00:00:00.000Z";
+    await getDb().run(`UPDATE oauth_tokens SET expires_at = '${past}', refresh_expires_at = '${past}'`);
+    // Reconnecting through DCR registers a fresh client with the same name and redirect.
+    const fresh = await register(app);
+    const p = pkce();
+    const code = await getCode(app, fresh, cookie, p.challenge, "nests:read");
+    expect((await exchange(app, fresh, code, p.verifier)).status).toBe(200);
+    const apps = await list(app, cookie);
+    expect(apps).toMatchObject([{ clientId: fresh, expired: false }]);
+    expect(apps.map((a: any) => a.clientId)).not.toContain(old);
   });
 });

@@ -19,15 +19,20 @@
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
+ * Metacognition (`context_metacognition_*`) is per-nest only: what a run does
+ * depends on the agent's saved config, so a tool list can't show it up front,
+ * and this is the endpoint the ChatGPT app connects to.
+ *
  * Governance tools that manage people or nest settings (`context_approve`,
  * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import { mcpNoStream } from "./routes.js";
+import { credentialMayContribute } from "../governance/org-contribution.js";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { z } from "zod";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
@@ -35,11 +40,9 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
-import { confirmBillingToolField } from "../auth/seats.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -60,15 +63,20 @@ import {
   TOOL_DEFINITIONS,
   headlessToolError,
   MCP_READ_TOOLS,
+  toolShape,
   type ToolResult,
 } from "./tools.js";
+import { toolAnnotations, toolTitle } from "./annotations.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
+import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -78,6 +86,7 @@ import { isSystemUser } from "../auth/systems.js";
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",
@@ -295,6 +304,7 @@ const SERVER_NEST_TOOLS = [
   "context_comments",
   "context_versions",
   "context_create",
+  "context_upload",
   "context_update",
   "context_delete",
   "context_move",
@@ -309,7 +319,7 @@ const SERVER_NEST_TOOLS = [
   "context_bulk_update",
 ];
 
-function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
+function withNestArg(tool: { name: string; description: string; inputSchema: unknown }) {
   const fanout = FANOUT_READ_TOOLS.has(tool.name);
   const schema = tool.inputSchema as { properties?: object; required?: string[] };
   return {
@@ -329,7 +339,7 @@ export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
+      "List every nest these credentials can read, with name, id, permission and document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -350,6 +360,9 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
+  // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
+  // GET /rollups twins). Advertised only while the workflow plane is on.
+  ...AGENT_ORG_TOOL_DEFINITIONS,
 ];
 
 /**
@@ -365,6 +378,8 @@ export const SERVER_TOOL_DEFINITIONS = [
  */
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
   "context_query",
   "context_search",
   "context_list",
@@ -408,6 +423,8 @@ async function handleServerToolCall(
   client?: ClientMetadata,
   headless = false,
   capability: "read" | "write" = "write",
+  /** A person's own full credential (CU-wdqcq05rz6) — see McpToolContext. */
+  contributorCredential = false,
 ): Promise<ToolResult> {
   // Headless access keys (CU-wdqcq0314u): nest_create and every other
   // server-only tool are refused here; per-nest tools are re-checked in
@@ -421,6 +438,9 @@ async function handleServerToolCall(
   // them (incl. the context_create bootstrap write).
   if (capability === "read" && !MCP_READ_TOOLS.has(toolName)) {
     return `This API key is read-only and cannot call "${toolName}". Read-only keys may only read, query, search, and export. Mint a read-write key for changes.`;
+  }
+  if (isAgentOrgTool(toolName)) {
+    return runAgentOrgTool(toolName, args, { userId, apiKeyId, nestScope, capability });
   }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -602,6 +622,7 @@ async function handleServerToolCall(
     apiKeyLabel,
     client,
     capability,
+    contributorCredential,
   });
 }
 
@@ -615,10 +636,12 @@ function createServerMcp(
   c: Context<AuthEnv>,
   headless = false,
   capability: "read" | "write" = "write",
+  /** Returned in the `initialize` result (connect-instructions.ts). */
+  instructions?: string,
 ): McpServer {
   const server = new McpServer(
-    { name: "contextnest-server", version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    { name: "contextnest-server", title: "ContextNest", version: SERVICE_VERSION },
+    { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) },
   );
 
   const toolDefs = headless
@@ -628,21 +651,10 @@ function createServerMcp(
     // Read-only keys see only the read tools (handleServerToolCall still
     // refuses the writes on its own).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
-      else field = z.any();
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Same §9.4 and billing-confirm fields the per-nest surface advertises.
-    Object.assign(shape, clientToolField, confirmBillingToolField);
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    if (isAgentOrgTool(tool.name) && !config.FEATURE_WORKFLOW_PLANE) continue;
+    const shape = toolShape(tool.name, tool.inputSchema);
+    const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
+    server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
       const granted = c.get("oauthScope");
@@ -669,6 +681,7 @@ function createServerMcp(
         attributeRequest(c, undefined, connectionClient(server)),
         headless,
         capability,
+        credentialMayContribute(c),
       );
       return toCallToolResult(out);
     });
@@ -678,21 +691,40 @@ function createServerMcp(
 
 export const serverMcpRoutes = new Hono<AuthEnv>();
 
-// POST/GET/DELETE /mcp — stateless, one server per request, same transport
-// shape as the per-nest endpoint.
-serverMcpRoutes.all("/", async (c) => {
+// POST /mcp — stateless, one server per request, same transport shape as the
+// per-nest endpoint. Every other method gets 405 (see mcpNoStream).
+serverMcpRoutes.post("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
+  const headless = await isHeadlessIdentity(userId);
+  const capability = c.get("keyCapability") ?? "write";
+  const baseUrl = requestBaseUrl(c.req.url);
+  // Every readable nest's standing instructions, on the initialize request
+  // only (CU-wdqcq05rn0). The index is the same scoped, deduped list
+  // nest_index serves, so a nest-scoped key hears about its nest alone.
+  let instructions: string | undefined;
+  if (await isInitializeRequest(c.req.raw)) {
+    try {
+      instructions = await serverConnectInstructions(
+        await buildNestIndex(userId, c.get("nestScope")),
+        { userId, userEmail },
+        baseUrl,
+      );
+    } catch (err) {
+      console.error("[mcp] server connect instructions unavailable", err);
+    }
+  }
   const server = createServerMcp(
     userId,
     userEmail,
     c.get("nestScope"),
-    requestBaseUrl(c.req.url),
+    baseUrl,
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
     c,
-    await isHeadlessIdentity(userId),
-    c.get("keyCapability") ?? "write",
+    headless,
+    capability,
+    instructions,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -707,6 +739,7 @@ serverMcpRoutes.all("/", async (c) => {
     await server.server.close();
   }
 });
+serverMcpRoutes.all("/", mcpNoStream);
 
 // ─── GET /index — the person nest index ──────────────────────────────────
 
@@ -852,19 +885,30 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
-  - read: \`context_init\` (operating instructions — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
+  - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too; not on
+    \`${B}/mcp\`): \`context_metacognition_list\`, \`context_metacognition_suggest\`
+    (a starting config read off the agent document), \`context_metacognition_preview\`
+    (validates a config and saves nothing: show the person the returned \`summary\`),
+    \`context_metacognition_configure\` (saves it), \`context_metacognition_run\`, \`context_metacognition_remove\`; stats via
+    \`workflow_runs_list { agent, agent_stats: true }\`
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
   — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
   (\`nodes/gtm/deals\`). The recipient reaches exactly that document, or
   everything under that folder, and nothing else in the nest. Owner/admin only.
+
+Both endpoints answer \`initialize\` with \`instructions\`: the nest's CONTEXT.md
+(per-nest) and the approved text of its **always-include** documents — the
+standing rules for any work in the nest, filtered to what these credentials can
+read. Most clients put them in the system prompt; follow them.
 
 Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`Authorization: Bearer\` header. Claude Desktop needs the mcp-remote bridge:

@@ -286,6 +286,13 @@ describe("GET /auth/oidc/callback", () => {
     expect(user).toBeTruthy();
     expect(user!.email).toBe("new.person@acme.com");
     expect(user!.name).toBe("New Person");
+    // The IdP vouched for the address (CU-wdqcq05rz6): that is what lets a
+    // shared deployment trust its domain for org contributions.
+    const verified = (await getDb().get(
+      "SELECT email_verified_at FROM users WHERE LOWER(email) = ?",
+      ["new.person@acme.com"],
+    )) as { email_verified_at: string | null };
+    expect(verified.email_verified_at).toBeTruthy();
   });
 
   it("falls back to preferred_username when the email claim is absent (Entra)", async () => {
@@ -574,6 +581,13 @@ describe("GET /auth/oidc/callback", () => {
     );
     expect(res.headers.get("Location")).toBe("/");
     expect(cookiesOf(res)["cnst_session"]).toMatch(/^[0-9a-f]{64}$/);
+    // A password account that signs in through the IdP becomes verified.
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT email_verified_at FROM users WHERE id = ?",
+      [existing.userId],
+    )) as { email_verified_at: string | null };
+    expect(row.email_verified_at).toBeTruthy();
   });
 
   it("bounces with disabled when OIDC is turned off mid-flight", async () => {

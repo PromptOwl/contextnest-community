@@ -126,6 +126,25 @@ describe("browser Back after a wiki-link hop (CU-wdqcq02g19)", () => {
     index--; // browser Back
     expect(stack[index].key).toBe("nest-1/doc-a");
   });
+
+  // App keys entries by path + node, so page-to-page moves get a Back stop too.
+  it("returns to the previous page, not out of the app", () => {
+    const stack: string[] = [];
+    let last: string | null = null;
+    const write = (key: string) => {
+      if (historyWriteMode(last, key) === "push") stack.push(key);
+      else stack[Math.max(0, stack.length - 1)] = key;
+      last = key;
+    };
+    write("/|"); // dashboard
+    write("/nest/n1|"); // open nest
+    write("/nest/n1/board|"); // board view
+    expect(stack).toEqual(["/|", "/nest/n1|", "/nest/n1/board|"]);
+  });
+
+  it("reuses a parked leave-guard entry instead of pushing over it", () => {
+    expect(historyWriteMode("/nest/n1|n1/doc-a", "/nest/n1|", false)).toBe("replace");
+  });
 });
 
 describe("dropParkedEntries", () => {

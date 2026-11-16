@@ -60,7 +60,7 @@ Scope resolution: document → tag → nest → owner
 
 Every PR — human- or AI-authored — must have both of these, or the Claude review marks it 🔴 blocking (full rules in `REVIEW.md`):
 
-1. **ClickUp ticket** referenced in the title, body or branch name (`CU-<id>`, `[CU-<id>]`, `#<id>`, or an `app.clickup.com/t/<id>` link). If you don't know the ticket, ask — don't open the PR without it.
+1. **Ticket** referenced. The standard is a `Task: <Engineering Ops nest URL>` first line in the body, one per ticket. ClickUp references (`CU-<id>`, `[CU-<id>]`, `#<id>`, or an `app.clickup.com/t/<id>` link) are still accepted during the transition. If you don't know the ticket, ask — don't open the PR without it.
 2. **Steps to test** section in the body: numbered steps a tester can follow from the user's perspective — where to go or what to run, what to do, what they should see. "Unit tests pass" is not test steps. Use `N/A — no user-facing change` plus a reason only for docs/CI/chore PRs.
 
 ## Configuration

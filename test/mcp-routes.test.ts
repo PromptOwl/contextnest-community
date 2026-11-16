@@ -97,6 +97,21 @@ afterAll(() => {
   env.cleanup();
 });
 
+describe("MCP transport — no standalone SSE stream (stateless)", () => {
+  // A 200 here opened a stream we closed at once; clients reconnected in a
+  // tight loop and pinned prod's CPU. 405 tells them there is no stream.
+  for (const method of ["GET", "DELETE", "PUT", "PATCH"]) {
+    for (const path of [() => `/nests/${nestId}/mcp`, () => "/mcp"]) {
+      it(`${method} ${path().replace(nestId, ":id")} answers 405`, async () => {
+        const res = await app.request(path(), { method, headers: { Accept: "text/event-stream" } });
+        expect(res.status).toBe(405);
+        expect(res.headers.get("allow")).toBe("POST");
+        expect((await res.json()).error.code).toBe(-32000);
+      });
+    }
+  }
+});
+
 describe("MCP transport — Accept header guard", () => {
   it("rejects requests missing the SSE Accept header (406)", async () => {
     const res = await app.request(`/nests/${nestId}/mcp`, {
@@ -515,7 +530,8 @@ describe("MCP tools/call — structuredContent", () => {
     expect(r.content).toEqual([
       {
         type: "text",
-        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n\n---\n\n${body}`,
+        // The served version's human (and agent, when the write named one).
+        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n**Last edited by:** admin@localhost (v1)\n\n---\n\n${body}`,
       },
     ]);
     expect(r.structuredContent.id).toBe("nodes/pricing-sheet");
@@ -562,6 +578,9 @@ describe("MCP tools/call — structuredContent", () => {
     for (const k of Object.keys(r.structuredContent.frontmatter)) {
       expect(["title", "description", "type", "tags"]).toContain(k);
     }
+    // "Last edited by" names the version served — the approved v1 — never
+    // the pending draft's.
+    expect(r.content[0].text).toMatch(/\*\*Last edited by:\*\* \S+ (via \S+ )?\(v1\)/);
   });
 
   it("context_search: prose unchanged, results[] alongside it", async () => {

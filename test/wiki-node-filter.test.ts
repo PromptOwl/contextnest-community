@@ -62,6 +62,13 @@ describe("matchesFilters", () => {
     expect(matchesFilters(node, { type: "agent" })).toBe(false);
   });
 
+  it("search ignores accents in either direction", () => {
+    const cafe = { ...node, title: "Café Guide", tags: ["#crème"] };
+    expect(matchesFilters(cafe, { search: "cafe" })).toBe(true);
+    expect(matchesFilters(cafe, { search: "creme" })).toBe(true);
+    expect(matchesFilters({ ...node, title: "Cafe Guide" }, { search: "CAFÉ" })).toBe(true);
+  });
+
   it("filters by updatedAfter threshold", () => {
     const n = { ...node, updated_at: "2026-06-01T00:00:00Z" };
     const may = Date.parse("2026-05-01T00:00:00Z");

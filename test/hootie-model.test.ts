@@ -17,6 +17,10 @@ let calls: Call[] = [];
 let rejectsTuned = new Set<string>();
 /** When set, every request fails with this (billing, bad input …). */
 let alwaysFail: { status: number; message: string } | null = null;
+/** Models whose gateway refuses any request carrying tools (400). */
+let rejectsTools = new Set<string>();
+/** When true, a request with tools ends in a search_nest call. */
+let replyWithToolUse = false;
 
 function apiError(status: number, message: string) {
   return Object.assign(new Error(message), {
@@ -30,11 +34,15 @@ class FakeAnthropic {
     stream: (params: Record<string, unknown>) => {
       calls.push({ model: String(params.model), params });
       const tuned = "thinking" in params || "output_config" in params;
+      const withTools = Array.isArray(params.tools) && params.tools.length > 0;
       const fail = alwaysFail
         ? apiError(alwaysFail.status, alwaysFail.message)
         : tuned && rejectsTuned.has(String(params.model))
           ? apiError(400, "thinking: adaptive thinking is not supported on this model")
-          : null;
+          : withTools && rejectsTools.has(String(params.model))
+            ? apiError(400, "tools: Extra inputs are not permitted")
+            : null;
+      const toolUse = withTools && replyWithToolUse;
       return {
         async *[Symbol.asyncIterator]() {
           // A rejected request fails before any event, as the real API does.
@@ -42,7 +50,17 @@ class FakeAnthropic {
           yield { type: "content_block_delta", delta: { type: "text_delta", text: "Hel" } };
           yield { type: "content_block_delta", delta: { type: "text_delta", text: "lo" } };
         },
-        finalMessage: async () => ({ stop_reason: "end_turn", stop_details: null }),
+        finalMessage: async () =>
+          toolUse
+            ? {
+                stop_reason: "tool_use",
+                stop_details: null,
+                content: [
+                  { type: "text", text: "Hello" },
+                  { type: "tool_use", id: "toolu_1", name: "search_nest", input: { query: "gate" } },
+                ],
+              }
+            : { stop_reason: "end_turn", stop_details: null },
       };
     },
   };
@@ -71,6 +89,107 @@ beforeEach(() => {
   calls = [];
   rejectsTuned = new Set();
   alwaysFail = null;
+  rejectsTools = new Set();
+  replyWithToolUse = false;
+});
+
+const searchTool = {
+  name: "search_nest",
+  description: "Search the nest.",
+  input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+};
+
+/** Drain a round: its text, and what it returned. */
+async function round(gen: AsyncGenerator<string, any>) {
+  let text = "";
+  let next = await gen.next();
+  while (!next.done) {
+    text += next.value;
+    next = await gen.next();
+  }
+  return { text, result: next.value };
+}
+
+describe("streamRound — tools (ticket B)", () => {
+  it("offers the tools, and returns the calls the round ended on with its content verbatim", async () => {
+    replyWithToolUse = true;
+    const { streamRound } = await load();
+    const { text, result } = await round(
+      streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool], toolChoice: "auto" }),
+    );
+    expect(text).toBe("Hello");
+    expect(calls[0].params.tools).toEqual([searchTool]);
+    expect(calls[0].params.tool_choice).toEqual({ type: "auto" });
+    expect(result.toolCalls).toEqual([{ id: "toolu_1", name: "search_nest", input: { query: "gate" } }]);
+    expect(result.assistant).toHaveLength(2);
+  });
+
+  it("the last round goes out with tool_choice none; no tools → no tool fields at all", async () => {
+    const { streamRound } = await load();
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool], toolChoice: "none" }));
+    expect(calls[0].params.tool_choice).toEqual({ type: "none" });
+    calls = [];
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5" }));
+    expect(calls[0].params).not.toHaveProperty("tools");
+    expect(calls[0].params).not.toHaveProperty("tool_choice");
+  });
+
+  it("a gateway that refuses tools → ToolsRejectedError (after the bare retry); remembered once a tool-less request works", async () => {
+    rejectsTools.add("gw/llama");
+    const { streamRound, ToolsRejectedError } = await load();
+    const ask = (tools?: unknown[]) =>
+      round(streamRound({ ...base, messages: base.turns, model: "gw/llama", ...(tools ? { tools: tools as any } : {}) }));
+    await expect(ask([searchTool])).rejects.toBeInstanceOf(ToolsRejectedError);
+    // Tuned, then bare — both with tools.
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => Array.isArray(c.params.tools))).toBe(true);
+    // Without tools it answers …
+    calls = [];
+    expect((await ask()).text).toBe("Hello");
+    // … so from now on a request with tools isn't even sent.
+    calls = [];
+    await expect(ask([searchTool])).rejects.toBeInstanceOf(ToolsRejectedError);
+    expect(calls).toHaveLength(0);
+    // Other models still get tools.
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
+    expect(calls[0].params.tools).toEqual([searchTool]);
+  });
+
+  it("a 400 on a later round (tool history present) still falls back, but isn't remembered as tool-less", async () => {
+    rejectsTools.add("claude-opus-5");
+    const { streamRound, ToolsRejectedError } = await load();
+    const later = [
+      ...base.turns,
+      { role: "assistant" as const, content: [{ type: "tool_use", id: "toolu_1", name: "search_nest", input: {} }] },
+      { role: "user" as const, content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "none" }] },
+    ];
+    await expect(
+      round(streamRound({ ...base, messages: later, model: "claude-opus-5", tools: [searchTool] })),
+    ).rejects.toBeInstanceOf(ToolsRejectedError);
+    // The tool-less answer works — and must not mark the model tool-less.
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5" }));
+    rejectsTools = new Set();
+    calls = [];
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params.tools).toEqual([searchTool]);
+  });
+
+  it("a 400 that isn't about tools (it fails without them too) is not remembered as tool-less", async () => {
+    alwaysFail = { status: 400, message: "Your credit balance is too low to access the Anthropic API." };
+    const { streamRound, ToolsRejectedError } = await load();
+    await expect(
+      round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] })),
+    ).rejects.toBeInstanceOf(ToolsRejectedError);
+    await expect(round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5" }))).rejects.toMatchObject({
+      status: 400,
+    });
+    alwaysFail = null;
+    calls = [];
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params.tools).toEqual([searchTool]);
+  });
 });
 
 describe("streamAnswer — model compatibility", () => {
@@ -169,6 +288,15 @@ describe("streamAnswer — logs", () => {
     } finally {
       delete process.env.HOOTIE_DEBUG_LOG;
       log.mockRestore();
+    }
+  });
+});
+
+describe("describeModelError — where to fix it", () => {
+  it("points admins at the Server settings tab that holds the model and key", async () => {
+    const { describeModelError } = await load();
+    for (const status of [401, 404]) {
+      expect(describeModelError({ status }, { model: "gpt-4" })).toContain("Server settings → Hootie");
     }
   });
 });

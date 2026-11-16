@@ -36,6 +36,9 @@ class ServerSettingsPage {
     this.unsaved = page.getByText('Unsaved changes', { exact: true });
     this.saveButton = page.getByRole('button', { name: 'Save changes', exact: true }).first();
     this.discardButton = page.getByRole('button', { name: 'Discard', exact: true });
+    // Discard asks first (CU-wdqcq06a1t); the edits stay until this is confirmed.
+    this.discardDialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' });
+    this.discardConfirm = page.getByTestId('settings-discard-confirm');
     this.saveError = page.getByRole('alert').filter({ hasText: "Couldn't save settings" });
     this.tabList = page.getByRole('tablist').first();
 

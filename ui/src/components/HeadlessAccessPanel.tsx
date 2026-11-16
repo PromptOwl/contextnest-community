@@ -12,7 +12,7 @@
  * NestVisibilityControl, and reports failures through `onError`.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Copy, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -30,7 +30,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import * as api from "../lib/api";
 import { useNestMeta } from "../lib/queries";
-import { copyTextWithToast } from "../lib/clipboard";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   MAX_KEY_LABEL,
   connectSnippet,
@@ -174,13 +174,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
           </p>
           <pre className="whitespace-pre-wrap break-all rounded bg-background p-2 font-mono">{snippet}</pre>
           <div className="flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void copyTextWithToast(snippet, "Key copied to clipboard")}
-            >
-              <Copy className="mr-1 h-3 w-3" /> Copy
-            </Button>
+            <CopyButton text={snippet} label="Copy" toastMessage="Key copied to clipboard" />
             <Button size="sm" variant="ghost" onClick={() => setFresh(null)}>
               Done
             </Button>

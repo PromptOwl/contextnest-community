@@ -41,6 +41,8 @@ export interface DocumentVersion {
   version: number;
   content: string;
   editedBy: string;
+  /** The named system's display name when `editedBy` is a system identity. */
+  editedBySystem?: string;
   editedAt: string;
   changeNote?: string;
   status: DocumentLifecycleStatus;

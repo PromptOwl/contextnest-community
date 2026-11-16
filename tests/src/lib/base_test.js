@@ -36,6 +36,17 @@ import ActivityTracePage from '../page_factory/app/activity_trace_page.js';
 import MessageLogPage from '../page_factory/app/message_log_page.js';
 import HowItWorksPage from '../page_factory/app/how_it_works_page.js';
 import AccountPage from '../page_factory/app/account_page.js';
+import SidebarRailPage from '../page_factory/app/sidebar_rail_page.js';
+import ImportFolderPage from '../page_factory/app/import_folder_page.js';
+import NestArchivePage from '../page_factory/app/nest_archive_page.js';
+import NewDocumentPage from '../page_factory/app/new_document_page.js';
+import NewFolderPage from '../page_factory/app/new_folder_page.js';
+import NestImportPage from '../page_factory/app/nest_import_page.js';
+import NestOverviewPage from '../page_factory/app/nest_overview_page.js';
+import NestDocumentsPage from '../page_factory/app/nest_documents_page.js';
+import ReviewQueuePage from '../page_factory/app/review_queue_page.js';
+import CollaboratorsPage from '../page_factory/app/collaborators_page.js';
+import FieldsPage from '../page_factory/app/fields_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -54,6 +65,44 @@ import ApiKeysApi from './api_keys_api.js';
 
 // REST helper used to read Teammates state (directory, super admins)
 import TeammatesApi from './teammates_api.js';
+
+// REST helper used to read and remove what an Import Folder run created
+import ImportFolderApi from './import_folder_api.js';
+
+// REST helper used to arrange Nest archive preconditions (nests, links, requests)
+import NestArchiveApi from './nest_archive_api.js';
+
+// REST helper used to arrange New Document preconditions (nests, folders, governance)
+import NewDocumentApi from './new_document_api.js';
+
+// REST helper used to arrange New Folder preconditions (nests, shares, archive)
+import NewFolderApi from './new_folder_api.js';
+
+// REST helper used to arrange Nest Import preconditions (nests, documents, shares)
+import NestImportApi from './nest_import_api.js';
+
+// REST helper used to arrange Nest Overview preconditions (folders, typed documents, edits)
+import NestOverviewApi from './nest_overview_api.js';
+
+// REST helper used to arrange Nest Documents preconditions (tagged documents, shares, governance)
+import NestDocumentsApi from './nest_documents_api.js';
+
+// REST helper used to arrange Review Queue preconditions (stewards, submissions, comments)
+import ReviewQueueApi from './review_queue_api.js';
+
+// REST helper used to arrange Collaborators preconditions (shares, teams, visibility, keys)
+import CollaboratorsApi from './collaborators_api.js';
+
+// REST helper used to arrange Fields preconditions (fields, task rules, tasks, shares)
+import FieldsApi from './fields_api.js';
+// Assign Steward page (Stewards tab, Assign / Edit / Remove dialogs, review controls)
+import StewardsPage from '../page_factory/app/stewards_page.js';
+// REST helper used to arrange Assign Steward preconditions (stewards, pending documents)
+import StewardsApi from './stewards_api.js';
+// Nest Settings dialog (governance settings, Systems) and where the settings show up
+import NestSettingsPage from '../page_factory/app/nest_settings_page.js';
+// REST helper used to arrange Nest Settings preconditions (settings, API keys, Systems)
+import NestSettingsApi from './nest_settings_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -306,6 +355,180 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       // User menu → Account
       get accountPage() {
         return new AccountPage(this.page, role.alias);
+      },
+
+      // Sidebar rail
+      get sidebarRailPage() {
+        return new SidebarRailPage(this.page, role.alias);
+      },
+
+      // Nests → Import Folder dialog
+      get importFolderPage() {
+        return new ImportFolderPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Import Folder suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get importFolderApi() {
+        if (!this._importFolderApi) this._importFolderApi = new ImportFolderApi(this.page);
+        return this._importFolderApi;
+      },
+
+      // Nest page → archive, read-only archived nest, archive requests
+      get nestArchivePage() {
+        return new NestArchivePage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest archive suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestArchiveApi() {
+        if (!this._nestArchiveApi) this._nestArchiveApi = new NestArchiveApi(this.page);
+        return this._nestArchiveApi;
+      },
+
+      // Nest page → New Document editor
+      get newDocumentPage() {
+        return new NewDocumentPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the New Document suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get newDocumentApi() {
+        if (!this._newDocumentApi) this._newDocumentApi = new NewDocumentApi(this.page);
+        return this._newDocumentApi;
+      },
+
+      // Nest page → New Folder dialog, Contents tree
+      get newFolderPage() {
+        return new NewFolderPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the New Folder suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get newFolderApi() {
+        if (!this._newFolderApi) this._newFolderApi = new NewFolderApi(this.page);
+        return this._newFolderApi;
+      },
+
+      // Nest page → Import dialog (Files, Upload PDF, Whole vault)
+      get nestImportPage() {
+        return new NestImportPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Import suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestImportApi() {
+        if (!this._nestImportApi) this._nestImportApi = new NestImportApi(this.page);
+        return this._nestImportApi;
+      },
+
+      // Nest page → Overview tab (facts, Contents tree, Recently edited, empty nest)
+      get nestOverviewPage() {
+        return new NestOverviewPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Overview suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestOverviewApi() {
+        if (!this._nestOverviewApi) this._nestOverviewApi = new NestOverviewApi(this.page);
+        return this._nestOverviewApi;
+      },
+
+      // Nest page → Documents tab (search, filters, folders, row and bulk actions)
+      get nestDocumentsPage() {
+        return new NestDocumentsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Documents suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestDocumentsApi() {
+        if (!this._nestDocumentsApi) this._nestDocumentsApi = new NestDocumentsApi(this.page);
+        return this._nestDocumentsApi;
+      },
+
+      // Nest page → Review Queue tab (queue, chips, review pane, bulk, deletions)
+      get reviewQueuePage() {
+        return new ReviewQueuePage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Review Queue suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get reviewQueueApi() {
+        if (!this._reviewQueueApi) this._reviewQueueApi = new ReviewQueueApi(this.page);
+        return this._reviewQueueApi;
+      },
+
+      // Nest page → Collaborators tab (roster, roles, teams, visibility, API-only keys)
+      get collaboratorsPage() {
+        return new CollaboratorsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Collaborators suite. One instance per role and
+       * test, so the nests and teams it remembers for cleanup belong to that
+       * test alone.
+       */
+      get collaboratorsApi() {
+        if (!this._collaboratorsApi) this._collaboratorsApi = new CollaboratorsApi(this.page);
+        return this._collaboratorsApi;
+      },
+
+      // Nest page → Fields tab (custom fields, task numbering, surfaces, stages)
+      get fieldsPage() {
+        return new FieldsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Fields suite. One instance per role and test, so
+       * the nests it remembers for cleanup belong to that test alone.
+       */
+      get fieldsApi() {
+        if (!this._fieldsApi) this._fieldsApi = new FieldsApi(this.page);
+        return this._fieldsApi;
+      },
+
+      // Nest page → Assign Steward (Stewards tab and dialogs, what a steward can do)
+      get stewardsPage() {
+        return new StewardsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Assign Steward suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get stewardsApi() {
+        if (!this._stewardsApi) this._stewardsApi = new StewardsApi(this.page);
+        return this._stewardsApi;
+      },
+
+      // Nest page → Nest settings dialog (governance settings, Systems)
+      get nestSettingsPage() {
+        return new NestSettingsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Nest Settings suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get nestSettingsApi() {
+        if (!this._nestSettingsApi) this._nestSettingsApi = new NestSettingsApi(this.page);
+        return this._nestSettingsApi;
       },
 
       /**

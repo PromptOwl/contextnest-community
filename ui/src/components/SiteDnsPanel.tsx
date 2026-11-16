@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { Check, Copy, Loader2 } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 
 /**
  * A host the public site wants to use (custom domain or public URL) and its
@@ -50,26 +50,18 @@ export function SiteDnsPanel({ host, verified, intro, records, note, busy, verif
 }
 
 function DnsRow({ type, name, value }: { type: string; name: string; value: string }) {
-  const [copied, setCopied] = useState(false);
   return (
     <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 font-mono">
       <span>{type}</span>
       <span className="truncate" title={name}>{name}</span>
       <span className="truncate" title={value}>{value}</span>
-      <Button
+      <CopyButton
+        text={value}
         size="icon"
         variant="ghost"
         className="h-7 w-7"
         aria-label={`Copy ${type} value`}
-        onClick={() => {
-          void navigator.clipboard.writeText(value).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          });
-        }}
-      >
-        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </Button>
+      />
     </div>
   );
 }

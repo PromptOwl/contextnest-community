@@ -139,10 +139,10 @@ describe("neutral notice for everyone else", () => {
 });
 
 describe("dismissal", () => {
-  it("lasts 7 days, and only for the same notice", () => {
-    const n = adminLicenseNotice(lic({ trial: true, expires_at: iso(NOW + 20 * day) }), NOW)!;
-    expect(isDismissed(n, { id: n.id, at: NOW - 6 * day }, NOW)).toBe(true);
-    expect(isDismissed(n, { id: n.id, at: NOW - 8 * day }, NOW)).toBe(false);
+  it("lasts 30 days, and only for the same notice", () => {
+    const n = adminLicenseNotice(lic({ trial: true, expires_at: iso(NOW + 60 * day) }), NOW)!;
+    expect(isDismissed(n, { id: n.id, at: NOW - 29 * day }, NOW)).toBe(true);
+    expect(isDismissed(n, { id: n.id, at: NOW - 31 * day }, NOW)).toBe(false);
     expect(isDismissed(n, { id: "other", at: NOW }, NOW)).toBe(false);
   });
 });

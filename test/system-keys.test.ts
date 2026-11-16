@@ -151,6 +151,7 @@ describe("GWT 8 — create", () => {
     expect(row).toBeTruthy();
     expect(row.permission).toBe("write");
     expect(row.principal_kind).toBe("system");
+    expect(row.name).toBe("GitHub sync");
   });
 });
 
@@ -186,6 +187,7 @@ describe("GWT 9 — writes are attributed to the system; governance intact", () 
     const authors = JSON.stringify(versions);
     expect(authors).toContain(systemEmail);
     expect(authors).not.toContain(creator.email);
+    expect(versions[0].editedBySystem).toBe("GitHub sync");
     // Not published: the public view would not see it, and it's a draft.
     const latest = Array.isArray(versions) ? versions[0] : null;
     if (latest?.status) expect(latest.status).not.toBe("published");
@@ -199,6 +201,10 @@ describe("GWT 9 — writes are attributed to the system; governance intact", () 
     expect(selfApprove.status).toBe(403);
     const a = await jsonRequest(app, "POST", `/nests/${nestA}/nodes/${nodeId}/approve`, {}, owner.apiKey);
     expect(a.status).toBe(200);
+    // A person's version never picks up a system name.
+    const v = await jsonRequest(app, "GET", `/nests/${nestA}/nodes/${nodeId}/versions`, undefined, owner.apiKey);
+    const human = (v.data.versions ?? v.data).filter((x: any) => x.editedBy === owner.email);
+    for (const row of human) expect(row.editedBySystem).toBeUndefined();
   });
 });
 
@@ -479,5 +485,20 @@ describe("GWT 15 — MCP admin tools at REST parity", () => {
     expect(names).not.toContain("context_headless");
     const r = await callTool(nestB, "context_systems", { action: "create", name: "Escape", capability: "write" }, ro);
     expect(JSON.stringify(r.body)).not.toContain("cnst_sys_");
+  });
+});
+
+describe("revoke / rotate need every granted nest", () => {
+  it("an admin of only one of the system's nests is refused, and the key keeps working", async () => {
+    const partial = await registerUser(app, "partial-admin@test.com", "Partial");
+    await jsonRequest(app, "POST", `/nests/${nestB}/collaborators`, { email: partial.email, permission: "admin" }, owner.apiKey);
+    const made = await jsonRequest(app, "POST", "/systems", { name: "Shared Bot", capability: "read", nest_ids: [nestB, nestC] }, owner.apiKey);
+    expect(made.status).toBe(201);
+    const id = made.data.id;
+    const key = made.data.api_key;
+
+    expect((await jsonRequest(app, "DELETE", `/systems/${id}`, undefined, partial.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "POST", `/systems/${id}/rotate`, undefined, partial.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "GET", `/nests/${nestC}/nodes`, undefined, key)).status).toBe(200);
   });
 });

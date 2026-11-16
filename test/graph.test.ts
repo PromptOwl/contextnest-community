@@ -468,3 +468,35 @@ describe("graph: tag-based edges", () => {
     expect(orphanIds).not.toContain("nodes/epsilon");
   });
 });
+
+describe("graph: sub-item parent edges", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "SubItems" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+    const add = (body: Record<string, unknown>) =>
+      jsonRequest(app, "POST", `/nests/${nestId}/nodes`, body, owner.apiKey);
+    // No wikilinks or shared tags: the parent field is the only relation.
+    await add({ title: "Launch", type: "task", content: "x", tags: ["a"] });
+    const child = await add({ title: "Write copy", type: "task", content: "y", tags: ["b"], parent: "nodes/launch" });
+    expect(child.status).toBe(201);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("links a sub-item to its parent so neither is an orphan", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const edgeKeys = data.links.map((l: any) => `${l.source}->${l.target}`);
+    expect(edgeKeys).toContain("nodes/write-copy->nodes/launch");
+    const orphanIds = data.signals.orphans.map((n: any) => n.id);
+    expect(orphanIds).not.toContain("nodes/launch");
+    expect(orphanIds).not.toContain("nodes/write-copy");
+  });
+});

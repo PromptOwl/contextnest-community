@@ -100,7 +100,13 @@ describe("the run bundle and Hootie use the same credential", () => {
     process.env.HOOTIE_ENABLED = "true";
     const { app, owner } = await boot({});
     const nest = await jsonRequest(app, "POST", "/nests", { name: "Ask" }, owner.apiKey);
-    const res = await jsonRequest(app, "POST", `/nests/${nest.data.nest.id}/chat`, { message: "hi" }, owner.apiKey);
+    // Hootie runs only as a signed-in person (AC-H1-07): ask with the session.
+    const raw = await app.request(`/nests/${nest.data.nest.id}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: owner.cookie },
+      body: JSON.stringify({ message: "hi" }),
+    });
+    const res = { status: raw.status, data: await raw.json() };
     expect(res.status).toBe(503);
     expect(res.data.reason).toBe("no_api_key");
     expect(res.data.error).toMatch(/PromptOwl models/);

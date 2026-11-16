@@ -1,0 +1,6 @@
+# Caddy gets and renews the certificate for this name on its own. MCP's
+# streamed responses pass through without extra settings.
+{$CONTEXTNEST_HOST} {
+	encode zstd gzip
+	reverse_proxy community:3838
+}

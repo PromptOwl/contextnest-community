@@ -1,7 +1,7 @@
 /**
  * Overview tab — the nest's landing page, in the public reader's design
- * language (CU-wdqcq02qb1). It reads like the reader's home page: the nest
- * as the page title, its description as the lede, the governance facts as
+ * language (CU-wdqcq02qb1). It reads like the reader's home page: the nest's
+ * description as the lede (the header above names it), the governance facts as
  * the provenance line, then the contents as the reader's folder nav — an
  * expandable tree with full-width rows and one right-aligned column for
  * counts and recency. Recently edited sits in a side card the way "On this
@@ -11,7 +11,7 @@
  * opening a folder here asks NestView for that level — the same read the
  * Documents tab makes. Actions are callbacks into NestView.
  */
-import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Loader2, Plus, Sparkles, Trash2, Upload } from "lucide-react";
 import type { KnownFolder } from "../FolderTree";
 import { FolderTree, prettyFolderPath } from "../FolderTree";
@@ -19,7 +19,7 @@ import { typePill } from "./node-display";
 import { NodeTypeIcon } from "./NodeTypeIcon";
 import { READER_CARD_CLASS, breadcrumbFor } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
-import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, overviewFacts, type MoreMarker } from "@/lib/nest-overview";
+import { capFolderDocs, emptyStateActions, folderCollapsed, overviewFacts, type MoreMarker } from "@/lib/nest-overview";
 
 interface Props {
   /** Cold load still in flight — shows a spinner instead of an empty index. */
@@ -32,8 +32,7 @@ interface Props {
   /** Folder → documents, from the loaded levels. */
   tocGroups: { folder: string; depth: number; items: any[] }[];
   knownFolders: KnownFolder[];
-  /** Folder levels whose documents are loaded / in flight. */
-  loadedFolders: Set<string>;
+  /** Folder levels whose documents are in flight. */
   loadingFolders: Set<string>;
   /** Load one folder level (no-op when already loaded). */
   onExpandFolder: (path: string) => void;
@@ -56,8 +55,7 @@ interface Props {
   onDeleteFolder?: (folder: { path: string; label: string; total: number }) => void;
 }
 
-/** Top-level folders opened on arrival, and documents shown per folder before "View all". */
-const PREFETCH_FOLDERS = 5;
+/** Documents shown per folder before "View all". */
 const DOCS_PER_FOLDER = 5;
 
 // The reader's shared text treatments, so the two surfaces can't drift apart
@@ -81,7 +79,6 @@ export function OverviewTab({
   folderCount,
   tocGroups,
   knownFolders,
-  loadedFolders,
   loadingFolders,
   onExpandFolder,
   isReadOnly,
@@ -95,26 +92,14 @@ export function OverviewTab({
   onAddWithAI,
   onDeleteFolder,
 }: Props) {
-  // Folder rows: open once loaded, closed until then; a click wins either way.
+  // Folder rows: closed until opened; a click wins either way.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(() => new Map());
-  const isCollapsed = (path: string) => folderCollapsed(path, overrides, loadedFolders);
+  const isCollapsed = (path: string) => folderCollapsed(path, overrides);
   const toggle = (path: string) => {
     const opening = isCollapsed(path);
     setOverrides((prev) => new Map(prev).set(path, !opening));
     if (opening) onExpandFolder(path);
   };
-
-  // Open the first few top-level folders on arrival, so the index shows
-  // documents rather than a column of closed folders.
-  const prefetch = useMemo(() => foldersToPrefetch(knownFolders, loadedFolders, PREFETCH_FOLDERS), [knownFolders, loadedFolders]);
-  // Keyed on the prefetch list only: loadingFolders / overrides are read
-  // inside, not deps — an in-flight folder is skipped here, and one the user
-  // has collapsed by hand is never reopened behind their back.
-  useEffect(() => {
-    if (initialLoad) return;
-    for (const p of prefetch) if (!loadingFolders.has(p) && !overrides.has(p)) onExpandFolder(p);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialLoad, prefetch.join("|")]);
 
   const cappedGroups = useMemo(() => capFolderDocs(tocGroups, DOCS_PER_FOLDER), [tocGroups]);
 
@@ -147,13 +132,13 @@ export function OverviewTab({
           <>
             {/* The reader's page header: title, lede, provenance. */}
             <header className="mb-8 max-sm:mb-6">
-              {/* On a phone the page header right above already names the nest; the
-                  title stays for screen readers only. */}
-              <h2 id="nest-overview-heading" className="break-words text-[2rem] font-semibold leading-[1.15] tracking-tight text-foreground max-sm:sr-only">
+              {/* The breadcrumb and page header above already name the nest
+                  (CU-wdqcq06596); the title stays for screen readers only. */}
+              <h2 id="nest-overview-heading" className="sr-only">
                 {nestName}
               </h2>
-              {description && <p className="mt-3 max-sm:mt-0 max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
-              <p className={"mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? "" : " max-sm:mt-0")} data-testid="nest-overview-facts">
+              {description && <p className="max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
+              <p className={"flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? " mt-3" : "")} data-testid="nest-overview-facts">
                 {facts.map((f) => {
                   const dot = f.tone && (
                     <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />

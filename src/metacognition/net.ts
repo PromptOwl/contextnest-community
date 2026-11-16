@@ -56,13 +56,17 @@ export function isPrivateAddress(address: string): boolean {
 type Resolver = (host: string) => Promise<Array<{ address: string; family: number }>>;
 const systemResolver: Resolver = (host) => dns.promises.lookup(host, { all: true, verbatim: true });
 
-/** A socket `lookup` that refuses private answers and pins the checked one. */
-export function guardedLookup(resolve: Resolver = systemResolver): LookupFunction {
+/** A socket `lookup` that refuses private answers and pins the checked one.
+ *  `allowPrivate` defaults to the metacognition dev switch. */
+export function guardedLookup(
+  resolve: Resolver = systemResolver,
+  allowPrivate: () => boolean = () => config.METACOGNITION_ALLOW_PRIVATE_URLS,
+): LookupFunction {
   return ((hostname: string, options: any, callback: any) => {
     resolve(hostname).then(
       (answers) => {
         if (!answers.length) return callback(new OutboundBlockedError(`${hostname} did not resolve`));
-        if (!config.METACOGNITION_ALLOW_PRIVATE_URLS) {
+        if (!allowPrivate()) {
           const bad = answers.find((x) => isPrivateAddress(x.address));
           if (bad) {
             return callback(new OutboundBlockedError(`${hostname} resolves to a private address; refusing to connect`));
@@ -91,18 +95,25 @@ export class OutboundTooLargeError extends Error {
 
 /**
  * fetch(), with the address checked at connect time and the body capped.
- * `resolver` is for tests.
+ * `resolver` is for tests. `allowPrivate` overrides the metacognition dev
+ * switch; file uploads by URL pass false, so their fence is always up.
  */
-export function guardedFetch(opts: { maxBytes: number; timeoutMs: number; resolver?: Resolver }) {
-  const lookup = guardedLookup(opts.resolver);
+export function guardedFetch(opts: {
+  maxBytes: number;
+  timeoutMs: number;
+  resolver?: Resolver;
+  allowPrivate?: boolean;
+}) {
+  const allowPrivate = () => opts.allowPrivate ?? config.METACOGNITION_ALLOW_PRIVATE_URLS;
+  const lookup = guardedLookup(opts.resolver, allowPrivate);
   return (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-    if (url.protocol !== "https:" && !(config.METACOGNITION_ALLOW_PRIVATE_URLS && url.protocol === "http:")) {
+    if (url.protocol !== "https:" && !(allowPrivate() && url.protocol === "http:")) {
       return Promise.reject(new OutboundBlockedError(`${url.protocol} is not allowed`));
     }
     // An IP-literal host never goes through `lookup`, so check it here.
     const host = url.hostname.replace(/^\[|\]$/g, "");
-    if (isIP(host) && !config.METACOGNITION_ALLOW_PRIVATE_URLS && isPrivateAddress(host)) {
+    if (isIP(host) && !allowPrivate() && isPrivateAddress(host)) {
       return Promise.reject(new OutboundBlockedError(`${host} is a private address; refusing to connect`));
     }
     const headers: Record<string, string> = {};

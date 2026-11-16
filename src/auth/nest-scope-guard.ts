@@ -35,6 +35,8 @@ export const NEST_SCOPED_KEY_CODE = "nest_scoped_key";
  *  they expose nothing account-wide. */
 const PUBLIC_PATHS = new Set([
   "/health",
+  "/livez",
+  "/readyz",
   "/license/status",
   "/llms.txt",
   "/auth/admin-status",
@@ -80,6 +82,12 @@ export function nestKeyVerdict(
   // Run detail routes — every handler checks the run's nest against the scope
   // (loadRunWithPermission in workflow/run-routes.ts).
   if (path.startsWith("/runs/")) return { allowed: true };
+
+  // Agent control room reads (po-1186) — each narrows itself to the key's
+  // nest (orgScope keyNestScope; the trace re-checks the entry's nest).
+  if ((path === "/ledger" || path.startsWith("/ledger/") || path === "/rollups") && isGet) {
+    return { allowed: true };
+  }
 
   // The key's own nest, every sub-route. The nests-app gate still applies the
   // owner's permission on top.

@@ -125,7 +125,7 @@ export function ActivityLogPanel({
 
       <div className="flex gap-2 border-b px-4 py-2">
         <Select value={filter} onValueChange={setFilter}>
-          <SelectTrigger className="h-8 w-40" data-testid="activity-log-filter">
+          <SelectTrigger className="h-8 w-32 shrink-0" data-testid="activity-log-filter">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -136,7 +136,9 @@ export function ActivityLogPanel({
             ))}
           </SelectContent>
         </Select>
-        <div className="relative flex-1">
+        {/* min-w-0: a flex item won't shrink below its input's intrinsic
+            width otherwise, and the row overflowed the panel (clipped). */}
+        <div className="relative min-w-0 flex-1">
           <Search className="absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
           <Input
             className="h-8 pl-8"
@@ -147,7 +149,7 @@ export function ActivityLogPanel({
           />
         </div>
         <Input
-          className="h-8 w-28"
+          className="h-8 w-28 shrink-0"
           placeholder="Agent"
           aria-label="Filter by agent"
           value={agent}

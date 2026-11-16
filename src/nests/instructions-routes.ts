@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { standingBlockFor, standingRefs } from "../governance/always-include-service.js";
 import { heldWriteResponse, holdWriteIfGated } from "./push-confirmation-service.js";
 import {
   getInstructions,
@@ -43,7 +44,17 @@ function seqParam(raw: string | undefined): number {
 }
 
 instructionsRoutes.get("/instructions", async (c) => {
-  return c.json(await getInstructions(c.req.param("nestId")!));
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  // Which always-include documents travel with these instructions to every
+  // agent (CU-wdqcq05rn0) — the ones THIS reader can read, without the text.
+  // Resolved alongside the CONTEXT.md read, and cached per nest until an
+  // approval changes it; a failure shows as none rather than failing the page.
+  const [instructions, { set }] = await Promise.all([
+    getInstructions(nestId),
+    resolveCallerEmail(userId).then((userEmail) => standingBlockFor(nestId, { userId, userEmail })),
+  ]);
+  return c.json({ ...instructions, always_included: standingRefs(set) });
 });
 
 instructionsRoutes.put("/instructions", async (c) => {

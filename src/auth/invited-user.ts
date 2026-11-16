@@ -43,7 +43,7 @@ export async function createInvitedUser(
     promptowlSignIn: config.PROMPTOWL_SIGN_IN_GATE === "open",
     // ?invite= prefills the login page and guides them to sign in.
     link: base ? `${base}/?invite=${encodeURIComponent(email)}` : "",
-  });
+  }, { noNest: true });
   return { id, tempPassword };
 }
 
