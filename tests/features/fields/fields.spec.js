@@ -591,6 +591,15 @@ test.describe('Fields', () => {
         await checks();
       }).toPass(WRITE);
 
+    // Pick an item from Add field. The click sits inside the same retry: the
+    // list refresh after an add can close the menu between the checks above
+    // and the click (seen on a fast server, where the refresh lands at once).
+    const pick = (item) =>
+      expect(async () => {
+        await page.openAddFieldMenu();
+        await item.click(SHORT);
+      }).toPass(WRITE);
+
     await page.goto(nest.id);
     await expect(page.emptyFields).toBeVisible();
     await menuShows(async () => {
@@ -599,7 +608,7 @@ test.describe('Fields', () => {
       }
     });
 
-    await page.estimatePointsItem.click();
+    await pick(page.estimatePointsItem);
     await expectToast(page, 'Estimate added');
     await expect(page.row('Estimate')).toContainText('points', WRITE);
 
@@ -608,7 +617,7 @@ test.describe('Fields', () => {
       await disabled(page.estimateHoursItem);
       await enabled(page.timeInStatusItem);
     });
-    await page.timeInStatusItem.click();
+    await pick(page.timeInStatusItem);
     await expectToast(page, 'Time in status added');
     await expect(page.row('Time in status')).toBeVisible(WRITE);
 
@@ -627,7 +636,7 @@ test.describe('Fields', () => {
       await enabled(page.estimatePointsItem);
       await enabled(page.estimateHoursItem);
     });
-    await page.estimateHoursItem.click();
+    await pick(page.estimateHoursItem);
     await expect(page.row('Estimate')).toContainText('hours', WRITE);
 
     await menuShows(async () => {
