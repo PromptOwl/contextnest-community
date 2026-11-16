@@ -15,6 +15,10 @@ import { escapeMrkdwn } from "../adapters/slack/blockkit.js";
 import { aboutSurfacesUrl } from "../about-page.js";
 import { getSettings } from "./settings-service.js";
 
+/** Nest names are capped in the notice so a long one can't crowd out the disclosure and the link. */
+export const NOTICE_NEST_MAX = 80;
+const capName = (s: string) => (s.length > NOTICE_NEST_MAX ? `${s.slice(0, NOTICE_NEST_MAX - 1)}…` : s);
+
 /**
  * po-1186 CR3: the notice ends with a link to the public member explainer
  * (GET /about/surfaces) when this server has a public base URL to link to.
@@ -22,10 +26,6 @@ import { getSettings } from "./settings-service.js";
  * number that page shows. Every argument is required, so no caller can state
  * a default retention by leaving one out.
  */
-/** Nest names are capped in the notice so a long one can't crowd out the disclosure and the link. */
-export const NOTICE_NEST_MAX = 80;
-const capName = (s: string) => (s.length > NOTICE_NEST_MAX ? `${s.slice(0, NOTICE_NEST_MAX - 1)}…` : s);
-
 export const enableNotice = (nest: string, aboutUrl: string | null, ttlHours: number) =>
   `Nest is now listening here for ${escapeMrkdwn(capName(nest))}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve. ` +
   `What it keeps: only summaries a named person approves; messages are cleared within ${ttlHours} hours. ` +

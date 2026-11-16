@@ -497,6 +497,18 @@ describe("resuming the install step", () => {
     expect(r.data.manifest?.settings?.event_subscriptions?.request_url).toBe(`${BASE}/surfaces/slack/${installId}/events`);
   });
 
+  it("with PUBLIC_BASE_URL unset the re-served manifest has relative URLs, never 'undefined'", async () => {
+    delete process.env.PUBLIC_BASE_URL;
+    try {
+      const r = await jsonRequest(app, "GET", `/surfaces/slack/installs/${installId}`, undefined, root.apiKey);
+      expect(r.status).toBe(200);
+      expect(JSON.stringify(r.data.manifest)).not.toMatch(/undefined|null\//);
+      expect(r.data.manifest.settings.event_subscriptions.request_url).toBe(`/surfaces/slack/${installId}/events`);
+    } finally {
+      process.env.PUBLIC_BASE_URL = BASE;
+    }
+  });
+
   it("a hosted install gets no manifest back (it uses PromptOwl's app, so there is nothing to download)", async () => {
     const { createInstall } = await import("../src/surfaces/services/install-store.js");
     const hosted = await createInstall({ surface: "slack", mode: "hosted", tenantKey: `T_HOSTED_${Date.now()}`, homeNestId: N, status: "pending" });
