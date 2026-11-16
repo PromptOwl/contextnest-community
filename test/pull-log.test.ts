@@ -306,3 +306,157 @@ describe("context pull log — public readers and access keys", () => {
     expect(JSON.stringify(t)).not.toContain("owner@pub.test");
   });
 });
+
+describe("context pull log — paging, large pulls and older rows", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let stranger: { apiKey: string };
+  let openNest: string;
+  let pubNest: string;
+  let openDoc: string;
+  let draftDoc: string;
+  // The post-createTestApp module graph: the one the app writes through.
+  let log: typeof import("../src/governance/access-log.js");
+  let db: () => any;
+  let pullLog: typeof import("../src/governance/pull-log-service.js");
+
+  const walk = async (nestId: string, key: string, limit: number) => {
+    const seen: any[] = [];
+    const pages: any[] = [];
+    let before = "";
+    for (let i = 0; i < 50; i++) {
+      const page = (await pulls(app, nestId, key, `?limit=${limit}${before ? `&before=${before}` : ""}`)).data;
+      pages.push(page);
+      seen.push(...page.pulls);
+      if (!page.hasMore) break;
+      expect(page.nextBefore).toBeTruthy();
+      before = encodeURIComponent(page.nextBefore);
+    }
+    return { seen, pages };
+  };
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    log = await import("../src/governance/access-log.js");
+    pullLog = await import("../src/governance/pull-log-service.js");
+    const client = await import("../src/db/client.js");
+    db = () => client.getDb();
+    owner = await registerUser(app, "owner@pages.test", "Owner");
+    stranger = await registerUser(app, "stranger@pages.test", "Stranger");
+    openNest = (await jsonRequest(app, "POST", "/nests", { name: "Paging" }, owner.apiKey)).data.nest.id;
+    pubNest = (await jsonRequest(app, "POST", "/nests", { name: "Paging Public" }, owner.apiKey)).data.nest.id;
+    openDoc = (await jsonRequest(app, "POST", `/nests/${pubNest}/nodes`, { title: "Open Doc", content: "# Open\n\nkestrel" }, owner.apiKey)).data.node.id;
+    await jsonRequest(app, "PATCH", `/nests/${pubNest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    draftDoc = (await jsonRequest(app, "POST", `/nests/${pubNest}/nodes`, { title: "Draft Doc", content: "# Draft\n\nkestrel" }, owner.apiKey)).data.node.id;
+    const vis = await jsonRequest(app, "PATCH", `/nests/${pubNest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    expect(vis.status).toBe(200);
+  });
+
+  afterAll(() => env.cleanup());
+
+  const record = (nestId: string, nodeIds: string[], detail: string, action: "retrieve" | "export" = "retrieve") =>
+    log.recordNodeAccess({
+      nestId,
+      nodeIds,
+      action,
+      surface: "api",
+      userEmail: "owner@pages.test",
+      detail,
+      unthrottled: true,
+    });
+
+  it("records a pull past the per-call cap as its first 50 documents, in order", async () => {
+    const docs = Array.from({ length: 60 }, (_, i) => `cap-${String(i).padStart(2, "0")}`);
+    record(openNest, docs, "search");
+    await log.flushAccessLog();
+    const p = (await pulls(app, openNest, owner.apiKey, "?limit=1")).data.pulls[0];
+    expect(p.documents).toBe(log.MAX_PER_CALL);
+    expect(p.steps.map((s: any) => s.nodeId)).toEqual(docs.slice(0, log.MAX_PER_CALL));
+    expect(p.steps.map((s: any) => s.seq)).toEqual(docs.slice(0, log.MAX_PER_CALL).map((_, i) => i));
+  });
+
+  it("numbers seq across insert chunks, under one pull id", async () => {
+    const docs = Array.from({ length: 250 }, (_, i) => `exp-${i}`);
+    record(openNest, docs, "export", "export");
+    await log.flushAccessLog();
+    const rows = (await db().all(
+      "SELECT pull_id, seq, node_id FROM node_access_events WHERE nest_id = ? AND action = 'export' ORDER BY seq",
+      [openNest],
+    )) as Array<{ pull_id: string; seq: number; node_id: string }>;
+    expect(rows.length).toBe(250);
+    expect(new Set(rows.map((r) => r.pull_id)).size).toBe(1);
+    expect(rows.map((r) => Number(r.seq))).toEqual(docs.map((_, i) => i));
+    expect(rows.map((r) => r.node_id)).toEqual(docs);
+  });
+
+  it("pages across a full row window without splitting or dropping a pull", async () => {
+    // limit=1 reads a 100-row window; four 30-document pulls overflow it, so
+    // the oldest pull in each window is cut and must come back whole on a later page.
+    const made: string[][] = [];
+    for (let k = 0; k < 4; k++) {
+      const docs = Array.from({ length: 30 }, (_, i) => `win-${k}-${i}`);
+      made.push(docs);
+      record(openNest, docs, `query-${k}`);
+      await log.flushAccessLog();
+    }
+    const { seen } = await walk(openNest, owner.apiKey, 1);
+    const windowed = seen.filter((p) => String(p.tool).startsWith("query-"));
+    expect(windowed.map((p) => p.tool)).toEqual(["query-3", "query-2", "query-1", "query-0"]);
+    for (const p of windowed) expect(p.steps.map((s: any) => s.nodeId)).toEqual(made[Number(p.tool.slice(-1))]);
+    expect(new Set(seen.map((p) => p.id)).size).toBe(seen.length);
+  });
+
+  it("reads past a full window of pulls this caller can't see instead of returning an empty page", async () => {
+    record(pubNest, [openDoc], "search");
+    await log.flushAccessLog();
+    for (let i = 0; i < 150; i++) record(pubNest, [draftDoc], "context_get");
+    await log.flushAccessLog();
+    const first = (await pulls(app, pubNest, stranger.apiKey, "?limit=1")).data;
+    expect(first.pulls.map((p: any) => p.steps.map((s: any) => s.nodeId))).toEqual([[openDoc]]);
+  });
+
+  it("still hands back a cursor when a page comes back empty, and the walk reaches the readable pull", async () => {
+    for (let i = 0; i < 500; i++) record(pubNest, [draftDoc], "context_get");
+    await log.flushAccessLog();
+    const { seen, pages } = await walk(pubNest, stranger.apiKey, 1);
+    for (const page of pages) if (page.hasMore) expect(page.nextBefore).toBeTruthy();
+    expect(seen.map((p) => p.steps.map((s: any) => s.nodeId))).toEqual([[openDoc]]);
+    expect(JSON.stringify(seen)).not.toContain(draftDoc);
+  });
+
+  it("groups pre-093 rows by call, and reads one back by its legacy id", async () => {
+    const ts = "2020-01-02T03:04:05.678Z";
+    const insert = (nodeId: string, detail: string) =>
+      db().run(
+        `INSERT INTO node_access_events (ts, nest_id, node_id, action, surface, user_email, detail)
+         VALUES (?, ?, ?, 'retrieve', 'api', 'owner@pages.test', ?)`,
+        [ts, openNest, nodeId, detail],
+      );
+    await insert("legacy-a", "search");
+    await insert("legacy-b", "search");
+    await insert("legacy-c", "context");
+    const legacy = (await walk(openNest, owner.apiKey, 50)).seen.filter((p) => p.id.startsWith("legacy-"));
+    expect(legacy.map((p) => p.steps.map((s: any) => s.nodeId))).toEqual([["legacy-c"], ["legacy-a", "legacy-b"]]);
+    for (const p of legacy) {
+      expect(p.steps.every((s: any) => s.bytes === null && s.hop === null)).toBe(true);
+      const one = await jsonRequest(app, "GET", `/nests/${openNest}/pulls/${p.id}`, undefined, owner.apiKey);
+      expect(one.status).toBe(200);
+      expect(one.data.pull).toEqual(p);
+    }
+    // A legacy id names its group's first row; the second row's id is not a pull.
+    const searchId = Number(legacy[1].id.slice("legacy-".length));
+    const notAPull = await jsonRequest(app, "GET", `/nests/${openNest}/pulls/legacy-${searchId + 1}`, undefined, owner.apiKey);
+    expect(notAPull.status).toBe(404);
+  });
+
+  it("recognises this database's missing-table and missing-column errors (the pre-093 fallback)", async () => {
+    for (const sql of ["SELECT pull_id FROM no_such_access_table", "SELECT no_such_column FROM node_access_events"]) {
+      const err = await db().all(sql).then(() => null, (e: unknown) => e);
+      expect(err).toBeTruthy();
+      expect(pullLog.isMissingSchemaError(err)).toBe(true);
+    }
+    expect(pullLog.isMissingSchemaError(new Error("connection reset"))).toBe(false);
+  });
+});
