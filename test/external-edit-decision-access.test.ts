@@ -530,4 +530,16 @@ describe("AC-EED-05: with sign-in turned off (open mode), the one user still dec
     expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "reject")).status).toBe(200);
     expect((await decideLocal(nest, PRICING, await stageLocal(nest, PRICING), "approve")).status).toBe(200);
   });
+
+  it("AC-EED-05 (po-1375) only the local user: an API key sent to an open-mode server keeps its access checks", async () => {
+    const nest = (await must(call("POST", "/nests", { name: "Local Keyed" }))).nest.id as string;
+    await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);
+    const id = await stageLocal(nest, PRICING);
+    const outsider = await registerUser(open, `outsider-${Date.now()}@eed.test`, "Outsider");
+    const asKey = (path: string) => jsonRequest(open, "GET", path, undefined, outsider.apiKey);
+    expect((await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits`)).data?.pending ?? null).toBeNull();
+    expect((await asKey(`/nests/${nest}/nodes/${PRICING}/external-edits/${id}`)).status).not.toBe(200);
+    const list = await asKey(`/nests/${nest}/external-edits`);
+    expect(JSON.stringify(list.data ?? {})).not.toContain(id);
+  });
 });

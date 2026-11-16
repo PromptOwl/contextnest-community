@@ -185,15 +185,17 @@ export function startNewPostsPoll(o: NewPostsPollOptions): () => void {
   };
   const tick = async () => {
     if (visible()) {
+      let total: number | undefined;
       try {
-        const total = await o.count();
+        total = await o.count();
         failures = 0;
-        if (!stopped) o.onFresh(newPostCount(o.shown(), o.newest, total));
       } catch (e) {
         // A failed poll leaves the pill as it was and waits longer next time.
         failures++;
         o.onError?.(e);
       }
+      // Outside the try: only a failed read counts as a failed poll.
+      if (total !== undefined && !stopped) o.onFresh(newPostCount(o.shown(), o.newest, total));
     }
     schedule();
   };
