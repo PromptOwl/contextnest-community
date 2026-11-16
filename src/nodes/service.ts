@@ -255,6 +255,11 @@ const slugify = (s: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
 
+/** The change note the server writes when it publishes a write itself
+ *  ("Auto-published on create (<reason>)"). The document stream reads the
+ *  prefix to tell this stamp from a note a person wrote (po-1214). */
+export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
+
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
  * default), or null when the title slugifies to nothing (createNode generates
@@ -2315,7 +2320,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `Auto-published on create (${publishReason})`;
+          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -3342,7 +3347,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `Auto-published on edit (${publishReason})`;
+          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

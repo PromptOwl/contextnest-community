@@ -59,7 +59,9 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
 //   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
 //   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
-const BASELINE = 99;
+//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
+const BASELINE = 100;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

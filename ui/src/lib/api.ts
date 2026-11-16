@@ -14,6 +14,7 @@
 
 import { clearDraft } from "./draft";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
+import type { ClientAttribution } from "./client-attribution";
 import {
   ACCESS_OFFER_EVENT,
   accessOfferFromError,
@@ -3785,6 +3786,15 @@ export interface StreamItem {
   status: string;
   /** null where the caller reads the nest only publicly. */
   author: string | null;
+  /** The author's display name; null when none, and for public readers. */
+  authorName?: string | null;
+  /** The write's attribution (spec §9.4); `client.agent` is the agent the
+   *  person wrote through. null when none, and for public readers. */
+  client?: ClientAttribution | null;
+  /** The version's change note (system auto-publish stamps excluded). */
+  changeNote?: string | null;
+  /** On a version in review: may the caller approve / request changes? */
+  review?: { canReview: boolean } | null;
   at: string;
   summary: string;
   /** Comments on the document's open threads; null where the caller reads
