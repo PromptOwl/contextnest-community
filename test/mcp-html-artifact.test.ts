@@ -220,6 +220,18 @@ describe("REST parity", () => {
     expect(res.data.web_url).toContain(`/nest/${nestId}?doc=`);
   });
 
+  it("an update of a document that is not there is still a 404", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/no-such-deck`,
+      { content: FENCED },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(404);
+    expect(res.data.notice).toBeUndefined();
+  });
+
   it("a person saving in the web app (session cookie) is not converted", async () => {
     const res = await app.request(`/nests/${nestId}/nodes`, {
       method: "POST",

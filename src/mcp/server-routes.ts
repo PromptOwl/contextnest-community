@@ -240,6 +240,7 @@ export async function buildNestIndex(
       } catch {
         /* keep the conservative default */
       }
+      const webUrl = nestWebUrl(baseUrl, n.id);
       return {
         id: n.id,
         name: n.name,
@@ -248,7 +249,7 @@ export async function buildNestIndex(
         permission,
         // No version rows = an empty nest, so 0; null only when the count failed.
         document_count: docsByNest ? (docsByNest.get(n.id) ?? 0) : null,
-        ...(nestWebUrl(baseUrl, n.id) ? { web_url: nestWebUrl(baseUrl, n.id) } : {}),
+        ...(webUrl ? { web_url: webUrl } : {}),
       };
     }),
   );

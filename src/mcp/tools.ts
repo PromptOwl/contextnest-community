@@ -1881,7 +1881,6 @@ async function resolveLlmBody(
   }
 }
 
-/** " · assignee x · due 2026-10-31 · high" — empty for a node with none. */
 /**
  * The document's address in the web app, for the PERSON the agent is working
  * for (PO-1336). Results used to carry no link at all, so an agent asked for
@@ -1903,6 +1902,7 @@ function webLinkPatternProse(ctx: McpToolContext): string {
     : "";
 }
 
+/** " · assignee x · due 2026-10-31 · high" — empty for a node with none. */
 function taskFieldsProse(n: object): string {
   const f = n as { assignee?: string; due?: string; priority?: string; parent?: string };
   const parts = [
@@ -3208,6 +3208,7 @@ async function runTool(
         },
         fieldDefs,
       );
+      const webUrl = documentWebUrl(ctx.baseUrl, nestId, node.id);
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
         `**Type:** ${node.frontmatter.type || "document"}`,
@@ -3220,9 +3221,7 @@ async function runTool(
         // added key. A structured field needs the engine catalog first.
         lastEditLine,
         // Prose only, for the same reason (PO-1336).
-        documentWebUrl(ctx.baseUrl, nestId, node.id)
-          ? `**Web link (for people):** ${documentWebUrl(ctx.baseUrl, nestId, node.id)}`
-          : null,
+        webUrl ? `**Web link (for people):** ${webUrl}` : null,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
