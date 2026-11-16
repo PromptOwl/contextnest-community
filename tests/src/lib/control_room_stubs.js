@@ -115,9 +115,16 @@ export async function stubSurfaces(page, initial = {}) {
         return json(route, { stored, credentials: state.creds });
       }
       if (p === '/surfaces/slack/installs/inst_fake/oauth/start') {
-        // Stubbed Slack OAuth: approve at once and come back, like the callback page.
+        // Stubbed Slack OAuth: approve at once and come back, like the callback
+        // page. A page that navigates back, not a stubbed 302: against the
+        // deployed server (HTTPS behind a proxy) Chromium never finishes the
+        // navigation a fulfilled redirect starts, and the click times out.
         state.install = { ...state.install, status: 'active' };
-        return route.fulfill({ status: 302, headers: { location: '/control-room?section=setup' } });
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/html',
+          body: '<!doctype html><title>Slack (fake)</title><script>location.replace("/control-room?section=setup")</script>',
+        });
       }
       if (p === '/surfaces/slack/installs/inst_fake/channels') {
         return json(route, {
