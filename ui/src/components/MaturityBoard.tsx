@@ -957,7 +957,7 @@ function MaturityBoardInner({
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        // The caller opens the new task — refresh the board behind it, don't wait.
+        // Refresh the board so the new card shows — don't wait.
         void load({ silent: true });
         return res?.node?.id as string | undefined;
       } catch (e: any) {
@@ -1807,7 +1807,11 @@ function MaturityBoardInner({
             onSubmit={async (task) => {
               const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
               setAddingIn(null);
-              if (id) onOpenDocument(id);
+              // Stay on the Board (PO-1246); the card lands in its column.
+              if (id)
+                toast.success(`Task "${task.title}" created`, {
+                  action: { label: "Open", onClick: () => onOpenDocument(id) },
+                });
             }}
             onClose={() => setAddingIn(null)}
           />
