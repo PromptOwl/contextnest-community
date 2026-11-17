@@ -16,6 +16,7 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
+  "context_public_links",
   "nest_index",
   "context_onboarding",
   "context_init",
@@ -76,6 +77,8 @@ const READ_ONLY = [
 
 /** Can overwrite or remove something that already exists. */
 const DESTRUCTIVE = [
+  "context_public_link_update",
+  "context_public_link_revoke",
   "context_instructions_update",
   "context_table_rows",
   "context_remove_relation",
@@ -115,6 +118,10 @@ const DESTRUCTIVE = [
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
+  // Public links (PO-1365): a page on the open web, and its removal.
+  "context_public_link_create",
+  "context_public_link_update",
+  "context_public_link_revoke",
   "context_upload",
   // Fetches a public URL (PO-1185).
   "context_distill",

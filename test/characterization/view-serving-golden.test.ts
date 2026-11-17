@@ -12,6 +12,11 @@
  * (titles, bodies, user, nest name). The view feature must leave every one of
  * these byte-identical; see golden.ts for the capture procedure.
  *
+ * Re-captured once for PO-1365 (share): /p/:slug gained link-preview tags and
+ * the "Make your own nest" strip, and frames an artifact instead of serving it
+ * directly. Both /p/:slug/view entries were NOT re-captured: the document
+ * itself is byte-identical.
+ *
  * Every request is made twice and the two normalized snapshots must match,
  * so a run-to-run-varying token the normalizer missed shows up as a clear
  * in-run failure rather than a flaky golden.
@@ -180,9 +185,14 @@ describe("RC-19 golden — non-view artifact", () => {
   });
 
   it("/p/:slug", async () => {
+    // PO-1365: an author's HTML page is framed by the reader shell, which
+    // carries the link-preview tags and the "Make your own nest" strip. The
+    // document's own bytes are /p/:slug/view, pinned unchanged just below.
     const { snap, body } = await stableSnap(`/p/${artSlug}`, false);
     expect(snap.status).toBe(200);
-    expect(snap.csp!.startsWith(ARTIFACT_SANDBOX_CSP)).toBe(true);
+    expect(snap.csp).toContain("default-src 'none'");
+    expect(snap.csp).toContain("frame-src 'self'");
+    expect(body).toContain('<iframe id="cn-frame"');
     expect(body).toContain("Golden Artifact");
     expect(body).not.toContain('id="nest-data"');
     golden.check("artifact /p/:slug", snap);

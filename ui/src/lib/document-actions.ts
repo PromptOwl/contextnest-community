@@ -16,6 +16,7 @@ export type DocumentActionKey =
   | "move"
   | "archive"
   | "share-doc"
+  | "share-link"
   | "publish"
   | "delete"
   | "request-deletion"
@@ -107,6 +108,17 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
       label: "Share this document",
       testId: "document-editor-share-doc",
       separatorBefore: true,
+    });
+
+  // One click to a public link (PO-1365, share-link.ts): copies the link the
+  // document already has, or publishes with the dialog's defaults first. Same
+  // gate as Publish below — it is that dialog's shortcut, and the server
+  // refuses everyone else.
+  if (canShare && !isNew && !isArchived)
+    actions.push({
+      key: "share-link",
+      label: "Share public link",
+      testId: "document-editor-share-link",
     });
 
   // Publishing hosts THIS document on the open web, so it sits with sharing
