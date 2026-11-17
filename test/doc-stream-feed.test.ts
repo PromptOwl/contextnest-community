@@ -405,7 +405,7 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["since", "source", "author", "tag", "type", "limit", "offset"]);
     expect(tool.inputSchema.properties.source.enum).toEqual(["agent", "human"]);
     expect(tool.inputSchema.required).toEqual([]);
-    // The baseline itself (102) is enforced by `npm run lint:mcp-schemas` in CI.
+    // The baseline itself (111 after the merge with development) is enforced by `npm run lint:mcp-schemas` in CI.
   });
 
   // Last: it adds a version, which the counts above do not expect.
