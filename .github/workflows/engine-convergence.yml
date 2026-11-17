@@ -71,6 +71,11 @@ jobs:
       - name: Run unit tests
         run: npm test -- --shard=${{ matrix.shard }}/4
 
+      # Failed tests and their errors on the run's Summary page.
+      - name: Summarize failures
+        if: failure()
+        run: node tests/scripts/vitest-ci-summary.mjs
+
   # The tests that need a real Postgres are gated on TEST_DATABASE_URL and skip
   # in the shards above. They run here, against a service container. The files
   # are found by searching for the variable, so a new gated test joins this job
@@ -121,6 +126,10 @@ jobs:
           echo "Postgres-gated test files:"
           echo "$files"
           npm test -- $files
+
+      - name: Summarize failures
+        if: failure()
+        run: node tests/scripts/vitest-ci-summary.mjs
 
   # One name for branch protection: green only when every shard and the
   # Postgres job are green.

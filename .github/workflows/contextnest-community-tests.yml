@@ -1,9 +1,13 @@
-# contextnest-community-tests.yml — Playwright e2e suite for ContextNest Community.
+# contextnest-community-tests.yml — Playwright e2e suite for ContextNest Community,
+# run against the deployed dev server (nest-dev).
 #
-# Mirrors TheOwl's Playwright pipeline (theowl-tests.yml): manual dispatch +
-# push to main, chromium-only install, ordered test-suite run against a
-# deployed environment, CI dashboard in the run summary, HTML report + traces
-# uploaded as an artifact.
+# This tests what is deployed, not a pull request, so it does not run on pull
+# requests: a PR's own code is tested by e2e-pr-build.yml ("e2e (PR build)").
+# It runs when the deployed server may have changed (see `on:` below), and its
+# failures then show against the deployment instead of on unrelated PRs.
+#
+# Chromium-only install, ordered test-suite run, CI dashboard in the run
+# summary, HTML report + traces uploaded as an artifact.
 #
 # Required GitHub configuration (Settings → Secrets and variables → Actions):
 #   secrets.TEST_ACCOUNT1_USER   e2e account email (registered on the target server)
@@ -23,15 +27,18 @@
 name: ContextNest Community Tests
 
 on:
-  # Runs on merge to main
+  # A merge lands on development or main. The deployed server may not have that
+  # merge yet (nest-dev is deployed by hand while deploy-dev.yml is turned
+  # off), so specs for a feature it does not ship skip; see tests/README.md.
   push:
-    branches: [ "main" ]
-
-  # Runs on PRs into development/main — also the only way to watch the
-  # pipeline before the workflow file reaches main (workflow_dispatch is
-  # offered by GitHub only for workflows present on the default branch)
-  pull_request:
     branches: [ "main", "development" ]
+
+  # The dev deploy finished: the server just changed, so test it. GitHub starts
+  # a workflow_run only from the workflow file on the default branch, and only
+  # while "Deploy dev (Cloud Run)" is enabled and runs.
+  workflow_run:
+    workflows: [ "Deploy dev (Cloud Run)" ]
+    types: [ completed ]
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -66,27 +73,29 @@ permissions:
 #
 # That is NOT done with one repo-wide concurrency group: GitHub keeps only one
 # pending run per group and cancels the older pending run when a new one
-# arrives, so with several PRs pushing, most runs were cancelled before they
-# started. Instead:
-#   - this group is per PR (per run for pushes / manual runs), and a new
-#     commit on a PR cancels that PR's older run, which is superseded anyway;
-#   - the "Wait for the shared e2e server" step (tests/scripts/e2e-turnstile.mjs)
-#     lets one run at a time past it, first come first served, and drops none.
+# arrives, so a burst of merges would drop runs before they started. Instead
+# every run gets its own group (nothing is cancelled), and the "Wait for the
+# shared e2e server" step (tests/scripts/e2e-turnstile.mjs) lets one run at a
+# time past it, first come first served, and drops none.
 concurrency:
-  # Pushes and manual runs get their own group each (run_id), so a burst of
-  # pushes to one ref can't drop a pending run either; the turnstile orders them.
-  group: e2e-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: e2e-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   e2e:
+    # After a deploy: only when the deploy succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     # Turnstile wait (max 150 min) + install + tests (up to ~125 min seen),
     # so a run that waited long still gets the full test time. Hosted max is 360.
     timeout-minutes: 330
     steps:
+      # A workflow_run starts on the default branch; the deploy it follows
+      # shipped development, so run development's specs against it.
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && 'development' || github.sha }}
 
       - name: Display run parameters
         if: github.event_name == 'workflow_dispatch'

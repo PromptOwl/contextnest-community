@@ -17,7 +17,8 @@ import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 export async function discoverForSearch(
   storage: Pick<NestStorage, "discoverDocuments">,
 ): Promise<ContextNode[]> {
-  return storage.discoverDocuments({ includeRetired: true });
+  // Rejected stays findable; archived is out of the list, so out of search too.
+  return (await storage.discoverDocuments({ includeRetired: true })).filter((d) => !d.frontmatter.archived);
 }
 
 /** Lowercase with accents stripped, so "cafe" finds "Café". For comparing

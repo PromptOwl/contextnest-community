@@ -30,7 +30,8 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { clearParkedDeepLink, deepLinkToOpenOnReturn, parkDeepLink, takeParkedDeepLink } from "./lib/deep-link-return";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
@@ -186,6 +187,17 @@ type View =
       isArchived?: boolean;
     }
   | {
+      /** Channels (experimental, PO-1179): the nest's channel list and the
+       *  selected channel's timeline. */
+      page: "channels";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      readerMode?: boolean;
+      isArchived?: boolean;
+    }
+  | {
       page: "board";
       nestId: string;
       nestName: string;
@@ -213,7 +225,7 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -253,6 +265,7 @@ export default function App() {
     subagentRunsEnabled,
     mcpOauthEnabled,
     docStreamEnabled,
+    agentStreamEnabled,
     surfacesEnabled,
     loading,
     error,
@@ -502,7 +515,8 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    if (loading && nestViewFromLocation() === "workflows") return;
+    // Channels are gated on a /health flag the same way.
+    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -571,7 +585,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -622,7 +636,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled, loading]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, agentStreamEnabled, loading]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -677,6 +691,7 @@ export default function App() {
       view.page === "definitions" ||
       view.page === "structure" ||
       view.page === "board" ||
+      view.page === "channels" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
@@ -715,6 +730,59 @@ export default function App() {
     }
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
+
+  // A deep link followed while signed out (PO-1391). A private nest does not
+  // resolve for a stranger, so the probe ends "unreachable", the effect above
+  // drops the link from the address bar and the sign-in form shows. When the
+  // person then signs in, put the link back and probe again as them: they land
+  // on the nest or document they were sent, not on Home (the nest list or the
+  // first-run welcome screen) or a "no access" page. Declared after the URL
+  // sync so its address is the one left standing. The helper only returns the
+  // address this page was opened on; the parked one is checked again on take.
+  const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
+  const wasSignedInRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = authenticated;
+    const link = deepLinkToRetryAfterSignIn({
+      probeStatus: deepLinkProbe.status,
+      entryLink: entryLinkRef.current,
+      wasSignedIn,
+      signedIn: authenticated,
+    });
+    // A sign-in that left the page (PromptOwl, Google, single sign-on) comes
+    // back to Home on a fresh load: open the link parked before leaving.
+    const parked =
+      !link &&
+      deepLinkToOpenOnReturn({
+        sessionKnown: true,
+        signedIn: authenticated,
+        firstLook: wasSignedIn !== true,
+        probeStatus: deepLinkProbe.status,
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+        ? takeParkedDeepLink()
+        : null;
+    const open = link ?? parked;
+    if (!open) return;
+    // Once: a second sign-in in this tab (another account) starts from Home.
+    entryLinkRef.current = null;
+    clearParkedDeepLink();
+    window.history.replaceState(window.history.state, "", open);
+    setDeepLinkProbe({ status: "loading" });
+    // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
+  }, [authenticated, loading]);
+
+  // Park the link while the sign-in form is up, so it also survives a sign-in
+  // that leaves the page. Only for a signed-out visitor whose link did not
+  // resolve: a signed-in person's dead link is not something to come back to.
+  useEffect(() => {
+    if (loading || authenticated || authMode !== "key") return;
+    if (deepLinkProbe.status !== "unreachable") return;
+    parkDeepLink(entryLinkRef.current);
+  }, [loading, authenticated, authMode, deepLinkProbe.status]);
 
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the
@@ -1554,7 +1622,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring

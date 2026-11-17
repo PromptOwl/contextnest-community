@@ -520,6 +520,26 @@ describe("AC-EED-05: with sign-in turned off (open mode), the one user still dec
     expect((await decideLocal(nest, PRICING, id, "approve")).status).toBe(200);
   });
 
+  // PO-1388: the read rule for external edits (PO-1192) took the one user for
+  // a visitor to such a nest and hid the edit they are asked to decide.
+  it("AC-EED-05 and they see the edit they decide there: on the document, in the nest's list and in its count", async () => {
+    const nest = (await must(call("POST", "/nests", { name: "Inherited Reads" }))).nest.id as string;
+    await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);
+    const db = (await import("../src/db/client.js")).getDb();
+    const earlier = randomUUID();
+    await db.run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)", [earlier, "earlier-reads@eed.test", "Earlier", "x"]);
+    await db.run("UPDATE nests SET user_id = ? WHERE id = ?", [earlier, nest]);
+    const owner = (await db.get("SELECT user_id, visibility FROM nests WHERE id = ?", [nest])) as { user_id: string; visibility: string };
+    expect(owner).toEqual({ user_id: earlier, visibility: "public" });
+
+    const id = await stageLocal(nest, PRICING);
+    const list = await must(call("GET", `/nests/${nest}/external-edits`));
+    expect(list.entries.map((e: { suggestion_id: string }) => e.suggestion_id)).toEqual([id]);
+    expect((await must(call("GET", `/nests/${nest}/external-edits?count=1`))).total).toBe(1);
+    const detail = await must(call("GET", `/nests/${nest}/nodes/${PRICING}/external-edits/${id}`));
+    expect(JSON.stringify(detail.entry)).toContain(EDIT_TEXT);
+  });
+
   it("AC-EED-05 and on a nest that was made by an account from before sign-in was turned off", async () => {
     const nest = (await must(call("POST", "/nests", { name: "Inherited" }))).nest.id as string;
     await must(call("POST", `/nests/${nest}/nodes`, { title: "Pricing Page", content: "# Pricing Page" }), 201);

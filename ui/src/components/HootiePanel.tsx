@@ -853,7 +853,9 @@ function MentionOutcome({
     <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400" data-testid="hootie-mention-undeliverable">
       {outcome.reason === "no_anchor"
         ? `Couldn't tag anyone: there's no document to attach this to. Open one, or ask something ${name} can cite.`
-        : "Couldn't post the comment — the mention wasn't delivered."}
+        : outcome.reason === "channel"
+          ? `Couldn't tag anyone: ${name} doesn't post into channels. Post there yourself, or ask from a document.`
+          : "Couldn't post the comment — the mention wasn't delivered."}
     </p>
   );
 }

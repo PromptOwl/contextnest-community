@@ -16,6 +16,7 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
+  "context_public_links",
   "nest_index",
   "context_onboarding",
   "context_init",
@@ -29,6 +30,9 @@ const READ_ONLY = [
   "context_resolve",
   "context_export",
   "context_comments",
+  "context_channel_read",
+  // My Work (PO-1180): the caller's own queue.
+  "context_my_work",
   "context_relations",
   "context_boards",
   "context_board_items",
@@ -73,6 +77,8 @@ const READ_ONLY = [
 
 /** Can overwrite or remove something that already exists. */
 const DESTRUCTIVE = [
+  "context_public_link_update",
+  "context_public_link_revoke",
   "context_instructions_update",
   "context_table_rows",
   "context_remove_relation",
@@ -106,11 +112,18 @@ const DESTRUCTIVE = [
   "context_surfaces_budget_update",
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
+  "context_channels",
   "context_agent_run_close",
+  // Agent webhooks (PO-1181): set replaces a target, delete removes one.
+  "context_agent_webhooks",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
 const OPEN_WORLD = [
+  // Public links (PO-1365): a page on the open web, and its removal.
+  "context_public_link_create",
+  "context_public_link_update",
+  "context_public_link_revoke",
   "context_upload",
   // Fetches a public URL (PO-1185).
   "context_distill",
@@ -120,6 +133,8 @@ const OPEN_WORLD = [
   "context_bulk_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_table_rows",
   "context_approve",
   "context_resolve_deletion",
@@ -140,8 +155,13 @@ const OPEN_WORLD = [
   "context_surfaces_settings_update",
   "context_surfaces_disconnect",
   "context_surfaces_seed_apply",
+  "context_channels",
   // Read-only, but it calls Slack (users.conversations).
   "context_surfaces_slack_channels_list",
+  // Promote a thread (PO-1181): creates a node, which a docs site may serve.
+  "context_promote_thread",
+  // Points a nest's mention events at an outside URL.
+  "context_agent_webhooks",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -194,8 +214,14 @@ async function allDefinedNames(): Promise<string[]> {
   const { WORKFLOW_TOOL_DEFINITIONS } = await import("../src/mcp/workflow-tools.js");
   const { METACOGNITION_TOOL_DEFINITIONS } = await import("../src/mcp/metacognition-tools.js");
   const { SURFACES_TOOL_DEFINITIONS } = await import("../src/mcp/surfaces-tools.js");
+  const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
+  const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
+  const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
   const all = [
+    ...CHANNEL_TOOL_DEFINITIONS,
+    ...MY_WORK_TOOL_DEFINITIONS,
+    ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,
@@ -210,6 +236,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_AGENT_STREAM = "true";
   process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
@@ -238,6 +265,7 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_AGENT_STREAM;
   delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
@@ -248,7 +276,7 @@ describe("tools/list on every endpoint, for every key", () => {
   });
 
   it("keeps them with the feature flags off", async () => {
-    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_DOC_STREAM"]) {
+    for (const flag of ["FEATURE_SURFACES", "FEATURE_METACOGNITION", "FEATURE_WORKFLOW_PLANE", "EXPERIMENTAL_AGENT_STREAM", "EXPERIMENTAL_DOC_STREAM"]) {
       process.env[flag] = "false";
       try {
         for (const [label, path, key] of surfaces()) expectAnnotated(`${flag} off, ${label}`, await listTools(path, key));

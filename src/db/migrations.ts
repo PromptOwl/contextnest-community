@@ -1462,6 +1462,11 @@ export function runMigrations(db: Database.Database): void {
     if (publishCols.length && !publishCols.includes("no_download")) {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
+    // PO-1365: the per-link switch for the "Make your own nest" strip. On by
+    // default, so every link made before it existed keeps showing the strip.
+    if (publishCols.length && !publishCols.includes("show_invite")) {
+      db.exec("ALTER TABLE publish ADD COLUMN show_invite INTEGER NOT NULL DEFAULT 1");
+    }
   }
 
   // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
@@ -2536,12 +2541,139 @@ export function runMigrations(db: Database.Database): void {
       if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
       if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
       const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
-      for (const r of db.prepare("SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").iterate() as Iterable<{ id: string; trace: string }>) {
-        const t = runTotals(r.trace);
-        set.run(t.costMicros, t.tokens, r.id);
+      // Ids first, one trace at a time: better-sqlite3 refuses a write while an
+      // iterate() cursor is open, and .all() of every trace could be large.
+      const traceOf = db.prepare("SELECT trace FROM runs WHERE id = ?").pluck();
+      const ids = db.prepare("SELECT id FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").pluck().all() as string[];
+      for (const id of ids) {
+        const t = runTotals(traceOf.get(id) as string);
+        set.run(t.costMicros, t.tokens, id);
       }
     })();
     recordMigration("090_control_room_run_totals");
+  }
+
+  // 094: caller attribution on comment-thread messages (PO-1179, agent team
+  //   stream channels). Nullable `client_json`, like the version rows (044):
+  //   the "<agent>, on behalf of <human>" label. A label, never an identity.
+  //   085–093 are taken on open branches; ids match by string.
+  if (!hasMigration("094_annotation_comment_client")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
+    }
+    recordMigration("094_annotation_comment_client");
+  }
+
+  // 085: the @mention index My Work reads (PO-1180, agent team stream S2).
+  //   One row per person (or unresolved @handle) a comment-thread message
+  //   names, written where the message is posted, so `/me/work` answers "which
+  //   open threads tag me" from an index instead of scanning every thread's
+  //   text. `mentioned_user_id` is set when the name resolved to an account
+  //   (resolveMention, the same rule mention-notify uses); NULL means the
+  //   handle named no person — an agent's handle, until agent principals exist
+  //   (src/mentions/agent-mentions.ts). Rows go with their message, thread or
+  //   nest (ON DELETE CASCADE). Nothing to backfill: My Work starts from the
+  //   mentions made after the upgrade. Runs after 094 on purpose: 085 was
+  //   reserved when development jumped to 086+; it depends on none of them.
+  if (!hasMigration("085_comment_mentions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS comment_mentions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        mentioned_user_id TEXT,
+        handle TEXT NOT NULL,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+    `);
+    recordMigration("085_comment_mentions");
+  }
+
+  // 095: agent wake-up targets and their delivery ledger (PO-1181, agent team
+  //   stream S3). `agent_webhooks` is the nest-level, admin-only map from an
+  //   agent @handle to the runner URL an @mention of it is POSTed to, with the
+  //   HMAC secret that signs each POST; both are stored encrypted
+  //   (shared/secret-box). It is the stand-in until agent principals carry
+  //   their own target (src/stream/agent-wake.ts setAgentWebhookResolver).
+  //   `agent_wake_deliveries` holds one row per (message, handle) delivery,
+  //   keyed by its idempotency key, so a retry never sends twice; it is also
+  //   what the per-thread / per-handle rate fence counts.
+  if (!hasMigration("095_agent_webhooks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_webhooks (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        url_enc TEXT NOT NULL,
+        secret_enc TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, handle)
+      );
+      CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+        idempotency_key TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        comment_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+    `);
+    recordMigration("095_agent_webhooks");
+  }
+
+  // 087: per-person marks for the agent team stream, and what a wake-up
+  //   delivery ended as (PO-1190 / PO-1189, agent team stream S4).
+  //   `stream_marks` is ONE small table for the two things a person marks:
+  //     kind 'channel' — "I have read this channel up to `at`" (ref = the
+  //       channel's node id). Unread counts are messages by other people
+  //       after it; no row means nothing read yet.
+  //     kind 'mention' — "I am done with my mention in this thread" (ref =
+  //       the thread id). The mention leaves My Work until a later message in
+  //       that thread names them again. `subject` is '' for the person, or
+  //       the agent handle when they cleared it acting as that agent.
+  //   Rows are the caller's own state: nothing here is shared or shown to
+  //   anyone else. They go with the nest, and the nest is part of the key: a
+  //   channel's node id (nodes/channels/general) repeats from nest to nest.
+  //   `agent_wake_deliveries` gains `attempts` (a failed POST is retried),
+  //   `finished_at` (when it reached its final status) and `event`
+  //   ('agent.mention', or 'agent.test' for the panel's test button), so the
+  //   webhooks panel can show each handle's last delivery.
+  if (!hasMigration("096_stream_marks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS stream_marks (
+        user_id TEXT NOT NULL,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        at TEXT NOT NULL,
+        PRIMARY KEY (user_id, nest_id, kind, ref, subject)
+      );
+    `);
+    const cols = (
+      db.prepare("PRAGMA table_info(agent_wake_deliveries)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length) {
+      if (!cols.includes("attempts")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1");
+      if (!cols.includes("finished_at")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN finished_at TEXT");
+      if (!cols.includes("event")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN event TEXT NOT NULL DEFAULT 'agent.mention'");
+    }
+    recordMigration("096_stream_marks");
   }
 }
 

@@ -13,6 +13,7 @@
  * calls don't pay for it.
  */
 import { getInstructions } from "../nests/instructions-service.js";
+import { config } from "../config.js";
 import {
   alwaysIncludeDocs,
   fitBudget,
@@ -24,6 +25,11 @@ import {
   type StandingDocument,
   type StandingSection,
 } from "../governance/always-include-service.js";
+
+/** The two lines about channels in the connect message (AC-AX-09). */
+export const CHANNELS_CONNECT_HINT =
+  'Channels: `context_channels` lists them; `context_channel_read { channel, since }` returns what is new (pass back its `next_since`); post or reply with `context_comment { channel, body, thread? }`, adding `client: { agent: "<your name>" }` to show as an agent.\n' +
+  "Start with `context_my_work`: it lists the threads that @mention you or your agent handle (this key's label, or `client.agent`); reply in the thread, or resolve it, and it clears.";
 
 /** CONTEXT.md can be up to 256 KB; the connect message carries at most this
  *  much of it, cut at a line, with a pointer to `context_init` for the rest. */
@@ -53,6 +59,31 @@ export async function isInitializeRequest(req: Request): Promise<boolean> {
     );
   } catch {
     return false;
+  }
+}
+
+/** A tool call's arguments can be a whole document; past this the request is
+ *  not peeked at. */
+const MAX_PEEK_BYTES = 1024 * 1024;
+
+/**
+ * The single JSON-RPC message of a POST, read from a clone so the transport
+ * still gets the body. Null for a batch, a body past the cap or anything
+ * unparseable.
+ */
+export async function peekJsonRpc(
+  req: Request,
+): Promise<{ id?: string | number | null; method?: unknown; params?: unknown } | null> {
+  if (req.method !== "POST") return null;
+  const length = Number(req.headers.get("content-length"));
+  if (Number.isFinite(length) && length > MAX_PEEK_BYTES) return null;
+  try {
+    const text = await readCapped(req.clone(), MAX_PEEK_BYTES);
+    if (text === null) return null;
+    const body = JSON.parse(text) as unknown;
+    return body && typeof body === "object" && !Array.isArray(body) ? (body as { method?: unknown }) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -107,6 +138,10 @@ export async function nestConnectInstructions(
       fetchHint: opts.headless ? "read them with context_get" : "read them with context_get or context_init",
     });
     if (block) parts.push(block);
+    // Channels, in two lines (PO-1190, AC-AX-09): how to find them, read what
+    // is new, post, and check what is waiting. Not for a headless reader,
+    // which has none of these tools.
+    if (!opts.headless && config.EXPERIMENTAL_AGENT_STREAM) parts.push(CHANNELS_CONNECT_HINT);
   } catch (err) {
     console.error(`[mcp] ${nestId}: connect instructions unavailable`, err);
   }
@@ -154,6 +189,10 @@ export async function serverConnectInstructions(
   const lines = [
     "Each nest has operating instructions (CONTEXT.md). Before working in a nest, read them: " +
       `connect to ${baseUrl}/nests/<nest-id>/mcp and call context_init (nest_index lists the ids).`,
+    // Two things agents got wrong without being told (PO-1336).
+    "When a person asks for a link, give them the web app address these tools return (\"web\" in nest_index, the web link in a document result) — " +
+      `${baseUrl}/nest/<nest-id> or ${baseUrl}/nest/<nest-id>?doc=<node id, URL-encoded> — never an API or MCP URL, which does not open in a browser.`,
+    'To post an HTML page, call context_create with type "artifact" and the raw HTML document as content, with no markdown code fence around it.',
   ];
   const block = renderStandingInstructions(sections, {
     heading: "Standing instructions",

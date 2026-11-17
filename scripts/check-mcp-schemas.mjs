@@ -71,7 +71,39 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
-const BASELINE = 102;
+//   102->104 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread). Community-only (a node convention over the
+//   comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM). Upstream checked:
+//   @promptowl/contextnest-engine 3.7.0 (latest) /api has no channel op, so there is no descriptor to import.
+//   104->105 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
+//   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
+//   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
+//   operation to import a descriptor from.
+//   105->109 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
+//   2026-10-24, listed in docs/prds/api-convergence.md Phase 3; engine 3.7.0 /api has no public-link op).
+//   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
+//   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
+//     context_public_link_create — twin of POST /nests/:id/publications. Mints an unguessable /p/<slug> page for one
+//       document's approved version under a gate (public, passcode, email, invite); the engine has no hosted pages or gates.
+//     context_public_links — twin of GET /nests/:id/publications. Reads the `publish` rows; no engine op lists them.
+//     context_public_link_update — twin of PATCH /nests/:id/publications/:id. Sets the per-link `show_invite` flag on a
+//       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
+//     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
+//       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
+//   109->110 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
+//   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
+//   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
+//   110->111 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
+//   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
+//   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
+//   111 (unchanged) agent team stream S4b (PO-1190 / PO-1189): no new tool. `channel`, `since`, `sections`,
+//   `summary`, `mention_done` and the "agents" / "mark_read" / "test" actions extend the existing
+//   context_comment, context_resolve_comment, context_comments, context_channel_read, context_channels,
+//   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
+//   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
+//   that tool's schema, not a new one.
+const BASELINE = 111;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

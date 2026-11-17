@@ -295,6 +295,8 @@ export async function getHealth() {
       doc_pins?: boolean;
       /** Cross-nest document stream (GET /me/stream, the Stream page). */
       doc_stream?: boolean;
+      /** Agent team stream channels (PO-1179): /nests/:id/channels. */
+      agent_stream?: boolean;
     };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
@@ -412,6 +414,8 @@ export interface AdminSettings {
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
   experimental_doc_pins: boolean;
+  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM). */
+  experimental_agent_stream_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -2274,6 +2278,35 @@ export async function moveNode(nestId: string, nodeId: string, folder: string) {
   );
 }
 
+/** Who archived a document, when and why (spec §1.13). */
+export interface ArchivedDocument {
+  at: string;
+  by: string;
+  reason?: string;
+}
+
+/** Take a document out of lists and retrieval, recoverably. */
+export async function archiveNode(nestId: string, nodeId: string, reason?: string) {
+  return request<{ ok: boolean }>(`/nests/${nestId}/nodes/${nodeId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** Bring an archived document back in the status it left. */
+export async function unarchiveNode(nestId: string, nodeId: string) {
+  return request<{ ok: boolean; status: string }>(`/nests/${nestId}/nodes/${nodeId}/unarchive`, {
+    method: "POST",
+  });
+}
+
+/** The archived documents this caller can restore. */
+export async function listArchivedNodes(nestId: string) {
+  return request<{ nodes: Array<{ id: string; title: string; archived?: { at: string; by: string; reason?: string } }> }>(
+    `/nests/${nestId}/nodes?archived=1`,
+  );
+}
+
 // ─── Search & Query ─────────────────────────────────────────────────────
 
 export async function searchNodes(nestId: string, query: string) {
@@ -3062,6 +3095,165 @@ export async function reopenAnnotation(
 }
 
 
+// ─── Channels (agent team stream S1, PO-1179; EXPERIMENTAL_AGENT_STREAM) ──
+// A channel is a node (nodes/channels/<name>); posting and replying use the
+// annotation routes above with the channel's id.
+
+export interface ChannelActor {
+  human: string;
+  agent: string | null;
+  /** "<agent>, on behalf of <human>", or "<human>". */
+  label: string;
+}
+
+export interface ChannelSummary {
+  id: string;
+  name: string;
+  title: string;
+  type: "channel";
+  purpose: string | null;
+  archived: boolean;
+  post_count: number;
+  last_post_at: string | null;
+  /** Whether this caller may post here, and why not (PO-1190). */
+  can_post: boolean;
+  post_refusal: string | null;
+}
+
+export interface ChannelMessage {
+  id: string;
+  author: string;
+  actor: ChannelActor;
+  body: string;
+  created_at: string;
+  /** The artifacts the message links, resolved for the viewer (PO-1181). */
+  cards?: ArtifactCard[];
+}
+
+// ─── Agent team stream S3 (PO-1181) ───────────────────────────────────────
+
+/** A linked artifact as the viewer may see it: a card for a node they can
+ *  read, an unresolved marker (the link text only) for anything else. */
+export type ArtifactCard =
+  | {
+      link: string;
+      resolved: true;
+      kind: "node" | "artifact";
+      nest_id: string;
+      node_id: string;
+      title: string;
+      type: string;
+      stage: string | null;
+      status: string;
+      version: number | null;
+      url: string;
+    }
+  | { link: string; resolved: false };
+
+/** Cards for several message bodies at once (comment threads). */
+export async function resolveMessageCards(nestId: string, texts: string[]) {
+  return request<{ messages: Array<{ cards: ArtifactCard[] }> }>(`/nests/${nestId}/cards`, {
+    method: "POST",
+    body: JSON.stringify({ texts }),
+  });
+}
+
+export interface PromoteThreadResult {
+  node: { id: string; title: string; type: string; status: string; version: number; url: string };
+  source_thread: { node_id: string; thread_id: string };
+  reply: { thread_id: string; comment_id: string | null };
+}
+
+/** A wake-up target for an agent handle — host#hash only, never the URL. */
+export interface AgentWebhook {
+  handle: string;
+  target: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listAgentWebhooks(nestId: string) {
+  return request<{ webhooks: AgentWebhook[] }>(`/nests/${nestId}/agent-webhooks`);
+}
+
+/** Save a target; `secret` comes back only when one is minted. A rotate may
+ *  pass no `url` to keep the stored one. */
+export async function setAgentWebhook(nestId: string, handle: string, url: string | undefined, rotate = false) {
+  return request<{ webhook: AgentWebhook; secret?: string }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
+    { method: "PUT", body: JSON.stringify({ ...(url ? { url } : {}), ...(rotate ? { rotate: true } : {}) }) },
+  );
+}
+
+export async function deleteAgentWebhook(nestId: string, handle: string) {
+  return request<{ deleted: true }>(`/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Promote a comment thread to a decision or task node. */
+export async function promoteThread(
+  nestId: string,
+  threadId: string,
+  input: { kind: "decision" | "task"; title?: string },
+) {
+  return request<PromoteThreadResult>(`/nests/${nestId}/threads/${encodeURIComponent(threadId)}/promote`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface ChannelPost extends ChannelMessage {
+  status: "open" | "resolved";
+  reply_count: number;
+  last_reply_at: string | null;
+}
+
+export async function listChannels(nestId: string, opts: { archived?: boolean } = {}) {
+  return request<{ channels: ChannelSummary[] }>(`/nests/${nestId}/channels${opts.archived ? "?archived=1" : ""}`);
+}
+
+export async function createChannel(nestId: string, input: { name: string; purpose?: string }) {
+  return request<{ channel: ChannelSummary }>(`/nests/${nestId}/channels`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function archiveChannel(nestId: string, name: string, archived = true) {
+  return request<{ channel: ChannelSummary }>(
+    `/nests/${nestId}/channels/${encodeURIComponent(name)}/archive`,
+    { method: "POST", body: JSON.stringify({ archived }) },
+  );
+}
+
+export async function getChannelTimeline(nestId: string, name: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  const q = qs.toString();
+  return request<{
+    channel: ChannelSummary;
+    posts: ChannelPost[];
+    pagination: { total: number; limit: number; offset: number; has_more: boolean };
+  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}${q ? `?${q}` : ""}`);
+}
+
+export async function getChannelThread(nestId: string, name: string, threadId: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams({ thread: threadId });
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  return request<{
+    channel: ChannelSummary;
+    thread: {
+      post: ChannelPost;
+      replies: ChannelMessage[];
+      pagination: { total: number; limit: number; offset: number; has_more: boolean };
+    };
+  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}?${qs}`);
+}
+
 // ─── Comments & activity (collaboration) ─────────────────────────────────
 
 export interface CommentAnchor {
@@ -3271,6 +3463,9 @@ export interface Publication {
   comments_enabled: boolean;
   watermark: boolean;
   no_download: boolean;
+  /** The page shows the "Make your own nest" strip. Absent on a server that
+   *  predates the setting, where it is always shown. */
+  show_invite?: boolean;
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;
@@ -3296,6 +3491,7 @@ export async function createPublication(
     comments_enabled?: boolean;
     watermark?: boolean;
     no_download?: boolean;
+    show_invite?: boolean;
     code?: string | null;
     allowlist?: string[];
     expires_at?: string | null;
@@ -3304,6 +3500,18 @@ export async function createPublication(
   return request<{ publish: Publication; link: string }>(
     `/nests/${nestId}/publications`,
     { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Change a live link's settings in place; its URL stays the same. */
+export async function updatePublication(
+  nestId: string,
+  publishId: string,
+  data: { show_invite: boolean },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications/${publishId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
   );
 }
 
@@ -3730,19 +3938,52 @@ export interface AssignedItem {
   open_blockers?: number;
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number }) {
+/**
+ * An open comment thread that @mentions the caller (or an agent they own) and
+ * waits on their answer (PO-1180). Gone once they reply in it after the
+ * mention, or it is resolved.
+ */
+export interface MentionItem {
+  type: "mention";
+  /** "channel" opens the channel timeline at the thread; "document" opens
+   *  the document with the comment thread focused. */
+  kind: "channel" | "document";
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  channel: string | null;
+  thread_id: string;
+  comment_id: string;
+  excerpt: string;
+  author: string;
+  /** "<agent>, on behalf of <person>", or the person. */
+  author_label: string;
+  agent: string | null;
+  /** Set when an agent you own was tagged rather than you. */
+  for_agent: string | null;
+  mentioned_at: string;
+}
+
+export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));
   const qs = q.toString();
   return request<{
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
-    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    /** Open threads that @mention the caller, one page (PO-1180). */
+    mentions?: MentionItem[];
+    /** Reviews + requests + open mentions waiting on the caller, all pages;
+     *  excludes `waiting`. */
     waiting_on_me_total?: number;
     pagination?: WorkPagination;
+    /** The mentions' own paging; `total` is every open mention. */
+    mentions_pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 
@@ -4328,7 +4569,7 @@ export type HootieMention =
       thread_id: string;
       notified: number;
     }
-  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+  | { status: "undeliverable"; reason: "no_anchor" | "channel" | "post_failed" };
 
 /** What Hootie is doing mid-answer: `tool` is the tool that's running
  *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's
