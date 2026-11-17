@@ -2453,9 +2453,9 @@ function MaturityBoardInner({
         )}
         {(blockedCount > 0 || hideBlocked) && (
           <Button
-            variant={hideBlocked ? "secondary" : "ghost"}
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className={`h-7 px-2 text-xs ${hideBlocked ? "border border-primary/30 bg-primary/10 font-medium text-primary hover:bg-primary/15" : ""}`}
             aria-pressed={hideBlocked}
             title={hideBlocked ? "Show blocked tasks again" : "Hide tasks that have an open blocker"}
             onClick={() => setHideBlocked((v) => !v)}
