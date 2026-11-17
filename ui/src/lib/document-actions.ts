@@ -62,9 +62,9 @@ export interface DocumentActionsInput {
    */
   canSeeActivity?: boolean;
   /**
-   * The document is still loading. "Share public link" publishes in one click
-   * and names the document in its confirmation, so it waits (PO-1396).
-   * Default false.
+   * The document is still loading, or it failed to load. "Share public link"
+   * publishes in one click and names the document in its confirmation, so it
+   * waits for a loaded document (PO-1396). Default false.
    */
   isLoading?: boolean;
 }
