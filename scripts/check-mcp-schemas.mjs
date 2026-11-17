@@ -80,14 +80,25 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
 //   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
 //   operation to import a descriptor from.
-//   106->107 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   106->110 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
+//   2026-10-24, listed in docs/prds/api-convergence.md Phase 3; engine 3.7.0 /api has no public-link op).
+//   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
+//   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
+//     context_public_link_create — twin of POST /nests/:id/publications. Mints an unguessable /p/<slug> page for one
+//       document's approved version under a gate (public, passcode, email, invite); the engine has no hosted pages or gates.
+//     context_public_links — twin of GET /nests/:id/publications. Reads the `publish` rows; no engine op lists them.
+//     context_public_link_update — twin of PATCH /nests/:id/publications/:id. Sets the per-link `show_invite` flag on a
+//       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
+//     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
+//       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
+//   110->111 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
 //   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
 //   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
 //   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
-//   107->108 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
+//   111->112 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
 //   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
 //   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
-const BASELINE = 108;
+const BASELINE = 112;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

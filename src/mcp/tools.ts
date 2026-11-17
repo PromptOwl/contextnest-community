@@ -147,6 +147,7 @@ import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentTool } from "./agent-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
+import { PUBLIC_LINK_TOOL_DEFINITIONS, PUBLIC_LINK_TOOL_NAMES, isPublicLinkTool, runPublicLinkTool } from "./public-link-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
@@ -580,6 +581,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   ...SURFACES_ADMIN_TOOL_NAMES,
   // Registering an agent (po-1186) mints a governed agent node: owner/admin.
   ...AGENT_ADMIN_TOOL_NAMES,
+  // Public links (PO-1365) — the REST /nests/:id/publications twins.
+  ...PUBLIC_LINK_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -1832,6 +1835,8 @@ export const TOOL_DEFINITIONS = [
       required: ["action"],
     },
   },
+  // Public links (PO-1365), defined in public-link-tools.ts.
+  ...PUBLIC_LINK_TOOL_DEFINITIONS,
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -5217,6 +5222,9 @@ async function runTool(
       // Promote a thread (PO-1181): always registered (mcp/routes.ts).
       if (isStreamTool(toolName)) {
         return runStreamTool(toolName, args, ctx);
+      }
+      if (isPublicLinkTool(toolName)) {
+        return runPublicLinkTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

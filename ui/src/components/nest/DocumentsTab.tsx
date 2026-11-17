@@ -32,7 +32,7 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus, Activity, Ruler,
+  FolderOpen, ChevronRight, Share2, Globe, FolderPlus, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
 import { ActivityLogPanel } from "../ActivityLogPanel";
@@ -42,6 +42,7 @@ import {
   type DocumentLifecycleStatus, type Steward, type ReviewRequest, type Version,
 } from "../governance";
 import { PublishDialog } from "../PublishDialog";
+import { shareDocumentLink } from "../../lib/share-link";
 import { ShareTargetDialog } from "../ShareTargetDialog";
 import { folderGrantTarget } from "../../lib/folder-target";
 import { checkFolderPath } from "../../lib/folder-path";
@@ -243,6 +244,8 @@ export function DocumentsTab({
   }, [deletionRequests]);
 
   const [publishNode, setPublishNode] = useState<any | null>(null);
+  // Share's Manage opens the Publish dialog on its Links tab.
+  const [publishTab, setPublishTab] = useState<"new" | "links">("new");
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -1320,7 +1323,31 @@ export function DocumentsTab({
                             </DropdownMenuItem>
                           )}
                           {canManage && (
-                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                            <DropdownMenuItem
+                              data-testid={`doc-share-link-${node.id}`}
+                              onSelect={() =>
+                                void shareDocumentLink({
+                                  nestId,
+                                  nodeId: node.id,
+                                  title: node.title || node.id,
+                                  onManage: () => {
+                                    setPublishTab("links");
+                                    setPublishNode(node);
+                                  },
+                                })
+                              }
+                            >
+                              <Globe className="h-3.5 w-3.5 mr-2" />
+                              Share public link
+                            </DropdownMenuItem>
+                          )}
+                          {canManage && (
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setPublishTab("new");
+                                setPublishNode(node);
+                              }}
+                            >
                               <Share2 className="h-3.5 w-3.5 mr-2" />
                               Publish
                             </DropdownMenuItem>
@@ -2273,6 +2300,7 @@ export function DocumentsTab({
           nestId={nestId}
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
+          initialTab={publishTab}
           onClose={() => setPublishNode(null)}
         />
       )}

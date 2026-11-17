@@ -2663,12 +2663,17 @@ Returns `201` whenever the batch ran, even if every row landed in `skipped` or `
 Expose ONE document as a standalone page at a stable, unguessable `/p/<slug>` URL. Distinct from nest visibility (whole-nest read) and from grants (authenticated per-user sharing). Managing publish links is owner/admin only. Access modes: `public` (no auth), `code` (shared passcode), `email` (viewer enters an email → one-time magic link → access logged), `invite` (same, but only allow-listed emails get a link). Every served view is logged; links are revocable and can carry `expires_at`.
 
 ### POST `/nests/:nestId/publications` (owner/admin)
-Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite", comments_enabled?: bool, watermark?: bool, no_download?: bool, code?: string (code mode), allowlist?: string[] (invite mode), expires_at?: ISO }`. → `201 { publish, link }`.
+Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite", comments_enabled?: bool, watermark?: bool, no_download?: bool, show_invite?: bool (default true), code?: string (code mode), allowlist?: string[] (invite mode), expires_at?: ISO }`. → `201 { publish, link }`.
+
+`access_mode` defaults to `public` here, as it always has; the Publish dialog and one-click Share both send it explicitly. The MCP twin, `context_public_link_create`, has no default: an agent must name the mode, and a missing one is refused with the four allowed values, so an open link is never an agent's silent default.
 
 `watermark` stamps the viewer's email across the page — email/invite gates only, since the other two identify nobody. `no_download` blocks copy, right-click, drag and printing; both are deterrents, not protection (screenshots and developer tools still work). `400` when `node_id` names no document in the nest, or when `email`/`invite` is requested on a server with no mail transport (`SMTP_URL` + `NOTIFY_EMAIL_FROM`) — their one-time link could never be sent.
 
 ### GET `/nests/:nestId/publications` (owner/admin)
 List this nest's publish links with their `link` URLs.
+
+### PATCH `/nests/:nestId/publications/:id` (owner/admin)
+Body `{ show_invite: boolean }` → `200 { publish, link }`. Changes a link in place; its URL stays the same. `show_invite` is the only setting that can be changed (`400` when it is not a boolean, `404` for an unknown or revoked link).
 
 ### GET `/nests/:nestId/publications/:id/views` (owner/admin)
 The access log — `{ count, views: [{ email, created_at }] }`.
@@ -2677,13 +2682,20 @@ The access log — `{ count, views: [{ email, created_at }] }`.
 Revoke — the link 404s immediately.
 
 ### Public render surface (no auth chain)
-- `GET /p/:slug` — the document, a gate form (email/code/invite), or — when `comments_enabled` — a reader shell framing the document beside the comment control. Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug` — the document, a gate form (email/code/invite), or a reader shell framing the document: when `comments_enabled` (beside the comment control), and for an HTML/artifact document on a nest that is not white-label (above the strip below). Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug/og-image` — the link-preview image: the nest's uploaded logo, or a default 1200×630 card. `404` for a link that is not live.
 - `GET /p/:slug/view` — the document itself, always sandboxed. The shell frames it; gated independently, so being the frame source is not authorization.
 - `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link). Rate limited per link per IP.
 - `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open. Invite mode re-checks the allow-list here, not only when the link was sent.
 - `POST /p/:slug/comments` — JSON `{ body, email? }`, from the shell's modal. Needs the gate cleared and an identifying email; lands as an unanchored annotation thread for stewards, never on the published page.
 
 Only the approved version is ever served — a document with no approved snapshot 404s rather than exposing a draft. A revoked, expired or unknown slug answers every route above with the same HTML notice, never a hint about which it was.
+
+**Link previews.** `GET /p/:slug` carries Open Graph and Twitter card tags: `og:title`, `og:description` (up to 200 characters of the approved version's text; omitted when `no_download` is on), `og:url`, `og:site_name` (the nest's `site_title`, else `ContextNest`), `og:image` (an external https logo directly, otherwise `/p/:slug/og-image`), `twitter:card`. A gated link that has not been opened gets `Protected document` as its title and no description. Links use `PUBLIC_BASE_URL` when set, otherwise the request's origin. An HTML document that already has its own `og:` tags keeps them. Every `/p` page (open or gated) carries `<meta name="robots" content="noindex, nofollow">` (except an author's HTML page that already has its own `og:` tags, which is served exactly as written and relies on the header), and every response under `/p/` (including `/view`, `/og-image` and the "no longer available" page) sends `X-Robots-Tag: noindex, nofollow`: a public link is for sharing with people, not for search. Link previews are unaffected (unfurlers read the `og:` tags). `GET /p/:slug/og-image` is rate limited per live link per IP (120 per 10 minutes); an unknown slug is a plain `404`.
+
+**"Make your own nest".** On a link with `show_invite` on (the default) in a nest without `hide_powered_by`, `GET /p/:slug` shows one strip linking to this deployment's sign-in page with `?ref=share` (`<base>/?ref=share`), where a new person can register and lands in first-run onboarding. It is part of the page chrome only (a markdown page, the gate, the reader shell) and never part of `GET /p/:slug/view`, whose bytes are unchanged. A white-label nest shows no strip, whatever the link says. With `show_invite` off the page is served with nothing added to its body, and an HTML document is served directly instead of framed.
+
+**MCP** (nest owner/admin only, advertised only to them on a read-write credential): `context_public_link_create` (`id` and `access_mode`, both required, plus the POST body's `code`, `allowlist`, `expires_at`, `comments_enabled`, `watermark`, `no_download`, `show_invite`), `context_public_links` (`id?`), `context_public_link_update` (`link_id`, `show_invite`) and `context_public_link_revoke` (`link_id`) mirror the four routes above on the same service: same refusals, in the same words. The prose states the URL and whether the link is open (anyone with the link) or gated; `structuredContent` is the REST payload plus `access` (`open` | `gated`) and, on the list, `live`.
 
 ---
 

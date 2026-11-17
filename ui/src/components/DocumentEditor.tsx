@@ -113,6 +113,7 @@ import { CodeHighlight } from "./CodeHighlight";
 import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
+import { shareDocumentLink } from "../lib/share-link";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -294,7 +295,9 @@ export function DocumentEditor({
   const [showShare, setShowShare] = useState(false);
   // Set when the visibility picker's "Share with a team…" opens the dialog.
   const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
-  const [showPublish, setShowPublish] = useState(false);
+  // Which tab the Publish dialog opens on: "links" from Share's Manage, where
+  // the link already exists and the job is to change or remove it.
+  const [showPublish, setShowPublish] = useState<false | "new" | "links">(false);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
@@ -2234,8 +2237,20 @@ export function DocumentEditor({
           return { ...base, icon: Archive, onSelect: () => setShowArchive(true) };
         case "share-doc":
           return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "share-link":
+          return {
+            ...base,
+            icon: Globe,
+            onSelect: () =>
+              void shareDocumentLink({
+                nestId,
+                nodeId,
+                title: title.trim() || "Untitled",
+                onManage: () => setShowPublish("links"),
+              }),
+          };
         case "publish":
-          return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
+          return { ...base, icon: Share2, onSelect: () => setShowPublish("new") };
         case "delete":
         case "request-deletion":
           return { ...base, icon: Trash2, onSelect: () => setShowDeletionModal(true) };
@@ -2473,6 +2488,7 @@ export function DocumentEditor({
           nestId={nestId}
           nodeId={nodeId}
           nodeTitle={title || nodeId}
+          initialTab={showPublish}
           onClose={() => setShowPublish(false)}
         />
       )}

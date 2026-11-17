@@ -16,8 +16,8 @@
  *
  * Inline schema: promoting a thread is Community-only (the comment-thread
  * store is this edition's), so the engine has no operation to import a
- * descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 107,
- * then 108 for context_agent_webhooks, documented there). Artifact cards ride
+ * descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 111,
+ * then 112 for context_agent_webhooks, documented there). Artifact cards ride
  * on context_channel_read's existing output instead of a tool of their own.
  */
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";

@@ -493,6 +493,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created by an earlier build of 037 still gets them on upgrade.
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
+    -- PO-1365: the per-link switch for the "Make your own nest" strip (on by default).
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS show_invite INTEGER NOT NULL DEFAULT 1;
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,

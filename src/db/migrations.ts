@@ -1462,6 +1462,11 @@ export function runMigrations(db: Database.Database): void {
     if (publishCols.length && !publishCols.includes("no_download")) {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
+    // PO-1365: the per-link switch for the "Make your own nest" strip. On by
+    // default, so every link made before it existed keeps showing the strip.
+    if (publishCols.length && !publishCols.includes("show_invite")) {
+      db.exec("ALTER TABLE publish ADD COLUMN show_invite INTEGER NOT NULL DEFAULT 1");
+    }
   }
 
   // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
