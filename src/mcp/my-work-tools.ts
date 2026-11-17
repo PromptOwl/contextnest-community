@@ -17,7 +17,7 @@
  * Inline schema: My Work is a Community-only aggregate over this edition's
  * governance tables (reviews, deletion/access requests, inbox rows, board
  * assignments, the mention index); the engine has no such operation to import
- * a descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 101,
+ * a descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 106,
  * documented there).
  */
 import { buildMyWork, parseMyWorkPaging, type MyWork } from "../me/my-work.js";

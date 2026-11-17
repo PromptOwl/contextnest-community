@@ -407,3 +407,17 @@ describe("SEC: mentions never reveal what the caller can't read", () => {
     expect(m.excerpt.startsWith("@alice <img")).toBe(true);
   });
 });
+
+describe("DEDUPE: only the comment mention My Work shows is dropped from notifications", () => {
+  it("keeps a document-body mention on a node that also has an open comment mention", async () => {
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Body Ping", content: "@alice@team.test owns this" }, bob.apiKey);
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    const node = created.data.node.id;
+    const t = await open(bob, node, "@alice@team.test and this comment too");
+    const w = await work(alice);
+    expect(mentionThreads(w)).toContain(t);
+    const onNode = w.notifications.filter((n: any) => n.kind === "mention" && (n.node_id ?? n.subject_id) === node);
+    // The body mention stays; the comment mention is the Mentions row, counted once.
+    expect(onNode.map((n: any) => n.message), JSON.stringify(onNode)).toEqual([expect.stringContaining('mentioned you in "Body Ping"')]);
+  });
+});

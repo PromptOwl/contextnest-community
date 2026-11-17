@@ -400,7 +400,8 @@ export default function MyWorkPage() {
             {/* Open threads that @mention you, in channels and on documents,
                 waiting on your reply (PO-1180). Reply or resolve and the row
                 goes. Newest first; click jumps to the thread. */}
-            {(work.mentions?.length ?? 0) > 0 && (
+            {/* On total, not this page: an emptied later page keeps its pager. */}
+            {(work.mentions_pagination?.total ?? work.mentions?.length ?? 0) > 0 && (
               <div className="rounded-lg border" data-testid="my-work-mentions">
                 <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
                   Mentions
