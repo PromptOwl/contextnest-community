@@ -14,6 +14,8 @@ import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
 import { clampAnchor, projectThreadsToMarkdown } from "./projection.js";
+import { unwrapHtmlFence } from "../nodes/html-artifact.js";
+import { ARTIFACT_NODE_TYPE } from "./types.js";
 import type {
   AnnotationAnchor,
   AnnotationComment,
@@ -324,12 +326,19 @@ export async function readArtifact(
     liveExists = false;
   }
 
+  // An artifact stored with its HTML inside a code fence (written before the
+  // write guard, or by a path the guard does not cover) is served as the page
+  // it is, not as the literal fence (PO-1336). Artifacts only: a markdown
+  // document that is one html block stays a code sample.
+  const page = (body: string) =>
+    type === ARTIFACT_NODE_TYPE ? (unwrapHtmlFence(body) ?? body) : body;
+
   if (target != null) {
     try {
       const raw = await versionManager.reconstructVersion(nodeId, target);
       return {
         title,
-        html: bodyOnly(nodeId, raw),
+        html: page(bodyOnly(nodeId, raw)),
         version: target,
         type,
         approved: approvedVersion != null && target === approvedVersion,
@@ -345,7 +354,7 @@ export async function readArtifact(
   if (!liveExists) {
     throw new NotFoundError(`Artifact not found: ${nodeId}`);
   }
-  return { title, html: liveHtml, version: target, type, approved: false };
+  return { title, html: page(liveHtml), version: target, type, approved: false };
 }
 
 /**

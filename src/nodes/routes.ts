@@ -28,6 +28,8 @@ import {
 } from "../governance/access-guard.js";
 import { isPublicReader, permissionLevel } from "../shared/access.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { documentWebUrl } from "../shared/web-links.js";
+import { htmlWriteGuard, htmlWriteNotice } from "./html-artifact.js";
 import {
   assertContributorCreate,
   assertContributorPatch,
@@ -261,6 +263,15 @@ nodeRoutes.post("/bulk-delete", async (c) => {
   );
 });
 
+/** `web_url` on a write response: the document's page in the web app — the
+ *  link for a person, as opposed to this API address (PO-1336). Absent when the
+ *  server's public address is unknown. Writes only: the GET shape is pinned by
+ *  the characterization goldens and its readers already hold the id. */
+function webLinkFields(c: { req: { url: string } }, nestId: string, nodeId: string): { web_url?: string } {
+  const url = documentWebUrl(requestBaseUrl(c.req.url), nestId, nodeId);
+  return url ? { web_url: url } : {};
+}
+
 // POST /nests/:nestId/nodes
 nodeRoutes.post("/", async (c) => {
   const body = await c.req.json<{
@@ -331,6 +342,15 @@ nodeRoutes.post("/", async (c) => {
   // document in the web UI authenticates with a session cookie and is exactly
   // who would be confirming it. Same hold, same 202 contract as bulk publish.
   const keyId = c.get("apiKeyId") ?? null;
+  // An HTML page sent as a document by an agent is stored as the artifact it
+  // is (nodes/html-artifact.ts, PO-1336) — the same guard context_create
+  // applies. API-key callers only, like the hold below: a person who types a
+  // code block into the editor meant a code block.
+  const html = keyId ? htmlWriteGuard({ type: body.type, content: body.content }) : null;
+  if (html) {
+    body.content = html.content;
+    if (html.type) body.type = html.type;
+  }
   if (keyId) {
     const pending = await holdWriteIfGated({
       nestId,
@@ -391,6 +411,8 @@ nodeRoutes.post("/", async (c) => {
 
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    ...webLinkFields(c, nestId, node.id),
+    ...(html ? { notice: htmlWriteNotice(html) } : {}),
     ...(tableRefs ? { table_refs: tableRefs } : {}),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
@@ -938,6 +960,27 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
 
   const authorEmail = await getUserEmail(c);
 
+  // Same guard as POST and context_update (PO-1336): an agent's replaced body
+  // that is an HTML page. Needs the stored type, so it reads the node. A failed
+  // read skips the guard (never guess "document" and re-type a task or skill);
+  // updateNode reads the node again and reports the error.
+  let html: ReturnType<typeof htmlWriteGuard> = null;
+  if (c.get("apiKeyId") && typeof body.content === "string") {
+    const { storage } = await engineCache.get(nestId);
+    const stored = await storage.readDocument(nodeId).catch(() => null);
+    html = stored
+      ? htmlWriteGuard({
+          type: body.type,
+          storedType: stored.frontmatter.type as string | undefined,
+          content: body.content,
+        })
+      : null;
+    if (html) {
+      body.content = html.content;
+      if (html.type) body.type = html.type;
+    }
+  }
+
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -966,6 +1009,8 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   return c.json({
     node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     version: responseVersion,
+    ...webLinkFields(c, nestId, node.id),
+    ...(html ? { notice: htmlWriteNotice(html) } : {}),
     ...(tableRefs ? { table_refs: tableRefs } : {}),
   });
 });

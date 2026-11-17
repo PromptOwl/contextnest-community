@@ -3034,6 +3034,27 @@ Execute (the runner contract — the agent IS the runner):
 - `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
 - `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
 
+### Links for people, and posting an HTML page
+
+**Links.** The API lives under `/nests/<id>` (plural) and answers programs. The web app lives under `/nest/<id>` (singular): `/nest/<nest-id>` is a nest, `/nest/<nest-id>?doc=<node id, URL-encoded>` is one document. Agents get the web address ready-made, so they never have to build one:
+
+- `GET /index?format=json` and the `nest_index` tool: `web_url` on each nest; the markdown lists it as "web (for people)" and labels the API URLs "for agents".
+- `POST /nests/:nestId/nodes` and `PATCH /nests/:nestId/nodes/:nodeId`: a top-level `web_url` next to `node`.
+- `context_get`, `context_create`, `context_update` and a `context_upload` document: the link in the result text. `context_list` and `context_search` end with the address pattern. The structured payloads of these tools are unchanged (they follow the engine's operation catalog).
+
+The base is `PUBLIC_BASE_URL` when set, otherwise the origin of the request. A browser page load of `/nests/:nestId`, `/nests/:nestId/mcp` or `/nests/:nestId/context` that carries no `Authorization` header and no query string is redirected (302) to `/nest/:nestId`. A page load is a request with `Sec-Fetch-Dest: document`, or, from a client that sends no `Sec-Fetch-Dest`, one whose `Accept` includes `text/html`. Requests from programs are not affected; one that authenticates with a session cookie and wants the JSON should not ask for `text/html` (or can add any query string).
+
+**HTML pages.** To post an HTML page, create a node with `"type": "artifact"` and the raw HTML document as `content` (no markdown code fence). It renders, sandboxed, in the web app. When an agent sends a page as a plain document anyway, the server stores what was meant: over MCP always, over REST when the request carries an API key (a person saving in the web app is never converted).
+
+| The write | What is stored | The result says |
+| --- | --- | --- |
+| No type or `document`, and the whole body is one `html` code fence or a full HTML document (`<!DOCTYPE html>` / `<html>`) | an `artifact`, body = the HTML without the fence | "Stored as an HTML artifact…" |
+| The same, with artifacts disabled on the server (`TYPE_ARTIFACT_ENABLED=false`) | as sent, a markdown document | "…artifact nodes are disabled on this server…" |
+| An `artifact` (new or existing) whose body arrives inside a code fence | the HTML without the fence | "The code fence around the HTML was removed…" |
+| Markdown with text around an html code block, any other node type, or `append` | as sent | nothing |
+
+Over MCP the sentence is part of the result text; over REST it is a top-level `notice` string.
+
 ### PromptOwl native connection (service-ticket auth)
 
 The official PromptOwl deployment connects on its users' behalf without storing a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the shared secret configured for it as an official community site (`/admin/community-sites`, or the legacy `OFFICIAL_COMMUNITY_SSO_SECRET` env var — see `CONFIGURATION.md`). The ticket carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a ~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by email — native access never auto-provisions.
