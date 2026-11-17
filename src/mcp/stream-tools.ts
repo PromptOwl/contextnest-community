@@ -16,9 +16,9 @@
  *
  * Inline schema: promoting a thread is Community-only (the comment-thread
  * store is this edition's), so the engine has no operation to import a
- * descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 102,
- * then 103 for context_agent_webhooks, documented there). Artifact cards ride on context_channel_read's existing
- * output instead of a tool of their own.
+ * descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 107,
+ * then 108 for context_agent_webhooks, documented there). Artifact cards ride
+ * on context_channel_read's existing output instead of a tool of their own.
  */
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { promoteText, promoteThread } from "../stream/promote.js";
@@ -63,7 +63,7 @@ export const STREAM_TOOL_DEFINITIONS = [
         action: { type: "string", description: 'One of "list" (default), "set", "delete".' },
         handle: { type: "string", description: 'The agent\'s @name, e.g. "grok" (set, delete).' },
         url: { type: "string", description: "Public https URL the event is POSTed to (set)." },
-        rotate: { type: "boolean", description: "set: mint a new signing secret (returned once)." },
+        rotate: { type: "boolean", description: "set: mint a new signing secret (returned once); url may be omitted to keep the stored one." },
       },
     },
   },
@@ -92,12 +92,7 @@ export async function runStreamTool(
     );
     return { text: promoteText(data), data };
   } catch (err) {
-    if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
-    if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
-    if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
-    if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
-    if (err instanceof AppError && err.statusCode === 403) return toolError(err.message, "UNAUTHORIZED_ACTION");
-    throw err;
+    return refusal(err);
   }
 }
 

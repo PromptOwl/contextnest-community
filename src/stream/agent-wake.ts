@@ -52,13 +52,11 @@ import { config } from "../config.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { resolveActorLabel } from "../channels/actor-label.js";
 import { isChannelNode } from "../channels/channel-service.js";
-import { isSafeConnectorUrl } from "../notify/dispatch.js";
 import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webhook.js";
 import { senderFor } from "../notify/outbound-log.js";
-import { guardedFetch, isPrivateAddress } from "../metacognition/net.js";
-import { isIP } from "node:net";
+import { guardedFetch } from "../metacognition/net.js";
 import { justWritten } from "../mentions/mention-index.js";
-import { storedAgentWebhook } from "./agent-webhooks.js";
+import { isPublicAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
 
 export const AGENT_WAKE_EVENT = "agent.mention";
 /** Wakes of one handle from one thread inside WAKE_THREAD_WINDOW_MS. */
@@ -138,19 +136,12 @@ export function wakeIdempotencyKey(nestId: string, commentId: string, handle: st
   return createHash("sha256").update(`agent-wake:v1:${nestId}:${commentId}:${handle}`).digest("hex").slice(0, 40);
 }
 
-function privateLiteral(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    return isIP(host) !== 0 && isPrivateAddress(host);
-  } catch {
-    return true;
-  }
-}
-
 function normHandle(h: string | null | undefined): string {
   return String(h ?? "").trim().replace(/^@/, "").toLowerCase();
 }
 
+// ponytail: count-then-insert isn't atomic, so parallel posts can overshoot the
+// limits by a few. Soft fence; use a conditional INSERT … SELECT if it must be exact.
 async function overLimit(nestId: string, threadId: string, handle: string): Promise<boolean> {
   const db = getDb();
   const now = Date.now();
@@ -218,7 +209,7 @@ export async function wakeMentionedAgents(params: {
       if (!target?.url || !target.secret) continue;
       // The save-time fence, again at use time: a resolver (or an old row)
       // can't hand back a private target.
-      if (!isSafeConnectorUrl(target.url) || privateLiteral(target.url)) {
+      if (!isPublicAgentWebhookUrl(target.url)) {
         console.warn(`[agent-wake] refusing a non-public target for @${handle} in ${nestId}`);
         continue;
       }

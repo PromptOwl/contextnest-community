@@ -120,7 +120,7 @@ export const HISTORICAL_MIGRATIONS = [
   "086_control_room_ledger",
   "090_control_room_run_totals",
   "094_annotation_comment_client",
-  "086_agent_webhooks",
+  "095_agent_webhooks",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1430,7 +1430,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
   `);
 
-  // Migration 086 parity: agent wake-up targets + delivery ledger (PO-1181).
+  // Migration 095 parity: agent wake-up targets + delivery ledger (PO-1181).
   await db.exec(`
     CREATE TABLE IF NOT EXISTS agent_webhooks (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,

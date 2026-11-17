@@ -4681,6 +4681,7 @@ export function DocumentEditor({
               nestId={nestId}
               nodeId={nodeId}
               readOnly={isViewOnly}
+              canPromote={canAuthorNew && !isViewOnly}
               pendingAnchor={pendingAnchor}
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}

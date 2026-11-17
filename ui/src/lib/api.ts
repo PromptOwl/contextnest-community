@@ -3174,11 +3174,12 @@ export async function listAgentWebhooks(nestId: string) {
   return request<{ webhooks: AgentWebhook[] }>(`/nests/${nestId}/agent-webhooks`);
 }
 
-/** Save a target; `secret` comes back only when one is minted. */
-export async function setAgentWebhook(nestId: string, handle: string, url: string, rotate = false) {
+/** Save a target; `secret` comes back only when one is minted. A rotate may
+ *  pass no `url` to keep the stored one. */
+export async function setAgentWebhook(nestId: string, handle: string, url: string | undefined, rotate = false) {
   return request<{ webhook: AgentWebhook; secret?: string }>(
     `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
-    { method: "PUT", body: JSON.stringify({ url, ...(rotate ? { rotate: true } : {}) }) },
+    { method: "PUT", body: JSON.stringify({ ...(url ? { url } : {}), ...(rotate ? { rotate: true } : {}) }) },
   );
 }
 

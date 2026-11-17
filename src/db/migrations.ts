@@ -2593,7 +2593,7 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("085_comment_mentions");
   }
 
-  // 086: agent wake-up targets and their delivery ledger (PO-1181, agent team
+  // 095: agent wake-up targets and their delivery ledger (PO-1181, agent team
   //   stream S3). `agent_webhooks` is the nest-level, admin-only map from an
   //   agent @handle to the runner URL an @mention of it is POSTed to, with the
   //   HMAC secret that signs each POST; both are stored encrypted
@@ -2602,7 +2602,7 @@ export function runMigrations(db: Database.Database): void {
   //   `agent_wake_deliveries` holds one row per (message, handle) delivery,
   //   keyed by its idempotency key, so a retry never sends twice; it is also
   //   what the per-thread / per-handle rate fence counts.
-  if (!hasMigration("086_agent_webhooks")) {
+  if (!hasMigration("095_agent_webhooks")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_webhooks (
         nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -2628,7 +2628,7 @@ export function runMigrations(db: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
       CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
     `);
-    recordMigration("086_agent_webhooks");
+    recordMigration("095_agent_webhooks");
   }
 }
 

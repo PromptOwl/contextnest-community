@@ -94,6 +94,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   const [creating, setCreating] = useState(false);
   const [openThread, setOpenThread] = useState<string | null>(link.thread);
   const [replyDraft, setReplyDraft] = useState("");
+  const [promoting, setPromoting] = useState<string | null>(null);
 
   const nestQ = useQuery(reads.nest(nestId));
   const canWrite = useMemo(() => {
@@ -186,14 +187,17 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   // Promote a thread to a decision or task node (PO-1181). Writers only —
   // the server refuses anyone else; the reply it posts shows in the thread.
   const promote = async (threadId: string, kind: "decision" | "task") => {
-    if (!current) return;
+    if (promoting) return;
+    setPromoting(threadId);
     try {
       const r = await api.promoteThread(nestId, threadId, { kind });
       toast.success(`Promoted to a ${kind}: ${r.node.title}`);
-      // The server's reply lands in the thread; drop the channel's timeline and threads.
-      qc.invalidateQueries({ queryKey: keys.node(nestId, current.id) });
+      // The new node joins the tree and the server's reply lands in the thread.
+      void qc.invalidateQueries({ queryKey: keys.nest(nestId) });
     } catch (e) {
       fail("Could not promote the thread")(e);
+    } finally {
+      setPromoting(null);
     }
   };
 
@@ -339,6 +343,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                               <button
                                 type="button"
                                 onClick={() => promote(p.id, "decision")}
+                                disabled={!!promoting}
                                 className="ml-3 mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
                                 title="Turn this thread into a decision node that links back here"
                               >
@@ -347,6 +352,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                               <button
                                 type="button"
                                 onClick={() => promote(p.id, "task")}
+                                disabled={!!promoting}
                                 className="ml-3 mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
                                 title="Turn this thread into a task node that links back here"
                               >

@@ -4,7 +4,7 @@
  * a target decides where this nest's mention events go.
  *
  *   GET    /agent-webhooks            → { webhooks: [{ handle, target, … }] }  (target = host#hash, never the URL)
- *   PUT    /agent-webhooks/:handle { url, rotate? } → { webhook, secret? }     (secret only when minted)
+ *   PUT    /agent-webhooks/:handle { url, rotate? } → { webhook, secret? }     (secret only when minted; rotate may omit url)
  *   DELETE /agent-webhooks/:handle    → { deleted: true }
  *
  * The nest middleware (app.ts) already holds these at the admin tier and keeps
