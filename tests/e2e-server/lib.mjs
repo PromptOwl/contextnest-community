@@ -13,6 +13,7 @@ export const FEATURE_ENV = Object.freeze({
   FEATURE_SURFACES: 'true',
   EXPERIMENTAL_DOC_STREAM: 'true',
   EXPERIMENTAL_DOC_PINS: 'true',
+  EXPERIMENTAL_AGENT_STREAM: 'true',
   HOOTIE_ENABLED: 'true',
 });
 
@@ -26,8 +27,18 @@ export const FREE_SEAT_PEOPLE = Object.freeze(['qa-viewer@example.com']);
 export const PAID_SEAT_PEOPLE = Object.freeze(['qa-editor@example.com', 'qa-reviewer@example.com']);
 export const DIRECTORY_PEOPLE = Object.freeze([...FREE_SEAT_PEOPLE, ...PAID_SEAT_PEOPLE]);
 
+/**
+ * Closes the welcome screen for the signed-in account (what its Skip button
+ * calls). The launcher calls it for each test account, so their dashboard is
+ * the nest list whether or not they own a nest.
+ */
+export const CLOSE_WELCOME_PATH = '/onboarding/dismiss';
+
 /** The standing nest that gives the seeded people a paid seat. No AUTO_ prefix: the orphan sweep keeps it. */
 export const SEATS_NEST_NAME = 'E2E seats (seeded, keep)';
+
+/** Loaded into the server under test before its own code. A file URL, so a path with spaces works. */
+export const KEEP_ALIVE_MODULE = new URL('./keep-alive.mjs', import.meta.url).href;
 
 /**
  * Read the launcher's settings from the environment.
@@ -67,9 +78,12 @@ export function readSettings(env) {
  * every feature switch on, and nothing that reaches outside the machine.
  * @param {ReturnType<typeof readSettings>} settings
  * @param {string} dataRoot
+ * @param {string} [nodeOptions] NODE_OPTIONS already set for the launcher; kept.
  */
-export function serverEnv(settings, dataRoot) {
+export function serverEnv(settings, dataRoot, nodeOptions = '') {
   return {
+    // Idle connections outlive the pause between a spec's API calls (keep-alive.mjs).
+    NODE_OPTIONS: `${nodeOptions} --import ${KEEP_ALIVE_MODULE}`.trim(),
     PORT: String(settings.port),
     DATA_ROOT: dataRoot,
     DB_DRIVER: 'sqlite',

@@ -122,15 +122,27 @@ What the launcher sets up:
 
 - The built server (`node dist/index.js`) on a fresh SQLite data folder in the system temp folder, in key auth mode, with the feature switches on (`tests/e2e-server/lib.mjs`).
 - The first account as the server admin and the second as an ordinary member, plus three `qa-…@example.com` people in the directory for the collaborator and steward suites.
+- The welcome screen closed for both accounts. Someone who owns no nest gets it in place of the nest list, and the second account owns none on a fresh server.
+- Idle connections kept open for two minutes (`tests/e2e-server/keep-alive.mjs`). Node's default is five seconds, and an API call that reuses a connection just as the server closes it fails with `ECONNRESET`.
 - A license answer served on `127.0.0.1:4010`, so the server runs as a licensed enterprise server without calling PromptOwl. This is for tests only.
+
+Every launch is a new server, so a session saved by an earlier run is no longer valid and every API call answers 401 "Your session has expired". Delete `tests/src/cookies_storage/*.json` before the next run.
 
 Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without building the server (the UI still needs `npm run build:ui`). `E2E_SERVER_PORT`, `E2E_LICENSE_PORT` and `E2E_DATA_ROOT` override the ports and the data folder.
 
 ## CI
 
-Two workflows run the suite on a pull request:
+Two workflows run the suite, against two different servers:
 
-- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
-- The workflow below runs the same suite against the deployed server.
+- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") runs on every pull request. It builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
+- `.github/workflows/contextnest-community-tests.yml` ("e2e") runs the same suite against the deployed dev server (nest-dev, or `vars.TEST_URL`), with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). It does not run on pull requests: it tests what is deployed, so a failure there says nothing about a PR. It runs on a push to `development` or `main`, after the dev deploy workflow ("Deploy dev (Cloud Run)") succeeds, and by hand from the Actions tab. One run uses the server at a time (`tests/scripts/e2e-turnstile.mjs`); the others wait their turn.
 
-`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.
+Both upload the HTML report and traces as a workflow artifact.
+
+### Specs and the deployed server
+
+The deployed server is long-lived, shared, and often behind `development`. A spec has to hold on both servers:
+
+- **A feature the server may not have yet:** ask the server, skip with a reason when it is missing, and fail instead when the feature's `CN_EXPECT_*` is 1 (the PR build). Ask for something only that feature answers. `/health` carrying a flag is not enough when the feature shipped in parts: the Control room dashboard specs ask for the dashboard's own read (`GET /rollups?by=reason`).
+- **A page that differs by deployment kind:** nest-dev is a shared deployment with teams on (`/health`: `shared_deployment`), the PR build is a single-organization server. Read `/health` and expect the layout of the server under test, as the collaborators suite does for the add control and the visibility options.
+- **Stubbed navigation:** answer a stubbed navigation with a page, not a `302`. Chromium does not finish the request that follows a stubbed redirect on an https server, so it works on localhost and hangs on the deployed one.

@@ -72,7 +72,15 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
-//   103->107 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
+//   103->105 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread). Community-only (a node convention over the
+//   comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM). Upstream checked:
+//   @promptowl/contextnest-engine 3.7.0 (latest) /api has no channel op, so there is no descriptor to import.
+//   105->106 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
+//   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
+//   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
+//   operation to import a descriptor from.
+//   106->110 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
 //   2026-10-24, listed in docs/prds/api-convergence.md Phase 3; engine 3.7.0 /api has no public-link op).
 //   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
 //   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
@@ -83,7 +91,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
 //     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
 //       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
-const BASELINE = 107;
+const BASELINE = 110;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

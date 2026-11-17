@@ -35,7 +35,7 @@ export const ONBOARDING_TOOL_DEFINITIONS = [
   {
     name: "context_onboarding",
     description:
-      "Reads the caller's first-run onboarding state: whether the welcome screen shows, the nest it works on (with its MCP URL), whether a model can distill on the server, Slack connector status, and the connect proof — whether an agent really read that nest (after `since`, if given). With `job_id`, also the progress of a distill job you started: phase, steps done of total, and the drafts written so far.",
+      "Reads the caller's first-run onboarding state: whether the welcome screen shows (a first run owns no nest and was invited to none), the nest it works on (with its MCP URL), whether a model can distill on the server, Slack connector status, and the connect proof — whether an agent really read that nest (after `since`, if given). With `job_id`, also the progress of a distill job you started: phase, steps done of total, and the drafts written so far.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -108,7 +108,9 @@ export async function handleOnboardingTool(name: string, args: Record<string, an
       const data = job ? { ...state, connection, job } : { ...state, connection };
       const lines = [
         `Welcome screen: ${state.show ? "shown" : "not shown"}${state.dismissed ? " (dismissed)" : ""}.`,
-        state.nest ? `Nest: "${state.nest.name}" (${state.nest.id}), MCP URL ${state.nest.mcp_url}.` : "No nest of your own yet. Call context_onboarding_update with action create_nest.",
+        state.nest ? `Nest: "${state.nest.name}" (${state.nest.id}), MCP URL ${state.nest.mcp_url}.` : state.shared_nests > 0
+            ? `No nest of your own yet, and ${state.shared_nests} nest${state.shared_nests === 1 ? "" : "s"} shared with you (nest_index lists them). To make your own, call context_onboarding_update with action create_nest.`
+            : "No nest of your own yet. Call context_onboarding_update with action create_nest.",
         connection ? (connection.connected ? `Connect proof: an agent read this nest at ${connection.at}${connection.client ? ` (${connection.client})` : ""}.` : "Connect proof: no agent read of this nest yet.") : "",
         `Distill: ${state.distill.mode === "server" ? "runs on the server" : "returns a prompt for your own agent"}.`,
         `Slack: ${state.connectors.slack.connected ? "connected" : state.connectors.slack.can_connect ? "ready to connect (open the welcome screen in a browser)" : (state.connectors.slack.reason?.replace(/\.$/, "") ?? "not available")}.`,

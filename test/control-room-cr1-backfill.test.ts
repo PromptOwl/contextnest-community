@@ -86,7 +86,32 @@ describe("086 backfill of surface_windows.run_id", () => {
 });
 
 
-// ─── 2. Run totals stay inside a BIGINT ────────────────────────────────────
+// ─── 2. The 090 run-totals backfill on a database that already has runs ────
+
+describe("090 backfill of runs.est_cost_micros / tokens", () => {
+  it("SQLite: an upgrade with traced runs boots and fills the totals (no write while a read cursor is open)", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const { runMigrations } = await import("../src/db/migrations.js");
+    const mem = new Database(":memory:");
+    runMigrations(mem);
+    mem.exec("ALTER TABLE runs DROP COLUMN est_cost_micros; ALTER TABLE runs DROP COLUMN tokens");
+    mem.prepare("DELETE FROM schema_migrations WHERE id = '090_control_room_run_totals'").run();
+    mem.prepare(FIXTURE[0]).run();
+    mem.prepare(FIXTURE[1]).run();
+    const trace = JSON.stringify({ est_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } });
+    for (const id of ["r1", "r2"]) {
+      mem.prepare("INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, trace, started_at) VALUES (?, 'n1', 'nodes/a', 'manual', 'succeeded', ?, '${T0}')").run(id, trace);
+    }
+    expect(() => runMigrations(mem)).not.toThrow();
+    expect(mem.prepare("SELECT est_cost_micros, tokens FROM runs ORDER BY id").all()).toEqual([
+      { est_cost_micros: 250_000, tokens: 15 },
+      { est_cost_micros: 250_000, tokens: 15 },
+    ]);
+    mem.close();
+  });
+});
+
+// ─── 3. Run totals stay inside a BIGINT ────────────────────────────────────
 
 describe("runTotals bounds a caller-written trace", () => {
   it("caps huge values per run and drops negative ones", async () => {

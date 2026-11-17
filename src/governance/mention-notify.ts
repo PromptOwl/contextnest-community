@@ -369,6 +369,14 @@ export async function notifyMentions(params: {
   }
 }
 
+const COMMENT_MENTION_TEXT = "mentioned you in a comment on";
+
+/** A comment's "mentioned you" inbox row, not a document-body one (PO-1180:
+ *  My Work's Mentions section carries the former, so the inbox drops it). */
+export function isCommentMentionNotice(n: { kind: string; message?: string | null }): boolean {
+  return n.kind === "mention" && !!n.message?.includes(COMMENT_MENTION_TEXT);
+}
+
 /**
  * Drop a notification for everyone named in a comment.
  *
@@ -404,7 +412,7 @@ async function commentMentionFanOut(params: {
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
-    const message = `${await personLabel(actorEmail)} mentioned you in a comment on "${ctx.label}"`;
+    const message = `${await personLabel(actorEmail)} ${COMMENT_MENTION_TEXT} "${ctx.label}"`;
     await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,

@@ -142,7 +142,7 @@ export interface NestSidebarView {
    *  collapsed "Views" group so the sidebar reads as nest → docs. */
   group?: "views";
   /** App view page to open. */
-  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
+  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels";
   /** Nest-page tab, for views that are tabs of the nest page. */
   tab?: "overview" | "review";
 }
@@ -158,6 +158,8 @@ export function nestSidebarViews(
   caps: { isReadOnly: boolean; isReaderView: boolean; canEditDocs: boolean },
   opts: {
     workflowPlaneEnabled: boolean;
+    /** Experimental channels switch (PO-1179). */
+    agentStreamEnabled?: boolean;
     /** The nest runs stewardship — the queue is a standing surface then. */
     stewardshipEnabled?: boolean;
     /** Something is already waiting (reviews, deletion flags) — the queue
@@ -176,7 +178,7 @@ export function nestSidebarViews(
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   // The registry pages, each gated by its own meta.visible (workflows: the
   // workflow-plane flag and write access).
-  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled }))
+  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled, agentStreamEnabled: !!opts.agentStreamEnabled }))
     views.push({ id: p.id, label: p.label, icon: p.icon, page: p.viewPage, group: "views" });
   return views;
 }
