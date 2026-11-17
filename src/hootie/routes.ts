@@ -31,11 +31,11 @@
  * resolveModelCredential (own key with the byok feature, else PromptOwl's
  * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
-import { isChannelNode } from "../channels/channel-service.js";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isChannelNode } from "../channels/channel-service.js";
 import { config } from "../config.js";
 import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
 import { hasEntitlement } from "../auth/entitlements.js";
@@ -117,7 +117,7 @@ type MentionOutcome =
       thread_id: string;
       notified: number;
     }
-  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+  | { status: "undeliverable"; reason: "no_anchor" | "channel" | "post_failed" };
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
@@ -698,7 +698,7 @@ async function deliverMentions(params: {
   if (!anchor) return { status: "undeliverable", reason: "no_anchor" };
   // Never into a channel (PO-1179): a channel takes posts from the nest's
   // writers, and this one is written for the asker, who may only read.
-  if (await isChannelNode(nestId, anchor.id)) return { status: "undeliverable", reason: "no_anchor" };
+  if (await isChannelNode(nestId, anchor.id)) return { status: "undeliverable", reason: "channel" };
   const name = effectiveHootieBrand().name;
   const body = [
     `**Asked ${name}:** ${message}`,

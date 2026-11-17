@@ -57,22 +57,37 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->100 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
-//   /nests/:id/channels (list/create/archive, timeline/thread); channels are Community-only (a node
-//   convention over the comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM), so the
-//   engine has no channel operation to import a descriptor from.
-//   100->101 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
+//   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
+//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
+//   100->103 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
+//   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
+//     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
+//       folds the job progress in; no separate status tool). Per-person welcome state (user_onboarding table) and the
+//       distill job row (distill_jobs) are Community server state the engine does not model.
+//     context_onboarding_update — twin of POST /onboarding/{dismiss,reopen,nest}. Flips the per-person welcome flag
+//       (user_onboarding) and creates the caller's own nest idempotently; the engine has no users or onboarding state.
+//     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
+//       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
+//       concerns outside the engine's vault-operation catalog, so there is no op to consume.
+//   103->105 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread). Community-only (a node convention over the
+//   comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM). Upstream checked:
+//   @promptowl/contextnest-engine 3.7.0 (latest) /api has no channel op, so there is no descriptor to import.
+//   105->106 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
 //   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
 //   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
 //   operation to import a descriptor from.
-//   101->102 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   106->107 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
 //   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
 //   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
 //   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
-//   102->103 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
+//   107->108 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
 //   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
 //   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
-const BASELINE = 103;
+const BASELINE = 108;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

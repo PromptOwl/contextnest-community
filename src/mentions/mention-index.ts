@@ -51,7 +51,8 @@ const MAX_SCAN = 2000;
 
 /**
  * Record who a just-posted thread message @mentions. Best-effort, like every
- * fan-out on the comment path: a failure here never fails the post.
+ * fan-out on the comment path: a failure here never fails the post. Comments
+ * have no edit or single-delete route, so a recorded row never goes stale.
  */
 export async function indexCommentMentions(params: {
   nestId: string;
@@ -119,25 +120,26 @@ export async function indexCommentMentions(params: {
  * millisecond message from someone else from being taken for it).
  */
 export function justWritten(
-  thread: { comments: Array<{ id: string; author: string }> },
+  thread: { comments: Array<{ id: string; author: string; body?: string }> },
   authorEmail: string,
+  body?: string,
 ): string | null {
   const me = authorEmail.toLowerCase();
-  for (let i = thread.comments.length - 1; i >= 0; i--) {
-    if (thread.comments[i].author.toLowerCase() === me) return thread.comments[i].id;
-  }
-  return null;
+  const mine = thread.comments.filter((c) => c.author.toLowerCase() === me);
+  // Same text first: two quick replies by one author can't swap ids.
+  const hit = [...mine].reverse().find((c) => body !== undefined && c.body === body) ?? mine[mine.length - 1];
+  return hit?.id ?? null;
 }
 
 /** Index the message a post or reply just wrote (see indexCommentMentions). */
 export async function indexPostedMessage(params: {
   nestId: string;
   nodeId: string;
-  thread: { id: string; comments: Array<{ id: string; author: string }> };
+  thread: { id: string; comments: Array<{ id: string; author: string; body?: string }> };
   body: string;
   authorEmail: string;
 }): Promise<void> {
-  const commentId = justWritten(params.thread, params.authorEmail);
+  const commentId = justWritten(params.thread, params.authorEmail, params.body);
   if (!commentId) return;
   await indexCommentMentions({
     nestId: params.nestId,
@@ -195,7 +197,8 @@ interface Row {
 
 function excerptOf(body: string): string {
   const flat = String(body ?? "").replace(/\s+/g, " ").trim();
-  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX)}…` : flat;
+  // Drop a high surrogate the cut left alone, so an emoji is never split.
+  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX).replace(/[\uD800-\uDBFF]$/, "")}…` : flat;
 }
 
 /** "2026-11-08 10:00:00.123" (both dialects' nowMsExpr) → ISO 8601 UTC. */
@@ -217,18 +220,21 @@ function isChannelRow(r: Row): boolean {
  * Every open thread that @mentions the caller (or an agent the caller owns)
  * and that the caller hasn't answered since, newest mention first, one item
  * per thread — in the given nests only, and only on nodes the caller can open
- * now. Returns the whole filtered list; the caller pages it, so `total` and
- * the badge count exactly what can be shown (AC-MW-03/04).
+ * now. Returns one page plus the filtered `total`, so the badge counts
+ * exactly what the pages can show (AC-MW-03/04), and the "nest\0node" keys of
+ * every open item (My Work drops the inbox rows for those).
  */
 export async function listOpenMentions(params: {
   userId: string;
   email: string;
   /** Nest id → display name: the nests the caller may see items from. */
   nestNames: Map<string, string>;
-}): Promise<MentionItem[]> {
-  const { userId, email, nestNames } = params;
+  offset: number;
+  limit: number;
+}): Promise<{ items: MentionItem[]; total: number; nodeKeys: Set<string> }> {
+  const { userId, email, nestNames, offset, limit } = params;
   const nestIds = [...nestNames.keys()];
-  if (nestIds.length === 0 || !userId) return [];
+  if (nestIds.length === 0 || !userId) return { items: [], total: 0, nodeKeys: new Set() };
   const me = email.toLowerCase();
   const handles = await agentHandlesOwnedBy({ userId, email });
   const handleClause = handles.length
@@ -271,9 +277,10 @@ export async function listOpenMentions(params: {
     }),
   );
 
+  const open = [...perThread.values()].filter((r) => allowed.get(`${r.nest_id}\u0000${r.node_id}`));
+  // Labels and excerpts for the requested page only; total counts them all.
   const out: MentionItem[] = [];
-  for (const r of perThread.values()) {
-    if (!allowed.get(`${r.nest_id}\u0000${r.node_id}`)) continue;
+  for (const r of open.slice(offset, offset + limit)) {
     const actor = await resolveActorLabel({ email: r.author, client: deserializeClient(r.client_json) });
     const channel = config.EXPERIMENTAL_AGENT_STREAM && isChannelRow(r) ? r.node_id.split("/").pop()! : null;
     out.push({
@@ -294,20 +301,5 @@ export async function listOpenMentions(params: {
       mentioned_at: toIso(r.created_at),
     });
   }
-  return out;
-}
-
-/**
- * "nest\0node" for every document the caller has a mention row on, answered
- * or not — the inbox's "X mentioned you" rows for those are the same event
- * the Mentions section already carries, so My Work stops counting them twice.
- */
-export async function mentionedNodeKeys(userId: string, nestIds: string[]): Promise<Set<string>> {
-  if (!userId || nestIds.length === 0) return new Set();
-  const rows = (await getDb().all(
-    `SELECT DISTINCT nest_id, node_id FROM comment_mentions
-      WHERE mentioned_user_id = ? AND nest_id IN (${nestIds.map(() => "?").join(", ")})`,
-    [userId, ...nestIds],
-  )) as Array<{ nest_id: string; node_id: string }>;
-  return new Set(rows.map((r) => `${r.nest_id}\u0000${r.node_id}`));
+  return { items: out, total: open.length, nodeKeys: new Set(open.map((r) => `${r.nest_id}\u0000${r.node_id}`)) };
 }

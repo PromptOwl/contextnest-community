@@ -9,21 +9,12 @@
  * (CU-wdqcq02gy8). Rules are unit-tested in document-actions.test.ts.
  */
 
-/**
- * A pdf node's binary is bound to its id (src/nodes/service.ts's moveNode
- * refuses it: "PDF documents can't be moved to another folder yet"). Shared
- * by this menu and the documents-list row menu/drag-drop so neither offers a
- * move that the server will always 409 on.
- */
-export function nodeTypeSupportsMove(type: string | undefined): boolean {
-  return type !== "pdf";
-}
-
 export type DocumentActionKey =
   | "history"
   | "activity"
   | "copy-link"
   | "move"
+  | "archive"
   | "share-doc"
   | "publish"
   | "delete"
@@ -47,8 +38,8 @@ export interface DocumentActionsInput {
   isArchived: boolean;
   /** May author content here (editor-access.ts). Gates Move. */
   canEditContent: boolean;
-  /** PDF node: Move is withheld, the server always rejects it. Default false. */
-  isPdf?: boolean;
+  /** A steward of this document: may archive it (src/nodes/service.ts). Default false. */
+  canArchive?: boolean;
   /** Pending review by someone else: writes are locked server-side (423). */
   isLocked: boolean;
   /** May at least ask for deletion (editor tier and up). */
@@ -77,7 +68,7 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
     canShare,
     isArchived,
     canEditContent,
-    isPdf = false,
+    canArchive = false,
     isLocked,
     canRequestDeletion,
     canDeleteDirectly,
@@ -104,7 +95,7 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
       separatorBefore: true,
     });
 
-  if (!isNew && canEditContent && !isLocked && !isPdf)
+  if (!isNew && canEditContent && !isLocked)
     actions.push({ key: "move", label: "Move to folder", testId: "document-editor-move" });
 
   // Share THIS doc first — it's the narrower, more common ask. Meaningless on
@@ -122,6 +113,9 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
   // rather than with the editing actions above.
   if (canShare && !isNew && !isArchived)
     actions.push({ key: "publish", label: "Publish", testId: "document-editor-publish" });
+
+  if (!isNew && canArchive && !isLocked)
+    actions.push({ key: "archive", label: "Archive", testId: "document-editor-archive", separatorBefore: true });
 
   // One Delete entry: the author (and the admin/owner tier) deletes outright,
   // everyone else raises a request. Hidden below that tier once a flag is

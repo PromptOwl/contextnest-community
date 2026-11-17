@@ -407,3 +407,32 @@ describe("SEC: mentions never reveal what the caller can't read", () => {
     expect(m.excerpt.startsWith("@alice <img")).toBe(true);
   });
 });
+
+describe("DEDUPE: only the comment mention My Work shows is dropped from notifications", () => {
+  it("keeps a document-body mention on a node that also has an open comment mention", async () => {
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Body Ping", content: "@alice@team.test owns this" }, bob.apiKey);
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    const node = created.data.node.id;
+    const t = await open(bob, node, "@alice@team.test and this comment too");
+    const w = await work(alice);
+    expect(mentionThreads(w)).toContain(t);
+    const onNode = w.notifications.filter((n: any) => n.kind === "mention" && (n.node_id ?? n.subject_id) === node);
+    // The body mention stays; the comment mention is the Mentions row, counted once.
+    expect(onNode.map((n: any) => n.message), JSON.stringify(onNode)).toEqual([expect.stringContaining('mentioned you in "Body Ping"')]);
+  });
+});
+
+describe("justWritten: the mention attaches to the message just posted", () => {
+  it("prefers the author's comment with the posted text over their newest one", async () => {
+    const { justWritten } = await import("../src/mentions/mention-index.js");
+    const thread = {
+      comments: [
+        { id: "a", author: "Bob@team.test", body: "@alice first" },
+        { id: "b", author: "bob@team.test", body: "@alice second" },
+      ],
+    };
+    expect(justWritten(thread, "bob@team.test", "@alice first")).toBe("a");
+    expect(justWritten(thread, "bob@team.test", "edited by the server")).toBe("b");
+    expect(justWritten(thread, "carol@team.test", "@alice first")).toBeNull();
+  });
+});
