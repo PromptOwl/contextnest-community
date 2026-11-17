@@ -62,14 +62,30 @@ test.describe('Share a document', () => {
 
     const { page } = role;
     await page.goto(`/nest/${nest.id}?doc=${encodeURIComponent(doc.id)}`);
-    await page.getByTestId('document-editor-more').click();
-    const share = page.getByTestId('document-editor-share-link');
+    const share = await openMoreMenu(page);
     const shipped = await share.isVisible().catch(() => false);
     if (process.env.CN_EXPECT_SHARE_LINK === '1') {
       expect(shipped, 'the server under test does not ship Share public link (PO-1365)').toBe(true);
     }
     test.skip(!shipped, 'The server under test does not ship Share public link yet (PO-1365).');
     return { api, nest, doc, page, share };
+  }
+
+  /**
+   * Open the document's ⋮ menu and return its Share public link item, scoped
+   * to the menu Radix has settled open. A menu that was just used stays in the
+   * page as data-state="closed" until its exit animation ends (past the toast
+   * coming up), and its items are still visible then: an unscoped locator can
+   * resolve to the dying item and be detached mid-click.
+   */
+  async function openMoreMenu(page) {
+    const trigger = page.getByTestId('document-editor-more');
+    await expect(page.getByRole('menu')).toHaveCount(0, WRITE);
+    await trigger.click();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const menu = page.locator('[role="menu"][data-state="open"]');
+    await expect(menu).toBeVisible();
+    return menu.getByTestId('document-editor-share-link');
   }
 
   /** Open a URL the way a stranger does: no session, no cookies. */
@@ -115,14 +131,9 @@ test.describe('Share a document', () => {
     const first = await links(api, nest.id);
     expect(first).toHaveLength(1);
 
-    // The first click's menu is still closing as the toast comes up, and its
-    // item stays in the page until the exit animation ends. Wait for it to go
-    // before opening the menu again, or the click lands on the dying item.
-    const again = page.getByTestId('document-editor-share-link');
-    await expect(again).toBeHidden(WRITE);
-    await page.getByTestId('document-editor-more').click();
-    await expect(again).toBeVisible();
-    await again.click();
+    // The first click's menu is still closing as the toast comes up; reopen
+    // it only once that one is gone, and click the item in the open menu.
+    await (await openMoreMenu(page)).click();
     // Copied, or shown when the browser refuses the clipboard: never re-published.
     await expect(page.getByText(/Public link copied|This document has a public link/)).toBeVisible(WRITE);
     const second = await links(api, nest.id);
