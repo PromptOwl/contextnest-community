@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { NestStorage } from "@promptowl/contextnest-engine";
 import {
   setupTestEnv,
   createTestApp,
@@ -115,11 +116,9 @@ describe("import folder as nest (upload model)", () => {
     expect(status).toBe(201);
     expect(data.documents).toBe(8);
 
-    const history = readFileSync(
-      join(env.dataDir, "nests", data.nest.id, ".versions", "context_history.yaml"),
-      "utf-8",
-    );
-    expect(history.match(/^\s*- checkpoint:/gm) ?? []).toHaveLength(1);
+    // Through the engine: the chain's file layout is its own (segments since 3.6).
+    const history = await new NestStorage(join(env.dataDir, "nests", data.nest.id)).readCheckpointHistory();
+    expect(history?.checkpoints).toHaveLength(1);
 
     // Every doc is genuinely published, not just cheaply counted.
     const list = await jsonRequest(

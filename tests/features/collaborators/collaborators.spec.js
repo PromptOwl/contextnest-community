@@ -230,8 +230,14 @@ test.describe('Collaborators', () => {
     // They can edit an existing document and save the change from the page.
     const edit = 'Edited by the editor.';
     await editor.page.gotoDocument(owner.nest.id, owner.doc.id);
-    await editor.page.editButton.click();
-    await expect(editor.page.editableBody.first()).toBeVisible(WRITE);
+    // The page can re-render under the click and drop the Edit button (seen on
+    // a fast server), so press Edit until the editor is open.
+    await expect(async () => {
+      if (!(await editor.page.editableBody.first().isVisible())) {
+        await editor.page.editButton.click({ timeout: 5_000 });
+      }
+      await expect(editor.page.editableBody.first()).toBeVisible({ timeout: 5_000 });
+    }).toPass(WRITE);
     await editor.page.editableBody.first().click();
     await editor.page.page.keyboard.press('Control+End');
     await editor.page.page.keyboard.type(` ${edit}`);
@@ -478,7 +484,11 @@ test.describe('Collaborators', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-public-cancel');
 
     await owner.page.goto(owner.nest.id);
-    expect(await owner.page.visibilityOptions()).toEqual(['Private', 'Organization', 'Public']);
+    // A shared deployment offers team sharing where a single-organization
+    // server offers Organization (which there would reach every organization).
+    const health = await (await primary_user.page.request.get('/health')).json();
+    const middle = health.shared_deployment ? 'Share with a team…' : 'Organization';
+    expect(await owner.page.visibilityOptions()).toEqual(['Private', middle, 'Public']);
     await owner.page.chooseVisibility('Public');
     await expect(owner.page.visibilityDialog).toContainText('Make this nest public?');
     await owner.page.visibilityDialog.getByRole('button', { name: 'Cancel' }).click();

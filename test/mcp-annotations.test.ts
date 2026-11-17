@@ -69,6 +69,7 @@ const READ_ONLY = [
   "context_agent_rollups",
   "context_agent_ledger_org",
   "context_agent_rollups_org",
+  "context_surfaces_cold_start",
 ];
 
 /** Can overwrite or remove something that already exists. */
@@ -121,6 +122,8 @@ const OPEN_WORLD = [
   "context_bulk_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_table_rows",
   "context_approve",
   "context_resolve_deletion",
