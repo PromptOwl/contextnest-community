@@ -247,6 +247,13 @@ describe("the invitation strip (show_invite)", () => {
     expect(await (await app.request(`/p/${off.data.publish.slug}`)).text()).not.toContain("data-cn-cta");
   });
 
+  it("refuses a show_invite that is not true or false, rather than guessing", async () => {
+    const r = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook", show_invite: "false" }, owner.apiKey);
+    expect(r.isError).toBe(true);
+    expect(r.data.code).toBe("VALIDATION_FAILED");
+    expect(r.text).toBe("show_invite must be true or false");
+  });
+
   it("context_public_link_update switches it on a live link, as PATCH does", async () => {
     const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, owner.apiKey);
     const { id, slug } = made.data.publish;

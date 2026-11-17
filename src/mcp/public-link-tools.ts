@@ -194,6 +194,11 @@ export async function runPublicLinkTool(
           "VALIDATION_FAILED",
         );
       }
+      // Booleans reach us unchecked (the schema maps them to any): a string
+      // "false" must not silently leave the strip on. Same words as update.
+      if (args.show_invite !== undefined && typeof args.show_invite !== "boolean") {
+        return refusal("show_invite must be true or false", "VALIDATION_FAILED");
+      }
       const { row, link } = await publishDocumentLink({
         nestId: ctx.nestId,
         userId: ctx.userId,
