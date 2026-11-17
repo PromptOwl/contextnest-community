@@ -1321,9 +1321,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <CardHeader>
                 <CardTitle className="text-base">Getting started screen</CardTitle>
                 <CardDescription>
-                  A welcome screen for a person who signs in and owns no nest
-                  yet: create their nest in one click, connect their agents,
-                  then fill it. They can skip it and open it again from Home.
+                  A welcome screen for a person who signs in, owns no nest and
+                  was invited to none: create their nest in one click, connect
+                  their agents, then fill it. They can skip it and open it
+                  again from Home. Someone invited to a nest lands on it.
                   On by default.
                 </CardDescription>
               </CardHeader>

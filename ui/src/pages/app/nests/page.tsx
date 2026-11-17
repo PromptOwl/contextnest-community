@@ -65,6 +65,7 @@ import { selectionState, toggleMany } from "../../../lib/bulk-select";
 import { RenameNestDialog } from "../../../components/RenameNestDialog";
 import { ImportFolderModal } from "../../../components/ImportFolderModal";
 import { WelcomeScreen, ONBOARDING_QUERY_KEY } from "../../../components/WelcomeScreen";
+import { homeShowsWelcome } from "../../../lib/onboarding";
 import hootieIcon from "../../../assets/hootie.svg";
 import { Compass } from "lucide-react";
 
@@ -81,7 +82,8 @@ export default function NestsPage() {
   const { adminStatus, authMode, isAdmin, logoUrl } = useAuth();
   const queryClient = useQueryClient();
   // First-run onboarding (PO-1185): the server decides whether the welcome
-  // screen shows (no nest of your own and not skipped, or reopened from here).
+  // screen shows (no nest of your own, invited to none and not skipped, or
+  // reopened from here). An invited person gets the nest list (PO-1391).
   const { data: onboarding } = useQuery({
     queryKey: ONBOARDING_QUERY_KEY,
     queryFn: () => api.getOnboarding(),
@@ -446,7 +448,7 @@ export default function NestsPage() {
     setNestRemovalTarget({ id: nestId, name: nestName });
   };
 
-  if (onboarding?.show) {
+  if (onboarding && homeShowsWelcome(onboarding)) {
     return (
       <WelcomeScreen
         state={onboarding}

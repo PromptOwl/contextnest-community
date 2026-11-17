@@ -296,7 +296,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 The Getting started screen. Every route acts on the caller; nest routes check access to the nest. A nest-scoped key gets `403` on every route; a read-only key gets `403` on every POST and on `/onboarding/slack/start`. MCP twins on the server-level `/mcp`: `context_onboarding` (`GET /onboarding`, `/onboarding/connection` and, with `job_id`, `/onboarding/distill/:jobId`), `context_onboarding_update` (dismiss, reopen, nest) and `context_distill`.
 
 ### GET `/onboarding`
-The welcome screen's state: `show`, `first_run` (owns no nest), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
+The welcome screen's state: `show`, `first_run` (owns no nest and was let into nobody else's), `shared_nests` (how many live nests someone else owns that the caller was let into: collaborator, steward, team share, or a share on one document or folder; a public or org-visible nest they can merely read is not counted), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
 
 ### POST `/onboarding/dismiss` · POST `/onboarding/reopen`
 Skip / Done, and Getting started on Home. Return the new state.
