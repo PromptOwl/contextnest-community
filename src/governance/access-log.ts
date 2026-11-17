@@ -67,6 +67,11 @@ export const THROTTLE_MS = 10 * 60_000;
 export const MAX_PER_CALL = 50;
 /** Documents recorded per selector export — larger, since each one left. */
 export const MAX_PER_EXPORT = 1000;
+
+/** Pull replay: the hops of documents handed over as direct hits (no traversal). */
+export function directHits(nodeIds: readonly string[]): Record<string, { hop: number }> {
+  return Object.fromEntries(nodeIds.map((id) => [id, { hop: 0 }]));
+}
 const THROTTLE_MAX_KEYS = 20_000;
 /** Rows per INSERT (16 bound values each — well under SQLite's and
  *  Postgres's parameter limits). */

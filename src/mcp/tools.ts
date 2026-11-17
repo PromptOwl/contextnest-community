@@ -134,7 +134,7 @@ import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
-import { flushAccessLog, recordNodeAccess, type AccessAction } from "../governance/access-log.js";
+import { directHits, flushAccessLog, recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import { describePull, describeStep, getPull, listPulls, pullViewer } from "../governance/pull-log-service.js";
 import {
   clientToolField,
@@ -2129,7 +2129,7 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     // A get or a search hands over direct hits (an allowlist, so a tool that
     // walks the graph is never recorded as "matched"). context_query walks in
     // the engine, which reports no per-document hop — left unknown.
-    ...(DIRECT_HIT_TOOLS.has(toolName) ? { hops: Object.fromEntries(ids.map((id) => [id, { hop: 0 }])) } : {}),
+    ...(DIRECT_HIT_TOOLS.has(toolName) ? { hops: directHits(ids) } : {}),
     detail: toolName,
   });
 }
@@ -4098,7 +4098,7 @@ async function runTool(
     case "context_pull_log": {
       // Read model over the access log (po-1252) — the same service and the
       // same who-sees-whom rule as GET /nests/:id/pulls.
-      const viewer = await pullViewer(nestId, userId, userEmail);
+      const viewer = await pullViewer(nestId, userId, userEmail, { readOnlyKey: ctx.capability === "read" });
       await flushAccessLog(nestId);
       if (args.pull_id !== undefined) {
         if (typeof args.pull_id !== "string" || !args.pull_id.trim()) {

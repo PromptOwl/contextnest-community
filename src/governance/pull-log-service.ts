@@ -123,7 +123,12 @@ const COLUMNS = `e.id, e.ts, e.node_id, e.action, e.surface, e.user_id, e.client
   e.agent, e.pull_id, e.seq, e.hop, e.via, e.bytes, COALESCE(e.user_email, u.email, e.user_id) AS actor`;
 const FROM = "FROM node_access_events e LEFT JOIN users u ON u.id = e.user_id";
 
-export async function pullViewer(nestId: string, userId: string, userEmail: string): Promise<PullViewer> {
+export async function pullViewer(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  opts: { readOnlyKey?: boolean } = {},
+): Promise<PullViewer> {
   const [permission, publicReader] = await Promise.all([
     resolveNestPermission(nestId, userId),
     isPublicReader(nestId, userId),
@@ -132,7 +137,9 @@ export async function pullViewer(nestId: string, userId: string, userEmail: stri
     userId,
     userEmail,
     publicReader,
-    identities: !publicReader && permissionLevel(permission) >= permissionLevel("write"),
+    // A read-only key reads, whatever its owner may do (the same clamp as REST
+    // and the other MCP tools), so it is never shown who pulled.
+    identities: !publicReader && !opts.readOnlyKey && permissionLevel(permission) >= permissionLevel("write"),
   };
 }
 

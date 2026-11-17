@@ -221,6 +221,24 @@ describe("context pull log", () => {
     expect(probe.data.pulls).toEqual([]);
   });
 
+  it("names no one to a read-only key, whoever owns it (REST and MCP)", async () => {
+    const k = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pulls", nest_id: nestId, capability: "read" }, owner.apiKey);
+    expect(k.status).toBeLessThan(300);
+    const ro = k.data.api_key as string;
+
+    const rest = await pulls(app, nestId, ro);
+    expect(rest.status).toBe(200);
+    expect(rest.data.identities).toBe(false);
+    expect(rest.data.pulls.length).toBeGreaterThan(0);
+    expect(rest.data.pulls.every((p: any) => p.actor === null && p.agent === null)).toBe(true);
+    expect(JSON.stringify(rest.data)).not.toContain("editor@fernhill.test");
+
+    const tool = await callTool(app, nestId, ro, "context_pull_log", { limit: 5 });
+    expect(tool.isError).toBeFalsy();
+    expect(tool.structuredContent.identities).toBe(false);
+    expect(tool.structuredContent.pulls.every((p: any) => p.actor === null && p.agent === null)).toBe(true);
+  });
+
   it("gives agents the same log and trace over MCP (context_pull_log)", async () => {
     const rest = (await pulls(app, nestId, owner.apiKey, "?limit=5")).data;
     const list = await callTool(app, nestId, owner.apiKey, "context_pull_log", { limit: 5 });
