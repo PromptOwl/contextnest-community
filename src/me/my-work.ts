@@ -355,15 +355,24 @@ export async function buildMyWork(params: {
   // (PO-1180), across the same visible nests, access-checked per node. Paged
   // on their own cursor; the whole filtered list is counted, so the badge
   // and mentions_pagination.total are exactly what the pages can show.
-  const allMentions = !want("mentions")
-    ? []
-    : await listOpenMentions({ userId, email: me, nestNames: nestName, actingAs: params.actingAs ?? null }).catch((err) => {
+  const none = { items: [], total: 0, nodeKeys: new Set<string>() };
+  const {
+    items: mentions,
+    total: mentionsTotal,
+    nodeKeys: mentionNodes,
+  } = !want("mentions")
+    ? none
+    : await listOpenMentions({
+        userId,
+        email: me,
+        nestNames: nestName,
+        actingAs: params.actingAs ?? null,
+        offset: mentionsOffset,
+        limit: mentionsLimit,
+      }).catch((err) => {
         console.error("[me/work] mentions list failed", err);
-        return [];
+        return none;
       });
-  const mentions = allMentions.slice(mentionsOffset, mentionsOffset + mentionsLimit);
-  const mentionsTotal = allMentions.length;
-  const mentionNodes = new Set(allMentions.map((m) => `${m.nest_id}\u0000${m.node_id}`));
   // Watcher notifications (HITL tags) ride along so the inbox is one call.
   // Scoped to the visible nests only for a nest-scoped credential; the REST
   // inbox keeps listing every unread row, as it always has. A comment
@@ -380,7 +389,7 @@ export async function buildMyWork(params: {
   const waitingOnMeTotal =
     reviewTotal + requestsShown - myReviewsTotal -
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
-    allMentions.length;
+    mentionsTotal;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
   const full = {
     items: cap(items),

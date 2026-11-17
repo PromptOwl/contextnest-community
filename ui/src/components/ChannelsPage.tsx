@@ -297,11 +297,11 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                     ))}
                 </div>
 
-                {current.archived && (
-                  <p className="mb-4 text-sm text-muted-foreground">This channel is archived. Unarchive it to post again.</p>
+                {!current.can_post && current.post_refusal && (
+                  <p className="mb-4 text-sm text-muted-foreground">{current.post_refusal}</p>
                 )}
 
-                {canWrite && !current.archived && (
+                {current.can_post && (
                   <div className="mb-4 flex gap-2">
                     <Textarea
                       value={draft}
@@ -371,7 +371,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                                   Showing the first {replies.length} of {threadQ.data.thread.pagination.total} replies.
                                 </p>
                               )}
-                              {canWrite && !current.archived && (
+                              {current.can_post && (
                                 <div className="mt-2 flex gap-2">
                                   <Input
                                     value={replyDraft}

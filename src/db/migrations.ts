@@ -2653,7 +2653,7 @@ export function runMigrations(db: Database.Database): void {
   //   `finished_at` (when it reached its final status) and `event`
   //   ('agent.mention', or 'agent.test' for the panel's test button), so the
   //   webhooks panel can show each handle's last delivery.
-  if (!hasMigration("087_stream_marks")) {
+  if (!hasMigration("096_stream_marks")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS stream_marks (
         user_id TEXT NOT NULL,
@@ -2673,7 +2673,7 @@ export function runMigrations(db: Database.Database): void {
       if (!cols.includes("finished_at")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN finished_at TEXT");
       if (!cols.includes("event")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN event TEXT NOT NULL DEFAULT 'agent.mention'");
     }
-    recordMigration("087_stream_marks");
+    recordMigration("096_stream_marks");
   }
 }
 

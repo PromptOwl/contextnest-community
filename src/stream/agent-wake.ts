@@ -298,7 +298,10 @@ async function deliver(params: {
       { nestId, ...(nodeId ? { nodeId } : {}), channel: "webhook", ...senderFor(params.sender) },
       { rawBody: body, headers, fetchImpl: (u, init) => transport(u, init) },
     ).catch((err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-    if (last.ok || attempts > retries.length) break;
+    // A 4xx other than 408/429 is the runner refusing the event: retrying won't change it.
+    const status = Number(/responded (\d{3})/.exec(last.error ?? "")?.[1] ?? 0);
+    const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
+    if (last.ok || permanent || attempts > retries.length) break;
     await db
       .run("UPDATE agent_wake_deliveries SET attempts = ?, error = ? WHERE idempotency_key = ?", [attempts, (last.error ?? "failed").slice(0, 500), key])
       .catch(() => {});

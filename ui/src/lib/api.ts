@@ -3115,6 +3115,9 @@ export interface ChannelSummary {
   archived: boolean;
   post_count: number;
   last_post_at: string | null;
+  /** Whether this caller may post here, and why not (PO-1190). */
+  can_post: boolean;
+  post_refusal: string | null;
 }
 
 export interface ChannelMessage {

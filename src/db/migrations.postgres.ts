@@ -121,7 +121,7 @@ export const HISTORICAL_MIGRATIONS = [
   "090_control_room_run_totals",
   "094_annotation_comment_client",
   "095_agent_webhooks",
-  "087_stream_marks",
+  "096_stream_marks",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */

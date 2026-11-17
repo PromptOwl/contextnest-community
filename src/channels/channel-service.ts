@@ -235,28 +235,28 @@ interface Stats {
 async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<string, Stats>> {
   const out = new Map<string, Stats>();
   for (const ids of chunks(nodeIds)) {
-  const rows = (await getDb().all(
-    `SELECT t.node_id,
-            CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
-            MAX(t.created_at) AS last_at,
-            MAX(c.created_at) AS last_activity_at,
-            CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
-       FROM annotation_threads t
-       JOIN annotation_comments c ON c.thread_id = t.id
-       LEFT JOIN stream_marks r
-         ON r.user_id = ? AND r.nest_id = t.nest_id AND r.kind = 'channel' AND r.ref = t.node_id AND r.subject = ''
-      WHERE t.nest_id = ? AND t.node_id IN (${marks(ids)})
-      GROUP BY t.node_id`,
-    [caller.userEmail.toLowerCase(), caller.userId, caller.nestId, ...ids],
-  )) as Array<{ node_id: string; count: number | string; last_at: string | null; last_activity_at: string | null; unread: number | string | null }>;
-  for (const r of rows) {
-    out.set(r.node_id, {
-      count: Number(r.count),
-      lastAt: r.last_at,
-      lastActivityAt: r.last_activity_at,
-      unread: Number(r.unread ?? 0),
-    });
-  }
+    const rows = (await getDb().all(
+      `SELECT t.node_id,
+              CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
+              MAX(t.created_at) AS last_at,
+              MAX(c.created_at) AS last_activity_at,
+              CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
+         FROM annotation_threads t
+         JOIN annotation_comments c ON c.thread_id = t.id
+         LEFT JOIN stream_marks r
+           ON r.user_id = ? AND r.nest_id = t.nest_id AND r.kind = 'channel' AND r.ref = t.node_id AND r.subject = ''
+        WHERE t.nest_id = ? AND t.node_id IN (${marks(ids)})
+        GROUP BY t.node_id`,
+      [caller.userEmail.toLowerCase(), caller.userId, caller.nestId, ...ids],
+    )) as Array<{ node_id: string; count: number | string; last_at: string | null; last_activity_at: string | null; unread: number | string | null }>;
+    for (const r of rows) {
+      out.set(r.node_id, {
+        count: Number(r.count),
+        lastAt: r.last_at,
+        lastActivityAt: r.last_activity_at,
+        unread: Number(r.unread ?? 0),
+      });
+    }
   }
   return out;
 }
@@ -577,7 +577,7 @@ async function toPosts(caller: Caller, threads: ThreadRow[]): Promise<ChannelPos
       status: t.status,
       reply_count: o.replies,
       last_reply_at: o.lastReplyAt,
-      last_activity_at: o.lastReplyAt ?? firsts[i].created_at,
+      last_activity_at: o.lastReplyAt ?? t.created_at,
       promoted: promoted.get(t.id) ?? [],
     };
   });
@@ -696,28 +696,21 @@ export async function readChannel(
          JOIN annotation_threads t ON t.id = c.thread_id
         WHERE t.nest_id = ? AND t.node_id = ?
           AND (c.created_at > ? OR (c.created_at = ? AND c.id > ?))
+          AND c.created_at < ${nowMsExpr(db)}
         ORDER BY c.created_at ASC, c.id ASC
         LIMIT ?`,
       [caller.nestId, node.id, cursor.at, cursor.at, cursor.id, limit + 1],
     )) as CommentRow[];
+    // The current millisecond is held back: ids are random, so a later write in
+    // the same ms could sort before the cursor. ponytail: on Postgres created_at
+    // is the txn start, so a long txn can still land behind; use a sequence if so.
     const page = rows.slice(0, limit);
     if (page.length === 0) return { channel: view, messages: [], has_more: false, next_since: raw };
-    // Which of these opened its thread: the thread's first message. Read
-    // newest first, so the last write to the map per thread is its oldest.
-    const threadIds = [...new Set(page.map((r) => r.thread_id))];
-    const firsts = new Map<string, string>();
-    for (const r of (await db.all(
-      `SELECT thread_id, id FROM annotation_comments
-        WHERE thread_id IN (${threadIds.map(() => "?").join(", ")})
-        ORDER BY created_at DESC, id DESC`,
-      threadIds,
-    )) as Array<{ thread_id: string; id: string }>) {
-      firsts.set(r.thread_id, r.id);
-    }
+    const openings = await openingsFor([...new Set(page.map((r) => r.thread_id))]);
     const messages = (await toMessages(caller, page)).map((m, i) => ({
       ...m,
       thread_id: page[i].thread_id,
-      reply: firsts.get(page[i].thread_id) !== m.id,
+      reply: openings.get(page[i].thread_id)?.first?.id !== m.id,
     }));
     return { channel: view, messages, has_more: rows.length > limit, next_since: page[page.length - 1].id };
   }

@@ -7,9 +7,6 @@
  */
 
 import { isChannelId, isChannelNode } from "../channels/channel-node.js";
-
-const CHANNEL_USES_THREADS =
-  "A channel takes messages as threads: POST …/nodes/<channel id>/annotations (reply: …/annotations/<thread>/comments), or MCP context_comment.";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -66,6 +63,9 @@ import {
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
 import { readableDeletionRequests } from "./access-guard.js";
+
+const CHANNEL_USES_THREADS =
+  "A channel takes messages as threads: POST …/nodes/<channel id>/annotations (reply: …/annotations/<thread>/comments), or MCP context_comment.";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
