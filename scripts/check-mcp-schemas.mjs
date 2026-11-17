@@ -72,7 +72,8 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
-//   103->107 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision).
+//   103->107 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
+//   2026-10-24, listed in docs/prds/api-convergence.md Phase 3; engine 3.7.0 /api has no public-link op).
 //   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
 //   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
 //     context_public_link_create — twin of POST /nests/:id/publications. Mints an unguessable /p/<slug> page for one
