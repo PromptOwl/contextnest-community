@@ -885,9 +885,9 @@ Named Board views of a nest (columns, filters, card order). A board is a view, n
 ```
 `created_by_email` is `null` for callers below write — the read tier also serves public/org visitors, and member emails stay write-tier (as with `GET /collaborators`).
 
-**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`.
+**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`. Names are unique (case-insensitive) among the boards the caller can see; a taken name is saved with the next free number ("Sprint 2"). Someone else's private board doesn't count.
 
-**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`.
+**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`. A `name` taken by another visible board, or making a private board shared when a shared one has its name, → `409`.
 - Only the creator may change `private` (`403` otherwise).
 - A `config` without `ranks` keeps the stored ranks.
 - `position`: integer `0`–`10000`.
