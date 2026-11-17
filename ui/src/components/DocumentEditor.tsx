@@ -2207,6 +2207,7 @@ export function DocumentEditor({
       // Owner / nest admin (or server admin) — the people GET /activity-log
       // lets in; the server refuses everyone else regardless.
       canSeeActivity: isAdmin || canSeeActivityLog(permission),
+      isLoading: loading,
     }).map((a) => {
       const base = {
         label: a.label,
