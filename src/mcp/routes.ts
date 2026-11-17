@@ -31,6 +31,7 @@ import {
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
 import { CHANNEL_TOOL_DEFINITIONS } from "./channel-tools.js";
+import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { isInitializeRequest, nestConnectInstructions } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -97,6 +98,9 @@ function createMcpServerForNest(
     // Channels (PO-1179): their own experimental switch, independent of the
     // workflow plane. Read per request, so flipping it takes effect at once.
     ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+    // My Work (PO-1180): the caller's queue, mentions included. Not behind the
+    // channels switch — document-comment mentions work without channels.
+    ...MY_WORK_TOOL_DEFINITIONS,
   ];
   // A headless access key is offered only the tools it may call (CU-wdqcq0314u);
   // handleToolCall refuses the rest regardless.
@@ -143,6 +147,9 @@ function createMcpServerForNest(
         client,
         capability,
         contributorCredential: credentialMayContribute(c),
+        // An unscoped credential may read its cross-nest queue here, as it
+        // could from GET /me/work (context_my_work).
+        crossNest: !c.get("nestScope"),
       });
       return toCallToolResult(out);
     });

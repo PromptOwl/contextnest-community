@@ -13,7 +13,7 @@
  * Message bodies render as plain text (whitespace kept), never as HTML, so a
  * post cannot inject markup; @mentions are highlighted as text spans.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, Hash, Loader2, MessageSquare, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +26,7 @@ import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { keys, reads } from "../lib/queries";
 import * as api from "../lib/api";
 import type { ChannelMessage } from "../lib/api";
+import { readChannelDeepLink } from "../lib/channel-deep-link";
 
 const PAGE_SIZE = 50;
 
@@ -71,14 +72,25 @@ function Message({ m, children }: { m: ChannelMessage; children?: ReactNode }) {
 
 export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   const qc = useQueryClient();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
+  // A My Work mention deep-links here as ?channel=&thread= (PO-1180): open that
+  // channel (archived ones listed too, so an archived channel's thread is reachable)
+  // and thread. Read once, then dropped from the URL so refresh/Back don't reopen it.
+  const [link] = useState(() => readChannelDeepLink(window.location.search));
+  useEffect(() => {
+    if (!link.channel) return;
+    const u = new URL(window.location.href);
+    u.searchParams.delete("channel");
+    u.searchParams.delete("thread");
+    window.history.replaceState(window.history.state, "", u);
+  }, [link]);
+  const [selected, setSelected] = useState<string | null>(link.channel);
+  const [showArchived, setShowArchived] = useState(!!link.channel);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPurpose, setNewPurpose] = useState("");
   const [creating, setCreating] = useState(false);
-  const [openThread, setOpenThread] = useState<string | null>(null);
+  const [openThread, setOpenThread] = useState<string | null>(link.thread);
   const [replyDraft, setReplyDraft] = useState("");
 
   const nestQ = useQuery(reads.nest(nestId));
@@ -110,10 +122,15 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
   });
   const posts = timelineQ.data?.pages.flatMap((p) => p.posts) ?? [];
 
+  // A thread belongs to the selected channel; a deep-linked channel that is gone
+  // (current fell back to another one) opens no thread.
+  const thread = current && (!selected || current.name === selected) ? openThread : null;
   const threadQ = useQuery({
-    ...reads.channelThread(nestId, current?.id ?? "", current?.name ?? "", openThread ?? ""),
-    enabled: !!current && !!openThread,
+    ...reads.channelThread(nestId, current?.id ?? "", current?.name ?? "", thread ?? ""),
+    enabled: !!thread,
   });
+  // The open thread's post isn't on a loaded timeline page (an older deep-linked post).
+  const offPagePost = thread && !posts.some((p) => p.id === thread) ? threadQ.data?.thread.post : undefined;
   const replies: ChannelMessage[] = threadQ.data?.thread.replies ?? [];
 
   const fail = (fallback: string) => (e: any) => toast.error(e?.message || fallback);
@@ -290,7 +307,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                   <p className="text-sm text-muted-foreground">No posts yet.</p>
                 ) : (
                   <ul className="divide-y">
-                    {posts.map((p) => (
+                    {[...(offPagePost ? [offPagePost] : []), ...posts].map((p) => (
                       <li key={p.id}>
                         <Message m={p}>
                           <button
@@ -301,7 +318,7 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                             <MessageSquare className="h-3.5 w-3.5" />
                             {p.reply_count ? `${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}` : "Reply"}
                           </button>
-                          {openThread === p.id && (
+                          {thread === p.id && (
                             <div className="mt-2 border-l-2 pl-3">
                               {replies.map((r) => (
                                 <Message key={r.id} m={r} />

@@ -148,7 +148,9 @@ import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentToo
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
+import { indexPostedMessage } from "../mentions/mention-index.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
@@ -453,6 +455,12 @@ export interface McpToolContext {
    * any other caller of handleToolCall gets no contributor reach.
    */
   contributorCredential?: boolean;
+  /**
+   * The credential is not fenced to one nest (no API-key nest scope): the
+   * cross-nest reads GET /me/* serve may be answered from this endpoint too
+   * (context_my_work). Unset is false — the call sees this nest only.
+   */
+  crossNest?: boolean;
 }
 
 /**
@@ -489,6 +497,8 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_review_queue",
   "context_my_drafts",
   "context_stream",
+  // My Work (PO-1180): the caller's own queue, read-only.
+  "context_my_work",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -3686,6 +3696,8 @@ async function runTool(
         baseUrl: ctx.baseUrl,
         ...(threadId ? { thread } : {}),
       });
+      // Who it tags, for My Work's Mentions (PO-1180) — same as the REST routes.
+      await indexPostedMessage({ nestId, nodeId: node.id, thread, body, authorEmail: userEmail });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -5193,6 +5205,10 @@ async function runTool(
       // on (mcp/routes.ts); runChannelTool re-checks the switch.
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
+      }
+      // My Work (PO-1180): always registered (mcp/routes.ts).
+      if (isMyWorkTool(toolName)) {
+        return runMyWorkTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }
