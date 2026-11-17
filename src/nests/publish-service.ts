@@ -241,7 +241,13 @@ export async function publishDocumentLink(input: {
   baseUrl: string;
   request: PublishRequest;
 }): Promise<{ row: PublishRow; link: string }> {
-  const { nestId, request: body } = input;
+  const { nestId } = input;
+  // A JSON body of literal `null` must be a 400, not a TypeError 500.
+  const body: PublishRequest = input.request ?? {};
+  // Same rule as PATCH and MCP: a string "false" must not leave the strip on.
+  if (body.show_invite !== undefined && typeof body.show_invite !== "boolean") {
+    throw new ValidationError("show_invite must be true or false");
+  }
   const mode = (body.access_mode ?? "public") as PublishMode;
   // An email or invite link is opened ONLY by clicking a mailed magic link, so
   // without a mail transport it is a link nobody — not even the person who was

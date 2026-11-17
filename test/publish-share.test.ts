@@ -436,6 +436,17 @@ describe("a link with the invitation switched off (show_invite: false)", () => {
     expect((await page(`/p/${slug}`)).html).toContain("data-cn-cta");
   });
 
+  it("refuses a null body or a non-boolean show_invite on create with a 400", async () => {
+    const nul = await app.request(`/nests/${nestId}/publications`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${owner.apiKey}`, "Content-Type": "application/json" },
+      body: "null",
+    });
+    expect(nul.status).toBe(400);
+    const bad = await jsonRequest(app, "POST", `/nests/${nestId}/publications`, { node_id: "nodes/deck", show_invite: "false" }, owner.apiKey);
+    expect(bad.status).toBe(400);
+  });
+
   it("cannot switch the strip on for a white-label nest", async () => {
     const slug = await publish(whiteNest, "nodes/handbook", { show_invite: true });
     expect((await page(`/p/${slug}`)).html).not.toContain("data-cn-cta");
