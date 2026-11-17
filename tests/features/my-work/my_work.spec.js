@@ -191,6 +191,8 @@ test.describe('My Work', () => {
       primary_user,
       commonFunction,
     }) => {
+      // Several writes and two page loads on a shared server: more than the default 2 minutes.
+      test.slow();
       const { page, myWork, api, nest } = await asReviewer(primary_user, commonFunction);
       // Something of the primary's own is pending, so the badge has a count.
       const doc = await api.createDocument(nest.id, {
@@ -217,21 +219,22 @@ test.describe('My Work', () => {
       /**
        * Load `open` and check the badge shows what is waiting on the user:
        * the reviews and requests waiting on them, the tasks assigned to them
-       * and their unread notifications (`waitingOnMeCount`). Other suites
-       * raise and settle work on this account in parallel, so the badge is
-       * held to the count read just before the page loaded or the one read
-       * now — never to a number taken earlier.
+       * and their unread notifications (`waitingOnMeCount`). Other suites —
+       * and other runs on the shared server — raise and settle work on this
+       * account in parallel, so the count can move between any two reads. The
+       * badge is held to the counts the server reported from just before the
+       * page loaded until now: it must lie within them, never outside.
        */
       const pendingTotal = async () => MyWorkApi.waitingOnMe(await api.myWork({ limit: 1 }));
       const expectBadgeMatchesServer = async (open) => {
-        const before = await pendingTotal();
+        const seen = [await pendingTotal()];
         await open();
         await expect(myWork.railItem).toBeVisible();
         await expect
           .poll(async () => {
             const shown = (await myWork.railBadge.count()) ? Number(await myWork.railBadge.textContent()) : 0;
-            const now = await pendingTotal();
-            return shown === before || shown === now;
+            seen.push(await pendingTotal());
+            return shown >= Math.min(...seen) && shown <= Math.max(...seen);
           }, { message: 'the rail badge should show reviews + requests + assigned tasks + unread notifications', timeout: 30_000 })
           .toBe(true);
       };
@@ -946,6 +949,8 @@ test.describe('My Work', () => {
       commonFunction,
     }) => {
       test.skip(!secondaryRole, NEEDS_SECOND_ACCOUNT);
+      // Four reviews seeded and two bulk decisions on a shared server: more than the default 2 minutes.
+      test.slow();
       const { myWork, api, author, nest } = await withAuthor(
         primary_user,
         secondary_user,

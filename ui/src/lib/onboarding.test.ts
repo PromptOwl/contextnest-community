@@ -12,6 +12,7 @@ import {
   slackTile,
   slackReturn,
   generalInstructionsUrl,
+  homeShowsWelcome,
   type TileContext,
 } from "./onboarding";
 
@@ -134,5 +135,32 @@ describe("Slack tile (AC9, AC10)", () => {
     expect(user.action).toBe("blocked");
     expect(user.text).toMatch(/server admin must configure/);
     expect(slackTile({ ...base, configured: false, can_connect: false, admin_settings_path: "/settings" }, true).action).toBe("admin");
+  });
+});
+
+/**
+ * PO-1391: the server decides who is a first run (`show`), in one place. Home
+ * renders that answer and never works it out again from the other fields.
+ */
+describe("the welcome gate on Home", () => {
+  it("Given an invited person who owns no nest, When they open Home, Then they see the nest list", () => {
+    expect(homeShowsWelcome({ show: false, first_run: false, shared_nests: 1, nest: null })).toBe(false);
+  });
+
+  it("Given a person who reaches nothing, Then they see the welcome screen", () => {
+    expect(homeShowsWelcome({ show: true, first_run: true, shared_nests: 0, nest: null })).toBe(true);
+  });
+
+  it("Given an invited person who clicked Getting started, Then the welcome screen opens", () => {
+    expect(homeShowsWelcome({ show: true, first_run: false, shared_nests: 1, nest: null })).toBe(true);
+  });
+
+  it("follows `show` alone: a first run who skipped sees the nest list", () => {
+    expect(homeShowsWelcome({ show: false, first_run: true, shared_nests: 0, nest: null })).toBe(false);
+  });
+
+  it("shows the nest list until the state has arrived, and when onboarding is not served", () => {
+    expect(homeShowsWelcome(undefined)).toBe(false);
+    expect(homeShowsWelcome(null)).toBe(false);
   });
 });

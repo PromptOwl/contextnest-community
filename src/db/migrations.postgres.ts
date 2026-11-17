@@ -116,9 +116,13 @@ export const HISTORICAL_MIGRATIONS = [
   "082_surfaces_seeds",
   "083_view_summaries",
   "084_onboarding",
+  "085_comment_mentions",
   "086_control_room_ledger",
   "090_control_room_run_totals",
   "093_access_pull_trace",
+  "094_annotation_comment_client",
+  "095_agent_webhooks",
+  "096_stream_marks",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -491,6 +495,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created by an earlier build of 037 still gets them on upgrade.
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
+    -- PO-1365: the per-link switch for the "Make your own nest" strip (on by default).
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS show_invite INTEGER NOT NULL DEFAULT 1;
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
@@ -1198,6 +1204,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    -- caller attribution on comment-thread messages (migration 094, PO-1179)
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS client_json TEXT;
     ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
@@ -1416,6 +1424,68 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       after = page[page.length - 1].id;
     }
   }
+  // Migration 085 parity: the @mention index My Work reads (PO-1180). Placed
+  // after 086/090 on purpose (085 was reserved); it depends on neither.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS comment_mentions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      mentioned_user_id TEXT,
+      handle TEXT NOT NULL,
+      author TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+  `);
+
+  // Migration 095 parity: agent wake-up targets + delivery ledger (PO-1181).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_webhooks (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      url_enc TEXT NOT NULL,
+      secret_enc TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, handle)
+    );
+    CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+      idempotency_key TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      comment_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+  `);
+
+  // Migration 087 parity: per-person stream marks (channel read state, mention
+  // marked done) and the final state of a wake-up delivery (PO-1190/PO-1189).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stream_marks (
+      user_id TEXT NOT NULL,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      at TEXT NOT NULL,
+      PRIMARY KEY (user_id, nest_id, kind, ref, subject)
+    );
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

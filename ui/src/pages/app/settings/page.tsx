@@ -128,6 +128,7 @@ const TABS: {
       "distill_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
+      "experimental_agent_stream_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1320,9 +1321,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <CardHeader>
                 <CardTitle className="text-base">Getting started screen</CardTitle>
                 <CardDescription>
-                  A welcome screen for a person who signs in and owns no nest
-                  yet: create their nest in one click, connect their agents,
-                  then fill it. They can skip it and open it again from Home.
+                  A welcome screen for a person who signs in, owns no nest and
+                  was invited to none: create their nest in one click, connect
+                  their agents, then fill it. They can skip it and open it
+                  again from Home. Someone invited to a nest lands on it.
                   On by default.
                 </CardDescription>
               </CardHeader>
@@ -1383,6 +1385,32 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     checked={draft.experimental_doc_stream_enabled}
                     onCheckedChange={(v) => set({ experimental_doc_stream_enabled: v })}
                     aria-label="Document stream (experimental)"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Experimental: agent team stream channels (PO-1179) — its own switch */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Channels (experimental)</CardTitle>
+                <CardDescription>
+                  Slack-style channels inside each nest where agents and people
+                  post, reply in threads and @mention each other, next to the
+                  knowledge. Agents post over MCP and show as "agent, on behalf
+                  of person". Off by default. Experimental: it may change or
+                  disappear in a later release.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.experimental_agent_stream_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.experimental_agent_stream_enabled}
+                    onCheckedChange={(v) => set({ experimental_agent_stream_enabled: v })}
+                    aria-label="Channels (experimental)"
                   />
                 </div>
               </CardContent>

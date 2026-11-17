@@ -6,10 +6,13 @@
  * - governanceNodeRoutes: mounted at /nests/:nestId/nodes BEFORE nodeRoutes catch-all
  */
 
+import { isChannelId, isChannelNode } from "../channels/channel-node.js";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
+import { config } from "../config.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -60,6 +63,9 @@ import {
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
 import { readableDeletionRequests } from "./access-guard.js";
+
+const CHANNEL_USES_THREADS =
+  "A channel takes messages as threads: POST …/nodes/<channel id>/annotations (reply: …/annotations/<thread>/comments), or MCP context_comment.";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -691,7 +697,7 @@ governanceRoutes.get("/activity", async (c) => {
   const all = await comments.getActivity({ nestId, limit });
   // Only what the caller can read: an entry names a node, who touched it and
   // an excerpt, so a visibility-only reader gets approved documents' entries
-  // only, and a pending chat draft stays unseen below write (PO-1191).
+  // and never a channel's, and a share grantee only their shared ones.
   const userId = c.get("userId");
   const readable = new Set(
     (
@@ -945,13 +951,21 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
   if (annotationReply) {
     return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
   }
+  const author = await getUserEmail(c);
+  // A channel's messages are its threads, under the channel's own access
+  // rule; this older flat store takes nothing for a channel, from anyone
+  // (PO-1190). Someone who can't read under nodes/channels/ gets one answer
+  // whether or not a channel is there, so this is no way to list them.
+  if (isChannelId(nodeId)) {
+    if (!(await canReadNode(nestId, nodeId, c.get("userId"), author))) return c.json({ error: "Not found" }, 404);
+    if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
+  }
   const body = await c.req.json<{
     body?: string;
     version?: number;
     anchor?: { start?: number; end?: number; text?: string };
     parentId?: string;
   }>();
-  const author = await getUserEmail(c);
   let comment;
   // A comment lands only on a node its author can read: the same rule as
   // reading the node's comments (PO-1192).
@@ -1004,6 +1018,10 @@ governanceNodeRoutes.post(
       return c.json({ error: "Comment not found" }, 404);
     }
     const resolvedBy = await getUserEmail(c);
+    if (isChannelId(nodeId)) {
+      if (!(await canReadNode(nestId, nodeId, c.get("userId"), resolvedBy))) return c.json({ error: "Not found" }, 404);
+      if (await isChannelNode(nestId, nodeId)) return c.json({ error: CHANNEL_USES_THREADS }, 409);
+    }
     try {
       const comment = await comments.resolveComment({
         nestId,
@@ -1590,6 +1608,19 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * Open mode (sign-in off) with no credential: the one local user, who has
+ * owner-level access to every nest (the nest gate) — including one an account
+ * from before sign-in was turned off created — and decides external edits
+ * there (canDecideExternalEdit), so it must read the edit it decides
+ * (AC-EED-05). Only the anonymous local identity: an API key or session sent
+ * to an open-mode server authenticates as itself (flexAuthMiddleware) and
+ * keeps every access check.
+ */
+function isOpenModeLocalUser(userId: string | undefined): boolean {
+  return config.AUTH_MODE === "open" && userId === ANON_USER_ID;
+}
+
+/**
  * May this caller see a document's pending external edits? Such an edit is
  * text nobody approved, so it follows the document's working copy: never for
  * someone who reaches the nest only through its visibility (they read approved
@@ -1597,6 +1628,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
  */
 async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return true;
   if (await isPublicReader(nestId, userId)) return false;
   return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
 }
@@ -1609,6 +1641,7 @@ async function readableExternalEdits(
 ): Promise<externalEdits.ExternalEditEntry[]> {
   if (entries.length === 0) return entries;
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return entries;
   if (await isPublicReader(nestId, userId)) return [];
   const readable = await filterAccessible(
     nestId,

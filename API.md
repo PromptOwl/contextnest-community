@@ -296,7 +296,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 The Getting started screen. Every route acts on the caller; nest routes check access to the nest. A nest-scoped key gets `403` on every route; a read-only key gets `403` on every POST and on `/onboarding/slack/start`. MCP twins on the server-level `/mcp`: `context_onboarding` (`GET /onboarding`, `/onboarding/connection` and, with `job_id`, `/onboarding/distill/:jobId`), `context_onboarding_update` (dismiss, reopen, nest) and `context_distill`.
 
 ### GET `/onboarding`
-The welcome screen's state: `show`, `first_run` (owns no nest), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
+The welcome screen's state: `show`, `first_run` (owns no nest and was let into nobody else's), `shared_nests` (how many live nests someone else owns that the caller was let into: collaborator, steward, team share, or a share on one document or folder; a public or org-visible nest they can merely read is not counted), `dismissed`, `nest` (`id`, `name`, `mcp_url`, `server_mcp_url`), `can_create_nest`, `suggested_nest_name`, `distill.mode` (`server` | `agent`), `connectors.slack` (`configured`, `can_connect`, `connected`, `admin_settings_path`, `reason`).
 
 ### POST `/onboarding/dismiss` · POST `/onboarding/reopen`
 Skip / Done, and Getting started on Home. Return the new state.
@@ -919,7 +919,7 @@ Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; con
 Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
 
 ### Bulk move and delete — `POST /nests/:nestId/nodes/bulk-move`, `/bulk-delete`
-Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal or a PDF move is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
+Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
 
 ### Ticket backfill — `POST /nests/:nestId/tickets/backfill` (admin/owner)
 Numbers the tasks a nest already has, oldest first (`created_at`, then id), once `task_rules.ticket_numbering` is on (which needs a `ticket_prefix`). Body `{ "limit"?: 1–100, "dry_run"?: boolean }` (default 100). Tasks that already have a ticket are skipped; every other task is numbered whatever surface it is in. A dry run writes nothing. Each numbered task is published as its own version (change note `Assigned ticket PO-1`) and never drafts. Call again until `remaining` is `0`.
@@ -1320,6 +1320,14 @@ Restore an earlier version by writing its content as a **new** version (history 
 { "targetVersion": 3 }
 ```
 Response: `{ "ok": true, "version": <new>, "node": { ... } }`. `400` without a valid `targetVersion`; `404` if that version doesn't exist. Only **sealed** versions can be reverted to — a draft revision is not in the version chain (see below).
+
+### POST `/nests/:nestId/nodes/:nodeId/archive`
+
+Body `{ "reason": "…" }` (optional). Takes the document out of lists, counts, search and agent reads, keeping its history (spec §1.13). Stewards only: nest owner, admin, or a reviewer of this document, otherwise `403`. `423` while a review is pending; `400` when already archived or a suggestion is staged. The document stays readable by id for stewards, with an `archived` block, and answers `404` to everyone else. Edits, discards and review submissions answer `400` until it is restored.
+
+### POST `/nests/:nestId/nodes/:nodeId/unarchive`
+
+Brings an archived document back in the status it left, same version and content. Same permission as archive. List what can be restored with `GET /nests/:nestId/nodes?archived=1`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/discard`
 
@@ -1893,6 +1901,33 @@ Open board tasks and cards whose `assignee` is the caller, across every nest the
 
 `assigned` is not paged with the reviews: `limit` / `offset` and `pagination` cover the review queue only, and the full `assigned` list comes back on every call. The My Work badge counts `pagination.total` plus `assigned.length`, so tasks assigned to you count as waiting on you.
 
+### Mention rows (`GET /me/work` → `mentions`)
+
+Open comment threads — channel posts and document comments, the annotation threads `context_comment` writes — that @mention the caller and wait on their answer, across every nest they can see. A thread leaves the list once the caller replies in it **after** the mention, it is resolved, or the caller marks it done (below); a later mention brings it back. One row per thread (the newest unanswered mention in it), newest first:
+
+```json
+{ "type": "mention", "kind": "channel", "nest_id": "…", "nest_name": "Team", "node_id": "nodes/channels/ops", "title": "#ops",
+  "channel": "ops", "thread_id": "…", "comment_id": "…", "excerpt": "@alice can you take the deploy tonight?",
+  "author": "bob@acme.com", "author_name": "Bob Builder", "author_label": "grok, on behalf of Bob Builder", "agent": "grok", "for_agent": null,
+  "mentioned_at": "2026-11-08T10:00:00.123Z" }
+```
+
+`kind` is `channel` (open `/nest/<id>/channels?channel=<channel>&thread=<thread_id>`) or `document` (open the document with `?doc=<node_id>&thread=<thread_id>`); `channel` is `null` for a document, and every row is `document` while `EXPERIMENTAL_AGENT_STREAM` is off. `excerpt` is the message as plain text, whitespace collapsed, capped at 280 characters. `author` is the writer's login (an email), `author_name` their display name, and `author_label` what to show: the display name, or `"<agent>, on behalf of <name>"` when the writer declared an agent (`agent`).
+
+Who counts as mentioned is decided when the message is posted, by the rule mention notifications use: `@full@email`, a unique email local part, or a unique display name (`@(Display Name)`), looked up in the nest's people first, then the directory when `PEOPLE_SUGGEST_ALL_USERS` is on; never the author; at most 25 per message; nothing inside a code span or fence. Mentions are recorded for messages a person posts (`POST …/annotations`, `…/annotations/:threadId/comments`, MCP `context_comment`), not for text a model wrote (Hootie, metacognition agents) or an anonymous docs-site comment. Access is decided when My Work is read: a nest or document the caller can no longer read takes its rows out of the list and out of every count.
+
+**Mentions of an agent.** An `@handle` that names no person (an agent's handle, today) is recorded too. A call that **acts as an agent** also gets the threads that tag that handle, each with `for_agent: "<handle>"`: the handle is the caller-declared `client.agent`, else the API key's label, when it has the shape of a handle (lowercase letters, digits, `.`, `-`, `_`). So an agent whose key is labelled `grok` calls `context_my_work` (or `GET /me/work` with that key) and sees what is tagged `@grok` — no webhook needed. The label is self-reported and only widens which handles match: every row is still limited to nests the person behind the key can see and nodes they can open, so claiming a label shows nothing that person couldn't already read. For that handle a thread is answered once a later message in it is written **as that agent under the same login** (so the person behind the key tagging their own agent still lands in the agent's queue, and someone else claiming the label can't clear it), or the thread is resolved, or it is marked done. Once agent principals land, the agents a person owns roll up to them the same way (`for_agent`); until then nobody owns one.
+
+**Mark done.** `POST /me/work/mentions/:threadId/done` (body optional: `{ "for_agent": "<handle>" }` to clear the mention of the agent the call acts as) → `{ "done": true, "thread_id", "for_agent" }`. The caller's mention in that thread leaves `mentions`, `mentions_pagination.total` and `waiting_on_me_total` at once and returns only if a **later** message in the thread names them again. It is the caller's own mark: the message, the thread's status and everyone else's My Work are untouched. `404` unless the caller has an open mention in that thread right now (the same answer for a thread that doesn't exist, one they can't open, and one that never named them). MCP: `context_resolve_comment { thread, mention_done: true }` (the caller's own mention first, else the acting agent's).
+
+**Sections and limit.** `?sections=` (comma-separated, any of `mentions`, `items`, `assigned`, `waiting`, `notifications`) returns only those sections — and skips the work behind the others — each with its own paging key (`mentions_pagination`; `pagination` when `items` or `waiting` is asked); the cross-section totals (`waiting_on_me_total`) ride only on the full response. An explicit `?limit=` caps **every** section at that many rows (`assigned` and `notifications` included), not only the review page. An unknown section name → `400`.
+
+Paging: `?mentions_limit=` (1–100; defaults to `limit`, else 50) and `?mentions_offset=` page this list on its own; `mentions_pagination` is `{ total, limit, offset, has_more }` with `total` = every open mention. `waiting_on_me_total` includes that total. A comment's "mentioned you" notification is left out of `notifications` while this list shows an open mention on the same document, so the badge counts a mention once; a mention in a document's body always stays in `notifications`.
+
+Known limits: each read scans the caller's newest 2,000 mention rows before the per-thread and access filters, so past that `total` can undercount. Recording is best-effort: a failed write never fails the post, and that mention is not retried. Mentions posted before migration 085 are not backfilled. Comments cannot be edited or deleted one by one, so a recorded mention never goes stale; deleting the thread or document removes its rows.
+
+MCP twin: `context_my_work` (read tier; `sections`, `limit`, `offset`, `mentions_limit`, `mentions_offset`) returns the `/me/work` body as `structuredContent`. Its **default leaves `notifications` out** (the person's unread inbox is not an agent's queue, and was most of the response): it returns `mentions`, `items`, `assigned` and `waiting`, mentions first, a few hundred tokens when nothing is waiting. Ask for `sections: ["notifications"]` to get them; asking for all five returns exactly the REST body, totals included. On a nest-scoped key — which may not call `/me/work` — it returns that nest's share only.
+
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions, `comment_reply` thread replies, `comment` notes to a document's watchers and reviewers); nest-level rows have `node_id: null`.
@@ -2092,9 +2127,9 @@ List comments on a node. Optional `status` = `open` | `resolved`. A node the cal
 ```
 
 ### POST `/nests/:nestId/nodes/:nodeId/comments`
-Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`. `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
+Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`. `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`. A channel node takes nothing here (`409`): a channel's messages are its annotation threads, under the channel's own access rule (see Channels).
 
-**`@mentions` notify.** Every name in the comment body — `@user@host`, `@localpart`, or `@(Display Name)` — is resolved against the nest's people (`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row in `GET /me/notifications` linking the document, plus a message on the configured connector and an email to their own address when SMTP is set up. A channel message names who was mentioned (a room is not a person); the inbox row and the email address the recipient directly. The author is never notified about their own mention, a name matching nobody (or matching two people ambiguously) notifies nobody, and a recipient who can't open the document is skipped — so a mention can't disclose a title. Unlike a document body, where only names a save *adds* notify, every name in a comment notifies: the comment itself is the new event. At most 25 people are notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and unthrottled, so a comment naming a large roster would otherwise be an amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS` on, a name that matches a registered account off the nest is an invite: a write+ author's mention adds them as a `read` collaborator and then notifies; a read-only author's mention of an outsider still reaches nobody.
+**`@mentions` notify.** Every name in the comment body — `@user@host`, `@localpart`, or `@(Display Name)`; a full stop that ends the sentence is not part of the name, so `thanks @rita.` names rita — is resolved against the nest's people (`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row in `GET /me/notifications` linking the document, plus a message on the configured connector and an email to their own address when SMTP is set up. A channel message names who was mentioned (a room is not a person); the inbox row and the email address the recipient directly. The author is never notified about their own mention, a name matching nobody (or matching two people ambiguously) notifies nobody, and a recipient who can't open the document is skipped — so a mention can't disclose a title. Unlike a document body, where only names a save *adds* notify, every name in a comment notifies: the comment itself is the new event. At most 25 people are notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and unthrottled, so a comment naming a large roster would otherwise be an amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS` on, a name that matches a registered account off the nest is an invite: a write+ author's mention adds them as a `read` collaborator and then notifies; a read-only author's mention of an outsider still reaches nobody.
 
 The *stream* of them is bounded too: per nest per 5 minutes, one person may cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention **channel posts** (`MENTION_CHANNEL_BUDGET`) — separate pools, because emails scale with how many people were named while a channel post is one message per comment. Separate also so the email allowance doesn't depend on something invisible: the connector dispatch is a no-op on a nest with no connector configured, and a shared pool would have spent the token before it could say so, quietly halving the email budget on exactly the deployments least likely to have a connector. Past that the comment still posts and the inbox rows still land — the queue is the recipient's own record and costs one insert — and only the external fan-out is skipped, with a server-log warning. The budget sits on delivery rather than on comment creation deliberately: an agent working through a review posts a comment per finding, which is exactly what `context_comment` is for, and throttling the write would break it. The same applies to the annotation thread endpoints (§ Hosted artifacts), which are what the UI's comments panel posts.
 
@@ -2106,7 +2141,7 @@ The *stream* of them is bounded too: per nest per 5 minutes, one person may caus
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`. A comment on a node the caller can't read → `404`, the same answer as an unknown comment id.
 
 ### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
-Per-node (or nest-wide) activity log — "who did what". Only for nodes the caller can read: the per-node log of an unreadable node is `{ "activity": [] }`, and the nest-wide log leaves out entries about nodes the caller can't read (so a visitor to a public nest sees approved documents' entries only). A read-only aggregation
+Per-node (or nest-wide) activity log — "who did what". Only for nodes the caller can read: the per-node log of an unreadable node is `{ "activity": [] }`, and the nest-wide log leaves out entries about nodes the caller can't read (so a visitor to a public nest sees approved documents' entries only, never a channel's, and a share grantee only their shared documents'). A read-only aggregation
 over comments + committed edits (`node_versions`) + pending external-edit
 suggestions ("proposed an edit", read from nest storage) + reviews
 (`review_requests`); newest first, `?limit=` (default 100). Each entry:
@@ -2154,8 +2189,9 @@ The task's full timeline (edits, reviews, comments too) is `…/activity` above.
 The comments above are flat per-node threads. **Annotations** are the highlight-anchored threads the editor's Comment mode and the artifact viewer show; MCP's `context_comments` / `context_comment` / `context_resolve_comment` operate on these. Read permission to view, write to post.
 
 - `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
-- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
-- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). Everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured.
+- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion?, client? }` → `201 { thread, comment_id, mentions }`. `client` is stored with the message as caller attribution: `client.agent` shows the message as `"<agent>, on behalf of <person>"`; an API key's label alone does not (it is kept beside the message, not shown as an agent). On a channel node, posting is for people added to the nest (see Channels). No `anchor` = a whole-document (or whole-artifact) thread.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body, client? }` → `{ thread, comment_id, mentions }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). On a document, everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured. **In a channel a reply notifies only the people it @mentions**: no `comment_reply` rows for the thread's participants and no "commented on" rows for reviewer stewards (the channel's `unread` count carries that); people watching the channel node still hear of every message.
+- Both answer with what was written and who it reached: `comment_id` is the new message's id, and `mentions` lists every `@name` in it, in order — `{ name, kind: "person", display_name, notified }` (`notified: false` when it is the author, has no account, or can't open the node), `{ name, kind: "agent", wake }` (`wake`: `sent` — a wake-up POST went out; `no_webhook` — the agent has no target and finds the mention in its `context_my_work`; `skipped` — the writer itself, a duplicate, or the rate fence) or `{ name, kind: "nobody" }`. A caller who may not see the nest's roster (someone reading a public nest, say) always gets `mentions: []`, so the answer can't be used to find out who is on a nest. MCP `context_comment` returns the same as `structuredContent` (`node_id`, `thread_id`, `comment_id`, `mentions`) and says it in one line of text.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
 - `GET /nests/:nestId/nodes/:nodeId/hosted` — an artifact's HTML (for a `view` node's page and frames see [View nodes](#view-nodes)), served under the sandbox CSP (opaque origin, no network). `?v=N` pins a snapshot. `?embed=1` appends the in-app viewer's bridge, a script that tells the viewer which text is at the top of the frame, scrolls to text the viewer names, and paints the open threads' quotes (`postMessage` only; the viewer sends quotes keyed by throwaway ids, never thread ids or comment bodies — so the artifact's own scripts can tell which of its passages have open threads, and nothing more). Without `embed` the body is served as stored. Only `embed=1` turns it on. An artifact whose markup ends inside an unclosed `<script>`, `<!--`, `<textarea>` or `<plaintext>` swallows the bridge; its preview then works as before, without highlights or place-keeping.
 - `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
@@ -2677,12 +2713,17 @@ Returns `201` whenever the batch ran, even if every row landed in `skipped` or `
 Expose ONE document as a standalone page at a stable, unguessable `/p/<slug>` URL. Distinct from nest visibility (whole-nest read) and from grants (authenticated per-user sharing). Managing publish links is owner/admin only. Access modes: `public` (no auth), `code` (shared passcode), `email` (viewer enters an email → one-time magic link → access logged), `invite` (same, but only allow-listed emails get a link). Every served view is logged; links are revocable and can carry `expires_at`.
 
 ### POST `/nests/:nestId/publications` (owner/admin)
-Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite", comments_enabled?: bool, watermark?: bool, no_download?: bool, code?: string (code mode), allowlist?: string[] (invite mode), expires_at?: ISO }`. → `201 { publish, link }`.
+Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite", comments_enabled?: bool, watermark?: bool, no_download?: bool, show_invite?: bool (default true), code?: string (code mode), allowlist?: string[] (invite mode), expires_at?: ISO }`. → `201 { publish, link }`.
+
+`access_mode` defaults to `public` here, as it always has; the Publish dialog and one-click Share both send it explicitly. The MCP twin, `context_public_link_create`, has no default: an agent must name the mode, and a missing one is refused with the four allowed values, so an open link is never an agent's silent default.
 
 `watermark` stamps the viewer's email across the page — email/invite gates only, since the other two identify nobody. `no_download` blocks copy, right-click, drag and printing; both are deterrents, not protection (screenshots and developer tools still work). `400` when `node_id` names no document in the nest, or when `email`/`invite` is requested on a server with no mail transport (`SMTP_URL` + `NOTIFY_EMAIL_FROM`) — their one-time link could never be sent.
 
 ### GET `/nests/:nestId/publications` (owner/admin)
 List this nest's publish links with their `link` URLs.
+
+### PATCH `/nests/:nestId/publications/:id` (owner/admin)
+Body `{ show_invite: boolean }` → `200 { publish, link }`. Changes a link in place; its URL stays the same. `show_invite` is the only setting that can be changed (`400` when it is not a boolean, `404` for an unknown or revoked link).
 
 ### GET `/nests/:nestId/publications/:id/views` (owner/admin)
 The access log — `{ count, views: [{ email, created_at }] }`.
@@ -2691,13 +2732,20 @@ The access log — `{ count, views: [{ email, created_at }] }`.
 Revoke — the link 404s immediately.
 
 ### Public render surface (no auth chain)
-- `GET /p/:slug` — the document, a gate form (email/code/invite), or — when `comments_enabled` — a reader shell framing the document beside the comment control. Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug` — the document, a gate form (email/code/invite), or a reader shell framing the document: when `comments_enabled` (beside the comment control), and for an HTML/artifact document on a nest that is not white-label (above the strip below). Document bodies are served under the strict artifact sandbox (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug/og-image` — the link-preview image: the nest's uploaded logo, or a default 1200×630 card. `404` for a link that is not live.
 - `GET /p/:slug/view` — the document itself, always sandboxed. The shell frames it; gated independently, so being the frame source is not authorization.
 - `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link). Rate limited per link per IP.
 - `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open. Invite mode re-checks the allow-list here, not only when the link was sent.
 - `POST /p/:slug/comments` — JSON `{ body, email? }`, from the shell's modal. Needs the gate cleared and an identifying email; lands as an unanchored annotation thread for stewards, never on the published page.
 
 Only the approved version is ever served — a document with no approved snapshot 404s rather than exposing a draft. A revoked, expired or unknown slug answers every route above with the same HTML notice, never a hint about which it was.
+
+**Link previews.** `GET /p/:slug` carries Open Graph and Twitter card tags: `og:title`, `og:description` (up to 200 characters of the approved version's text; omitted when `no_download` is on), `og:url`, `og:site_name` (the nest's `site_title`, else `ContextNest`), `og:image` (an external https logo directly, otherwise `/p/:slug/og-image`), `twitter:card`. A gated link that has not been opened gets `Protected document` as its title and no description. Links use `PUBLIC_BASE_URL` when set, otherwise the request's origin. An HTML document that already has its own `og:` tags keeps them. Every `/p` page (open or gated) carries `<meta name="robots" content="noindex, nofollow">` (except an author's HTML page that already has its own `og:` tags, which is served exactly as written and relies on the header), and every response under `/p/` (including `/view`, `/og-image` and the "no longer available" page) sends `X-Robots-Tag: noindex, nofollow`: a public link is for sharing with people, not for search. Link previews are unaffected (unfurlers read the `og:` tags). `GET /p/:slug/og-image` is rate limited per live link per IP (120 per 10 minutes); an unknown slug is a plain `404`.
+
+**"Make your own nest".** On a link with `show_invite` on (the default) in a nest without `hide_powered_by`, `GET /p/:slug` shows one strip linking to this deployment's sign-in page with `?ref=share` (`<base>/?ref=share`), where a new person can register and lands in first-run onboarding. It is part of the page chrome only (a markdown page, the gate, the reader shell) and never part of `GET /p/:slug/view`, whose bytes are unchanged. A white-label nest shows no strip, whatever the link says. With `show_invite` off the page is served with nothing added to its body, and an HTML document is served directly instead of framed.
+
+**MCP** (nest owner/admin only, advertised only to them on a read-write credential): `context_public_link_create` (`id` and `access_mode`, both required, plus the POST body's `code`, `allowlist`, `expires_at`, `comments_enabled`, `watermark`, `no_download`, `show_invite`), `context_public_links` (`id?`), `context_public_link_update` (`link_id`, `show_invite`) and `context_public_link_revoke` (`link_id`) mirror the four routes above on the same service: same refusals, in the same words. The prose states the URL and whether the link is open (anyone with the link) or gated; `structuredContent` is the REST payload plus `access` (`open` | `gated`) and, on the list, `live`.
 
 ---
 
@@ -3015,6 +3063,8 @@ The server guarantees **delivery**, not obedience: an outside client (Claude Cod
 - `context_pull_log` — `{ pull_id?, limit?, before?, agent? }` — the context pull log (`GET /nests/:nestId/pulls`): recorded retrievals, newest first, each with the documents it handed over in order (version, size, hop and via). With `pull_id`, that one pull's trace. Same who-sees-whom rule as the REST route; not available to headless access keys. Also on the server-level `/mcp` endpoint (with `nest`).
 Every write here needs edit access; a read-only collaborator's key gets `UNAUTHORIZED_ACTION`, and a headless access key is refused like any other write.
 
+**Archive.** `context_archive` and `context_unarchive` mirror the REST routes: stewards only, and `context_get` answers not found for an archived node. Prefer archive to `context_delete` when a document may be wanted again.
+
 **Deletion requests** mirror the REST + UI flow, so an agent isn't left at a dead end when `context_delete` refuses:
 - `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
 - `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
@@ -3022,8 +3072,9 @@ Every write here needs edit access; a read-only collaborator's key gets `UNAUTHO
 
 **Comments read AND write.** `context_comments` reads a document's threads (anchored quotes, replies, open/resolved) — the same annotation store the web UI's comments panel shows. Two write tools close the loop so an agent handed feedback can answer it rather than only read it:
 
-- `context_comment` — leave a comment. Omit `thread` to open a new whole-document thread; pass a `thread` id from `context_comments` to reply into it. One tool for both, because they differ only by that argument.
-- `context_resolve_comment` — resolve a thread, or `reopen: true` to put it back. The caller is recorded as the resolver, exactly as in the UI.
+- `context_comment` — leave a comment. Omit `thread` to open a new whole-document thread; pass a `thread` id to reply into it. One tool for both, because they differ only by that argument. The target is `id` or `title` (a document), `channel` (a channel: its name, `#name` or node id — `id` takes those too), or nothing but `thread`: the document or channel is then the thread's own, checked exactly as if it had been named. A wrong channel is answered with the channels that exist. The result's `structuredContent` is `{ node_id, thread_id, comment_id, mentions }` (see the annotation routes for `mentions`), and the text ends with one line saying what each @name reached.
+- `context_resolve_comment` — resolve a thread, or `reopen: true` to put it back; the thread id alone is enough. The caller is recorded as the resolver, exactly as in the UI. `mention_done: true` leaves the thread as it is and clears only the caller's own mention of it from My Work (`POST /me/work/mentions/:threadId/done`).
+- `context_comments { thread }` returns that one thread (with or without `id`): `structuredContent` `{ node_id, title, thread }`. It is what an agent wake-up's `read` call asks for on a document.
 
 Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
 
@@ -3070,6 +3121,27 @@ Execute (the runner contract — the agent IS the runner):
 - `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
 - `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
 
+### Links for people, and posting an HTML page
+
+**Links.** The API lives under `/nests/<id>` (plural) and answers programs. The web app lives under `/nest/<id>` (singular): `/nest/<nest-id>` is a nest, `/nest/<nest-id>?doc=<node id, URL-encoded>` is one document. Agents get the web address ready-made, so they never have to build one:
+
+- `GET /index?format=json` and the `nest_index` tool: `web_url` on each nest; the markdown lists it as "web (for people)" and labels the API URLs "for agents".
+- `POST /nests/:nestId/nodes` and `PATCH /nests/:nestId/nodes/:nodeId`: a top-level `web_url` next to `node`.
+- `context_get`, `context_create`, `context_update` and a `context_upload` document: the link in the result text. `context_list` and `context_search` end with the address pattern. The structured payloads of these tools are unchanged (they follow the engine's operation catalog).
+
+The base is `PUBLIC_BASE_URL` when set, otherwise the origin of the request. A browser page load of `/nests/:nestId`, `/nests/:nestId/mcp` or `/nests/:nestId/context` that carries no `Authorization` header and no query string is redirected (302) to `/nest/:nestId`. A page load is a request with `Sec-Fetch-Dest: document`, or, from a client that sends no `Sec-Fetch-Dest`, one whose `Accept` includes `text/html`. Requests from programs are not affected; one that authenticates with a session cookie and wants the JSON should not ask for `text/html` (or can add any query string).
+
+**HTML pages.** To post an HTML page, create a node with `"type": "artifact"` and the raw HTML document as `content` (no markdown code fence). It renders, sandboxed, in the web app. When an agent sends a page as a plain document anyway, the server stores what was meant: over MCP always, over REST when the request carries an API key (a person saving in the web app is never converted).
+
+| The write | What is stored | The result says |
+| --- | --- | --- |
+| No type or `document`, and the whole body is one `html` code fence or a full HTML document (`<!DOCTYPE html>` / `<html>`) | an `artifact`, body = the HTML without the fence | "Stored as an HTML artifact…" |
+| The same, with artifacts disabled on the server (`TYPE_ARTIFACT_ENABLED=false`) | as sent, a markdown document | "…artifact nodes are disabled on this server…" |
+| An `artifact` (new or existing) whose body arrives inside a code fence | the HTML without the fence | "The code fence around the HTML was removed…" |
+| Markdown with text around an html code block, any other node type, or `append` | as sent | nothing |
+
+Over MCP the sentence is part of the result text; over REST it is a top-level `notice` string.
+
 ### PromptOwl native connection (service-ticket auth)
 
 The official PromptOwl deployment connects on its users' behalf without storing a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the shared secret configured for it as an official community site (`/admin/community-sites`, or the legacy `OFFICIAL_COMMUNITY_SSO_SECRET` env var — see `CONFIGURATION.md`). The ticket carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a ~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by email — native access never auto-provisions.
@@ -3089,10 +3161,142 @@ Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection clie
 
 ## 10. Admin / operator
 
+### Channels — `/nests/:nestId/channels` (experimental, `EXPERIMENTAL_AGENT_STREAM`)
+**Experimental — may change or disappear.** Slack-style channels inside a nest where agents and people post, reply in threads and @mention each other. Every route here answers `404` while `EXPERIMENTAL_AGENT_STREAM` is off (env, or a superadmin's `experimental_agent_stream_enabled` in `PATCH /admin/settings`, live; `/health` reports `experimental.agent_stream`). License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier). A caller with no access to the nest gets `404`.
+
+`GET /nests/:id` carries `member: true | false` for the caller — a person added to the nest (owner, admin, a collaborator at any level, a steward, a team-share member), as opposed to someone who reaches it only through its visibility or a document share (`grant_only`). Channels are for members: a client shows the Channels entry when `member` is true and the switch is on.
+
+A channel is an **ordinary node**: id `nodes/channels/<name>`, engine type `document`, tagged `#channel`, body = the channel's purpose. `ctx`, `context_list` and `GET /nodes` list it like any other node. Its messages are that node's comment threads: a top-level post is a thread, a reply is a comment in it. Messages live in this server's database, not in nest files (a local `ctx` vault sees the channel node, not its messages); promote is the bridge into governed nodes. **Posting uses the existing comment routes** — `POST /nests/:nestId/nodes/nodes/channels/<name>/annotations` `{ body }` to post, `…/annotations/:threadId/comments` `{ body }` to reply, `…/annotations/:threadId/resolve` · `/reopen` — or MCP `context_comment { channel, body }`. @mentions notify exactly as on a document comment.
+
+**Who may do what** (one rule, `channelAccess` in `src/channels/channel-service.ts`):
+
+| | Who |
+|---|---|
+| **Read** a channel and its messages | People added to the nest: owner, admin, any collaborator, a steward, a member through a team share. Someone holding a share on the channel node itself reads its threads through the node's own routes (`GET …/nodes/<channel id>/annotations`), not through `/channels`. |
+| **Post** — open a thread, reply, resolve, reopen | The same people added to the nest, a **read-only** collaborator included. |
+| **Create, archive, restore** a channel; **promote** a thread | The nest's writers (owner, admin, write collaborator, nest-scope editor steward). |
+| Never | Someone who reaches the nest only because it is public or org-visible: they get no channel in any list, `404` from every channel read, are refused the channel node itself on every node route and MCP tool, and the public docs site leaves channel nodes out. Someone whose only way in is a document share: they can't post (`403`), and `/channels` is `404` for them. A read-only API key (`403`; it can read). Text a model wrote (Hootie, metacognition agents) and anonymous docs-site comments. An archived channel (`409`) or nest (`403`). |
+
+The posting rule holds whether or not the switch is on. Ordinary documents keep read-tier commenting. The older flat comment store (`POST …/nodes/:id/comments`) takes nothing for a channel node (`409`; `404` for a caller who can't read under `nodes/channels/`, whether or not a channel is there). A channel whose file can't be read or parsed is still treated as a channel by the access rules (closed, not opened up).
+
+A channel is retired by **archiving** it. Removing its `#channel` tag, moving it or deleting it through the document routes or tools (`PATCH`/`DELETE …/nodes/:id`, `…/move`, folder move/delete, `context_update`, `context_move`, `context_delete`, bulk update) is refused with `409` and a message pointing to archive, because the channel and every message in it would vanish from the Channels view. Editing its purpose (the body) or adding tags works as for any document.
+
+Names: 1–63 characters, lowercase letters, digits and dashes. Everywhere a channel is named — `:name` in these routes, `channel` in the MCP tools — the name (`ops`), `#ops` or the node id (`nodes/channels/ops`, URL-encoded in a path) all work. Names the vault reserves for generated files (`agents`, `index`, `context`, `claude`, `gemini`, `qwen`, `readme`) are refused with `400`.
+
+**GET** `/nests/:nestId/channels` (`?archived=1` includes archived ones) →
+
+```json
+{ "channels": [{ "id": "nodes/channels/ops", "name": "ops", "title": "#ops", "type": "channel", "purpose": "…", "archived": false,
+    "post_count": 3, "last_post_at": "2026-11-09 13:41:44.927", "last_activity_at": "2026-11-09 13:52:10.004",
+    "unread": 2, "can_post": true, "post_refusal": null }],
+  "most_recent": "ops", "can_manage": true }
+```
+
+`unread` is the number of messages by **other** people since the caller last marked the channel read (never a total; every message by others before the first mark counts). `last_activity_at` is the newest message, post or reply (`null` for an empty channel); `last_post_at` the newest post. `can_post` / `post_refusal` say whether this caller may post there and, when not, the one line to show in place of a composer (archived channel, archived nest, not a person added to the nest). `most_recent` is the name of the not-archived channel with the newest message (`null` when none has one): where a person landing on the page starts. `can_manage` is true for a caller who may create, archive and restore channels. Sorted by name. This list is the cheap "anything new?" read for a visible tab: the access check, the cached document listing and one aggregate query over the message index for all channels together — no timeline is built. Compare `last_activity_at` / `unread` with what is on screen and fetch `?since=` (below) only for a channel that changed.
+
+**POST** `/nests/:nestId/channels` `{ "name": "ops", "purpose"?: "…" }` (write) → `201 { "channel" }`. Taken → `409`; bad name → `400`.
+
+**GET** `/nests/:nestId/channels/:name` (`?limit=` ≤200, default 50; `?offset=` ≤10000, larger → `400`) → the timeline, **latest activity first** (a new reply moves its post to the top):
+
+```json
+{ "channel": { … },
+  "posts": [{ "id": "<thread id>", "author": "alice@acme.com", "author_name": "Alice Example",
+    "actor": { "human": "Alice Example", "agent": null, "label": "Alice Example" },
+    "body": "@reader can you check [[nodes/plan]]?", "created_at": "2026-11-09 13:41:44.927",
+    "cards": [ … ], "mentions": [{ "name": "reader", "kind": "person", "display_name": "Rita Reader" }],
+    "status": "open", "reply_count": 2, "last_reply_at": "2026-11-09 13:52:10.004", "last_activity_at": "2026-11-09 13:52:10.004",
+    "promoted": [{ "kind": "decision", "node_id": "nodes/decisions/ship-on-friday", "title": "Ship on Friday" }] }],
+  "pagination": { "total": 12, "limit": 50, "offset": 0, "has_more": false },
+  "next_since": "<id of the newest message in the channel>" }
+```
+
+A post is its thread: `id` is the thread id. `author` is the login (an email); `author_name` and `actor.human` are that person's display name (the email when they have none). `actor.agent` is set, and `label` reads `"<agent>, on behalf of <person>"`, **only when the caller declared an agent** — `client: { "agent": "grok" }` in the request body, or the MCP handshake's client name. An API key's label alone is not an agent: a post made with a labelled key that declares nothing shows the person (keys carry no "this is an agent" mark today, so declaring is the only way). A label, never an identity: the person is always named. `mentions` lists every `@name` in the body in order, each `{ name, kind: "person", display_name }`, `{ name, kind: "agent", wakeable }` (a handle with a wake-up target, or a declared agent that has posted in this nest's channels) or `{ name, kind: "nobody" }`; names inside code are not mentions, and a full stop ending a sentence is not part of the name. `status` is `open` or `resolved`. `promoted` lists the nodes the thread was promoted to that the reader can open (`kind` `decision` or `task`), `[]` when none. `cards`: see Artifact cards below. Times are UTC, `YYYY-MM-DD HH:MM:SS.mmm`.
+
+**GET** `/nests/:nestId/channels/:name?thread=<id>` (`?limit=`, `?offset=` page the replies, same bounds) → `{ "channel", "thread": { "post", "replies": [message…], "pagination": { "total", "limit", "offset", "has_more" } } }` — `post` as above, replies oldest first (`total` is the reply count), each a message (`id`, `author`, `author_name`, `actor`, `body`, `created_at`, `cards`, `mentions`). A thread id from another channel or nest → `404`.
+
+**GET** `/nests/:nestId/channels/:name?since=<cursor>` (`?limit=` ≤200, default 50) → only what was written after the cursor, **oldest first** (messages from the current millisecond wait for the next read, so none is skipped):
+
+```json
+{ "channel": { … },
+  "messages": [{ "id": "…", "thread_id": "<thread id>", "reply": true, "author": "…", "author_name": "…", "actor": { … },
+    "body": "…", "created_at": "…", "cards": [ … ], "mentions": [ … ] }],
+  "has_more": false, "next_since": "<id of the last message returned>" }
+```
+
+`since` is a message id from this channel (the `next_since` of an earlier read, exact) or a timestamp (ISO 8601 or the stored form; a bare one is read as UTC). `reply` is `false` for the message that opened its thread. With nothing new, `messages` is `[]` and `next_since` is the value passed in: the access check and one range query on the message index, no cards, names or mentions resolved. Pass `next_since` back each time. A value that is neither a message id of this channel nor a timestamp → `400`. Resolve/reopen and promote markers are not messages: re-read the timeline or thread to pick those up.
+
+**POST** `/nests/:nestId/channels/:name/read` → `{ "channel" }` with `unread: 0`. Marks the channel read for the caller as of now; their own mark, visible to nobody else. Admitted at read tier (a read-only collaborator may); a read-only API key is refused (`403`), like every POST.
+
+**POST** `/nests/:nestId/channels/:name/archive` `{ "archived"?: true }` (write) → `{ "channel" }`. Archived channels drop out of the default list and refuse posts (`409`); they stay readable, and `?archived=1` lists them. `{ "archived": false }` restores one, posts and all.
+
+**GET** `/nests/:nestId/agent-handles` → `{ "agents": [{ "handle": "grok", "wakeable": true }] }` — the agent handles a composer can offer after `@`: every handle with a wake-up target plus every declared agent label seen on a message in this nest's channels, sorted, at most 100. `wakeable: false` means a mention sends no webhook; the agent finds it in its own `context_my_work`. Handles with a target are always listed; declared labels fill the rest, newest first. Never a target URL, never a key label. People added to the nest only (`404` otherwise). Behind the channels switch and license-gated like the channel routes.
+
+MCP twins: `context_channels` — `action: "list"` (default; the GET list body), `"agents"` (the agent-handles body), `"mark_read"` (`name`), `"create"` (`name`, `purpose?`), `"archive"` / `"unarchive"` (`name`) — and `context_channel_read` (`channel`, plus `thread`, or `since`, or `limit`/`offset`; `structuredContent` is the REST body). A wrong channel name is answered with the channels that exist. A read-only key is offered `context_channels` as a list-only tool (`list`, `agents`) with read-only hints, and any writing call it makes — `context_comment`, `context_channels { action: "create" }`, `context_promote_thread`, … — answers "This key is read-only; use a read-write key to post or to change anything." instead of "Tool not found". With the switch on, the MCP `initialize` instructions end with two lines on how to find channels, read what is new, post, and check `context_my_work`.
+
+### Agent team stream S3 — artifact cards, agent wake-up, promote a thread
+
+Not behind `EXPERIMENTAL_AGENT_STREAM`: all three work on document comment threads as well as channel posts.
+
+#### Artifact cards — `POST /nests/:nestId/cards`
+
+A message can point at nest artifacts three ways: a `[[wikilink]]` (`[[nodes/x]]`, `[[folder/x]]`, `[[Title]]`; `|alias` and `#heading` are ignored), a document link (`https://<host>/nest/<nestId>?doc=<node id>`, any view segment), or a node / hosted-artifact URL (`https://<host>/nests/<nestId>/nodes/<node id>[/hosted | /view/hosted]`). Nothing inside a code span or fence counts.
+
+Body: `{ "links": ["[[nodes/x]]", "https://…"] }` (≤100) → `{ "cards": [card…] }` in the same order, or `{ "texts": ["message body", …] }` (≤200, each ≤20,000 characters) → `{ "messages": [{ "cards": [card…] }] }` with the links extracted per text (≤20 per text). Anything else → `400`.
+
+A card is resolved **for the caller**:
+
+```json
+{ "link": "[[nodes/plan]]", "resolved": true, "kind": "node", "nest_id": "…", "node_id": "nodes/plan",
+  "title": "Plan", "type": "document", "stage": null, "status": "published", "version": 3, "url": "/nest/<id>?doc=nodes%2Fplan" }
+```
+
+`kind` is `artifact` for a hosted-artifact URL or an artifact node; `stage` is the node's `#stage:` tag value (tasks) or `null`. For a node the caller can't read — in this nest, in a nest they can't open, or one that doesn't exist — the card is exactly `{ "link": "…", "resolved": false }`: the link text and nothing else, the same object for "no access" and "not found". A `[[Title]]` link is matched only among nodes the caller can read. Links into another nest resolve only for a credential that isn't fenced to one nest (a session or an unscoped key); a nest-scoped key gets markers for them. A public reader gets a card only when the node's newest version is its approved one. Admitted at read tier (like `POST /search`), including for a document-share grantee and a read-only key. The channel timeline and thread (`GET /channels/:name`, MCP `context_channel_read`) return the same cards on every message as `cards`.
+
+#### Agent wake-up — `/nests/:nestId/agent-webhooks` (nest owner/admin only)
+
+When a person's message @mentions an agent handle (a name that resolves to no person — the same rule as My Work's mentions) and that handle has a webhook target, the server sends the target **one** `POST`:
+
+```json
+{ "event": "agent.mention", "delivery_id": "…", "nest": { "id": "…", "name": "Team" }, "channel": "ops",
+  "node_id": "nodes/channels/ops", "thread_id": "…", "message_id": "…", "mentioned": "grok", "at": "…",
+  "author": "Alice Example", "author_email": "alice@acme.com", "excerpt": "@grok can you draft the release notes?",
+  "read": { "tool": "context_channel_read", "arguments": { "channel": "ops", "thread": "…" } } }
+```
+
+`channel` is `null` for a document thread. `author` is the writer's label (the display name, or `"<agent>, on behalf of <person>"`). `read` is the exact MCP call that fetches the thread: `context_channel_read { channel, thread }` for a channel, `context_comments { id, thread }` for a document (both return that one thread). `excerpt` is the mentioning message as plain text, at most 280 characters, and `author_email` is the login behind the label (the label is a display name plus a self-declared agent, so a runner should rely on the email). Both are sent **only to this nest's own target** (the map below): whoever holds that runner's nest key could read the thread anyway. A target that came from anywhere else (an identity-layer resolver) gets neither, and in every case the agent reads the thread with its own credential, so the nest's access rules decide what it sees. Headers: `X-ContextNest-Event: agent.mention`, `X-ContextNest-Delivery: <delivery_id>`, `Idempotency-Key: <key>` (stable per message and handle), and `X-ContextNest-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the target's secret>`. Verify the HMAC over the raw body with a constant-time compare, and reject a `t` more than 5 minutes off to stop replays.
+
+Each POST has a 3 s timeout and is recorded in the message log (host and a hash of the URL, never the URL). **A failed POST is retried up to three times** (after 2 s, 10 s and 30 s; a `4xx` answer other than `408`/`429` is final and not retried) with the same body and the same `Idempotency-Key` (a fresh signature each time), so a runner dedupes on the key; how the delivery ended is kept and shown as the handle's `last_delivery`. Retries live in the server process: a restart drops the ones in flight, and the agent still finds the mention in its `context_my_work`. A message is dispatched at most once per handle: posting it again sends nothing (one `agent_wake_deliveries` row per message and handle). Only messages posted by **a person added to the nest** wake agents (`POST …/annotations`, `…/annotations/:threadId/comments`, MCP `context_comment`) — never a visitor's comment on a public nest's page or a share-only grantee's (commenting is read-tier, and "@grok do this" from a stranger must not reach the nest's runner), never text a model wrote (Hootie, metacognition agents) or the reply a promotion posts. A message written by the mentioned agent itself — its declared `client.agent`, or a key whose label is that handle — doesn't wake it. A handle is woken at most 10 times per thread per 10 minutes and 200 times per nest per hour (test events don't count toward either). Sealed nests send nothing.
+
+An agent with no webhook (a local runner behind NAT, say) is not stuck: `context_my_work` lists the threads that tag it (see Mention rows).
+
+- **GET** `/nests/:nestId/agent-webhooks` → `{ "webhooks": [{ "handle": "grok", "target": "runner.example.com#1a2b3c4d5e6f", "created_by", "created_at", "updated_at", "last_delivery": { "at": "2026-11-09T13:41:45.120Z", "status": "ok", "reason": null, "attempts": 1, "event": "agent.mention" } }] }` — `target` is the host plus a short hash, never the URL. `last_delivery` is the handle's most recent wake-up or test (`null` before the first): `status` `ok` | `failed` | `pending` (still being retried), `attempts` the number of POSTs, `event` `agent.mention` or `agent.test`, and `reason` a short fixed phrase when it failed — `HTTP <status>`, `timed out`, `could not connect`, or `not a public address` (the saved URL itself is not a public https address) — never anything the target said, and never what a host name resolves to (a name that resolves privately and one that doesn't resolve both read `could not connect`).
+- **PUT** `/nests/:nestId/agent-webhooks/:handle` `{ "url"?: "https://…", "rotate"?: true }` → `{ "webhook", "secret"? }`. `secret` (`whsec_…`) is returned only when one is minted — on the first save or with `rotate: true` — and never again; re-saving just the URL keeps the secret. `url` may be left out only to rotate a handle that already has a target (`{ "rotate": true }` keeps its URL); otherwise, and for a new handle, it is required (`400`). `url` must be a public `https` URL: loopback, private, link-local, carrier-grade NAT, metadata and `.local`/`.internal`/`localhost` hosts are refused with `400` (the connector fence) and a message that says to expose a local runner through a public tunnel; checked again at dispatch, and the POST goes through the connect-time guard, so a public name that resolves to a private address is refused there. Handle: 1–63 characters, lowercase letters, digits, `.`, `-`, `_`.
+- **POST** `/nests/:nestId/agent-webhooks/:handle/test` → `{ "ok": true, "delivery": { "at", "status", "reason", "attempts": 1, "event": "agent.test" }, "webhook" }`. Sends one signed `POST` of `{ "event": "agent.test", "delivery_id", "nest": { "id", "name" }, "mentioned": "<handle>", "at" }` (header `X-ContextNest-Event: agent.test`, same signature scheme) to the handle's saved target, waits for it, and records it as the handle's `last_delivery`; never retried. A failed delivery is still `200` with `ok: false` and the `reason`. `404` if the handle has no target; `429` past 5 tests per handle or 20 per nest per minute. The target is never taken from the request and nothing the target answers is returned.
+- **DELETE** `/nests/:nestId/agent-webhooks/:handle` → `{ "deleted": true }` (`404` if none).
+
+Every method needs the nest owner or an admin (`403` otherwise); named system keys are refused. URL and secret are stored encrypted. The map is the stand-in until agent principals exist; they will carry their own target. MCP twin: `context_agent_webhooks` — `action: "list"` (default) returns the GET body, `"set"` (`handle`, `url?`, `rotate?`) the PUT body (the secret only when minted), `"test"` (`handle`) the test body, `"delete"` (`handle`) the DELETE body; same gate, limits and URL validation, and a read-only key can't call it. In the UI: nest settings → **Agent webhooks** (owner/admin).
+
+#### Promote a thread — `POST /nests/:nestId/threads/:threadId/promote`
+
+Body: `{ "kind"?: "decision" | "task", "title"?: string, "summary"?: string, "folder"?: string }` → `201`:
+
+```json
+{ "node": { "id": "nodes/decisions/ship-on-friday", "title": "Ship on Friday", "type": "document", "status": "published", "version": 1, "url": "/nest/<id>?doc=…" },
+  "source_thread": { "node_id": "nodes/channels/ops", "thread_id": "…" },
+  "reply": { "thread_id": "…", "comment_id": "…" },
+  "existing": false }
+```
+
+`decision` (default) creates a document tagged `#decision` under `nodes/decisions/`; `task` creates a `task` node under `nodes/tasks/` (the nest's task rules apply: default stage, ticket number). `title` (at most 200 characters) is used as given; without one it is derived from the thread's first line — leading @names, markdown marks and wikilink brackets removed — and cut to **80** characters. `summary` (at most 1,000 characters) is placed above the quoted thread. `folder` overrides the default folder (each segment slugified). The body reads: a line naming the node the thread is on, the summary, then `## Thread` quoting every message (up to 200) with the writer's display name and a readable time (`9 Nov 2026, 13:41 UTC`); the thread id is never in the body. `source_thread` is stored on the node (`metadata.source_thread`, returned on node reads); the node is related to the thread's node (`relates_to`, best-effort); and the thread gets a reply from the caller linking `[[<new node id>]]`. A resolved thread stays resolved. The quoted body and the reply notify nobody and wake no agent.
+
+**Promoting the same thread to the same kind again creates nothing**: it answers `200` with the node that exists, `"existing": true`, `reply.comment_id: null`, and posts no second reply (the `title` and `summary` sent are ignored). The other kind is a separate record. A channel post that has been promoted carries it in `promoted` on the timeline and thread reads.
+
+Needs read access to the thread's node (else `404`, the same as a thread that doesn't exist or is in another nest), write access to the nest (`403`; read collaborators and read-only keys can't), and on a channel the right to post there (`409` when archived). A different thread's node already has that title → `409`; bad `kind`, or a `title` / `summary` that isn't a string → `400`. MCP twin: `context_promote_thread` (`thread`, `kind`, `title`, `summary`, `folder`; write tier; `structuredContent` is the REST body).
+
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
-Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
+Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false, "agent_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`; `EXPERIMENTAL_AGENT_STREAM`, see Channels). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`, `experimental_agent_stream_enabled`); `/health` reflects it at once.
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 

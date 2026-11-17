@@ -80,6 +80,7 @@ import {
   Star,
   Megaphone,
   Undo2,
+  Archive,
   PanelLeft,
   Globe,
   Building2,
@@ -112,6 +113,7 @@ import { CodeHighlight } from "./CodeHighlight";
 import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
+import { shareDocumentLink } from "../lib/share-link";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -293,7 +295,9 @@ export function DocumentEditor({
   const [showShare, setShowShare] = useState(false);
   // Set when the visibility picker's "Share with a team…" opens the dialog.
   const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
-  const [showPublish, setShowPublish] = useState(false);
+  // Which tab the Publish dialog opens on: "links" from Share's Manage, where
+  // the link already exists and the job is to change or remove it.
+  const [showPublish, setShowPublish] = useState<false | "new" | "links">(false);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
@@ -421,6 +425,9 @@ export function DocumentEditor({
   // isArchived flag, so an archived nest's editor stayed writable everywhere
   // except the one path (Dashboard → nest → doc) that happened to pass it.
   const isArchived = isNestArchived(nestMeta.data?.nest);
+  // This one document is archived (spec §1.13): frozen, like an archived nest.
+  const [archivedDoc, setArchivedDoc] = useState<api.ArchivedDocument | null>(null);
+  const [showArchive, setShowArchive] = useState(false);
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -437,7 +444,7 @@ export function DocumentEditor({
     nestStewards: myStewards,
     nodeRoles: myNodeRoles,
     grant: myGrant,
-    isArchived,
+    isArchived: isArchived || archivedDoc !== null,
   });
   // Creator's display name from the nest roster (same cached read the comments
   // panel makes); the email stays on hover, and is the fallback. Read-only
@@ -1211,6 +1218,7 @@ export function DocumentEditor({
       setTaskPriority((node as any)?.priority ?? undefined);
       setTaskDue((node as any)?.due ?? undefined);
       setStatus(node?.status ?? null);
+      setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
       setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
@@ -2188,7 +2196,8 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
-      isPdf: isPdfNode,
+      canArchive:
+        !isArchived && !archivedDoc && (isOwner || isAdmin || hasAdminApprove || hasReviewerRole),
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
@@ -2224,10 +2233,24 @@ export function DocumentEditor({
           };
         case "move":
           return { ...base, icon: FolderInput, onSelect: () => setMoveTo(currentFolder) };
+        case "archive":
+          return { ...base, icon: Archive, onSelect: () => setShowArchive(true) };
         case "share-doc":
           return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "share-link":
+          return {
+            ...base,
+            icon: Globe,
+            onSelect: () =>
+              void shareDocumentLink({
+                nestId,
+                nodeId,
+                title: title.trim() || "Untitled",
+                onManage: () => setShowPublish("links"),
+              }),
+          };
         case "publish":
-          return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
+          return { ...base, icon: Share2, onSelect: () => setShowPublish("new") };
         case "delete":
         case "request-deletion":
           return { ...base, icon: Trash2, onSelect: () => setShowDeletionModal(true) };
@@ -2314,6 +2337,24 @@ export function DocumentEditor({
       )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
+      {!isNew && (
+        <ReasonDialog
+          open={showArchive}
+          onOpenChange={setShowArchive}
+          title={`Archive "${title || nodeId}"?`}
+          description="It leaves document lists, search and AI retrieval. Nothing is deleted: its history is kept, and a steward can restore it."
+          label="Why archive it?"
+          optionalReason
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel="Archive document"
+          onConfirm={async (reason) => {
+            await api.archiveNode(nestId, nodeId, reason || undefined);
+            toast.success("Archived");
+            setShowArchive(false);
+            onBack();
+          }}
+        />
       )}
       {!isNew && (
         <ReasonDialog
@@ -2447,6 +2488,7 @@ export function DocumentEditor({
           nestId={nestId}
           nodeId={nodeId}
           nodeTitle={title || nodeId}
+          initialTab={showPublish}
           onClose={() => setShowPublish(false)}
         />
       )}
@@ -2949,6 +2991,34 @@ export function DocumentEditor({
               <Alert variant="destructive" className="mb-4">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            {archivedDoc && (
+              <Alert className="mb-4" data-testid="document-archived-banner">
+                <Archive className="h-4 w-4" />
+                <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>
+                    Archived by {archivedDoc.by} on {new Date(archivedDoc.at).toLocaleDateString()}
+                    {archivedDoc.reason ? `: ${archivedDoc.reason}` : "."} It is out of lists and retrieval.
+                  </span>
+                  <button
+                    type="button"
+                    className="font-medium underline underline-offset-2 hover:no-underline"
+                    data-testid="restore-archived-document"
+                    onClick={async () => {
+                      try {
+                        await api.unarchiveNode(nestId, nodeId);
+                        toast.success("Restored");
+                        await loadNode();
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Failed to restore");
+                      }
+                    }}
+                  >
+                    Restore
+                  </button>
+                </AlertDescription>
               </Alert>
             )}
 
@@ -4627,6 +4697,7 @@ export function DocumentEditor({
               nestId={nestId}
               nodeId={nodeId}
               readOnly={isViewOnly}
+              canPromote={canAuthorNew && !isViewOnly}
               pendingAnchor={pendingAnchor}
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}

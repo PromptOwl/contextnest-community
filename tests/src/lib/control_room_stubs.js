@@ -10,8 +10,8 @@
  *
  * Slack's OAuth is stubbed too: "Open Slack to approve" navigates to
  * /surfaces/slack/installs/:id/oauth/start, which this fake answers by marking
- * the install active and redirecting back to the Control room, as the real
- * callback page does.
+ * the install active and sending the browser back to the Control room, where
+ * the real callback page's "Continue setup" link leads.
  *
  * `state.calls` records every write, so a test can assert that nothing was
  * saved before the step that saves it.
@@ -115,15 +115,15 @@ export async function stubSurfaces(page, initial = {}) {
         return json(route, { stored, credentials: state.creds });
       }
       if (p === '/surfaces/slack/installs/inst_fake/oauth/start') {
-        // Stubbed Slack OAuth: approve at once and come back, like the callback
-        // page. A page that navigates back, not a stubbed 302: against the
-        // deployed server (HTTPS behind a proxy) Chromium never finishes the
-        // navigation a fulfilled redirect starts, and the click times out.
+        // Stubbed Slack OAuth: approve at once and come back, as the callback
+        // page's "Continue setup" link does. A page that navigates, not a 302:
+        // Chromium aborts the request that follows a stubbed redirect on an
+        // https server, so the wizard never came back on a deployed server.
         state.install = { ...state.install, status: 'active' };
         return route.fulfill({
           status: 200,
           contentType: 'text/html',
-          body: '<!doctype html><title>Slack (fake)</title><script>location.replace("/control-room?section=setup")</script>',
+          body: '<!doctype html><title>Slack approved</title><script>location.replace("/control-room?section=setup")</script>',
         });
       }
       if (p === '/surfaces/slack/installs/inst_fake/channels') {

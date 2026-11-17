@@ -29,7 +29,8 @@ function testFiles(dir: string): string[] {
     if (name === "node_modules") continue;
     const full = join(dir, name);
     if (statSync(full).isDirectory()) found.push(...testFiles(full));
-    else if (/\.test\.tsx?$/.test(name)) found.push(relative(repoRoot, full));
+    // Forward slashes on every OS, like the grep the job runs.
+    else if (/\.test\.tsx?$/.test(name)) found.push(relative(repoRoot, full).replaceAll("\\", "/"));
   }
   return found;
 }

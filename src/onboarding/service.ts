@@ -1,10 +1,19 @@
 /**
  * First-run onboarding (PO-1185): the state behind the welcome screen.
  *
- * A FIRST RUN is a signed-in person who owns no live nest and has not
- * dismissed the screen. The screen then stays open while it walks them
- * through the nest it made ("Create my nest"), until they click Skip or Done.
- * "Getting started" on Home reopens it at any time.
+ * A FIRST RUN is a signed-in person who owns no live nest and was let into
+ * nobody else's (PO-1391): no collaborator grant, steward assignment, team
+ * share or document share. Someone invited to a nest lands on their nest list
+ * with that nest in it, not here. Reading a nest through its visibility
+ * (public, org) is not an invitation and does not count.
+ *
+ * A first run who has not dismissed the screen sees it. It then stays open
+ * while it walks them through the nest it made ("Create my nest"), until they
+ * click Skip or Done. "Getting started" on Home reopens it at any time, for
+ * anyone.
+ *
+ * `show` is decided here and nowhere else: the UI renders it, and
+ * context_onboarding reports it.
  *
  * The REST routes (routes.ts) and the MCP tools (mcp/onboarding-tools.ts) call
  * these functions, so the two surfaces cannot drift.
@@ -12,7 +21,7 @@
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { createNest } from "../nests/service.js";
+import { createNest, listNestsGrantedTo } from "../nests/service.js";
 import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js";
 import { isOrgAdmin } from "../surfaces/services/binding-service.js";
 import { deserializeClient } from "../shared/client-metadata.js";
@@ -57,8 +66,14 @@ export interface OnboardingState {
   enabled: boolean;
   /** Show the welcome screen now. */
   show: boolean;
-  /** Owns no live nest. */
+  /** Owns no live nest and was let into nobody else's (see shared_nests). */
   first_run: boolean;
+  /**
+   * Live nests someone else owns that this person was let into: collaborator,
+   * steward, team share or a share on one document. Not public or org nests
+   * they can merely read.
+   */
+  shared_nests: number;
   dismissed: boolean;
   /** The nest the screen works on: the one it created, else the newest owned. */
   nest: (NestRef & { mcp_url: string; server_mcp_url: string }) | null;
@@ -164,6 +179,14 @@ export async function slackState(userId: string, nestId: string | null): Promise
   };
 }
 
+/**
+ * The first-run rule (PO-1391): nothing of their own and nothing they were
+ * let into. An invited person has somewhere to land already.
+ */
+export function isFirstRun(ownedNests: number, grantedNests: number): boolean {
+  return ownedNests === 0 && grantedNests === 0;
+}
+
 export async function getOnboardingState(userId: string, baseUrl: string): Promise<OnboardingState> {
   const enabled = config.ONBOARDING_ENABLED && config.AUTH_MODE !== "open" && userId !== ANON_USER_ID;
   const r = await row(userId);
@@ -171,11 +194,11 @@ export async function getOnboardingState(userId: string, baseUrl: string): Promi
   let nest: NestRef | null = null;
   if (r?.nest_id) nest = owned.find((n) => n.id === r.nest_id) ?? null;
   if (!nest) nest = owned[0] ?? null;
-  const firstRun = owned.length === 0;
+  const sharedNests = (await listNestsGrantedTo(userId)).length;
+  const firstRun = isFirstRun(owned.length, sharedNests);
   const dismissed = !!r?.dismissed_at;
-  // Owning no nest is a first run. After "Create my nest" the screen stays on
-  // (nest_id set) so the person can connect and fill it. Reopened from Home,
-  // it shows whatever they own.
+  // After "Create my nest" the screen stays on (nest_id set) so the person can
+  // connect and fill it. Reopened from Home, it shows whatever they own.
   const show = enabled && !dismissed && (firstRun || !!r?.nest_id || !!r?.reopened);
   const modelAvailable = !!resolveModelCredential();
   const distillOn = config.DISTILL_ENABLED;
@@ -184,6 +207,7 @@ export async function getOnboardingState(userId: string, baseUrl: string): Promi
     enabled,
     show,
     first_run: firstRun,
+    shared_nests: sharedNests,
     dismissed,
     nest: nest ? { ...nest, mcp_url: nestMcpUrl(base, nest.id), server_mcp_url: `${base}/mcp` } : null,
     can_create_nest: await canCreateNests(userId),

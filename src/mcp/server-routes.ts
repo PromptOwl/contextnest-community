@@ -79,6 +79,7 @@ import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headle
 import { isSystemUser } from "../auth/systems.js";
 import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
+import { nestWebUrl } from "../shared/web-links.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -94,6 +95,8 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_submit_review",
   "context_request_access",
   "context_task_log",
@@ -171,6 +174,9 @@ export interface IndexedNest {
   visibility: string;
   permission: NestPermission | "owner";
   document_count: number | null;
+  /** The nest's page in the web app — the link for a person (PO-1336).
+   *  Absent when the server's public address is unknown. */
+  web_url?: string;
 }
 
 /**
@@ -181,6 +187,8 @@ export interface IndexedNest {
 export async function buildNestIndex(
   userId: string,
   nestScope: string | null,
+  /** Public origin for `web_url`; omitted = no web links. */
+  baseUrl?: string,
 ): Promise<IndexedNest[]> {
   const [owned, shared, publicExtras] = await Promise.all([
     listNests(userId),
@@ -234,6 +242,7 @@ export async function buildNestIndex(
       } catch {
         /* keep the conservative default */
       }
+      const webUrl = nestWebUrl(baseUrl, n.id);
       return {
         id: n.id,
         name: n.name,
@@ -242,6 +251,7 @@ export async function buildNestIndex(
         permission,
         // No version rows = an empty nest, so 0; null only when the count failed.
         document_count: docsByNest ? (docsByNest.get(n.id) ?? 0) : null,
+        ...(webUrl ? { web_url: webUrl } : {}),
       };
     }),
   );
@@ -256,6 +266,10 @@ export function renderNestIndexMarkdown(
     "",
     `${nests.length} nest${nests.length === 1 ? "" : "s"} accessible with these credentials. Full interaction manual: ${baseUrl}/llms.txt`,
     "",
+    // Which URL is for whom (PO-1336): an agent asked for "the link" used to
+    // hand a person the API address, which a browser cannot open.
+    `Links: "web" is the link for people — give that one to a person who asks for a link to a nest. A single document is \`<web link>?doc=<node id, URL-encoded>\`. The "retrieve", "mcp" and "export" URLs are for agents and programs only; they do not open in a browser.`,
+    "",
   ];
   for (const n of nests) {
     lines.push(`## ${n.name}`);
@@ -265,8 +279,10 @@ export function renderNestIndexMarkdown(
     lines.push(`- permission: ${n.permission} · visibility: ${n.visibility}`);
     if (n.document_count !== null)
       lines.push(`- documents: ${n.document_count}`);
+    const web = n.web_url || nestWebUrl(baseUrl, n.id);
+    if (web) lines.push(`- web (for people): ${web}`);
     lines.push(
-      `- retrieve: \`POST ${baseUrl}/nests/${n.id}/context\` · mcp: \`${baseUrl}/nests/${n.id}/mcp\` · export: \`${baseUrl}/nests/${n.id}/export?format=markdown\``,
+      `- for agents: retrieve: \`POST ${baseUrl}/nests/${n.id}/context\` · mcp: \`${baseUrl}/nests/${n.id}/mcp\` · export: \`${baseUrl}/nests/${n.id}/export?format=markdown\``,
     );
     lines.push("");
   }
@@ -313,6 +329,8 @@ const SERVER_NEST_TOOLS = [
   "context_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_submit_review",
   "context_request_access",
   "context_task_log",
@@ -456,7 +474,7 @@ async function handleServerToolCall(
     return runAgentOrgTool(toolName, args, { userId, apiKeyId, nestScope, capability });
   }
   if (toolName === "nest_index") {
-    const nests = await buildNestIndex(userId, nestScope);
+    const nests = await buildNestIndex(userId, nestScope, baseUrl);
     // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
     const data = { nests };
     if (!nests.length) return { text: "No nests accessible with these credentials.", data };
@@ -509,7 +527,8 @@ async function handleServerToolCall(
         String(args.name ?? ""),
         args.description ? String(args.description) : undefined,
       );
-      return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.`;
+      const web = nestWebUrl(baseUrl, nest.id);
+      return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.${web ? ` Open in the web app (the link for people): ${web}` : ""}`;
     } catch (err) {
       if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
@@ -791,11 +810,12 @@ nestIndexRoutes.get("/", async (c) => {
       403,
     );
   const userId = c.get("userId");
-  const nests = await buildNestIndex(userId, c.get("nestScope"));
+  const baseUrl = requestBaseUrl(c.req.url);
+  const nests = await buildNestIndex(userId, c.get("nestScope"), baseUrl);
   if (c.req.query("format") === "json") {
     return c.json({ count: nests.length, nests });
   }
-  const md = renderNestIndexMarkdown(nests, requestBaseUrl(c.req.url));
+  const md = renderNestIndexMarkdown(nests, baseUrl);
   return c.text(md, 200, { "Content-Type": "text/markdown; charset=utf-8" });
 });
 
@@ -827,6 +847,20 @@ Servers in "open" auth mode need no key.
    One entry per accessible nest: name, id, permission, document count, and
    the per-nest URLs below.
 2. Pick a nest id, then retrieve with the API or MCP.
+
+## Links for people
+
+Everything else in this file is an address for agents and programs. When a
+person asks for a link, give them the web app's address, never an API or MCP
+URL (those answer a browser with JSON or an error):
+
+- a nest: \`${B}/nest/<nest-id>\` (singular \`/nest/\`; the API is \`/nests/\`)
+- one document: \`${B}/nest/<nest-id>?doc=<node-id>\` with the node id
+  URL-encoded (\`nodes/gtm/plan\` → \`?doc=nodes%2Fgtm%2Fplan\`)
+
+\`/index\`, \`nest_index\` and the document tools return these ready-made
+(\`web_url\`, "Web link"). Opening one goes through the same access rules as
+everything else: the person must be signed in and able to read it.
 
 ## Deterministic retrieval API
 
@@ -876,6 +910,11 @@ Other read endpoints (all under \`${B}/nests/<nest-id>\`):
 
 Write endpoints (need write permission):
 - \`POST /nodes\` — \`{ "title", "content", "tags"?, "type"?, "folder"? }\`
+  - \`content\` is markdown. To post an HTML page (deck, dashboard, report), send
+    \`"type": "artifact"\` and put the raw HTML document in \`content\`, with no
+    markdown code fence around it; it renders as a page in the web app. Over MCP:
+    \`context_create\` with the same \`type\` and \`content\`.
+  - The response carries \`web_url\`, the document's link for people.
 - \`PATCH /nodes/<node-id>\` — \`{ "content"? , "append"?, "tags"?, "title"? }\`
 - \`DELETE /nodes/<node-id>\`; \`POST /nodes/<id>/request-deletion\` when you lack delete rights
 - \`POST /nodes/<id>/move\` — \`{ "folder" }\`; history and comments follow
@@ -886,7 +925,7 @@ Write endpoints (need write permission):
 
 ## Your inbox (server-level)
 
-- \`GET ${B}/me/work\` — reviews waiting on you and handoffs, across every nest
+- \`GET ${B}/me/work\` — reviews waiting on you, handoffs, and open threads that @mention you, across every nest (MCP: \`context_my_work\`)
 - \`GET ${B}/me/drafts\` — your documents never submitted for review
 - \`GET ${B}/me/notifications\` — watcher and review notifications
 
@@ -915,7 +954,7 @@ Streamable HTTP, stateless. Two endpoints:
   - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`,
     \`context_boards\`, \`context_board_items\`, \`context_pull_log\` (recorded retrievals and what each handed over)
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
-    \`context_delete\`, \`context_move\`, \`context_submit_review\`,
+    \`context_delete\`, \`context_archive\`, \`context_unarchive\`, \`context_move\`, \`context_submit_review\`,
     \`context_request_access\` (ask for write access when a write is refused),
     \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)
@@ -925,7 +964,7 @@ Streamable HTTP, stateless. Two endpoints:
   - write: \`context_update\`, \`context_table_rows\` (change table rows by key), \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
-  - comments: \`context_comment\`, \`context_resolve_comment\`
+  - comments: \`context_comment\` (a document, or \`channel\` to post in a channel), \`context_resolve_comment\`, \`context_promote_thread\` (turn a thread into a decision or task node)
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
