@@ -349,8 +349,10 @@ describe("a white-label nest shows no strip", () => {
       '<!doctype html><html><head><meta property="og:title" content="Author title"><title>T</title></head><body><p>Hi</p></body></html>';
     await jsonRequest(app, "POST", `/nests/${whiteNest}/nodes`, { title: "Own Tags", content: own, type: "artifact" }, owner.apiKey);
     const slug = await publish(whiteNest, "nodes/own-tags");
-    const { html } = await page(`/p/${slug}`);
+    const { res, html } = await page(`/p/${slug}`);
     expect(html.trim()).toBe(own);
+    // We add no tags to it, robots included; the header still says noindex.
+    expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   });
 
   it("leaves an HTML page with no <head> exactly as written", async () => {
