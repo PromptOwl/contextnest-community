@@ -106,7 +106,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   that tool's schema, not a new one.
 //   112->113 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
-//   engine op exists. Product-owner sign-off for Community-only inline tools: 2026-10-24 (recorded on PR #569).
+//   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
 const BASELINE = 113;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
