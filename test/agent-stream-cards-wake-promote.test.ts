@@ -389,6 +389,18 @@ describe("AC-ST-04: a writer promotes a thread to a decision", () => {
     expect(r.data.node.id).toMatch(/^nodes\/tasks\//);
   });
 
+  it("promotes in a review-required nest: the node is created and the thread links it", async () => {
+    const gov = (await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey)).data.nest.id as string;
+    await jsonRequest(app, "PATCH", `/nests/${gov}/settings`, { stewardship_enabled: true, allow_self_approve: false }, owner.apiKey);
+    const doc = await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Plan", content: "v1" }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const t = await open(owner, doc.data.id ?? doc.data.node.id, "Decide the launch date", {}, gov);
+    const r = await jsonRequest(app, "POST", `/nests/${gov}/threads/${t.id}/promote`, { kind: "decision" }, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const got = await jsonRequest(app, "GET", `/nests/${gov}/nodes/${r.data.node.id}`, undefined, owner.apiKey);
+    expect(got.status, JSON.stringify(got.data)).toBe(200);
+  });
+
   it("a document comment thread promotes too (the AnnotationsPanel buttons)", async () => {
     const t = await open(alice, secretId, "We keep the plan under wraps until launch");
     const r = await jsonRequest(app, "POST", `/nests/${nestId}/threads/${t.id}/promote`, { kind: "decision" }, carol.apiKey);
