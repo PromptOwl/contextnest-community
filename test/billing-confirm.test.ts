@@ -219,6 +219,30 @@ describe("billing confirmation on a raise", () => {
     expect(saved.content[0].text).toMatch(/as editor/);
   });
 
+  it("team share over MCP: refused, then saved with confirm_billing", async () => {
+    const team = await req("POST", "/teams", { name: "Reviewers" }, alice, true);
+    const teamId = team.data.team.id;
+    await req("POST", `/teams/${teamId}/members`, { email: "lena@co.com", role: "editor" }, alice);
+    const refused = await mcp(alice.apiKey, "context_nest_teams", { action: "share", team_id: teamId });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toMatchObject({ code: "BILLING_CONFIRMATION_REQUIRED" });
+    const saved = await mcp(alice.apiKey, "context_nest_teams", {
+      action: "share",
+      team_id: teamId,
+      confirm_billing: true,
+    });
+    expect(saved.isError).toBeFalsy();
+  });
+
+  it("steward over MCP: refused, then saved with confirm_billing", async () => {
+    const args = { scope: "nest", email: "rev@co.com", role: "reviewer" };
+    const refused = await mcp(alice.apiKey, "context_assign_steward", args);
+    expect(refused.structuredContent).toMatchObject({ code: "BILLING_CONFIRMATION_REQUIRED" });
+    const saved = await mcp(alice.apiKey, "context_assign_steward", { ...args, confirm_billing: true });
+    expect(saved.isError).toBeFalsy();
+    expect(saved.content[0].text).toMatch(/Assigned \*\*rev@co\.com\*\* as reviewer/);
+  });
+
   it("a plan that has no room refuses (402) before asking", async () => {
     Object.assign(entitlement, { plan: "free", maxUsers: 100, maxAccountOwners: 1, maxSubscribers: 0 });
     const res = await req("POST", `/nests/${nestId}/collaborators`, { email: "kim@co.com", permission: "write" }, alice);

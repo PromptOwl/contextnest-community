@@ -39,7 +39,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
-import { getDocStream } from "./governance/stream-service.js";
+import { streamForCaller } from "./governance/stream-read.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -85,8 +85,12 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { onboardingRoutes } from "./onboarding/routes.js";
+import { readClient } from "./shared/client-metadata.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
+import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
+import { surfacesEnabled } from "./surfaces/flags.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
 import { registerConnector, getConnector } from "./surfaces/registry.js";
 import { parseKey } from "./surfaces/services/buffer-crypto.js";
@@ -102,7 +106,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   officeNodeRoutes,
@@ -139,6 +143,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import {
+  agentRegisterRoutes,
+  nestLedgerRoutes,
+  nestRollupRoutes,
+  orgLedgerRoutes,
+  orgRollupRoutes,
+} from "./governance/ledger-routes.js";
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
@@ -166,6 +177,7 @@ import {
   VaultBusyError,
   PlanLimitError,
   BillingConfirmError,
+  CodedError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
@@ -324,6 +336,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "publications",
   "branding",
   "metacognition",
+  // Registering an agent mints a governed agent node (po-1186): automation.
+  "agents",
   "schedules",
   "hooks",
   "env",
@@ -582,6 +596,22 @@ async function canApproveInNest(nestId: string, email: string): Promise<boolean>
   return ok;
 }
 
+/**
+ * The review actions on a document that the nest middleware admits at read
+ * tier — POST /nests/:id/nodes/<node id…>/<action> — because a reviewer steward
+ * may hold only read collaborator access. Each handler decides who may act
+ * (canUserApprove, the submitter, canDecideExternalEdit). The external-edit
+ * decisions end in approve/reject too. Adding a name here loosens a route:
+ * its handler must check the caller itself.
+ */
+const STEWARD_NODE_ACTIONS = new Set([
+  "approve",
+  "approve-with-edits",
+  "reject",
+  "submit-review",
+  "cancel-review",
+]);
+
 export function createApp(): Hono<AuthEnv> {
   // LinearRouter, not the default SmartRouter — parity with upstream
   // development (bb96ca8), which hit the same bug class this branch fixed
@@ -696,9 +726,10 @@ export function createApp(): Hono<AuthEnv> {
       userId: c.get("userId") ?? null,
       status: c.res.status,
       durationMs: Date.now() - started,
-      // Set by whichever handler validated the request's `client` block
-      // (§9.4). Absent on a request that sent none.
-      client: c.get("clientMetadata"),
+      // The request's `client` block (§9.4), else what the transport knows
+      // (the API key's label): a keyed REST read is attributed, so the
+      // onboarding connect proof can count it. A browser session stays unattributed.
+      client: readClient(c),
     });
   });
 
@@ -784,6 +815,9 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Surfaces (Slack → nest; needs the plane and metacognition, never in
+      // open mode). Off → /surfaces/* 404s and the Control room page hides.
+      surfaces_enabled: surfacesEnabled(),
       // Experimental features, one key each (default OFF; superadmin switches
       // under Settings → Features). Off → the feature's routes 404 and the UI
       // renders none of it. Add new experimental switches as keys here.
@@ -1020,6 +1054,10 @@ export function createApp(): Hono<AuthEnv> {
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     type_view_enabled: ACCEPTED_NODE_TYPES.has("view"),
     hootie_enabled: config.HOOTIE_ENABLED,
+    // First-run onboarding (PO-1185).
+    onboarding_enabled: config.ONBOARDING_ENABLED,
+    distill_enabled: config.DISTILL_ENABLED,
+    surfaces_slack_self_serve: config.SURFACES_SLACK_SELF_SERVE,
     // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
@@ -1383,6 +1421,17 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Default OFF (CU-wdqcq03ewc). Both states are written explicitly so a
     // UI choice beats a deploy env of either value (db/settings.ts precedence).
+    // First-run onboarding toggles (PO-1185). Both states are written
+    // explicitly so a UI choice beats a deploy env of either value.
+    if ("onboarding_enabled" in body) {
+      pending.push({ name: "ONBOARDING_ENABLED", value: body.onboarding_enabled ? "true" : "false" });
+    }
+    if ("distill_enabled" in body) {
+      pending.push({ name: "DISTILL_ENABLED", value: body.distill_enabled ? "true" : "false" });
+    }
+    if ("surfaces_slack_self_serve" in body) {
+      pending.push({ name: "SURFACES_SLACK_SELF_SERVE", value: body.surfaces_slack_self_serve ? "true" : "false" });
+    }
     if ("hootie_enabled" in body) {
       pending.push({
         name: "HOOTIE_ENABLED",
@@ -2666,12 +2715,13 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
   // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
-  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000),
+  // ?source=agent|human, ?facets=0 (skip the facet counts; po-1214),
+  // ?items=0 (count only: `total`, no page — the new-posts poll).
   // One item per node version across every nest the caller can read, newest
   // first, access-filtered per nest (see governance/stream-service.ts). Behind
   // its own switch: off → 404. Version history is a licensed governance view,
   // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
-  const streamUnreadableWarned = new Set<string>();
   app.get("/me/stream", async (c) => {
     if (!config.EXPERIMENTAL_DOC_STREAM) {
       return c.json(
@@ -2708,47 +2758,28 @@ export function createApp(): Hono<AuthEnv> {
       // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
       since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
     }
-    const me = await resolveCallerEmail(userId);
-    const nests = new Map<string, string>();
-    for (const n of await listVisibleNests(userId, { readable: true }))
-      nests.set(n.id, n.name ?? n.id);
-    const page = await getDocStream({
+    const sourceRaw = c.req.query("source");
+    if (sourceRaw && sourceRaw !== "agent" && sourceRaw !== "human") {
+      return c.json({ error: "source must be agent or human" }, 400);
+    }
+    const page = await streamForCaller({
       userId,
-      userEmail: me,
-      nests,
+      userEmail: await resolveCallerEmail(userId),
       filters: {
         nest: list("nest"),
         tag: list("tag"),
         type: list("type"),
         author: list("author"),
         since,
+        source: sourceRaw as "agent" | "human" | undefined,
       },
       // The service clamps (limit 1–100, default 50; offset 0–10000).
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
       offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
-      readVersion: async (nestId, nodeId, version) => {
-        const { storage, versions } = await engineCache.get(nestId);
-        try {
-          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
-        } catch {
-          // The unreviewed draft on top is never in the chain — its bytes are
-          // the live file (same fallback as GET …/versions/:version).
-          const node = await storage.readDocument(nodeId);
-          if ((node.frontmatter.version ?? 1) === version) {
-            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
-          }
-          // Neither the chain nor the live file has this version: a broken
-          // chain. The card shows no summary; say so once per document.
-          const key = `${nestId}:${nodeId}`;
-          if (!streamUnreadableWarned.has(key)) {
-            // Bounded: a long-lived server forgets old ones rather than grow.
-            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
-            streamUnreadableWarned.add(key);
-            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
-          }
-          return null;
-        }
-      },
+      // facets=0: skip the facet counts (po-1214).
+      facets: c.req.query("facets") !== "0" && c.req.query("facets") !== "false",
+      // items=0: the poll needs only `total` — no page, review or summary work.
+      items: c.req.query("items") !== "0" && c.req.query("items") !== "false",
     });
     return c.json(page);
   });
@@ -2906,6 +2937,12 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Agent control room (po-1186): the org-wide decision ledger, one entry's
+  // trace, and rollups. Read-only; each route scopes to the caller's nests.
+  app.use("/ledger/*", flexAuthMiddleware);
+  app.route("/ledger", orgLedgerRoutes);
+  app.use("/rollups/*", flexAuthMiddleware);
+  app.route("/rollups", orgRollupRoutes);
   // Inbound trigger hooks — public by design: the unguessable token in the
   // path is the capability; presets add platform signature verification on
   // top (see workflow/hook-routes.ts).
@@ -2918,6 +2955,10 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Surfaces member explainer (po-1186 CR3): the page the bot links in its
+  // one enable notice. Public, server-rendered, no nest data; 404 while
+  // Surfaces is off.
+  app.route(ABOUT_SURFACES_PATH, aboutSurfacesRoutes);
   // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
   // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
   app.route("/d", siteRoutes);
@@ -2936,6 +2977,13 @@ export function createApp(): Hono<AuthEnv> {
   // Named systems (CU-wdqcq0538g). Admin-gated in the service layer
   // (owner/admin of the nests involved); a system or headless key never gets
   // here (the nest-scope guard fences those out).
+  // First-run onboarding (PO-1185): the welcome screen's state, "Create my
+  // nest", the connect proof, distill and self-serve Slack. Global like
+  // /systems: it acts on the caller and checks each nest it names.
+  app.use("/onboarding", flexAuthMiddleware);
+  app.use("/onboarding/*", flexAuthMiddleware);
+  app.route("/onboarding", onboardingRoutes);
+
   app.use("/systems", flexAuthMiddleware);
   app.use("/systems/*", flexAuthMiddleware);
   app.route("/systems", systemRoutes);
@@ -3414,20 +3462,34 @@ export function createApp(): Hono<AuthEnv> {
     // trust the handler.
     // The batch approve/reject belongs here for the same reason: it is a
     // wrapper over those per-document decisions and re-checks every item
-    // through them. Exact trailing segment, so a node slug can't reach it.
+    // through them.
+    //
+    // Every exemption in this block names an ACTION, and every such action is
+    // a POST. So each one is matched as a POST on that action's own route
+    // shape — never as a substring of the path, and never for another method.
+    // A node id comes from the document's title and folder: "Approved
+    // Vendors" is `nodes/approved-vendors` and "Comments" is `nodes/comments`,
+    // so a substring match (`path.includes("/approve")`) or a method-blind
+    // suffix match (`/\/comments$/`) left PATCH/DELETE/move on those documents
+    // at "read" — a route whose handler trusts this middleware (PO-1193).
+    const isPost = c.req.method === "POST";
+    // A node action: POST /nests/:id/nodes/<node id…>/<action>.
+    const nodeAction =
+      isPost && parts[1] === "nodes" && parts.length >= 4
+        ? parts[parts.length - 1]
+        : null;
     const isStewardActionPath =
-      path.includes("/approve") ||
-      path.includes("/reject") ||
-      path.includes("/submit-review") ||
-      path.includes("/cancel-review") ||
-      /\/review-queue\/bulk$/.test(path) ||
-      (parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
+      (nodeAction !== null && STEWARD_NODE_ACTIONS.has(nodeAction)) ||
+      (isPost && parts.length === 3 && parts[1] === "review-queue" && parts[2] === "bulk") ||
+      (isPost && parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
     // Confirm/reject a held push (Push Confirmation Gate) is admitted at
     // read-tier so a read-only reviewer steward can decide it; the handler's
     // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
-    // (reject already matches isStewardActionPath's /reject; confirm needs this.)
     const isPushDecisionPath =
-      /\/pending-pushes\/[^/]+\/(confirm|reject)$/.test(path);
+      isPost &&
+      parts.length === 4 &&
+      parts[1] === "pending-pushes" &&
+      (parts[3] === "confirm" || parts[3] === "reject");
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.
@@ -3435,8 +3497,9 @@ export function createApp(): Hono<AuthEnv> {
     //   POST …/annotations                        → create thread
     //   POST …/annotations/:id/{comments,resolve,reopen}
     const isAnnotationAction =
-      /\/annotations$/.test(path) ||
-      /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
+      isPost &&
+      (/\/annotations$/.test(path) ||
+        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path));
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3447,9 +3510,12 @@ export function createApp(): Hono<AuthEnv> {
     // `comments-draft` → path `…/nodes/comments-draft` contains `/comments`.
     // A substring match left `required` at "read", letting a read-only
     // collaborator PATCH/DELETE any node whose slug starts with "comments".
+    // POST only, for the same reason: a document titled "Comments" IS
+    // `…/nodes/comments`, and only a POST there reaches the comment handler.
     const isCommentAction =
-      /\/comments$/.test(path) ||
-      /\/comments\/[^/]+\/resolve$/.test(path);
+      isPost &&
+      (/\/comments$/.test(path) ||
+        /\/comments\/[^/]+\/resolve$/.test(path));
     // Flagging a node for deletion is admitted at read-tier HERE so the
     // handler can answer 404-then-403 in the right order (a caller who can't
     // see the node must not learn it exists). The real gate is the handler's
@@ -3461,8 +3527,9 @@ export function createApp(): Hono<AuthEnv> {
     // admitted at read-tier — you don't need write access to undo your own
     // flag. The handler validates ownership (withdrawnBy === requestedBy).
     const isDeletionRequestAction =
-      /\/request-deletion$/.test(path) ||
-      /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+      isPost &&
+      (/\/request-deletion$/.test(path) ||
+        /\/deletion-requests\/[^/]+\/withdraw$/.test(path));
     // Asking for access is what a viewer does (CU-wdqcq041jn), so the whole
     // /access-requests surface sits at read tier. Approve/deny are refused in
     // the handler for anyone but the owner, a nest admin or the server admin.
@@ -3930,6 +3997,11 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  // Agent control room (po-1186): register an outside agent, the nest's
+  // decision ledger (+ export) and its rollups.
+  nestsApp.route("/:nestId/agents", agentRegisterRoutes);
+  nestsApp.route("/:nestId/ledger", nestLedgerRoutes);
+  nestsApp.route("/:nestId/rollups", nestRollupRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
@@ -4062,6 +4134,9 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (err instanceof BillingConfirmError) {
       return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
+    }
+    if (err instanceof CodedError) {
+      return c.json({ ...err.extra, error: err.message, code: err.code }, err.statusCode as any, err.headers);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

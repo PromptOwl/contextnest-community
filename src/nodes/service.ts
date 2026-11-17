@@ -78,6 +78,7 @@ import {
   filterAccessible,
   canReadNode,
   readsWholeNest,
+  ownDraftIds,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import {
@@ -99,6 +100,7 @@ import {
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { nestDoneTags, nestTaskRules, storeDefaultTaskRules } from "../nests/service.js";
+import { validateInstructions, writeInstructions } from "../nests/instructions-service.js";
 import {
   applyExclusiveNamespaces,
   bareTag,
@@ -255,6 +257,11 @@ const slugify = (s: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+
+/** The change note the server writes when it publishes a write itself
+ *  ("Auto-published on create (<reason>)"). The document stream reads the
+ *  prefix to tell this stamp from a note a person wrote (po-1214). */
+export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
 
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
@@ -501,6 +508,16 @@ export interface NodeResponse extends TaskFields {
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
+  /** Who sealed the latest version: the human and, when the write named one,
+   *  the agent (`client`, spec §9.4). Node detail only, never to a public
+   *  reader — like `collaborators`, it names the nest's people. */
+  last_edit?: {
+    version: number;
+    edited_by: string;
+    edited_by_system?: string;
+    edited_at: string;
+    client?: ClientMetadata;
+  };
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -1183,13 +1200,23 @@ export async function listNodesForCaller(
     ? await versions.getApprovedVersions(nestId)
     : null;
 
+  // A visibility-only reader sees the live draft (and its real status) of the
+  // documents they edit — a write grantee's, or their own proposal — and
+  // approved content for everything else, as in the single-node read.
+  const own = publicReader
+    ? await ownDraftIds(nestId, userId, userEmail, nodes)
+    : new Set<string>();
   let accessible = await filterAccessible(
     nestId,
     userId,
     userEmail,
-    nodes,
+    own.size ? nodes.filter((n) => !own.has(n.id)) : nodes,
     approvedVersions ?? undefined,
   );
+  if (own.size) {
+    const kept = new Set(accessible.map((n) => n.id));
+    accessible = nodes.filter((n) => kept.has(n.id) || own.has(n.id));
+  }
 
   // Share grants (a caller with NO nest-wide permission sees exactly the
   // documents their grants cover) are narrowed inside filterAccessible, on both
@@ -1232,6 +1259,7 @@ export async function listNodesForCaller(
     const keep = await Promise.all(
       accessible.map(async (d) => {
         const a = await loadApproved(d.id);
+        if (own.has(d.id)) return matchesFields(d.frontmatter.type, storedFieldsOf(d.frontmatter.metadata));
         return !!a && matchesFields(d.frontmatter.type, fieldsOfRaw(d.id, a.raw));
       }),
     );
@@ -1249,7 +1277,7 @@ export async function listNodesForCaller(
   // Two whole-nest reads instead of per-node ones: display status cost a DB
   // round trip per document and the pending-change probe a directory glob.
   // Skipped on the approved-only path, which reads neither.
-  const [displayState, driftedDocs] = approvedVersions
+  const [displayState, driftedDocs] = approvedVersions && !own.size
     ? [null, null]
     : await Promise.all([
         versions.getDisplayState(nestId),
@@ -1290,10 +1318,11 @@ export async function listNodesForCaller(
       }
 
       // Field values from the approved version, never the live draft.
-      const approved = approvedFields ? await loadApproved(doc.id) : null;
-      if (approvedFields) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
+      const isOwn = own.has(doc.id);
+      const approved = approvedFields && !isOwn ? await loadApproved(doc.id) : null;
+      if (approvedFields && !isOwn) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
 
-      if (approvedVersions) {
+      if (approvedVersions && !isOwn) {
         const wanted = approvedVersions.get(doc.id);
         if (wanted != null) {
           r.content = approved ? bodyOnly(doc.id, approved.raw) : "";
@@ -1731,6 +1760,10 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** The `view:` block of a type: view node (§1.12) — validated against the
    *  engine's view schema, refused on any other type. */
   view?: unknown;
+  /** An agent registered through the agent event API (po-1186): where it
+   *  executes, its runtime label and its accountable owner, stored as
+   *  `metadata.agent`. Agent nodes only. */
+  agent?: { executes: string; runtime: string | null; owner: string };
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -2232,6 +2265,7 @@ async function createNodeOnce(
       ...(input.prime === undefined ? {} : { prime: input.prime }),
       ...(input.alwaysInclude === undefined ? {} : { always_include: input.alwaysInclude }),
       ...(input.original ? { original: input.original } : {}),
+      ...(input.agent && input.type === "agent" ? { agent: input.agent } : {}),
     };
     if (input.type === TASK_NODE_TYPE) {
       await applyTaskRulesOnCreate(nestId, tags, await nestTaskRules(nestId));
@@ -2304,7 +2338,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `Auto-published on create (${publishReason})`;
+          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -2509,6 +2543,39 @@ async function stageImportedFilesInner(
       return !segs.includes("_suggestions") && !segs.includes(".context");
     })
     .map((f) => (/^context\.md$/i.test(String(f.path)) ? { ...f, path: "CONTEXT.md" } : f));
+  // The engine's import slugifies paths, so it would land this as `context.md`,
+  // which `readContextMd` doesn't find on a case-sensitive disk. Instructions
+  // aren't a document anyway: they go through their own write, with a revision.
+  const instructions = carried.find((f) => f.path === "CONTEXT.md");
+  const staged = await stageVaultFiles(
+    nestId,
+    carried.filter((f) => f.path !== "CONTEXT.md"),
+    userEmail,
+  );
+  if (!instructions) return staged;
+  try {
+    const content = validateInstructions(instructions.content);
+    await writeInstructions(nestId, content, {
+      authorEmail: userEmail,
+      note: "Imported with the folder",
+      source: "push",
+    });
+    return { ...staged, written: staged.written + 1 };
+  } catch (err) {
+    if (!(err instanceof ValidationError)) throw err;
+    return {
+      ...staged,
+      rejected: [...staged.rejected, "CONTEXT.md"],
+      problems: [...staged.problems, `CONTEXT.md: ${err.message}`],
+    };
+  }
+}
+
+async function stageVaultFiles(
+  nestId: string,
+  carried: Array<{ path: string; content: string }>,
+  userEmail: string
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
   // View addresses (see views/collision.ts): a document arriving at a view's
   // <view>/view/… address, or a view arriving over an occupied one, is refused
@@ -3295,7 +3362,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `Auto-published on edit (${publishReason})`;
+          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

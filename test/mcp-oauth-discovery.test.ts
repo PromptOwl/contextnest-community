@@ -189,6 +189,17 @@ describe("/mcp challenge", () => {
     );
   });
 
+  // The 405 for GET (no SSE stream) sits behind auth: an anonymous GET still
+  // gets the challenge, so a client probing GET first starts the OAuth flow.
+  it("401s an anonymous GET too, on both endpoints, before the 405", async () => {
+    enable();
+    const app = await createTestApp("key");
+    for (const path of ["/mcp", "/nests/00000000-0000-0000-0000-000000000000/mcp"]) {
+      const res = await app.request(path, { method: "GET", headers: { Accept: "text/event-stream" } });
+      expect(res.status).toBe(401);
+    }
+  });
+
   /**
    * Clients request exactly these, so a connected agent can write and stays
    * signed in (refresh token) without a second consent.

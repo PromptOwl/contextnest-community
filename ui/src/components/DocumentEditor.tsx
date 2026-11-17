@@ -17,7 +17,7 @@ import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { documentLink } from "../lib/nest-url";
-import { useBreadcrumb } from "../lib/breadcrumb";
+import { documentCrumb, useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
   newTags,
@@ -150,6 +150,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { versionAuthorShort, clientTitle, lastEditParts, type LastEdit } from "../lib/version-author";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -291,6 +292,8 @@ export function DocumentEditor({
   // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  // Set when the visibility picker's "Share with a team…" opens the dialog.
+  const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
   const [showPublish, setShowPublish] = useState(false);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
@@ -388,6 +391,11 @@ export function DocumentEditor({
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  // Who sealed the latest version — human and agent (node detail `last_edit`).
+  const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
+  // updated_at as loadNode saw it. A save moves updatedAt past it; the byline
+  // then re-reads last_edit, since a write response does not carry it.
+  const loadedUpdatedAtRef = useRef<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -444,6 +452,7 @@ export function DocumentEditor({
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
   const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -964,11 +973,6 @@ export function DocumentEditor({
   const loadedTitleRef = useRef<string>("");
 
   const [loading, setLoading] = useState(!isNew);
-  // Header breadcrumb: Home › nest › this document (App adds the front).
-  // "Loading…" until the title arrives, not a false "Untitled" (CU-wdqcq06a1y).
-  useBreadcrumb([
-    { label: isNew ? "New document" : title.trim() || (loading ? "Loading…" : "Untitled") },
-  ]);
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
@@ -1153,6 +1157,8 @@ export function DocumentEditor({
   // The document couldn't be loaded (stale link, deleted doc, no access). The
   // editor must not fall through to a blank, saveable document in that case.
   const [loadFailed, setLoadFailed] = useState(false);
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  useBreadcrumb([{ label: documentCrumb({ isNew, title, loading, loadFailed }) }]);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
@@ -1212,6 +1218,8 @@ export function DocumentEditor({
       setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
+      setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
+      loadedUpdatedAtRef.current = node?.updated_at ?? null;
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1274,6 +1282,24 @@ export function DocumentEditor({
     if (isNew) return;
     loadNode();
   }, [isNew, loadNode]);
+
+  useEffect(() => {
+    if (isNew || !updatedAt || updatedAt === loadedUpdatedAtRef.current) return;
+    loadedUpdatedAtRef.current = updatedAt;
+    let cancelled = false;
+    api
+      .getNode(nestId, nodeId)
+      .then((r) => {
+        if (!cancelled) setLastEdit((r?.node?.last_edit ?? null) as LastEdit | null);
+      })
+      .catch((err) => {
+        // The byline keeps its last value; the save itself already succeeded.
+        console.warn("last-edit refresh failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, updatedAt]);
 
   const openVersions = useCallback(async () => {
     setShowVersions(true);
@@ -1448,6 +1474,8 @@ export function DocumentEditor({
     if (!isDirty || isReviewerOnly) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (leavingRef.current) return;
+      // A reload with focus still in a field never blurs it, so park here too.
+      saveOnBlurRef.current();
       e.preventDefault();
     };
     window.addEventListener("beforeunload", onBeforeUnload);
@@ -1703,7 +1731,7 @@ export function DocumentEditor({
         isRunnable
           ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
           : { ...payload, ...primePatch, ...viewPatch },
-        baseVersion,
+        baseVersionRef.current,
       );
       if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
       setPreviewNonce((n) => n + 1);
@@ -1741,7 +1769,7 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
-  const runSave = async (afterSave: (savedId: string) => void) => {
+  const runSave = async (afterSave: (savedId: string) => void, retried = false) => {
     // A plain save of someone else's pending submission is refused (locked);
     // the reviewer's edits only land through Save & approve.
     if (reviewerEditing) {
@@ -1790,7 +1818,25 @@ export function DocumentEditor({
       // the edits it had just written. A save is the answer to that question.
       bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
-      setError(err.message);
+      if (err.status === 409 && err.body?.error === "Version conflict") {
+        console.warn("[version-conflict]", err.body);
+        const { current_version: current, updated_by: by } = err.body;
+        if (!retried && typeof current === "number") {
+          // Re-base on the server's head and save again. The server decides the
+          // landing: a draft is updated in place, a published or pending
+          // document gets a new draft on top of the current version.
+          baseVersionRef.current = current;
+          setBaseVersion(current);
+          toast.info(`Changed${by ? ` by ${by}` : ""} meanwhile (now v${current}) — saving your edits on top.`);
+          setSaving(false);
+          return runSave(afterSave, true);
+        }
+        setError(
+          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Reload to take theirs.`,
+        );
+      } else {
+        setError(err.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -1998,6 +2044,11 @@ export function DocumentEditor({
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
+  // Mirrors the server's canDecideExternalEdit (PO-1193): on a governed nest
+  // an edit made outside the app is decided by whoever may approve the
+  // document, on an open nest by whoever may edit it. Everyone else still
+  // sees the notice and the diff.
+  const canDecideExternalEdit = stewardshipEnabled ? canApproveCapability : !isViewOnly;
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
@@ -2216,6 +2267,10 @@ export function DocumentEditor({
           <NestVisibilityControl
             nestId={nestId}
             variant="compact"
+            onShareWithTeam={() => {
+              setShareTab("teams");
+              setShowShare(true);
+            }}
             onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
             onError={(m) => {
               if (m) toast.error(m);
@@ -2402,7 +2457,11 @@ export function DocumentEditor({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           documentUrl={documentLink(window.location.origin, nestId, nodeId)}
-          onClose={() => setShowShare(false)}
+          initialTab={shareTab}
+          onClose={() => {
+            setShowShare(false);
+            setShareTab(undefined);
+          }}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
@@ -2752,7 +2811,9 @@ export function DocumentEditor({
                   <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+              {/* Fits "human via agent · time" on one line; a long agent name
+                  truncates, and the hover title carries the full detail. */}
+              <DropdownMenuContent align="end" className="min-w-[14rem] max-w-[22rem] max-h-80 overflow-y-auto">
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
@@ -2788,10 +2849,18 @@ export function DocumentEditor({
                             to tell which past version you are reaching for.
                             Same editedAt Version History already renders. */}
                         <span
-                          className="ml-auto text-xs text-muted-foreground"
-                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                          className="ml-auto pl-3 min-w-0 truncate whitespace-nowrap text-xs text-muted-foreground"
+                          title={
+                            [
+                              v.editedAt ? formatServerDate(v.editedAt) : null,
+                              v.editedBy,
+                              clientTitle(v.client),
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || undefined
+                          }
                         >
-                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[versionAuthorShort(v), relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -2983,6 +3052,7 @@ export function DocumentEditor({
                     nestId={nestId}
                     nodeId={nodeId}
                     pending={pendingChange}
+                    canDecide={canDecideExternalEdit}
                     onResolved={() => {
                       setPendingChange(null);
                       loadNode();
@@ -3507,11 +3577,40 @@ export function DocumentEditor({
                 {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
-                {!isNew && (author || collaborators.length > 0) && (
+                {!isNew && (author || lastEditBy || collaborators.length > 0) && (
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
                         Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                      </span>
+                    )}
+                    {/* Last edited by: the human, then the agent the write
+                        named — never the agent alone. Same type as Created by. */}
+                    {lastEditBy && (
+                      <span
+                        className="inline-flex flex-wrap items-center gap-x-1"
+                        data-testid="document-last-edited-by"
+                      >
+                        Last edited by{" "}
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                          {lastEditBy.human}
+                        </span>
+                        {lastEditBy.agent && (
+                          <>
+                            {" "}via{" "}
+                            <span
+                              className="font-medium text-foreground/80"
+                              title={clientTitle(lastEdit?.client)}
+                            >
+                              {lastEditBy.agent}
+                            </span>
+                          </>
+                        )}
+                        {lastEdit?.edited_at && (
+                          <span title={formatServerDate(lastEdit.edited_at)}>
+                            {" "}· {relTime(lastEdit.edited_at)}
+                          </span>
+                        )}
                       </span>
                     )}
                     {collaborators.length > 0 && (

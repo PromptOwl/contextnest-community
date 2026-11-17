@@ -163,22 +163,6 @@ const NAMES = new Set(METACOGNITION_TOOL_DEFINITIONS.map((t) => t.name));
 export const METACOGNITION_TOOL_NAMES: ReadonlySet<string> = NAMES;
 export const isMetacognitionTool = (name: string): boolean => NAMES.has(name);
 
-/**
- * Can this JSON-RPC body (one message or a batch) use the metacognition tools?
- * Only a tools/list or a call to one of them — the server-level endpoint uses
- * this to skip working out whether to offer them on every other request.
- */
-export function requestMayUseMetacognition(body: unknown): boolean {
-  // Fail closed: anything unrecognised (junk, an odd encoding) is "no", which
-  // only means the tools aren't offered on that request.
-  const msgs = Array.isArray(body) ? body : [body];
-  return msgs.some((m) => {
-    if (!m || typeof m !== "object") return false;
-    const { method, params } = m as { method?: unknown; params?: { name?: unknown } };
-    return method === "tools/list" || (method === "tools/call" && isMetacognitionTool(String(params?.name ?? "")));
-  });
-}
-
 /** An operation's refusal → a tool error carrying its message unchanged.
  *  CONFLICT (409: already running, too many starts this hour) means "try
  *  again later", not "fix the input"; a 5xx is the server's fault, INTERNAL. */

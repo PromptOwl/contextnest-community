@@ -18,6 +18,8 @@ import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { STREAM_TOOL, streamToolEnabled } from "./stream-tool.js";
+import { AGENT_TOOL_DEFINITIONS } from "./agent-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { SURFACES_TOOL_DEFINITIONS } from "./surfaces-tools.js";
@@ -85,6 +87,7 @@ function createMcpServerForNest(
     ? [
         ...TOOL_DEFINITIONS,
         ...WORKFLOW_TOOL_DEFINITIONS,
+        ...AGENT_TOOL_DEFINITIONS,
         ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
         ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
       ]
@@ -100,10 +103,12 @@ function createMcpServerForNest(
     // the agent the truth. runTool still refuses a write tool on its own
     // (the SDK answers an unregistered name with an error before that).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    // The document stream exists only while its experimental switch is on.
+    if (tool.name === STREAM_TOOL && !streamToolEnabled()) continue;
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // `client` is validated against the engine's own schema in handleToolCall.
-    const shape = toolShape(tool.inputSchema);
+    const shape = toolShape(tool.name, tool.inputSchema);
 
     const meta = { title: toolTitle(tool.name), description: tool.description, inputSchema: shape, annotations: toolAnnotations(tool.name) };
     server.registerTool(tool.name, meta, async (args: Record<string, any>) => {
@@ -140,8 +145,22 @@ function createMcpServerForNest(
   return server;
 }
 
-// POST/GET/DELETE /nests/:nestId/mcp
-mcpRoutes.all("/", async (c) => {
+/**
+ * Stateless transport: POST only. No standalone SSE stream and no session to
+ * delete, so GET/DELETE (and anything else) answer 405 — the spec's "no stream
+ * offered". Serving GET instead built a full server, opened an SSE stream and
+ * closed it at once — clients reconnected in a tight loop and pinned prod's
+ * CPU (Nov 2026 incident). OPTIONS never gets here: cors() answers it first.
+ */
+export const mcpNoStream = (c: Context) =>
+  c.json(
+    { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null },
+    405,
+    { Allow: "POST" },
+  );
+
+// POST /nests/:nestId/mcp
+mcpRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const caller = await getCaller(userId);
@@ -186,3 +205,4 @@ mcpRoutes.all("/", async (c) => {
     await server.server.close();
   }
 });
+mcpRoutes.all("/", mcpNoStream);

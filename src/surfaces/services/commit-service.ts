@@ -186,7 +186,8 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
     await req.responder.note(personalNestRefusal(personal));
     return { ok: false };
   }
-  if (!(await canReviewAll(p.nest_id, userId, pending))) {
+  // Admin folders are checked per verb just below, so Approve gets the admin refusal.
+  if (!(await canReviewAll(p.nest_id, userId, pending, { ignoreAdminFolders: true }))) {
     await req.responder.note(await notReviewerNote(p, binding, pending));
     return { ok: false };
   }

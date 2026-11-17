@@ -1339,6 +1339,16 @@ describe("S7-R2 L4: admin-only folders on every commit path", () => {
     expect((await one("SELECT status FROM review_requests WHERE nest_id = ? AND node_id = ? ORDER BY requested_at DESC LIMIT 1", [N1, draftId])).status).toBe("pending");
   });
 
+  it("L4: a non-admin reviewer can reject there, though approve stays refused", async () => {
+    const { submitForReview } = await import("../src/governance/review-service.js");
+    const made = await NODES.createNode(N1, { title: "Helper to reject", content: "x", folder: ADMIN.replace(/\/$/, "") }, alice.email, { alwaysDraft: true, creatorReviews: false });
+    await submitForReview({ nestId: N1, nodeId: made.node.id, version: made.version, requestedBy: alice.email });
+    expect((await jsonRequest(app, "POST", `/nests/${N1}/nodes/${made.node.id}/approve`, {}, bob.apiKey)).status).toBe(403);
+    const r = await jsonRequest(app, "POST", `/nests/${N1}/nodes/${made.node.id}/reject`, { note: "Not this one" }, bob.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect((await one("SELECT status FROM review_requests WHERE nest_id = ? AND node_id = ? ORDER BY requested_at DESC LIMIT 1", [N1, made.node.id])).status).toBe("rejected");
+  });
+
   it("L4: a non-admin writer can't create or edit documents there (REST and MCP); an admin can", async () => {
     // carol: a write collaborator of N1 (since L3), not an admin.
     expect((await jsonRequest(app, "POST", `/nests/${N1}/nodes`, { title: "Ordinary note by carol", content: "x" }, carol.apiKey)).status).toBeLessThan(300);

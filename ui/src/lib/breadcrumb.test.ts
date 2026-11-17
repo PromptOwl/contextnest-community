@@ -1,5 +1,21 @@
 import { describe, it, expect } from "vitest";
-import { crumbLabelClass, tabTitle } from "./breadcrumb";
+import { crumbLabelClass, documentCrumb, tabTitle } from "./breadcrumb";
+
+describe("documentCrumb", () => {
+  const doc = { isNew: false, title: "", loading: false, loadFailed: false };
+
+  it("says Not found for a document that failed to load, even with a stale title", () => {
+    expect(documentCrumb({ ...doc, loadFailed: true })).toBe("Not found");
+    expect(documentCrumb({ ...doc, title: "Old", loadFailed: true })).toBe("Not found");
+  });
+
+  it("names the document, or says what is happening when there is no title", () => {
+    expect(documentCrumb({ ...doc, title: " Plan " })).toBe("Plan");
+    expect(documentCrumb({ ...doc, loading: true })).toBe("Loading…");
+    expect(documentCrumb(doc)).toBe("Untitled");
+    expect(documentCrumb({ ...doc, isNew: true })).toBe("New document");
+  });
+});
 
 describe("crumbLabelClass", () => {
   it("lets the current crumb truncate instead of overflowing an unbreakable name", () => {

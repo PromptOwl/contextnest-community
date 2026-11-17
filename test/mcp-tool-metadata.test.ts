@@ -52,6 +52,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
   const owner = await registerUser(app, "owner@metadata.test", "Owner");
@@ -70,6 +71,7 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
 
@@ -121,6 +123,35 @@ describe("every listed tool", () => {
         }
       }
     }
+  });
+});
+
+describe("confirm_billing", () => {
+  // Written out, not read from the source, so widening the set is a decision.
+  const CAN_RAISE_A_BILL = ["context_assign_steward", "context_grant", "context_resolve_access_request", "context_share_nest", "context_nest_teams"];
+
+  it("is offered only on the tools that can raise what someone is billed", async () => {
+    for (const [label, path, key] of endpoints()) {
+      for (const t of await listTools(path, key)) {
+        const offered = "confirm_billing" in (t.inputSchema.properties ?? {});
+        expect(offered, `${label}: ${t.name}`).toBe(CAN_RAISE_A_BILL.includes(t.name));
+      }
+    }
+  });
+
+  it("is still offered on each of those tools, for a nest owner", async () => {
+    const tools = await listTools(`/nests/${nestId}/mcp`, ownerKey);
+    for (const name of CAN_RAISE_A_BILL) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool, name).toBeTruthy();
+      expect(tool!.inputSchema.properties?.confirm_billing?.description, name).toMatch(/billed/);
+    }
+  });
+
+  it("is on no tool of the server-level endpoint, which has none of them", async () => {
+    const tools = await listTools("/mcp", ownerKey);
+    expect(tools.filter((t) => CAN_RAISE_A_BILL.includes(t.name))).toEqual([]);
+    expect(tools.filter((t) => "confirm_billing" in (t.inputSchema.properties ?? {})).map((t) => t.name)).toEqual([]);
   });
 });
 
