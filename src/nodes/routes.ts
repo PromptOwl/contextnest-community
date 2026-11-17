@@ -925,16 +925,20 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const authorEmail = await getUserEmail(c);
 
   // Same guard as POST and context_update (PO-1336): an agent's replaced body
-  // that is an HTML page. Needs the stored type, so it reads the node; a miss
-  // is left for updateNode to report.
+  // that is an HTML page. Needs the stored type, so it reads the node. A failed
+  // read skips the guard (never guess "document" and re-type a task or skill);
+  // updateNode reads the node again and reports the error.
   let html: ReturnType<typeof htmlWriteGuard> = null;
   if (c.get("apiKeyId") && typeof body.content === "string") {
     const { storage } = await engineCache.get(nestId);
-    const storedType = await storage.readDocument(nodeId).then(
-      (n) => n.frontmatter.type as string | undefined,
-      () => undefined,
-    );
-    html = htmlWriteGuard({ type: body.type, storedType, content: body.content });
+    const stored = await storage.readDocument(nodeId).catch(() => null);
+    html = stored
+      ? htmlWriteGuard({
+          type: body.type,
+          storedType: stored.frontmatter.type as string | undefined,
+          content: body.content,
+        })
+      : null;
     if (html) {
       body.content = html.content;
       if (html.type) body.type = html.type;
