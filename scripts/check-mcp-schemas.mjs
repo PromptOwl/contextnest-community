@@ -91,7 +91,14 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
 //     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
 //       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
-const BASELINE = 110;
+//   110->111 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
+//   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
+//   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
+//   111->112 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
+//   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
+//   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
+const BASELINE = 112;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -19,6 +19,7 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
 import { indexPostedMessage } from "../mentions/mention-index.js";
+import { wakeForPostedMessage } from "../stream/agent-wake.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -98,6 +99,9 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
   });
   // Who it tags, for My Work's Mentions (PO-1180).
   await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
+  // Wake the agents it tags that have a webhook target (PO-1181) — reads
+  // the index row just written, so it runs after it.
+  await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail: userEmail });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread }, 201);
 });
@@ -148,6 +152,9 @@ export async function handleAnnotationReply(
     baseUrl: requestBaseUrl(c.req.url),
   });
   await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
+  // Wake the agents it tags that have a webhook target (PO-1181) — reads
+  // the index row just written, so it runs after it.
+  await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail: userEmail });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 }

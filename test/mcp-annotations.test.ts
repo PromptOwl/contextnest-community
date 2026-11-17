@@ -114,6 +114,8 @@ const DESTRUCTIVE = [
   "context_surfaces_seed_apply",
   "context_channels",
   "context_agent_run_close",
+  // Agent webhooks (PO-1181): set replaces a target, delete removes one.
+  "context_agent_webhooks",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -156,6 +158,10 @@ const OPEN_WORLD = [
   "context_channels",
   // Read-only, but it calls Slack (users.conversations).
   "context_surfaces_slack_channels_list",
+  // Promote a thread (PO-1181): creates a node, which a docs site may serve.
+  "context_promote_thread",
+  // Points a nest's mention events at an outside URL.
+  "context_agent_webhooks",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -211,9 +217,11 @@ async function allDefinedNames(): Promise<string[]> {
   const { CHANNEL_TOOL_DEFINITIONS } = await import("../src/mcp/channel-tools.js");
   const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
+  const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
+    ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,
