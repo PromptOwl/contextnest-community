@@ -297,7 +297,11 @@ describe("AC-MW-05: MCP context_my_work matches REST /me/work", () => {
   it("AC-MW-05 returns the same sections and items as REST for the person's own key", async () => {
     await open(bob, OPS, "@alice parity check");
     const rest = await work(alice);
-    const mcp = await callTool(alice.apiKey, "context_my_work", {});
+    // Since S4b (AC-AX-02) the MCP default leaves the notification list out;
+    // asking for every section returns exactly what REST returns.
+    const mcp = await callTool(alice.apiKey, "context_my_work", {
+      sections: ["mentions", "items", "waiting", "assigned", "notifications"],
+    });
     expect(mcp.isError, mcp.text).toBe(false);
     for (const k of [
       "items",
@@ -389,7 +393,9 @@ describe("SEC: mentions never reveal what the caller can't read", () => {
     const here = await open(bob, OPS, "@alice in the scoped nest");
     const minted = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nestId }, alice.apiKey);
     expect(minted.status, JSON.stringify(minted.data)).toBeLessThan(300);
-    const r = await callTool(minted.data.api_key, "context_my_work", {});
+    const r = await callTool(minted.data.api_key, "context_my_work", {
+      sections: ["mentions", "items", "waiting", "assigned", "notifications"],
+    });
     expect(r.isError, r.text).toBe(false);
     expect(mentionThreads(r.data)).toContain(here);
     expect(r.data.mentions.every((m: any) => m.nest_id === nestId)).toBe(true);

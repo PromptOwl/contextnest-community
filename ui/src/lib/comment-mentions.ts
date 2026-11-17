@@ -92,16 +92,19 @@ export function mentionSegments(
       last = match.index + full.length;
       continue;
     }
-    const name = (bracketed || bare || "").trim();
+    // A sentence's full stop is not part of the name (src/shared/mentions.ts bareName).
+    const plain = (bare || "").replace(/\.+$/, "");
+    const name = (bracketed || plain).trim();
+    const end = match.index + full.length - (bare ? bare.length - plain.length : 0);
     const start = match.index + (lead ? lead.length : 0);
     pushText(text.slice(last, start));
     segments.push({
       kind: "mention",
-      text: text.slice(start, match.index + full.length),
+      text: text.slice(start, end),
       name,
       resolved: !rosterKnown || isMemberName(members, name),
     });
-    last = match.index + full.length;
+    last = end;
   }
   pushText(text.slice(last));
   return segments;

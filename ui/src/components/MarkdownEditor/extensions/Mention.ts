@@ -40,11 +40,13 @@ export function findMentions(text: string): MentionMatch[] {
   while ((match = mentionRegex.exec(text)) !== null) {
     const fullMatch = match[0];
     const isParenName = match[1] !== undefined;
-    const name = (match[1] ?? match[2] ?? "") as string;
+    // A sentence's full stop is not part of the name (src/shared/mentions.ts bareName).
+    const name = (match[1] ?? (match[2] ?? "").replace(/\.+$/, "")) as string;
+    const trailing = isParenName ? 0 : (match[2] ?? "").length - name.length;
     const leadingSpace =
       fullMatch.startsWith(" ") || fullMatch.startsWith("\n") ? 1 : 0;
     const start = match.index + leadingSpace;
-    const end = start + fullMatch.length - leadingSpace;
+    const end = start + fullMatch.length - leadingSpace - trailing;
     const atIndex = isParenName ? -1 : name.indexOf("@");
     const localEnd = atIndex > 0 ? start + 1 + atIndex : end;
     matches.push({ start, end, localEnd, name });

@@ -107,6 +107,9 @@ beforeAll(async () => {
   app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
   wake = await import("../src/stream/agent-wake.js");
   mentions = await import("../src/mentions/agent-mentions.js");
+  // Retries (S4b, AC-AX-08) are pinned in agent-stream-s4b-agents.test.ts.
+  // Off here, so a wake-up no test captured isn't retried into a later one.
+  wake.setAgentWakeBackoff([]);
   owner = await registerUser(app, OWNER_EMAIL, "Owner");
   alice = await registerUser(app, "alice@stream.test", "Alice Example");
   bob = await registerUser(app, "bob@stream.test", "Bob Builder");
@@ -286,8 +289,12 @@ describe("AC-ST-02: an @mention of an agent with a webhook sends exactly one sig
       message_id: t.comments[0].id,
       mentioned: "grok",
     });
-    // The message text is NOT sent: the agent reads it with its own key.
-    expect(s.body).not.toContain("release notes");
+    // Since S4b (AC-AX-07) the payload also names the author, says how to
+    // read the thread, and carries an excerpt — to this nest's own target only
+    // (SEC-AX-07 in agent-stream-s4b-agents.test.ts pins the other case).
+    expect(payload.author).toBe("Alice Example");
+    expect(payload.read).toEqual({ tool: "context_channel_read", arguments: { channel: "ops", thread: t.id } });
+    expect(payload.excerpt).toBe("@grok can you draft the release notes?");
     const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(s.headers["x-contextnest-signature"]);
     expect(m, s.headers["x-contextnest-signature"]).not.toBeNull();
     expect(m![2]).toBe(sign(secret, m![1], s.body));
@@ -380,6 +387,18 @@ describe("AC-ST-04: a writer promotes a thread to a decision", () => {
     expect(r.status, JSON.stringify(r.data)).toBe(201);
     expect(r.data.node.type).toBe("task");
     expect(r.data.node.id).toMatch(/^nodes\/tasks\//);
+  });
+
+  it("promotes in a review-required nest: the node is created and the thread links it", async () => {
+    const gov = (await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey)).data.nest.id as string;
+    await jsonRequest(app, "PATCH", `/nests/${gov}/settings`, { stewardship_enabled: true, allow_self_approve: false }, owner.apiKey);
+    const doc = await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Plan", content: "v1" }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const t = await open(owner, doc.data.id ?? doc.data.node.id, "Decide the launch date", {}, gov);
+    const r = await jsonRequest(app, "POST", `/nests/${gov}/threads/${t.id}/promote`, { kind: "decision" }, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const got = await jsonRequest(app, "GET", `/nests/${gov}/nodes/${r.data.node.id}`, undefined, owner.apiKey);
+    expect(got.status, JSON.stringify(got.data)).toBe(200);
   });
 
   it("a document comment thread promotes too (the AnnotationsPanel buttons)", async () => {

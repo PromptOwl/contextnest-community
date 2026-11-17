@@ -14,12 +14,11 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
-import { notifyComment } from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
-import { indexPostedMessage } from "../mentions/mention-index.js";
-import { wakeForPostedMessage } from "../stream/agent-wake.js";
+import { messageClient } from "../channels/message-meta.js";
+import { fanOutPostedMessage } from "../channels/post-message.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -29,6 +28,13 @@ import { wakeForPostedMessage } from "../stream/agent-wake.js";
  * app.ts (isAnnotationAction) deliberately admits these POSTs at read so a
  * read-only reviewer can comment. Each handler therefore enforces node
  * read-access itself, so you can't annotate a node you can't see.
+ *
+ * On a channel node (agent team stream) the same routes are how people post,
+ * and `channelPostRefusal` narrows them to people added to the nest; a
+ * visibility-only reader never passes `canReadNode` for a channel at all.
+ *
+ * Posting answers `{ thread, comment_id, mentions }`: the message's id, and
+ * what each @name in it reached (channels/post-message.ts).
  */
 export const annotationRoutes = new Hono<AuthEnv>();
 
@@ -63,7 +69,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  // A channel (PO-1179) takes posts from its nest's writers only.
+  // A channel takes posts from people added to the nest only.
   const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
   if (refusal) return c.json({ error: refusal.error }, refusal.status);
 
@@ -86,24 +92,22 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
       snapshotVersion: input.snapshotVersion ?? null,
     },
     userEmail,
-    // Who wrote it on the person's behalf (API key label, or what the caller
-    // says) — the channel timeline's "<agent>, on behalf of <human>".
-    attributeRequest(c, input.client),
+    // Who wrote it on the person's behalf, when the caller says so — the
+    // channel timeline's "<agent>, on behalf of <human>". A bare key label is
+    // kept beside it, not shown as an agent (message-meta.ts).
+    messageClient(attributeRequest(c, input.client), input.client, c.get("apiKeyLabel")),
   );
-  await notifyComment({
+  const posted = await fanOutPostedMessage({
     nestId,
     nodeId,
+    thread,
+    isReply: false,
     body: input.body,
-    actorEmail: userEmail,
+    authorEmail: userEmail,
+    authorUserId: userId,
     baseUrl: requestBaseUrl(c.req.url),
   });
-  // Who it tags, for My Work's Mentions (PO-1180).
-  await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
-  // Wake the agents it tags that have a webhook target (PO-1181) — reads
-  // the index row just written, so it runs after it.
-  await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail: userEmail });
-  await syncAnnotationsNode(nestId, nodeId, userEmail);
-  return c.json({ thread }, 201);
+  return c.json({ thread, comment_id: posted.comment_id, mentions: posted.mentions }, 201);
 });
 
 // POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments — reply.
@@ -139,24 +143,21 @@ export async function handleAnnotationReply(
     threadId,
     userEmail,
     input.body,
-    attributeRequest(c, input.client),
+    messageClient(attributeRequest(c, input.client), input.client, c.get("apiKeyLabel")),
   );
-  // @mentions in the reply, everyone already in the thread, then the
-  // document's watchers and reviewer stewards.
-  await notifyComment({
+  // @mentions in the reply; on a document also everyone already in the
+  // thread, its watchers and reviewer stewards.
+  const posted = await fanOutPostedMessage({
     nestId,
     nodeId,
     thread,
+    isReply: true,
     body: input.body,
-    actorEmail: userEmail,
+    authorEmail: userEmail,
+    authorUserId: userId,
     baseUrl: requestBaseUrl(c.req.url),
   });
-  await indexPostedMessage({ nestId, nodeId, thread, body: input.body, authorEmail: userEmail });
-  // Wake the agents it tags that have a webhook target (PO-1181) — reads
-  // the index row just written, so it runs after it.
-  await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail: userEmail });
-  await syncAnnotationsNode(nestId, nodeId, userEmail);
-  return c.json({ thread });
+  return c.json({ thread, comment_id: posted.comment_id, mentions: posted.mentions });
 }
 
 annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =>

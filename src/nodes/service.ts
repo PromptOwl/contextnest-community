@@ -81,6 +81,7 @@ import {
   ownDraftIds,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -2939,6 +2940,22 @@ function normalizeDescription(value: unknown): string {
   return description;
 }
 
+/**
+ * A channel (agent team stream) is retired by archiving it, never by editing
+ * its document out from under its conversation (PO-1190, AC-AX-11): removing
+ * the #channel tag, moving the node or deleting it would make the channel and
+ * every message in it vanish from the Channels view. All three are refused
+ * here — the one choke point REST and MCP share — with the way that works.
+ */
+function channelRetireRefusal(node: { id: string; frontmatter?: { tags?: unknown } | null }, doing: string): ConflictError | null {
+  if (!isChannelDoc(node)) return null;
+  const name = node.id.split("/").pop();
+  return new ConflictError(
+    `${node.id} is the #${name} channel, so ${doing} would lose its conversation. Archive the channel instead ` +
+      `(Channels → Archive, POST /nests/:id/channels/${name}/archive, or context_channels { action: "archive", name: "${name}" }); it can be restored later.`,
+  );
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -3038,6 +3055,10 @@ export async function updateNode(
         // after reopen). MCP context_update replaces too, per the engine
         // catalog; a caller wanting to add a tag sends the full set.
         let nextTags = requireTags(patch.tags);
+        if (!hasTag({ frontmatter: { tags: nextTags } }, CHANNEL_TAG)) {
+          const refusal = channelRetireRefusal(node, "removing its #channel tag");
+          if (refusal) throw refusal;
+        }
         if (node.frontmatter.type === TASK_NODE_TYPE) {
           nextTags = enforceTaskTagRules(
             priorTags,
@@ -3675,6 +3696,9 @@ async function moveNodeInner(
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
+  const channelRefusal = channelRetireRefusal(node, "moving it");
+  if (channelRefusal) throw channelRefusal;
+
   if (isArchived(node)) {
     throw new ValidationError("This document is archived. Restore it first.");
   }
@@ -4040,6 +4064,11 @@ async function deleteNodeInner(
   const adminOnly = await adminFolderRefusal(nestId, nodeId, userEmail);
   if (adminOnly) throw new ForbiddenError(adminOnly);
 
+  // A channel is archived, not deleted (see channelRetireRefusal).
+  const live = await storage.readDocument(nodeId).catch(() => null);
+  const channelRefusal = live ? channelRetireRefusal(live, "deleting it") : null;
+  if (channelRefusal) throw channelRefusal;
+
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
@@ -4125,6 +4154,11 @@ export async function deleteFolder(
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
+  // Refused up front, so a folder holding a channel is not half deleted.
+  for (const d of docs) {
+    const refusal = isIdUnderFolder(d.id, rel) ? channelRetireRefusal(d, "deleting its folder") : null;
+    if (refusal) throw refusal;
+  }
   // A required folder is not deleted alone; the rest go deepest first, each
   // folder's required files last (see folderDeleteOrder).
   const targets = await folderDeleteOrder(
@@ -4191,7 +4225,12 @@ export async function moveFolder(
   if (adminOnly) throw new ForbiddenError(adminOnly);
 
   const { storage } = await engineCache.get(nestId);
-  const all = (await storage.discoverDocuments()).map((d) => d.id);
+  const discovered = await storage.discoverDocuments();
+  for (const d of discovered) {
+    const refusal = isIdUnderFolder(d.id, from) ? channelRetireRefusal(d, "moving its folder") : null;
+    if (refusal) throw refusal;
+  }
+  const all = discovered.map((d) => d.id);
   const inside = all.filter((id) => isIdUnderFolder(id, from) && !isDerivedAnnotationsNode(id));
   const subfolders = [
     from,
