@@ -448,7 +448,6 @@ nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
   return c.json({ ok: true, ...result });
 });
 
-// GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
 // POST /nests/:nestId/nodes/:nodeId/archive and .../unarchive — out of lists and
 // retrieval and back, history kept (spec §1.13). A steward's call, like approving.
 for (const action of ["archive", "unarchive"] as const) {
@@ -635,6 +634,7 @@ function lastEditOf(v: Awaited<ReturnType<typeof versions.getVersionAttribution>
   };
 }
 
+// GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
