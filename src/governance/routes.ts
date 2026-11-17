@@ -10,6 +10,8 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
+import { config } from "../config.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -1590,6 +1592,19 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * Open mode (sign-in off) with no credential: the one local user, who has
+ * owner-level access to every nest (the nest gate) — including one an account
+ * from before sign-in was turned off created — and decides external edits
+ * there (canDecideExternalEdit), so it must read the edit it decides
+ * (AC-EED-05). Only the anonymous local identity: an API key or session sent
+ * to an open-mode server authenticates as itself (flexAuthMiddleware) and
+ * keeps every access check.
+ */
+function isOpenModeLocalUser(userId: string | undefined): boolean {
+  return config.AUTH_MODE === "open" && userId === ANON_USER_ID;
+}
+
+/**
  * May this caller see a document's pending external edits? Such an edit is
  * text nobody approved, so it follows the document's working copy: never for
  * someone who reaches the nest only through its visibility (they read approved
@@ -1597,6 +1612,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
  */
 async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return true;
   if (await isPublicReader(nestId, userId)) return false;
   return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
 }
@@ -1609,6 +1625,7 @@ async function readableExternalEdits(
 ): Promise<externalEdits.ExternalEditEntry[]> {
   if (entries.length === 0) return entries;
   const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return entries;
   if (await isPublicReader(nestId, userId)) return [];
   const readable = await filterAccessible(
     nestId,
