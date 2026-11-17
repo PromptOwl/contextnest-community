@@ -19,7 +19,7 @@
  * the POSTs to the write tier. Each handler still checks its own rule through
  * the service, so MCP and REST share one gate.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { attributeRequest } from "../shared/client-metadata.js";
@@ -28,12 +28,12 @@ import { createChannel, listChannels, readChannel, setChannelArchived } from "./
 
 export const channelRoutes = new Hono<AuthEnv>();
 
-async function caller(c: any) {
-  const userId = c.get("userId") as string;
-  return { nestId: c.req.param("nestId") as string, userId, userEmail: await resolveCallerEmail(userId) };
+async function caller(c: Context<AuthEnv>) {
+  const userId = c.get("userId");
+  return { nestId: c.req.param("nestId")!, userId, userEmail: await resolveCallerEmail(userId) };
 }
 
-async function jsonObject(c: any): Promise<Record<string, unknown>> {
+async function jsonObject(c: Context<AuthEnv>): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
     body = await c.req.json();

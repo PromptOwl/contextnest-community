@@ -44,6 +44,15 @@ export const MAX_PURPOSE_LENGTH = 4000;
 export const DEFAULT_TIMELINE_LIMIT = 50;
 export const MAX_TIMELINE_LIMIT = 200;
 const MAX_TIMELINE_OFFSET = 10_000;
+/** Placeholders per `IN (…)` list; longer id lists are queried in chunks. */
+const IN_CHUNK = 200;
+
+function chunks<T>(xs: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += IN_CHUNK) out.push(xs.slice(i, i + IN_CHUNK));
+  return out;
+}
+const marks = (xs: unknown[]) => xs.map(() => "?").join(", ");
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const CHANNEL_ID_RE = /^nodes\/channels\/([a-z0-9][a-z0-9-]{0,62})$/;
@@ -112,15 +121,16 @@ async function postStats(
   nodeIds: string[],
 ): Promise<Map<string, { count: number; lastAt: string | null }>> {
   const out = new Map<string, { count: number; lastAt: string | null }>();
-  if (nodeIds.length === 0) return out;
-  const rows = (await getDb().all(
-    `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
-       FROM annotation_threads
-      WHERE nest_id = ? AND node_id IN (${nodeIds.map(() => "?").join(", ")})
-      GROUP BY node_id`,
-    [nestId, ...nodeIds],
-  )) as Array<{ node_id: string; count: number | string; last_at: string | null }>;
-  for (const r of rows) out.set(r.node_id, { count: Number(r.count), lastAt: r.last_at });
+  for (const ids of chunks(nodeIds)) {
+    const rows = (await getDb().all(
+      `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
+         FROM annotation_threads
+        WHERE nest_id = ? AND node_id IN (${marks(ids)})
+        GROUP BY node_id`,
+      [nestId, ...ids],
+    )) as Array<{ node_id: string; count: number | string; last_at: string | null }>;
+    for (const r of rows) out.set(r.node_id, { count: Number(r.count), lastAt: r.last_at });
+  }
   return out;
 }
 
@@ -340,26 +350,44 @@ function parseLimit(raw: unknown): number {
   return Math.min(Math.floor(n), MAX_TIMELINE_LIMIT);
 }
 
+/** Past the cap is a 400, not a clamp: a clamped offset kept `has_more` true
+ *  forever and an agent paging on it looped. */
 function parseOffset(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (raw === undefined || raw === null || raw === "" || !Number.isFinite(n) || n < 0) return 0;
-  return Math.min(Math.floor(n), MAX_TIMELINE_OFFSET);
+  if (n > MAX_TIMELINE_OFFSET) throw new ValidationError(`offset is at most ${MAX_TIMELINE_OFFSET}`);
+  return Math.floor(n);
 }
 
-async function commentsFor(threadIds: string[]): Promise<Map<string, CommentRow[]>> {
-  const out = new Map<string, CommentRow[]>();
-  if (threadIds.length === 0) return out;
-  const rows = (await getDb().all(
-    `SELECT id, thread_id, author, body, created_at, client_json
-       FROM annotation_comments
-      WHERE thread_id IN (${threadIds.map(() => "?").join(", ")})
-      ORDER BY created_at ASC, id ASC`,
-    threadIds,
-  )) as CommentRow[];
-  for (const r of rows) {
-    const list = out.get(r.thread_id) ?? [];
-    list.push(r);
-    out.set(r.thread_id, list);
+const COMMENT_COLS = "id, thread_id, author, body, created_at, client_json";
+
+/** Each thread's opening comment, plus its reply count and last reply time —
+ *  one grouped query, never every reply of every post on the page. */
+async function openingsFor(
+  threadIds: string[],
+): Promise<Map<string, { first: CommentRow | undefined; replies: number; lastReplyAt: string | null }>> {
+  const out = new Map<string, { first: CommentRow | undefined; replies: number; lastReplyAt: string | null }>();
+  const db = getDb();
+  for (const ids of chunks(threadIds)) {
+    const firsts = (await db.all(
+      `SELECT ${COMMENT_COLS} FROM annotation_comments c
+        WHERE c.thread_id IN (${marks(ids)})
+          AND NOT EXISTS (SELECT 1 FROM annotation_comments e
+                           WHERE e.thread_id = c.thread_id
+                             AND (e.created_at < c.created_at OR (e.created_at = c.created_at AND e.id < c.id)))`,
+      ids,
+    )) as CommentRow[];
+    const counts = (await db.all(
+      `SELECT thread_id, CAST(COUNT(*) AS INTEGER) AS n, MAX(created_at) AS last_at
+         FROM annotation_comments WHERE thread_id IN (${marks(ids)}) GROUP BY thread_id`,
+      ids,
+    )) as Array<{ thread_id: string; n: number | string; last_at: string | null }>;
+    const firstBy = new Map(firsts.map((r) => [r.thread_id, r]));
+    for (const id of ids) out.set(id, { first: firstBy.get(id), replies: 0, lastReplyAt: null });
+    for (const c of counts) {
+      const replies = Math.max(0, Number(c.n) - 1);
+      out.set(c.thread_id, { first: firstBy.get(c.thread_id), replies, lastReplyAt: replies ? c.last_at : null });
+    }
   }
   return out;
 }
@@ -374,35 +402,45 @@ async function toMessage(row: CommentRow): Promise<ChannelMessage> {
   };
 }
 
-async function toPost(thread: ThreadRow, comments: CommentRow[]): Promise<ChannelPost> {
-  const [first, ...replies] = comments;
+async function toPost(
+  thread: ThreadRow,
+  o: { first: CommentRow | undefined; replies: number; lastReplyAt: string | null },
+): Promise<ChannelPost> {
+  const first = o.first;
   const opening = first
     ? await toMessage(first)
     : {
-        id: thread.id,
-        author: thread.created_by,
-        actor: await resolveActorLabel({ email: thread.created_by }),
-        body: "",
-        created_at: thread.created_at,
-      };
+      id: thread.id,
+      author: thread.created_by,
+      actor: await resolveActorLabel({ email: thread.created_by }),
+      body: "",
+      created_at: thread.created_at,
+    };
   return {
     ...opening,
     // The post IS the thread: its id is what `thread` takes everywhere.
     id: thread.id,
     created_at: thread.created_at,
     status: thread.status,
-    reply_count: replies.length,
-    last_reply_at: replies.length ? replies[replies.length - 1].created_at : null,
+    reply_count: o.replies,
+    last_reply_at: o.lastReplyAt,
   };
+}
+
+interface Pagination {
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
 }
 
 export type ChannelTimeline =
   | {
-      channel: ChannelView;
-      posts: ChannelPost[];
-      pagination: { total: number; limit: number; offset: number; has_more: boolean };
-    }
-  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[] } };
+    channel: ChannelView;
+    posts: ChannelPost[];
+    pagination: Pagination;
+  }
+  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: Pagination } };
 
 /**
  * The channel's timeline (top-level posts newest first, paged) or, with
@@ -416,25 +454,38 @@ export async function readChannel(
   const { node, view } = await getReadableChannel(caller, input.channel);
   const db = getDb();
 
+  const limit = parseLimit(input.limit);
+  const offset = parseOffset(input.offset);
   const threadId = typeof input.thread === "string" ? input.thread.trim() : "";
   if (input.thread !== undefined && input.thread !== null && input.thread !== "") {
     // Scoped to THIS channel's node in THIS nest: a thread id from another
     // node or nest is simply not found here.
     const row = threadId
       ? ((await db.get(
-          "SELECT id, created_by, created_at, status FROM annotation_threads WHERE id = ? AND nest_id = ? AND node_id = ?",
-          [threadId, caller.nestId, node.id],
-        )) as ThreadRow | undefined)
+        "SELECT id, created_by, created_at, status FROM annotation_threads WHERE id = ? AND nest_id = ? AND node_id = ?",
+        [threadId, caller.nestId, node.id],
+      )) as ThreadRow | undefined)
       : undefined;
     if (!row) throw new NotFoundError("Thread not found in this channel");
-    const comments = (await commentsFor([row.id])).get(row.id) ?? [];
-    const post = await toPost(row, comments);
-    const replies = await Promise.all(comments.slice(1).map(toMessage));
-    return { channel: view, thread: { post, replies } };
+    const o = (await openingsFor([row.id])).get(row.id)!;
+    const post = await toPost(row, o);
+    // Replies are the comments after the opening one, paged like the timeline.
+    const rows = (await db.all(
+      `SELECT ${COMMENT_COLS} FROM annotation_comments WHERE thread_id = ?
+        ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`,
+      [row.id, limit, offset + 1],
+    )) as CommentRow[];
+    const replies = await Promise.all(rows.map(toMessage));
+    return {
+      channel: view,
+      thread: {
+        post,
+        replies,
+        pagination: { total: o.replies, limit, offset, has_more: offset + replies.length < o.replies },
+      },
+    };
   }
 
-  const limit = parseLimit(input.limit);
-  const offset = parseOffset(input.offset);
   const totalRow = (await db.get(
     "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
     [caller.nestId, node.id],
@@ -447,8 +498,8 @@ export async function readChannel(
       LIMIT ? OFFSET ?`,
     [caller.nestId, node.id, limit, offset],
   )) as ThreadRow[];
-  const byThread = await commentsFor(threads.map((t) => t.id));
-  const posts = await Promise.all(threads.map((t) => toPost(t, byThread.get(t.id) ?? [])));
+  const byThread = await openingsFor(threads.map((t) => t.id));
+  const posts = await Promise.all(threads.map((t) => toPost(t, byThread.get(t.id)!)));
   return {
     channel: view,
     posts,
@@ -458,31 +509,29 @@ export async function readChannel(
 
 /** Plain-text rendering of a timeline, for an agent reading over MCP. */
 export function timelineText(t: ChannelTimeline): string {
-  const head = `# ${t.channel.title}${t.channel.archived ? " (archived)" : ""}${
-    t.channel.purpose ? `\n\n${t.channel.purpose}` : ""
-  }`;
+  const head = `# ${t.channel.title}${t.channel.archived ? " (archived)" : ""}${t.channel.purpose ? `\n\n${t.channel.purpose}` : ""
+    }`;
   if ("thread" in t) {
-    const { post, replies } = t.thread;
+    const { post, replies, pagination: pg } = t.thread;
     const lines = [
       `## Thread ${post.id} (${post.status})`,
       `- **${post.actor.label}** (${post.created_at}): ${post.body}`,
       ...replies.map((r) => `  - **${r.actor.label}** (${r.created_at}): ${r.body}`),
     ];
-    return `${head}\n\n${lines.join("\n")}\n\nReply with context_comment { id: "${t.channel.id}", thread: "${post.id}", body }.`;
+    const more = pg.has_more ? `\n\nMore replies: pass offset ${pg.offset + replies.length}.` : "";
+    return `${head}\n\n${lines.join("\n")}${more}\n\nReply with context_comment { id: "${t.channel.id}", thread: "${post.id}", body }.`;
   }
   if (t.posts.length === 0) {
     return `${head}\n\nNo posts yet. Post with context_comment { id: "${t.channel.id}", body }.`;
   }
   const lines = t.posts.map(
     (p) =>
-      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${p.body}${
-        p.reply_count ? ` — ${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}` : ""
+      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${p.body}${p.reply_count ? ` — ${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}` : ""
       }`,
   );
   const { total, offset, has_more } = t.pagination;
   return `${head}\n\n${t.posts.length} of ${total} post(s), newest first${offset ? `, from ${offset}` : ""}:\n${lines.join(
     "\n",
-  )}${has_more ? `\n\nMore: pass offset ${offset + t.posts.length}.` : ""}\n\nRead a thread with context_channel_read { channel: "${
-    t.channel.name
-  }", thread: "<id>" }; post with context_comment { id: "${t.channel.id}", body } (add thread to reply).`;
+  )}${has_more ? `\n\nMore: pass offset ${offset + t.posts.length}.` : ""}\n\nRead a thread with context_channel_read { channel: "${t.channel.name
+    }", thread: "<id>" }; post with context_comment { id: "${t.channel.id}", body } (add thread to reply).`;
 }

@@ -204,6 +204,17 @@ describe("AC-CH-02: a writer creates a channel and the list shows it", () => {
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "lurkers" }, reader.apiKey)).status).toBe(403);
   });
 
+  it("AC-CH-02 two concurrent creates of one name: one 201, one 409, nothing overwritten", async () => {
+    const [a, b] = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "race", purpose: "A" }, writer.apiKey),
+      jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "race", purpose: "B" }, owner.apiKey),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    const winner = a.status === 201 ? "A" : "B";
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/channels`, undefined, writer.apiKey);
+    expect(list.data.channels.find((c: any) => c.name === "race").purpose).toBe(winner);
+  });
+
   it("AC-CH-02 refuses names the vault reserves for derived files (agents, index, claude…)", async () => {
     // nodes/channels/agents.md would be an AGENTS.md: the engine regenerates
     // it and discovery hides it, so the channel would vanish.
@@ -291,6 +302,24 @@ describe("AC-CH-03: timeline newest-first with reply counts; ?thread= gives pare
     const r = await timeline(reader, "?limit=2&offset=1", "timeline");
     expect(r.data.posts.map((p: any) => p.body)).toEqual(["second post", "first post"]);
     expect(r.data.pagination).toMatchObject({ total: 3, limit: 2, offset: 1, has_more: false });
+  });
+
+  it("AC-CH-03 pages a thread's replies with limit/offset", async () => {
+    const r = await timeline(reader, `?thread=${ids[1]}&limit=1&offset=1`, "timeline");
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    expect(r.data.thread.post).toMatchObject({ body: "second post", reply_count: 2 });
+    expect(r.data.thread.replies.map((c: any) => c.body)).toEqual(["reply two"]);
+    expect(r.data.thread.pagination).toMatchObject({ total: 2, limit: 1, offset: 1, has_more: false });
+    const first = await timeline(reader, `?thread=${ids[1]}&limit=1`, "timeline");
+    expect(first.data.thread.replies.map((c: any) => c.body)).toEqual(["reply one"]);
+    expect(first.data.thread.pagination.has_more).toBe(true);
+  });
+
+  it("AC-CH-03 an offset past the cap is a 400, not a clamp that pages forever", async () => {
+    const r = await timeline(reader, "?offset=10001", "timeline");
+    expect(r.status).toBe(400);
+    const mcp = await callTool(reader.apiKey, "context_channel_read", { channel: "timeline", offset: 10001 });
+    expect(mcp.rpcError || mcp.isError).toBeTruthy();
   });
 
   it("AC-CH-03 the channel list carries the post count and last activity", async () => {

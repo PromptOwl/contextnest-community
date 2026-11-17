@@ -3,6 +3,7 @@
  * visibility control fetch for themselves (CollaboratorManager,
  * NestVisibilityControl); this is the tab's chrome around them.
  */
+import { useState } from "react";
 import { toast } from "sonner";
 import { CollaboratorManager } from "../CollaboratorManager";
 import { NestVisibilityControl } from "../NestVisibilityControl";
@@ -34,6 +35,9 @@ export function CollaboratorsTab({
   onOpenSettings,
   onChanged,
 }: Props) {
+  // Bumped by the visibility picker's "Share with a team…" to open the
+  // add control on Team.
+  const [teamRequest, setTeamRequest] = useState(0);
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -83,6 +87,7 @@ export function CollaboratorsTab({
             nestId={nestId}
             onChanged={onChanged}
             onError={(msg) => msg && toast.error(msg)}
+            onShareWithTeam={() => setTeamRequest((n) => n + 1)}
           />
         )}
         {/* API-only access keys (CU-wdqcq0314u) — another answer to "who can
@@ -97,6 +102,7 @@ export function CollaboratorsTab({
           currentUserEmail={currentUserEmail}
           callerPermission={callerPermission}
           showTeams
+          teamRequest={teamRequest}
           reviewers={stewardshipEnabled && canManageGovernance}
         />
       </CardContent>

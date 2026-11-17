@@ -4,6 +4,9 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -2476,19 +2479,87 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("083_view_summaries");
   }
 
-  // 084: caller attribution on comment-thread messages (PO-1179, agent team
-  //   stream channels). Same nullable `client_json` column the version rows
-  //   and the activity trace carry (044): the agent label a channel timeline
-  //   shows as "<agent>, on behalf of <human>". NULL is "not attributed", so
-  //   every existing row is already correct. A label, never an identity.
-  if (!hasMigration("084_annotation_comment_client")) {
+  // 084: first-run onboarding (PO-1185): the welcome screen state per person,
+  //   server-side distill jobs, and where a self-serve Slack install returns.
+  //   Shared DDL with Postgres (src/onboarding/schema-ddl.ts).
+  if (!hasMigration("084_onboarding")) {
+    db.transaction(() => {
+      db.exec(onboardingDdl("(datetime('now'))"));
+      const cols = db.prepare("PRAGMA table_info(surface_oauth_states)").all() as Array<{ name: string }>;
+      if (cols.length && !cols.some((c) => c.name === "return_to")) {
+        db.exec("ALTER TABLE surface_oauth_states ADD COLUMN return_to TEXT");
+      }
+    })();
+    recordMigration("084_onboarding");
+  }
+  // A database that ran 084 before its one-running-distill-per-person index
+  // existed (this branch's own test servers) gets it here. Idempotent.
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_jobs_one_running ON distill_jobs(user_id) WHERE status = 'running'");
+
+  // 086: agent control room, CR1 (po-1186). The decision ledger is a view over
+  //   runs, run steps and the Surfaces tables, so these are columns, not a new
+  //   table. 084 and 085 are taken on open branches (onboarding, comment
+  //   mentions); ids match by string.
+  //   - runs.idempotency_key: one run per (nest, key) for an external agent's
+  //     retried start; runs.external_ref: the caller's own id, shown, never
+  //     trusted; runs.source: runner | external | server:metacognition |
+  //     server:surfaces (backfilled from claimed_by / triggered_by).
+  //   - runs.verdict / runs.reason_code: the strongest `decision` step's
+  //     verdict, written with the step so the ledger can filter on it in SQL.
+  //   - run_steps.client_key: one step per (run, key).
+  //   - surface_windows.run_id: the listener's run for the window it judged,
+  //     the run → window hop the ledger trace needs.
+  if (!hasMigration("086_control_room_ledger")) {
+    db.transaction(() => {
+      const cols = (table: string) =>
+        new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+      const runCols = cols("runs");
+      if (!runCols.has("idempotency_key")) db.exec("ALTER TABLE runs ADD COLUMN idempotency_key TEXT");
+      if (!runCols.has("source")) db.exec("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'runner'");
+      if (!runCols.has("external_ref")) db.exec("ALTER TABLE runs ADD COLUMN external_ref TEXT");
+      if (!runCols.has("verdict")) db.exec("ALTER TABLE runs ADD COLUMN verdict TEXT");
+      if (!runCols.has("reason_code")) db.exec("ALTER TABLE runs ADD COLUMN reason_code TEXT");
+      if (!cols("run_steps").has("client_key")) db.exec("ALTER TABLE run_steps ADD COLUMN client_key TEXT");
+      if (!cols("surface_windows").has("run_id")) db.exec("ALTER TABLE surface_windows ADD COLUMN run_id TEXT");
+      db.exec(controlRoomLedgerIndexesAndBackfill());
+    })();
+    recordMigration("086_control_room_ledger");
+  }
+
+  // 090: a run's cost and tokens on the run (po-1186 CR1 review). Written
+  //   with the trace at close (run-service closeRun), like `verdict`, so the
+  //   ledger's totals and rollups aggregate in SQL instead of parsing every
+  //   run's trace. Backfilled from the traces already stored.
+  if (!hasMigration("090_control_room_run_totals")) {
+    db.transaction(() => {
+      const runCols = new Set((db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+      if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
+      if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
+      const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
+      // Ids first, one trace at a time: better-sqlite3 refuses a write while an
+      // iterate() cursor is open, and .all() of every trace could be large.
+      const traceOf = db.prepare("SELECT trace FROM runs WHERE id = ?").pluck();
+      const ids = db.prepare("SELECT id FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").pluck().all() as string[];
+      for (const id of ids) {
+        const t = runTotals(traceOf.get(id) as string);
+        set.run(t.costMicros, t.tokens, id);
+      }
+    })();
+    recordMigration("090_control_room_run_totals");
+  }
+
+  // 094: caller attribution on comment-thread messages (PO-1179, agent team
+  //   stream channels). Nullable `client_json`, like the version rows (044):
+  //   the "<agent>, on behalf of <human>" label. A label, never an identity.
+  //   085–093 are taken on open branches; ids match by string.
+  if (!hasMigration("094_annotation_comment_client")) {
     const cols = (
       db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
     ).map((c) => c.name);
     if (cols.length && !cols.includes("client_json")) {
       db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
     }
-    recordMigration("084_annotation_comment_client");
+    recordMigration("094_annotation_comment_client");
   }
 
   // 085: the @mention index My Work reads (PO-1180, agent team stream S2).
