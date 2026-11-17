@@ -2536,9 +2536,13 @@ export function runMigrations(db: Database.Database): void {
       if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
       if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
       const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
-      for (const r of db.prepare("SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").iterate() as Iterable<{ id: string; trace: string }>) {
-        const t = runTotals(r.trace);
-        set.run(t.costMicros, t.tokens, r.id);
+      // Ids first, one trace at a time: better-sqlite3 refuses a write while an
+      // iterate() cursor is open, and .all() of every trace could be large.
+      const traceOf = db.prepare("SELECT trace FROM runs WHERE id = ?").pluck();
+      const ids = db.prepare("SELECT id FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").pluck().all() as string[];
+      for (const id of ids) {
+        const t = runTotals(traceOf.get(id) as string);
+        set.run(t.costMicros, t.tokens, id);
       }
     })();
     recordMigration("090_control_room_run_totals");
