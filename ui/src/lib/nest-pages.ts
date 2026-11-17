@@ -24,6 +24,8 @@ export interface NestPageCaps {
   isReaderView: boolean;
   canEditDocs: boolean;
   workflowPlaneEnabled: boolean;
+  /** Experimental channels (/health experimental.agent_stream, PO-1179). */
+  agentStreamEnabled?: boolean;
 }
 
 export interface NestPageMeta {
@@ -34,7 +36,7 @@ export interface NestPageMeta {
   /** Sidebar / tab-strip order, ascending. */
   order: number;
   /** The App view this page renders as. */
-  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
+  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels";
   beta?: boolean;
   /** Who gets the page listed and reachable. Reader mode hides every nest
    *  view regardless (see nest-caps isViewBlockedInReaderMode); this gate

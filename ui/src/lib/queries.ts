@@ -84,6 +84,14 @@ export const keys = {
   env: (nestId: string) => [...keys.nest(nestId), "env"] as const,
   connectors: (nestId: string) => [...keys.nest(nestId), "connectors"] as const,
   nestTeams: (nestId: string) => [...keys.nest(nestId), "teams"] as const,
+  channels: (nestId: string, archived = false) =>
+    [...keys.nest(nestId), "channels", archived ? "all" : "live"] as const,
+  // Under the channel's node key, so a post or reply (an annotation write on
+  // that node) drops the timeline and its threads with no extra rule.
+  channelTimeline: (nestId: string, channelId: string) =>
+    [...keys.node(nestId, channelId), "channel-timeline"] as const,
+  channelThread: (nestId: string, channelId: string, threadId: string) =>
+    [...keys.node(nestId, channelId), "channel-thread", threadId] as const,
   externalEdits: (nestId: string) =>
     [...keys.nest(nestId), "external-edits"] as const,
   // Under keys.externalEdits so whatever drops the list drops the count.
@@ -687,6 +695,19 @@ export const reads = {
       queryKey: keys.nestTeams(nestId),
       queryFn: () => api.listNestTeams(nestId),
       staleTime: STALE.reference,
+    }),
+  channels: (nestId: string, archived = false) =>
+    queryOptions({
+      queryKey: keys.channels(nestId, archived),
+      queryFn: () => api.listChannels(nestId, { archived }),
+      staleTime: STALE.listing,
+    }),
+  channelThread: (nestId: string, channelId: string, name: string, threadId: string) =>
+    queryOptions({
+      queryKey: keys.channelThread(nestId, channelId, threadId),
+      // ponytail: first 200 replies shown; page with offset if threads outgrow it.
+      queryFn: () => api.getChannelThread(nestId, name, threadId, { limit: 200 }),
+      staleTime: STALE.governance,
     }),
   hooks: (nestId: string, agent?: string) =>
     queryOptions({

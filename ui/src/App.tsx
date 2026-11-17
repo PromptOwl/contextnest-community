@@ -186,6 +186,17 @@ type View =
       isArchived?: boolean;
     }
   | {
+      /** Channels (experimental, PO-1179): the nest's channel list and the
+       *  selected channel's timeline. */
+      page: "channels";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      readerMode?: boolean;
+      isArchived?: boolean;
+    }
+  | {
       page: "board";
       nestId: string;
       nestName: string;
@@ -213,7 +224,7 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -253,6 +264,7 @@ export default function App() {
     subagentRunsEnabled,
     mcpOauthEnabled,
     docStreamEnabled,
+    agentStreamEnabled,
     surfacesEnabled,
     loading,
     error,
@@ -502,7 +514,8 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    if (loading && nestViewFromLocation() === "workflows") return;
+    // Channels are gated on a /health flag the same way.
+    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -571,7 +584,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -622,7 +635,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled, loading]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, agentStreamEnabled, loading]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -677,6 +690,7 @@ export default function App() {
       view.page === "definitions" ||
       view.page === "structure" ||
       view.page === "board" ||
+      view.page === "channels" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
@@ -1554,7 +1568,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring

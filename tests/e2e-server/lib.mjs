@@ -13,6 +13,7 @@ export const FEATURE_ENV = Object.freeze({
   FEATURE_SURFACES: 'true',
   EXPERIMENTAL_DOC_STREAM: 'true',
   EXPERIMENTAL_DOC_PINS: 'true',
+  EXPERIMENTAL_AGENT_STREAM: 'true',
   HOOTIE_ENABLED: 'true',
 });
 

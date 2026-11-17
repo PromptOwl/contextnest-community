@@ -16,6 +16,8 @@ import {
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
 import { notifyComment } from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { attributeRequest } from "../shared/client-metadata.js";
+import { channelPostRefusal } from "../channels/channel-service.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -59,10 +61,15 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     return c.json({ error: "Access denied" }, 403);
   }
 
+  // A channel (PO-1179) takes posts from its nest's writers only.
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
+
   const input = await c.req.json<{
     body?: string;
     anchor?: Partial<AnnotationAnchor> | null;
     snapshotVersion?: number | null;
+    client?: unknown;
   }>();
   if (!input.body || !input.body.trim()) {
     throw new ValidationError("body is required");
@@ -77,6 +84,9 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
       snapshotVersion: input.snapshotVersion ?? null,
     },
     userEmail,
+    // Who wrote it on the person's behalf (API key label, or what the caller
+    // says) — the channel timeline's "<agent>, on behalf of <human>".
+    attributeRequest(c, input.client),
   );
   await notifyComment({
     nestId,
@@ -107,13 +117,23 @@ export async function handleAnnotationReply(
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const input = (await c.req.json()) as { body?: string };
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
+
+  const input = (await c.req.json()) as { body?: string; client?: unknown };
   if (!input.body || !input.body.trim()) {
     throw new ValidationError("body is required");
   }
 
   // addComment also reopens the thread when it was resolved.
-  const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
+  const thread = await addComment(
+    nestId,
+    nodeId,
+    threadId,
+    userEmail,
+    input.body,
+    attributeRequest(c, input.client),
+  );
   // @mentions in the reply, everyone already in the thread, then the
   // document's watchers and reviewer stewards.
   await notifyComment({
@@ -142,6 +162,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) =>
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
 
   const thread = await setThreadStatus(nestId, nodeId, threadId, "resolved", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
@@ -158,6 +180,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/reopen", async (c) => 
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
+  const refusal = await channelPostRefusal(nestId, nodeId, userId, userEmail);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
 
   const thread = await setThreadStatus(nestId, nodeId, threadId, "open", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);

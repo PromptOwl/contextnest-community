@@ -295,6 +295,8 @@ export async function getHealth() {
       doc_pins?: boolean;
       /** Cross-nest document stream (GET /me/stream, the Stream page). */
       doc_stream?: boolean;
+      /** Agent team stream channels (PO-1179): /nests/:id/channels. */
+      agent_stream?: boolean;
     };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
@@ -412,6 +414,8 @@ export interface AdminSettings {
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
   experimental_doc_pins: boolean;
+  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM). */
+  experimental_agent_stream_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -3091,6 +3095,86 @@ export async function reopenAnnotation(
 }
 
 
+// ─── Channels (agent team stream S1, PO-1179; EXPERIMENTAL_AGENT_STREAM) ──
+// A channel is a node (nodes/channels/<name>); posting and replying use the
+// annotation routes above with the channel's id.
+
+export interface ChannelActor {
+  human: string;
+  agent: string | null;
+  /** "<agent>, on behalf of <human>", or "<human>". */
+  label: string;
+}
+
+export interface ChannelSummary {
+  id: string;
+  name: string;
+  title: string;
+  type: "channel";
+  purpose: string | null;
+  archived: boolean;
+  post_count: number;
+  last_post_at: string | null;
+}
+
+export interface ChannelMessage {
+  id: string;
+  author: string;
+  actor: ChannelActor;
+  body: string;
+  created_at: string;
+}
+
+export interface ChannelPost extends ChannelMessage {
+  status: "open" | "resolved";
+  reply_count: number;
+  last_reply_at: string | null;
+}
+
+export async function listChannels(nestId: string, opts: { archived?: boolean } = {}) {
+  return request<{ channels: ChannelSummary[] }>(`/nests/${nestId}/channels${opts.archived ? "?archived=1" : ""}`);
+}
+
+export async function createChannel(nestId: string, input: { name: string; purpose?: string }) {
+  return request<{ channel: ChannelSummary }>(`/nests/${nestId}/channels`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function archiveChannel(nestId: string, name: string, archived = true) {
+  return request<{ channel: ChannelSummary }>(
+    `/nests/${nestId}/channels/${encodeURIComponent(name)}/archive`,
+    { method: "POST", body: JSON.stringify({ archived }) },
+  );
+}
+
+export async function getChannelTimeline(nestId: string, name: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  const q = qs.toString();
+  return request<{
+    channel: ChannelSummary;
+    posts: ChannelPost[];
+    pagination: { total: number; limit: number; offset: number; has_more: boolean };
+  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}${q ? `?${q}` : ""}`);
+}
+
+export async function getChannelThread(nestId: string, name: string, threadId: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams({ thread: threadId });
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  return request<{
+    channel: ChannelSummary;
+    thread: {
+      post: ChannelPost;
+      replies: ChannelMessage[];
+      pagination: { total: number; limit: number; offset: number; has_more: boolean };
+    };
+  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}?${qs}`);
+}
+
 // ─── Comments & activity (collaboration) ─────────────────────────────────
 
 export interface CommentAnchor {
@@ -4357,7 +4441,7 @@ export type HootieMention =
       thread_id: string;
       notified: number;
     }
-  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+  | { status: "undeliverable"; reason: "no_anchor" | "channel" | "post_failed" };
 
 /** What Hootie is doing mid-answer: `tool` is the tool that's running
  *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's

@@ -1977,6 +1977,25 @@ describe("POST /nests/:id/chat — removed mid-question", () => {
     expect(await mentionTrail(nestId, launchId)).toEqual({ threads: 0, mentions: before.mentions });
   });
 
+  it("an @mention anchored on a channel is refused as `channel`, and nothing is posted (PO-1179)", async () => {
+    const { nestId } = await scratch();
+    const channelId = (
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "ops", folder: "channels", content: "# ops", tags: ["#channel"] }, olga.apiKey)
+    ).data.node.id;
+    const before = await mentionTrail(nestId, channelId);
+    scriptedRounds = [{ text: "The checklist covers go-live." }];
+    const { status, text } = await chatRaw(
+      app,
+      nestId,
+      { message: `@${olga.email} can you confirm the go-live steps?`, node_id: channelId },
+      priya.apiKey,
+    );
+    expect(status).toBe(200);
+    const done = parseSse(text).at(-1)!;
+    expect(done.data.mention).toEqual({ status: "undeliverable", reason: "channel" });
+    expect(await mentionTrail(nestId, channelId)).toEqual({ threads: 0, mentions: before.mentions });
+  });
+
   it("removed after a round whose calls run no tool: no further model round", async () => {
     const { nestId, removePriya } = await scratch();
     // An unknown tool runs nothing, so only the before-round re-check can

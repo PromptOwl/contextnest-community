@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
+import { channelPostRefusal } from "../channels/channel-service.js";
 import { isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -947,13 +948,17 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
   if (annotationReply) {
     return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
   }
+  const author = await getUserEmail(c);
+  // A channel (PO-1179) takes messages from its nest's writers only — in this
+  // standalone store as much as in the thread store its timeline reads.
+  const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), author);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
   const body = await c.req.json<{
     body?: string;
     version?: number;
     anchor?: { start?: number; end?: number; text?: string };
     parentId?: string;
   }>();
-  const author = await getUserEmail(c);
   let comment;
   // A comment lands only on a node its author can read: the same rule as
   // reading the node's comments (PO-1192).
@@ -1006,6 +1011,8 @@ governanceNodeRoutes.post(
       return c.json({ error: "Comment not found" }, 404);
     }
     const resolvedBy = await getUserEmail(c);
+    const refusal = await channelPostRefusal(nestId, nodeId, c.get("userId"), resolvedBy);
+    if (refusal) return c.json({ error: refusal.error }, refusal.status);
     try {
       const comment = await comments.resolveComment({
         nestId,

@@ -128,6 +128,7 @@ const TABS: {
       "distill_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
+      "experimental_agent_stream_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1383,6 +1384,32 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     checked={draft.experimental_doc_stream_enabled}
                     onCheckedChange={(v) => set({ experimental_doc_stream_enabled: v })}
                     aria-label="Document stream (experimental)"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Experimental: agent team stream channels (PO-1179) — its own switch */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Channels (experimental)</CardTitle>
+                <CardDescription>
+                  Slack-style channels inside each nest where agents and people
+                  post, reply in threads and @mention each other, next to the
+                  knowledge. Agents post over MCP and show as "agent, on behalf
+                  of person". Off by default. Experimental: it may change or
+                  disappear in a later release.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.experimental_agent_stream_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.experimental_agent_stream_enabled}
+                    onCheckedChange={(v) => set({ experimental_agent_stream_enabled: v })}
+                    aria-label="Channels (experimental)"
                   />
                 </div>
               </CardContent>
