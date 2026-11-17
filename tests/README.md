@@ -122,7 +122,11 @@ What the launcher sets up:
 
 - The built server (`node dist/index.js`) on a fresh SQLite data folder in the system temp folder, in key auth mode, with the feature switches on (`tests/e2e-server/lib.mjs`).
 - The first account as the server admin and the second as an ordinary member, plus three `qa-…@example.com` people in the directory for the collaborator and steward suites.
+- The welcome screen closed for both accounts. Someone who owns no nest gets it in place of the nest list, and the second account owns none on a fresh server.
+- Idle connections kept open for two minutes (`tests/e2e-server/keep-alive.mjs`). Node's default is five seconds, and an API call that reuses a connection just as the server closes it fails with `ECONNRESET`.
 - A license answer served on `127.0.0.1:4010`, so the server runs as a licensed enterprise server without calling PromptOwl. This is for tests only.
+
+Every launch is a new server, so a session saved by an earlier run is no longer valid and every API call answers 401 "Your session has expired". Delete `tests/src/cookies_storage/*.json` before the next run.
 
 Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without building the server (the UI still needs `npm run build:ui`). `E2E_SERVER_PORT`, `E2E_LICENSE_PORT` and `E2E_DATA_ROOT` override the ports and the data folder.
 

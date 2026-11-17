@@ -19,7 +19,8 @@
  *   3. Seeds what the suites expect: the test accounts (TEST_ACCOUNT1_* is the
  *      server admin, TEST_ACCOUNT2_* an ordinary member), a few
  *      qa-…@example.com people in the directory, and one standing nest that
- *      gives each of them a paid seat.
+ *      gives each of them a paid seat. The welcome screen is closed for both
+ *      accounts.
  *   4. Reports ready on GET http://127.0.0.1:<license port>/ready.
  *
  * Test-only. Never point a real server's PROMPTOWL_API_URL at this.
@@ -31,7 +32,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startSmtpSink } from './smtp-sink.mjs';
-import { DIRECTORY_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from './lib.mjs';
+import { CLOSE_WELCOME_PATH, DIRECTORY_PEOPLE, PAID_SEAT_PEOPLE, SEATS_NEST_NAME, licenseAnswer, readSettings, serverEnv } from './lib.mjs';
 
 const settings = readSettings(process.env);
 const log = (msg) => console.log(`[e2e-server] ${msg}`);
@@ -98,7 +99,7 @@ log(`starting: ${settings.serverCommand.join(' ')}`);
 
 const [cmd, ...args] = settings.serverCommand;
 const server = spawn(cmd, args, {
-  env: { ...process.env, ...serverEnv(settings, dataRoot) },
+  env: { ...process.env, ...serverEnv(settings, dataRoot, process.env.NODE_OPTIONS) },
   stdio: 'inherit',
 });
 
@@ -170,6 +171,14 @@ async function seed() {
   for (const [i, account] of settings.accounts.entries()) {
     const res = must(`POST /auth/register (${account.email})`, await call('POST', '/auth/register', account), [201]);
     if (i === 0) adminCookie = res.cookie;
+    // Someone who owns no nest gets the welcome screen in place of the nest
+    // list (PO-1185). The suites' accounts have been here before, as on a
+    // long-lived server, so it is closed for each of them: the second account
+    // owns no nest and its dashboard would otherwise never show (PO-1388).
+    const welcome = must(`POST ${CLOSE_WELCOME_PATH} (${account.email})`, await call('POST', CLOSE_WELCOME_PATH, {}, res.cookie), [200]);
+    if (welcome.data?.show !== false) {
+      throw new Error(`the welcome screen is still shown to ${account.email} after it was closed`);
+    }
     log(`account: ${account.email}${i === 0 ? ' (server admin)' : ''}`);
   }
 
