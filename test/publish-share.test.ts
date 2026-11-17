@@ -422,6 +422,13 @@ describe("a link with the invitation switched off (show_invite: false)", () => {
 
     const bad = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: "no" }, owner.apiKey);
     expect(bad.status).toBe(400);
+    // A JSON body of literal null is a bad request too, not a server error.
+    const nul = await app.request(`/nests/${nestId}/publications/${id}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${owner.apiKey}`, "Content-Type": "application/json" },
+      body: "null",
+    });
+    expect(nul.status).toBe(400);
     const stranger = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: false }, reviewer.apiKey);
     expect([403, 404]).toContain(stranger.status);
     const missing = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/nope`, { show_invite: false }, owner.apiKey);

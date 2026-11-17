@@ -23,9 +23,18 @@ describe("excerptOf", () => {
     expect(excerptOf(html, true)).toBe("Visible & safe.");
   });
 
-  it("drops a tag cut in half, and leaves text after an unclosed script as text", () => {
+  it("drops a tag cut in half, and everything after an unclosed script or style, as a browser would", () => {
     expect(excerptOf("<p>Kept</p><div class=", true)).toBe("Kept");
-    expect(excerptOf("<p>Kept</p><script>never closed", true)).toBe("Kept never closed");
+    expect(excerptOf("<p>Kept</p><script>never closed", true)).toBe("Kept");
+    expect(excerptOf("<p>Kept</p><style>p{color:red}", true)).toBe("Kept");
+  });
+
+  it("never quotes script or CSS that the source cap cut open", () => {
+    const css = `p{color:red}`.repeat(2_000); // 24k: the cap lands inside <style>
+    const html = `<html><head><style>${css}</style></head><body><p>Prose after the styles.</p></body></html>`;
+    expect(excerptOf(html, true)).toBe("");
+    const js = `var x = 1;`.repeat(2_500);
+    expect(excerptOf(`<p>Intro.</p><script>${js}</script><p>Later.</p>`, true)).toBe("Intro.");
   });
 
   it("decodes entities, and never produces half a surrogate pair", () => {

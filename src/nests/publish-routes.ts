@@ -74,7 +74,10 @@ publishRoutes.get("/:id/views", async (c) => {
 publishRoutes.patch("/:id", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId);
-  const body = await c.req.json<{ show_invite?: unknown }>().catch(() => ({}));
+  // `?? {}`: a body of literal `null` parses fine and must be a 400, not a 500.
+  const body = ((await c.req.json<{ show_invite?: unknown } | null>().catch(() => null)) ?? {}) as {
+    show_invite?: unknown;
+  };
   const row = await updatePublish(nestId, c.req.param("id")!, body);
   if (!row) throw new NotFoundError(PUBLISH_NOT_FOUND);
   return c.json({

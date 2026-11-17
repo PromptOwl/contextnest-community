@@ -108,6 +108,9 @@ function textOf(html: string): string {
     html
       .replace(/<!--[\s\S]*?-->/g, " ")
       .replace(/<(script|style|head|title|template|noscript|svg)\b[\s\S]*?<\/\1\s*>/gi, " ")
+      // One left open (by the author, or by the source cap cutting it): a
+      // browser treats the rest as its content, so nothing after it is prose.
+      .replace(/<(script|style|head|title|template|noscript|svg)\b[\s\S]*$/i, " ")
       .replace(/<[^>]*>/g, " ")
       // A tag cut in half by the source cap.
       .replace(/<[^>]*$/, " "),
