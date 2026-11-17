@@ -26,6 +26,7 @@ import {
   tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
+import { visibleTags } from "../lib/ticket";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -3438,9 +3439,10 @@ export function DocumentEditor({
                           ))}
                         </datalist>
                       )}
-                      {tags.length > 0 && (
+                      {visibleTags(tags).length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {tags.map((t) => {
+                          {/* The ticket tag shows as the task's ID, not a chip (PO-1231). */}
+                          {visibleTags(tags).map((t) => {
                             // View mode: chip click → filter nest by tag. Edit mode: X removes.
                             const tagClickable = mode === "view" && !!onTagClick;
                             return (

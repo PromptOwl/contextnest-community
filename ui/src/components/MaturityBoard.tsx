@@ -1420,7 +1420,7 @@ function MaturityBoardInner({
   );
   const allTagValues = useMemo(() => {
     const set = new Set<string>();
-    for (const n of nodes) for (const t of n.tags) set.add(t.replace(/^#/, ""));
+    for (const n of nodes) for (const t of visibleTags(n.tags)) set.add(t.replace(/^#/, ""));
     return [...set].sort();
   }, [nodes]);
 
