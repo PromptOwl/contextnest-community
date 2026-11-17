@@ -882,11 +882,14 @@ publishRenderRoutes.get("/:slug", async (c) => {
 // document.
 publishRenderRoutes.get("/:slug/og-image", async (c) => {
   const slug = c.req.param("slug");
-  // Anonymous, and each call reads the nest's branding: clamp it like the
-  // other anonymous /p routes. Generous, because unfurlers share addresses.
-  if (!tryConsume(`publish-og:${slug}:${clientIp(c)}`, OG_IMAGE_LIMIT)) return c.body(null, 429);
+  // Look the link up first, as the gate does: a bucket is keyed by slug, so a
+  // made-up slug must not get one (that would let anyone grow the limiter's
+  // table with random slugs). A live link is then clamped like the other
+  // anonymous /p routes, since each call reads the nest's branding. Generous,
+  // because unfurlers share addresses.
   const row = await publish.getPublishBySlug(slug);
   if (!publish.isLivePublish(row)) return c.body(null, 404);
+  if (!tryConsume(`publish-og:${slug}:${clientIp(c)}`, OG_IMAGE_LIMIT)) return c.body(null, 429);
   // `logo` is a data: URI built by inlineAsset, which only ever produces the
   // raster types in IMAGE_MIME (png, jpeg, gif, webp) — never SVG or HTML.
   const logo = (await loadBrand(row))?.logo ?? null;

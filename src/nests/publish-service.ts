@@ -320,8 +320,8 @@ export async function listPublish(nestId: string): Promise<PublishRow[]> {
  * Change a link's own settings without changing its URL. Only `show_invite`
  * today: the "Make your own nest" strip is the one thing an owner needs to
  * take off a page that is already in someone's inbox. Returns the updated
- * row, or undefined when the nest has no such link. The REST route and the
- * MCP tool both call this.
+ * row, or undefined when the nest has no such link or it was revoked. The
+ * REST route and the MCP tool both call this.
  */
 export async function updatePublish(
   nestId: string,
@@ -331,11 +331,11 @@ export async function updatePublish(
   if (typeof patch.show_invite !== "boolean") {
     throw new ValidationError("show_invite must be true or false");
   }
-  const res = await getDb().run("UPDATE publish SET show_invite = ? WHERE id = ? AND nest_id = ?", [
-    patch.show_invite ? 1 : 0,
-    id,
-    nestId,
-  ]);
+  // A revoked link is gone, as it is for revoke: changing it is "not found".
+  const res = await getDb().run(
+    "UPDATE publish SET show_invite = ? WHERE id = ? AND nest_id = ? AND revoked_at IS NULL",
+    [patch.show_invite ? 1 : 0, id, nestId],
+  );
   return res.changes > 0 ? getPublishById(nestId, id) : undefined;
 }
 

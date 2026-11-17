@@ -245,6 +245,20 @@ describe("the invitation strip (show_invite)", () => {
     expect(await (await app.request(`/p/${slug}`)).text()).not.toContain("data-cn-cta");
   });
 
+  it("refuses to update a revoked link, over MCP and REST alike", async () => {
+    const made = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const { id } = made.data.publish;
+    await call("context_public_link_revoke", { link_id: id }, owner.apiKey);
+    const r = await call("context_public_link_update", { link_id: id, show_invite: false }, owner.apiKey);
+    expect(r.isError).toBe(true);
+    expect(r.data.code).toBe("DOCUMENT_NOT_FOUND");
+    const rest = await jsonRequest(app, "PATCH", `/nests/${nestId}/publications/${id}`, { show_invite: false }, owner.apiKey);
+    expect(rest.status).toBe(404);
+    expect(r.text).toBe(rest.data.error);
+    const listed = await call("context_public_links", { id: "nodes/handbook" }, owner.apiKey);
+    expect(listed.data.publishes.find((p: any) => p.id === id).show_invite).toBe(true);
+  });
+
   it("classifies the update as a change to a page on the open web", async () => {
     const body = await mcp("tools/list", {}, owner.apiKey);
     const t = body.result.tools.find((x: any) => x.name === "context_public_link_update");

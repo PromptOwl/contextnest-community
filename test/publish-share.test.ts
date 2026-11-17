@@ -463,6 +463,12 @@ describe("/p/:slug/og-image", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG_BYTES);
   });
 
+  it("answers an unknown slug 404 every time: a made-up slug takes no rate-limit bucket", async () => {
+    for (let i = 0; i < 130; i++) {
+      expect((await app.request("/p/made-up-slug/og-image")).status).toBe(404);
+    }
+  });
+
   it("404s for a link that is not live", async () => {
     expect((await app.request("/p/does-not-exist/og-image")).status).toBe(404);
     const slug = await publish(nestId, "nodes/handbook");
