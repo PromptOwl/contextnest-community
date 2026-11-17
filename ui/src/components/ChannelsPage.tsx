@@ -307,6 +307,11 @@ export function ChannelsPage({ nestId, nestName, isArchived, onBack }: Props) {
                                 <Message key={r.id} m={r} />
                               ))}
                               {threadQ.isPending && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+                              {threadQ.data?.thread.pagination.has_more && (
+                                <p className="text-xs text-muted-foreground">
+                                  Showing the first {replies.length} of {threadQ.data.thread.pagination.total} replies.
+                                </p>
+                              )}
                               {canWrite && !current.archived && (
                                 <div className="mt-2 flex gap-2">
                                   <Input

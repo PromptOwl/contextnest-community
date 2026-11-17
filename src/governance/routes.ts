@@ -6,10 +6,10 @@
  * - governanceNodeRoutes: mounted at /nests/:nestId/nodes BEFORE nodeRoutes catch-all
  */
 
-import { channelPostRefusal } from "../channels/channel-service.js";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
+import { channelPostRefusal } from "../channels/channel-service.js";
 import { isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";

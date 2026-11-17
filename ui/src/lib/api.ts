@@ -3161,10 +3161,18 @@ export async function getChannelTimeline(nestId: string, name: string, opts: { l
   }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}${q ? `?${q}` : ""}`);
 }
 
-export async function getChannelThread(nestId: string, name: string, threadId: string) {
-  return request<{ channel: ChannelSummary; thread: { post: ChannelPost; replies: ChannelMessage[] } }>(
-    `/nests/${nestId}/channels/${encodeURIComponent(name)}?thread=${encodeURIComponent(threadId)}`,
-  );
+export async function getChannelThread(nestId: string, name: string, threadId: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams({ thread: threadId });
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  return request<{
+    channel: ChannelSummary;
+    thread: {
+      post: ChannelPost;
+      replies: ChannelMessage[];
+      pagination: { total: number; limit: number; offset: number; has_more: boolean };
+    };
+  }>(`/nests/${nestId}/channels/${encodeURIComponent(name)}?${qs}`);
 }
 
 // ─── Comments & activity (collaboration) ─────────────────────────────────

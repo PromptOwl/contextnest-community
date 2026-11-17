@@ -705,7 +705,8 @@ export const reads = {
   channelThread: (nestId: string, channelId: string, name: string, threadId: string) =>
     queryOptions({
       queryKey: keys.channelThread(nestId, channelId, threadId),
-      queryFn: () => api.getChannelThread(nestId, name, threadId),
+      // ponytail: first 200 replies shown; page with offset if threads outgrow it.
+      queryFn: () => api.getChannelThread(nestId, name, threadId, { limit: 200 }),
       staleTime: STALE.governance,
     }),
   hooks: (nestId: string, agent?: string) =>

@@ -58,8 +58,8 @@ export const CHANNEL_TOOL_DEFINITIONS = [
       properties: {
         channel: { type: "string", description: 'Channel name, e.g. "ops" (from context_channels).' },
         thread: { type: "string", description: "A post's id, to read that thread instead of the timeline." },
-        limit: { type: "number", description: "Posts per page (default 50, max 200)." },
-        offset: { type: "number", description: "Posts to skip (default 0)." },
+        limit: { type: "number", description: "Posts (or, with thread, replies) per page (default 50, max 200)." },
+        offset: { type: "number", description: "Posts (or replies) to skip (default 0, max 10000)." },
       },
       required: ["channel"],
     },

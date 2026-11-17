@@ -31,11 +31,11 @@
  * resolveModelCredential (own key with the byok feature, else PromptOwl's
  * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
-import { isChannelNode } from "../channels/channel-service.js";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isChannelNode } from "../channels/channel-service.js";
 import { config } from "../config.js";
 import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
 import { hasEntitlement } from "../auth/entitlements.js";
