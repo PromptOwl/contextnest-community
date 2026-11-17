@@ -77,6 +77,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_update: overwriteOutside("Update document", "Replaces content, tags and fields of an existing node. On a nest with a docs site, this can change a public page."),
   context_bulk_update: overwriteOutside("Update many documents", "Changes tags, fields and columns on up to 100 existing nodes. On a nest with a docs site, this can change a public page."),
   context_delete: overwriteOutside("Delete documents", "Deletes nodes with their history, irreversibly. On a nest with a docs site, this can change a public page."),
+  context_archive: addOutside("Archive document", "Takes a node out of lists and retrieval; nothing is deleted and context_unarchive restores it."),
+  context_unarchive: addOutside("Unarchive document", "Brings an archived node back in the status it left."),
   context_move: addOutside("Move document or folder", "Refiles a node or folder; an occupied destination is refused, history follows, and it can be moved back. On a nest with a docs site, this can change a public page."),
   context_table_rows: overwriteOutside("Change table rows", "Updates and deletes rows of a table node. On a nest with a docs site, this can change a public page."),
   context_instructions_update: overwrite("Replace nest instructions", "Replaces the whole of CONTEXT.md."),

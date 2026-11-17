@@ -120,6 +120,8 @@ const OPEN_WORLD = [
   "context_bulk_update",
   "context_delete",
   "context_move",
+  "context_archive",
+  "context_unarchive",
   "context_table_rows",
   "context_approve",
   "context_resolve_deletion",

@@ -21,6 +21,8 @@ const { slackSpy, msteamsSpy, emailSpy } = vi.hoisted(() => ({
 vi.mock("../src/notify/slack.js", () => ({ notifySlackForNest: slackSpy }));
 vi.mock("../src/notify/msteams.js", () => ({ notifyMsTeamsForNest: msteamsSpy }));
 vi.mock("../src/notify/email.js", () => ({ notifyEmailForNest: emailSpy }));
+// No database here, so the real sealed-nest lookup fails closed and sends nothing.
+vi.mock("../src/surfaces/sealed.js", () => ({ sealedNest: async () => null }));
 
 import { notifyNestEvent } from "../src/notify/notify.js";
 
