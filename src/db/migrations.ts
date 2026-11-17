@@ -2479,24 +2479,10 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("083_view_summaries");
   }
 
-  // 084: caller attribution on comment-thread messages (PO-1179, agent team
-  //   stream channels). Same nullable `client_json` column the version rows
-  //   and the activity trace carry (044): the agent label a channel timeline
-  //   shows as "<agent>, on behalf of <human>". NULL is "not attributed", so
-  //   every existing row is already correct. A label, never an identity.
-  if (!hasMigration("084_annotation_comment_client")) {
-    const cols = (
-      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    if (cols.length && !cols.includes("client_json")) {
-      db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
-    }
-    recordMigration("084_annotation_comment_client");
-  }
-  // 085: first-run onboarding (PO-1185): the welcome screen state per person,
+  // 084: first-run onboarding (PO-1185): the welcome screen state per person,
   //   server-side distill jobs, and where a self-serve Slack install returns.
   //   Shared DDL with Postgres (src/onboarding/schema-ddl.ts).
-  if (!hasMigration("085_onboarding")) {
+  if (!hasMigration("084_onboarding")) {
     db.transaction(() => {
       db.exec(onboardingDdl("(datetime('now'))"));
       const cols = db.prepare("PRAGMA table_info(surface_oauth_states)").all() as Array<{ name: string }>;
@@ -2504,9 +2490,9 @@ export function runMigrations(db: Database.Database): void {
         db.exec("ALTER TABLE surface_oauth_states ADD COLUMN return_to TEXT");
       }
     })();
-    recordMigration("085_onboarding");
+    recordMigration("084_onboarding");
   }
-  // A database that ran 085 before its one-running-distill-per-person index
+  // A database that ran 084 before its one-running-distill-per-person index
   // existed (this branch's own test servers) gets it here. Idempotent.
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_jobs_one_running ON distill_jobs(user_id) WHERE status = 'running'");
 
@@ -2556,6 +2542,20 @@ export function runMigrations(db: Database.Database): void {
       }
     })();
     recordMigration("090_control_room_run_totals");
+  }
+
+  // 094: caller attribution on comment-thread messages (PO-1179, agent team
+  //   stream channels). Nullable `client_json`, like the version rows (044):
+  //   the "<agent>, on behalf of <human>" label. A label, never an identity.
+  //   085–093 are taken on open branches; ids match by string.
+  if (!hasMigration("094_annotation_comment_client")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
+    }
+    recordMigration("094_annotation_comment_client");
   }
 }
 

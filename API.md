@@ -3062,7 +3062,7 @@ Names: 1–63 characters, lowercase letters, digits and dashes (a leading `#` an
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
-Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false, "agent_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`; `EXPERIMENTAL_AGENT_STREAM`, see Channels). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
+Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false, "agent_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`; `EXPERIMENTAL_AGENT_STREAM`, see Channels). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`, `experimental_agent_stream_enabled`); `/health` reflects it at once.
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 

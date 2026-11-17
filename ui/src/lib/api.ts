@@ -3102,8 +3102,8 @@ export interface ChannelPost extends ChannelMessage {
   last_reply_at: string | null;
 }
 
-export async function listChannels(nestId: string) {
-  return request<{ channels: ChannelSummary[] }>(`/nests/${nestId}/channels`);
+export async function listChannels(nestId: string, opts: { archived?: boolean } = {}) {
+  return request<{ channels: ChannelSummary[] }>(`/nests/${nestId}/channels${opts.archived ? "?archived=1" : ""}`);
 }
 
 export async function createChannel(nestId: string, input: { name: string; purpose?: string }) {
@@ -4404,7 +4404,7 @@ export type HootieMention =
       thread_id: string;
       notified: number;
     }
-  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+  | { status: "undeliverable"; reason: "no_anchor" | "channel" | "post_failed" };
 
 /** What Hootie is doing mid-answer: `tool` is the tool that's running
  *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's

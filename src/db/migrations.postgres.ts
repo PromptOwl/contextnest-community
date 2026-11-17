@@ -115,10 +115,10 @@ export const HISTORICAL_MIGRATIONS = [
   "081_surfaces_cards",
   "082_surfaces_seeds",
   "083_view_summaries",
-  "084_annotation_comment_client",
-  "085_onboarding",
+  "084_onboarding",
   "086_control_room_ledger",
   "090_control_room_run_totals",
+  "094_annotation_comment_client",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1189,7 +1189,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
-    -- caller attribution on comment-thread messages (migration 084, PO-1179)
+    -- caller attribution on comment-thread messages (migration 094, PO-1179)
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS client_json TEXT;
     ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;

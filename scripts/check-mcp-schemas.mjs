@@ -57,15 +57,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->100 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
-//   /nests/:id/channels (list/create/archive, timeline/thread); channels are Community-only (a node
-//   convention over the comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM), so the
-//   engine has no channel operation to import a descriptor from.
-//   100->101 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
 //   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
-//   101->102 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
+//   99->100 context_stream (po-1214) — twin of GET /me/stream; the document stream is Community-only
 //   (node_versions + node_index across nests, behind EXPERIMENTAL_DOC_STREAM), no engine op exists.
-//   102->105 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   100->103 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
 //   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
 //   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
 //     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
@@ -76,6 +72,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
 //       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
 //       concerns outside the engine's vault-operation catalog, so there is no op to consume.
+//   103->105 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread). Community-only (a node convention over the
+//   comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM). Upstream checked:
+//   @promptowl/contextnest-engine 3.7.0 (latest) /api has no channel op, so there is no descriptor to import.
 const BASELINE = 105;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
