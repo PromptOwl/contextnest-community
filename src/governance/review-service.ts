@@ -66,12 +66,6 @@ export async function submitForReview(params: {
 }): Promise<ReviewRequest> {
   const db = getDb();
 
-  const { storage: vault } = await engineCache.get(params.nestId);
-  const live = await vault.readDocument(params.nodeId).catch(() => null);
-  if (live?.frontmatter.archived) {
-    throw new ValidationError("This document is archived. Restore it first.");
-  }
-
   // Everything that decides WHICH version goes to review — and the chain append
   // that seals it — runs under the same per-node lock approve/reject take, and
   // that updateNode takes for a draft save. Submitting is the one moment a
@@ -82,6 +76,13 @@ export async function submitForReview(params: {
   const { id, version } = await withNodeWriteLock(
     nodeWriteKey(params.nestId, params.nodeId),
     async () => {
+      // Under the lock archiveNode takes, so an archive can't land between this and the seal.
+      const { storage: vault } = await engineCache.get(params.nestId);
+      const live = await vault.readDocument(params.nodeId).catch(() => null);
+      if (live?.frontmatter.archived) {
+        throw new ValidationError("This document is archived. Restore it first.");
+      }
+
       // Check no pending review already exists for this node
       const existing = (await db.get(
         "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",

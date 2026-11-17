@@ -1996,7 +1996,12 @@ export function DocumentsTab({
                   className="mt-4 text-xs text-muted-foreground"
                   data-testid="archived-documents"
                   onToggle={(e) => {
-                    if (e.currentTarget.open) void api.listArchivedNodes(nestId).then((r) => setArchivedDocs(r.nodes));
+                    if (e.currentTarget.open) {
+                      api.listArchivedNodes(nestId).then(
+                        (r) => setArchivedDocs(r.nodes),
+                        (err) => toast.error(err instanceof Error ? err.message : "Could not load archived documents"),
+                      );
+                    }
                   }}
                 >
                   <summary className="cursor-pointer select-none">Archived documents</summary>

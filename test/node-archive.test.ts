@@ -114,7 +114,19 @@ describe("archive", () => {
     expect(edit.status).toBe(400);
     expect(edit.data.error).toMatch(/archived/);
     expect((await post(`${id}/discard`)).status).toBe(400);
-    expect((await post(`${id}/submit-review`)).status).toBeGreaterThanOrEqual(400);
+    const submit = await post(`${id}/submit-review`);
+    expect(submit.status).toBe(400);
+    expect(submit.data.error).toMatch(/archived/);
+    const move = await post(`${id}/move`, { folder: "elsewhere" });
+    expect(move.status).toBe(400);
+    expect(move.data.error).toMatch(/archived/);
+    expect(await listed("?archived=1")).toContain(id);
+  });
+
+  it("caps the reason the same way over MCP as over REST", async () => {
+    await mcp(owner.apiKey, "context_archive", { id, reason: `  ${"x".repeat(600)}  ` });
+    const node = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey)).data.node;
+    expect(node.archived.reason).toBe("x".repeat(500));
   });
 
   it("restores it exactly: same version, same content, back in every list", async () => {

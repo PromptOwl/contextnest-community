@@ -459,12 +459,14 @@ for (const action of ["archive", "unarchive"] as const) {
       return c.json({ error: `Only a steward of this document can ${action} it.` }, 403);
     }
     if (action === "unarchive") {
-      return c.json({ ok: true, ...(await unarchiveNode(nestId, nodeId, userEmail)) });
+      return c.json({
+        ok: true,
+        ...(await unarchiveNode(nestId, nodeId, userEmail, { client: attributeRequest(c, undefined) })),
+      });
     }
     const body = await c.req.json<{ reason?: unknown }>().catch(() => ({}) as { reason?: unknown });
-    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
     const archived = await archiveNode(nestId, nodeId, userEmail, {
-      ...(reason ? { reason } : {}),
+      ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
       client: attributeRequest(c, undefined),
     });
     return c.json({ ok: true, archived });

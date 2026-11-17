@@ -3646,6 +3646,9 @@ async function moveNodeInner(
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
+  if (isArchived(node)) {
+    throw new ValidationError("This document is archived. Restore it first.");
+  }
 
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
@@ -3902,6 +3905,8 @@ export async function restoreVersion(
   );
 }
 
+const ARCHIVE_REASON_MAX = 500;
+
 /** Archived means frozen: discarding or editing would quietly bring it back. */
 async function assertNotArchived(nestId: string, nodeId: string): Promise<void> {
   const { storage } = await engineCache.get(nestId);
@@ -3932,9 +3937,11 @@ export function archiveNode(
     if (await getPendingReview(nestId, nodeId)) {
       throw new LockedError("This document is awaiting review. Approve or reject it before archiving.");
     }
+    // One cap for REST and MCP alike; the engine stores whatever it is given.
+    const reason = opts.reason?.trim().slice(0, ARCHIVE_REASON_MAX);
     const { archived } = await engineApi.run<{ archived: ArchivedMeta }>(
       "context_archive",
-      { id: nodeId, ...(opts.reason ? { reason: opts.reason } : {}), ...(opts.client ? { client: opts.client } : {}) },
+      { id: nodeId, ...(reason ? { reason } : {}), ...(opts.client ? { client: opts.client } : {}) },
       await opContext(nestId, userEmail),
     );
     await trackEvent("node.archive", { nestId, nodeId });
