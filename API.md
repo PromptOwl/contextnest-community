@@ -1918,7 +1918,9 @@ Who counts as mentioned is decided when the message is posted, by the rule menti
 
 An `@handle` that names no person (an agent's handle, today) is recorded too and reaches the agents' owner once agent principals land (`for_agent` then names the agent); until then nobody owns one.
 
-Paging: `?mentions_limit=` (1–100; defaults to `limit`, else 50) and `?mentions_offset=` page this list on its own; `mentions_pagination` is `{ total, limit, offset, has_more }` with `total` = every open mention. `waiting_on_me_total` includes that total, and the `kind: "mention"` notification rows for documents the caller has mention rows on are left out of `notifications`, so the badge counts a mention once.
+Paging: `?mentions_limit=` (1–100; defaults to `limit`, else 50) and `?mentions_offset=` page this list on its own; `mentions_pagination` is `{ total, limit, offset, has_more }` with `total` = every open mention. `waiting_on_me_total` includes that total. A comment's "mentioned you" notification is left out of `notifications` while this list shows an open mention on the same document, so the badge counts a mention once; a mention in a document's body always stays in `notifications`.
+
+Known limits: each read scans the caller's newest 2,000 mention rows before the per-thread and access filters, so past that `total` can undercount. Recording is best-effort: a failed write never fails the post, and that mention is not retried. Mentions posted before migration 085 are not backfilled. Comments cannot be edited or deleted one by one, so a recorded mention never goes stale; deleting the thread or document removes its rows.
 
 MCP twin: `context_my_work` (read tier; `limit`, `offset`, `mentions_limit`, `mentions_offset`) returns this whole `/me/work` body as `structuredContent`. On a nest-scoped key — which may not call `/me/work` — it returns that nest's share only.
 

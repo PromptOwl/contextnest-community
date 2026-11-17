@@ -2571,7 +2571,8 @@ export function runMigrations(db: Database.Database): void {
   //   handle named no person — an agent's handle, until agent principals exist
   //   (src/mentions/agent-mentions.ts). Rows go with their message, thread or
   //   nest (ON DELETE CASCADE). Nothing to backfill: My Work starts from the
-  //   mentions made after the upgrade.
+  //   mentions made after the upgrade. Runs after 094 on purpose: 085 was
+  //   reserved when development jumped to 086+; it depends on none of them.
   if (!hasMigration("085_comment_mentions")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS comment_mentions (

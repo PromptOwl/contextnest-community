@@ -421,3 +421,18 @@ describe("DEDUPE: only the comment mention My Work shows is dropped from notific
     expect(onNode.map((n: any) => n.message), JSON.stringify(onNode)).toEqual([expect.stringContaining('mentioned you in "Body Ping"')]);
   });
 });
+
+describe("justWritten: the mention attaches to the message just posted", () => {
+  it("prefers the author's comment with the posted text over their newest one", async () => {
+    const { justWritten } = await import("../src/mentions/mention-index.js");
+    const thread = {
+      comments: [
+        { id: "a", author: "Bob@team.test", body: "@alice first" },
+        { id: "b", author: "bob@team.test", body: "@alice second" },
+      ],
+    };
+    expect(justWritten(thread, "bob@team.test", "@alice first")).toBe("a");
+    expect(justWritten(thread, "bob@team.test", "edited by the server")).toBe("b");
+    expect(justWritten(thread, "carol@team.test", "@alice first")).toBeNull();
+  });
+});

@@ -1410,7 +1410,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       after = page[page.length - 1].id;
     }
   }
-  // Migration 085 parity: the @mention index My Work reads (PO-1180).
+  // Migration 085 parity: the @mention index My Work reads (PO-1180). Placed
+  // after 086/090 on purpose (085 was reserved); it depends on neither.
   await db.exec(`
     CREATE TABLE IF NOT EXISTS comment_mentions (
       id TEXT PRIMARY KEY,

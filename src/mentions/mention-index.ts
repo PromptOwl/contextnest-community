@@ -51,7 +51,8 @@ const MAX_SCAN = 2000;
 
 /**
  * Record who a just-posted thread message @mentions. Best-effort, like every
- * fan-out on the comment path: a failure here never fails the post.
+ * fan-out on the comment path: a failure here never fails the post. Comments
+ * have no edit or single-delete route, so a recorded row never goes stale.
  */
 export async function indexCommentMentions(params: {
   nestId: string;
@@ -119,25 +120,26 @@ export async function indexCommentMentions(params: {
  * millisecond message from someone else from being taken for it).
  */
 export function justWritten(
-  thread: { comments: Array<{ id: string; author: string }> },
+  thread: { comments: Array<{ id: string; author: string; body?: string }> },
   authorEmail: string,
+  body?: string,
 ): string | null {
   const me = authorEmail.toLowerCase();
-  for (let i = thread.comments.length - 1; i >= 0; i--) {
-    if (thread.comments[i].author.toLowerCase() === me) return thread.comments[i].id;
-  }
-  return null;
+  const mine = thread.comments.filter((c) => c.author.toLowerCase() === me);
+  // Same text first: two quick replies by one author can't swap ids.
+  const hit = [...mine].reverse().find((c) => body !== undefined && c.body === body) ?? mine[mine.length - 1];
+  return hit?.id ?? null;
 }
 
 /** Index the message a post or reply just wrote (see indexCommentMentions). */
 export async function indexPostedMessage(params: {
   nestId: string;
   nodeId: string;
-  thread: { id: string; comments: Array<{ id: string; author: string }> };
+  thread: { id: string; comments: Array<{ id: string; author: string; body?: string }> };
   body: string;
   authorEmail: string;
 }): Promise<void> {
-  const commentId = justWritten(params.thread, params.authorEmail);
+  const commentId = justWritten(params.thread, params.authorEmail, params.body);
   if (!commentId) return;
   await indexCommentMentions({
     nestId: params.nestId,
@@ -195,7 +197,8 @@ interface Row {
 
 function excerptOf(body: string): string {
   const flat = String(body ?? "").replace(/\s+/g, " ").trim();
-  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX)}…` : flat;
+  // Drop a high surrogate the cut left alone, so an emoji is never split.
+  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX).replace(/[\uD800-\uDBFF]$/, "")}…` : flat;
 }
 
 /** "2026-11-08 10:00:00.123" (both dialects' nowMsExpr) → ISO 8601 UTC. */
