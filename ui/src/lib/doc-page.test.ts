@@ -189,7 +189,7 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
     expect(ids(nestSidebarViews(full, { ...governed, agentStreamEnabled: true }))).toContain("channels");
     expect(
       ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { ...governed, agentStreamEnabled: true })),
-    ).toEqual(["overview"]);
+    ).toEqual(["documents"]);
   });
 
   it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
