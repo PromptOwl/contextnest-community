@@ -60,6 +60,7 @@ import {
 } from "./write.js";
 import { renderViewPage, type LinkResolver } from "./render.js";
 import { callerRefResolver } from "../tables/refs.js";
+import { documentWebPath } from "../shared/web-links.js";
 import {
   authorInfos,
   createViewDeps,
@@ -124,7 +125,7 @@ async function viewerLinkResolver(nestId: string, viewer: Principal): Promise<Li
     });
     return (target) => {
       const id = resolve(target, false);
-      return id ? `/nest/${encodeURIComponent(nestId)}?doc=${encodeURIComponent(id)}` : null;
+      return id ? documentWebPath(nestId, id) : null;
     };
   } catch {
     return undefined;

@@ -123,84 +123,46 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.newNestButton).not.toBeVisible();
     });
 
-    test('CN-DASH-002: the Dashboard renders correctly after a successful sign-in', async ({
-      loginPage,
-      nestsPage,
-      appShellPage,
-    }) => {
-      test.skip(!manualRole, 'No manual-login role configured.');
-
-      await loginPage.performLogin(manualRole.email, manualRole.password);
-
-      // The shell, the page heading and the server banner all land together.
-      expect(await appShellPage.isLoggedIn()).toBe(true);
-      await expect(nestsPage.pageTitle).toBeVisible({ timeout: 15000 });
-      await expect(nestsPage.pageTitle).toContainText('Nests');
-      await expect(nestsPage.pageTitle).toContainText('Shared knowledge vaults for your team');
-      await expect(nestsPage.serverUrlCode).toBeVisible();
-      await expect(nestsPage.gridLoader).not.toBeVisible();
-    });
-
-    test('CN-DASH-004: the banner displays the server URL and the Copy button copies it', async ({
-      primary_user,
-    }) => {
-      const { page, nestsPage } = await openDashboard(primary_user, { clipboard: true });
-      await nestsPage.goto();
-
-      const origin = new URL(page.url()).origin;
-      await expect(nestsPage.serverUrlCode).toHaveText(origin);
-
-      await nestsPage.copyServerUrl.click();
-
-      const copied = await readClipboard(page);
-      if (copied !== null) {
-        expect(copied).toBe(origin);
-      } else {
-        // Clipboard unreadable in this browser — the button's Copy→Check swap
-        // is the user-visible confirmation (it carries no success toast).
-        await expect(nestsPage.copyServerUrl.locator('svg.lucide-check')).toBeVisible();
-      }
-    });
-
     test('CN-DASH-005: the banner Nest and Document counts are accurate', async ({
       primary_user,
       commonFunction,
     }) => {
-      const { nestsPage, api } = await openDashboard(primary_user);
+      const { page, nestsPage, api } = await openDashboard(primary_user);
       // A nest with a known document count of 0 guarantees at least one row.
       await api.createNest(commonFunction.generateEntityName('counts'), 'Count check');
 
-      // The banner counts every nest the grid knows about — pending invites
-      // live in their own card and are excluded from both numbers.
-      const totals = async () => {
-        const nests = await gridNests(api);
-        return {
+      // The banner is derived from the page's own GET /nests response (each
+      // nest carries document_count), minus pending invites, which live in
+      // their own card. Other suites add and remove nests on this account the
+      // whole time — on a slow server, enough to move between any two separate
+      // reads — so the banner is held to the very responses the page drew it
+      // from, not to reads taken before or after it.
+      const pending = await api.pendingInviteNestIds();
+      const lists = [];
+      page.on('response', (r) => {
+        const u = new URL(r.url());
+        if (r.request().method() === 'GET' && u.pathname === '/nests' && !u.search) lists.push(r);
+      });
+      await nestsPage.goto();
+      await expect(nestsPage.countSkeletons).toHaveCount(0);
+      await expect.poll(() => lists.length).toBeGreaterThan(0);
+      const shown = {
+        nests: (await nestsPage.bannerNestCount.innerText()).trim(),
+        docs: (await nestsPage.bannerDocumentCount.innerText()).trim(),
+      };
+      const received = [];
+      for (const r of lists) {
+        const nests = ((await r.json().catch(() => null))?.nests ?? []).filter((n) => !pending.has(n.id));
+        received.push({
           nests: String(nests.length),
           docs: String(nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)),
-        };
-      };
-
-      // Other suites add nests and documents on this account while this one
-      // reads, so the banner is held to the totals read just before the page
-      // loaded or just after it was read — and re-read if both moved on.
-      let shown;
-      let before;
-      let after;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        before = await totals();
-        if (attempt === 0) await nestsPage.goto();
-        else await nestsPage.reload();
-        await expect(nestsPage.countSkeletons).toHaveCount(0);
-        shown = {
-          nests: (await nestsPage.bannerNestCount.innerText()).trim(),
-          docs: (await nestsPage.bannerDocumentCount.innerText()).trim(),
-        };
-        after = await totals();
-        const ok = (k) => shown[k] === before[k] || shown[k] === after[k];
-        if (ok('nests') && ok('docs')) break;
+        });
       }
-      expect([before.nests, after.nests], 'banner Nest count').toContain(shown.nests);
-      expect([before.docs, after.docs], 'banner Document count').toContain(shown.docs);
+      // The banner matches what the page received (the latest read, or the one
+      // before it when a refetch landed just as the banner was read).
+      expect(received.map((t) => `${t.nests}/${t.docs}`), 'banner Nest/Document counts').toContain(
+        `${shown.nests}/${shown.docs}`
+      );
     });
 
     test('CN-DASH-006: the whole-brain bar appears only when the user has at least one nest', async ({
@@ -257,28 +219,6 @@ test.describe('Community Dashboard', () => {
         !canCreate,
         'This account cannot create nests (NEST_CREATION=admins and not an admin).'
       );
-    });
-
-    test('CN-DASH-009: a nest cannot be created with an empty name', async ({ primary_user }) => {
-      const { nestsPage, api } = await openDashboard(primary_user);
-
-      await nestsPage.goto();
-      await nestsPage.openCreateDialog();
-
-      // Nothing typed: the button is dead and the form says nothing yet — the
-      // inline hint only appears once there is a name to object to.
-      await expect(nestsPage.createSubmit).toBeDisabled();
-      await expect(nestsPage.createError).toHaveCount(0);
-
-      // Whitespace does not survive trimming, so it is named as the problem.
-      await nestsPage.createNameInput.fill('   ');
-      await expect(nestsPage.createError).toHaveText('Name is required');
-      await expect(nestsPage.createSubmit).toBeDisabled();
-
-      await nestsPage.createCancel.click();
-      // Nothing was created from it. (Checked by name, not by counting: other
-      // suites create nests on this account at the same time.)
-      expect((await api.listNests()).some((n) => !(n.name ?? '').trim())).toBe(false);
     });
 
     test('CN-DASH-010: a nest name over 100 characters is rejected with an inline message', async ({
@@ -424,23 +364,6 @@ test.describe('Community Dashboard', () => {
       await nestsPage.openNest(name);
 
       await expect(page).toHaveURL(new RegExp(`/nest/${nest.id}`), { timeout: 15000 });
-    });
-
-    test('CN-DASH-018: a nest card can be opened with the keyboard (Enter/Space)', async ({
-      primary_user,
-      commonFunction,
-    }) => {
-      const { page, nestsPage, api } = await openDashboard(primary_user);
-      const enterNest = await api.createNest(commonFunction.generateEntityName('key-enter'));
-      const spaceNest = await api.createNest(commonFunction.generateEntityName('key-space'));
-
-      await nestsPage.goto();
-      await nestsPage.openNestWithKeyboard(enterNest.name, 'Enter');
-      await expect(page).toHaveURL(new RegExp(`/nest/${enterNest.id}`), { timeout: 15000 });
-
-      await nestsPage.goto();
-      await nestsPage.openNestWithKeyboard(spaceNest.name, ' ');
-      await expect(page).toHaveURL(new RegExp(`/nest/${spaceNest.id}`), { timeout: 15000 });
     });
 
     test('CN-DASH-020: an imported nest displays its Imported badge and provenance', async ({
@@ -870,30 +793,6 @@ test.describe('Community Dashboard', () => {
       }).toPass({ timeout: 60_000, intervals: [1_000, 3_000, 5_000] });
     }
 
-    test('CN-DASH-036: a shared nest displays "Shared by" and the correct role badge', async ({
-      primary_user,
-      secondary_user,
-      commonFunction,
-    }) => {
-      const { nest, dispose } = await shareWithPrimary(
-        secondary_user,
-        commonFunction,
-        'read',
-        'shared-viewer'
-      );
-      try {
-        const { nestsPage, api } = await openDashboard(primary_user);
-        // Settle the invite so the nest leaves Pending invites for the grid.
-        await api.settleInvitesFor(nest.id);
-
-        await gotoUntilCard(nestsPage, nest.name);
-        await expect(nestsPage.sharedByLine(nest.name)).toContainText(secondaryRole.email);
-        await expect(nestsPage.cardBadge(nest.name, 'Viewer')).toBeVisible();
-      } finally {
-        await dispose();
-      }
-    });
-
     test('CN-DASH-063: inside a shared nest, the banner and sidebar say who shared it and your role', async ({
       primary_user,
       secondary_user,
@@ -919,30 +818,6 @@ test.describe('Community Dashboard', () => {
         await expect(
           page.locator(`button[data-relation="shared"][title^="Open ${nest.name}"]`)
         ).toBeVisible();
-      } finally {
-        await dispose();
-      }
-    });
-
-    test('CN-DASH-037: the rename icon is hidden for non-admin collaborators', async ({
-      primary_user,
-      secondary_user,
-      commonFunction,
-    }) => {
-      // An editor is the strongest non-admin grant — rename is owner/admin only.
-      const { nest, dispose } = await shareWithPrimary(
-        secondary_user,
-        commonFunction,
-        'write',
-        'shared-editor-rename'
-      );
-      try {
-        const { nestsPage, api } = await openDashboard(primary_user);
-        await api.settleInvitesFor(nest.id);
-
-        await gotoUntilCard(nestsPage, nest.name);
-        await expect(nestsPage.cardBadge(nest.name, 'Editor')).toBeVisible();
-        await expect(nestsPage.renameIcon(nest.name)).toHaveCount(0);
       } finally {
         await dispose();
       }

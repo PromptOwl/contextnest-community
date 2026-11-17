@@ -93,13 +93,12 @@ export function AgentWebhooksPanel({ nestId }: { nestId: string }) {
                 size="sm"
                 variant="ghost"
                 aria-label={`Rotate @${h.handle}'s secret`}
-                title="Rotate secret (needs the URL again)"
-                disabled={busy || !url.trim()}
+                title="Rotate secret (keeps the URL)"
+                disabled={busy}
                 onClick={() =>
                   void act(async () => {
-                    const res = await api.setAgentWebhook(nestId, h.handle, url.trim(), true);
+                    const res = await api.setAgentWebhook(nestId, h.handle, undefined, true);
                     if (res.secret) setFresh({ handle: h.handle, secret: res.secret });
-                    setUrl("");
                   }, "Couldn't rotate the secret")
                 }
               >

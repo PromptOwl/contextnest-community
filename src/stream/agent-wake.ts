@@ -66,13 +66,11 @@ import { config } from "../config.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { resolveActorLabel } from "../channels/actor-label.js";
 import { isChannelNode } from "../channels/channel-node.js";
-import { isSafeConnectorUrl } from "../notify/dispatch.js";
 import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webhook.js";
 import { senderFor } from "../notify/outbound-log.js";
-import { guardedFetch, isPrivateAddress } from "../metacognition/net.js";
-import { isIP } from "node:net";
+import { guardedFetch } from "../metacognition/net.js";
 import { justWritten, MENTION_EXCERPT_MAX } from "../mentions/mention-index.js";
-import { storedAgentWebhook } from "./agent-webhooks.js";
+import { isPublicAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
 import { displayNames, namedActor, normHandle, writerHandles } from "../channels/message-meta.js";
 
 export const AGENT_WAKE_EVENT = "agent.mention";
@@ -136,7 +134,7 @@ export async function agentWakeTarget(nestId: string, handle: string): Promise<A
     return null;
   });
   if (!target?.url || !target.secret) return null;
-  if (!isSafeConnectorUrl(target.url) || privateLiteral(target.url)) return null;
+  if (!isPublicAgentWebhookUrl(target.url)) return null;
   return target;
 }
 
@@ -180,15 +178,8 @@ export function wakeIdempotencyKey(nestId: string, commentId: string, handle: st
   return createHash("sha256").update(`agent-wake:v1:${nestId}:${commentId}:${handle}`).digest("hex").slice(0, 40);
 }
 
-function privateLiteral(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    return isIP(host) !== 0 && isPrivateAddress(host);
-  } catch {
-    return true;
-  }
-}
-
+// ponytail: count-then-insert isn't atomic, so parallel posts can overshoot the
+// limits by a few. Soft fence; use a conditional INSERT … SELECT if it must be exact.
 async function overLimit(nestId: string, threadId: string, handle: string): Promise<boolean> {
   const db = getDb();
   const now = Date.now();
@@ -495,7 +486,7 @@ export async function sendAgentTestEvent(nestId: string, handle: string, actorEm
   // nothing goes to an address that is not public.
   const refused = (await sealedNest(nestId))
     ? SEALED_REASON
-    : !isSafeConnectorUrl(raw.url) || privateLiteral(raw.url)
+    : !isPublicAgentWebhookUrl(raw.url)
       ? NOT_PUBLIC_REASON
       : null;
   if (refused) {

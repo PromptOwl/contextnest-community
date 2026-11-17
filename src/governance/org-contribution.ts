@@ -179,6 +179,19 @@ export async function ownsWorkingDraft(
   );
 }
 
+/** Every document whose working copy is this person's own unreviewed draft. */
+export async function ownWorkingDraftIds(nestId: string, email: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    `SELECT v.node_id FROM node_versions v
+      WHERE v.nest_id = ? AND LOWER(v.author) = ?
+        AND v.status IN ('draft', 'pending_review', 'rejected')
+        AND v.version = (SELECT MAX(version) FROM node_versions
+                          WHERE nest_id = v.nest_id AND node_id = v.node_id)`,
+    [nestId, email.toLowerCase()],
+  )) as Array<{ node_id: string }>;
+  return new Set(rows.map((r) => r.node_id));
+}
+
 export interface ContributionResult extends NodeMutationResult {
   /** The review this write is waiting on (new, or the contributor's own
    *  open one that it was folded into). */

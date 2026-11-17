@@ -53,7 +53,8 @@ const MAX_SCAN = 2000;
 
 /**
  * Record who a just-posted thread message @mentions. Best-effort, like every
- * fan-out on the comment path: a failure here never fails the post.
+ * fan-out on the comment path: a failure here never fails the post. Comments
+ * have no edit or single-delete route, so a recorded row never goes stale.
  */
 export async function indexCommentMentions(params: {
   nestId: string;
@@ -121,25 +122,26 @@ export async function indexCommentMentions(params: {
  * millisecond message from someone else from being taken for it).
  */
 export function justWritten(
-  thread: { comments: Array<{ id: string; author: string }> },
+  thread: { comments: Array<{ id: string; author: string; body?: string }> },
   authorEmail: string,
+  body?: string,
 ): string | null {
   const me = authorEmail.toLowerCase();
-  for (let i = thread.comments.length - 1; i >= 0; i--) {
-    if (thread.comments[i].author.toLowerCase() === me) return thread.comments[i].id;
-  }
-  return null;
+  const mine = thread.comments.filter((c) => c.author.toLowerCase() === me);
+  // Same text first: two quick replies by one author can't swap ids.
+  const hit = [...mine].reverse().find((c) => body !== undefined && c.body === body) ?? mine[mine.length - 1];
+  return hit?.id ?? null;
 }
 
 /** Index the message a post or reply just wrote (see indexCommentMentions). */
 export async function indexPostedMessage(params: {
   nestId: string;
   nodeId: string;
-  thread: { id: string; comments: Array<{ id: string; author: string }> };
+  thread: { id: string; comments: Array<{ id: string; author: string; body?: string }> };
   body: string;
   authorEmail: string;
 }): Promise<void> {
-  const commentId = justWritten(params.thread, params.authorEmail);
+  const commentId = justWritten(params.thread, params.authorEmail, params.body);
   if (!commentId) return;
   await indexCommentMentions({
     nestId: params.nestId,
@@ -199,7 +201,8 @@ interface Row {
 
 function excerptOf(body: string): string {
   const flat = String(body ?? "").replace(/\s+/g, " ").trim();
-  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX)}…` : flat;
+  // Drop a high surrogate the cut left alone, so an emoji is never split.
+  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX).replace(/[\uD800-\uDBFF]$/, "")}…` : flat;
 }
 
 /** "2026-11-08 10:00:00.123" (both dialects' nowMsExpr) → ISO 8601 UTC. */
@@ -404,19 +407,4 @@ export async function markMentionDone(params: {
     [params.userId, mine.nest_id, threadId, forAgent ?? ""],
   );
   return { done: true, thread_id: threadId, for_agent: forAgent };
-}
-
-/**
- * "nest\0node" for every document the caller has a mention row on, answered
- * or not — the inbox's "X mentioned you" rows for those are the same event
- * the Mentions section already carries, so My Work stops counting them twice.
- */
-export async function mentionedNodeKeys(userId: string, nestIds: string[]): Promise<Set<string>> {
-  if (!userId || nestIds.length === 0) return new Set();
-  const rows = (await getDb().all(
-    `SELECT DISTINCT nest_id, node_id FROM comment_mentions
-      WHERE mentioned_user_id = ? AND nest_id IN (${nestIds.map(() => "?").join(", ")})`,
-    [userId, ...nestIds],
-  )) as Array<{ nest_id: string; node_id: string }>;
-  return new Set(rows.map((r) => `${r.nest_id}\u0000${r.node_id}`));
 }

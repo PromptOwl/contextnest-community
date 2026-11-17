@@ -1,0 +1,141 @@
+/**
+ * GET /about/surfaces — the member-facing explainer (po-1186 CR3, AC-CR-16).
+ *
+ * The page the bot links in its one enable notice, for anyone in a channel
+ * where Nest listens. Public: no session, no key, nothing nest-specific. It
+ * renders the server's own Surfaces settings (quiet window, how long text is
+ * held, whether DMs are captured) and the optional organization name and logo
+ * an admin set for this server. It never reads a nest, a binding, a channel or
+ * a user, so it cannot name one.
+ *
+ * Plain server-rendered HTML (not the SPA): it has to open for a channel
+ * member who has no account here. 404 while Surfaces is off, like every other
+ * Surfaces route.
+ */
+import { Hono } from "hono";
+import { config } from "../config.js";
+import { surfacesEnabled } from "./flags.js";
+import { getSettings } from "./services/settings-service.js";
+import { tryConsume, retryAfterSeconds, type RateLimitConfig } from "../shared/rate-limit.js";
+import { clientIp } from "../shared/request-ip.js";
+import { type SurfaceSettings } from "./core/settings.js";
+
+export const ABOUT_SURFACES_PATH = "/about/surfaces";
+
+/** Per client IP. Generous for people; it only stops a loop hammering a public, DB-backed page. */
+export const ABOUT_SURFACES_LIMIT: RateLimitConfig = { max: 60, windowMs: 60_000 };
+
+/**
+ * The absolute link the bot posts, or null when this server has no public base
+ * URL, or one that would break Slack's `<url|label>` link syntax (`|`, `<`,
+ * `>` or whitespace): no link is better than a broken one.
+ */
+export function aboutSurfacesUrl(): string | null {
+  const base = config.PUBLIC_BASE_URL;
+  if (!base || /[|<>\s]/.test(base)) return null;
+  return `${base}${ABOUT_SURFACES_PATH}`;
+}
+
+const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+
+/** What Nest never does, in the words the setup wizard uses. */
+export function neverList(s: Pick<SurfaceSettings, "buffer_ttl_hours">): string[] {
+  return [
+    "Read DMs between people, or channels it isn't in",
+    "Import channel history",
+    "Post recaps or summaries in the channel",
+    "Propose pay, health, performance or personal matters",
+    `Keep message text longer than ${s.buffer_ttl_hours} hours`,
+  ];
+}
+
+/**
+ * The CSP img-src for this page: only the configured logo's own origin
+ * (data: for a data:image logo), and nothing at all without a logo.
+ */
+export function logoImgSrc(logoUrl: string | null): string {
+  if (!logoUrl) return "'none'";
+  if (/^data:image\//i.test(logoUrl)) return "data:";
+  try {
+    return new URL(logoUrl).origin;
+  } catch {
+    return "'none'";
+  }
+}
+
+export function renderAboutSurfaces(opts: { orgName: string | null; logoUrl: string | null; settings: SurfaceSettings }): string {
+  const { orgName, logoUrl, settings: s } = opts;
+  const where = orgName ? `some ${esc(orgName)} channels` : "some of your team's channels";
+  const dms = s.dm_capture ? ", in direct messages people start with Nest themselves," : "";
+  const logo = logoUrl ? `<img class="logo" src="${esc(logoUrl)}" alt="${orgName ? esc(orgName) : "Logo"}">` : "";
+  const never = neverList(s)
+    .map((t) => `<li>${esc(t)}</li>`)
+    .join("");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>How Nest handles your messages</title>
+<style>
+:root{--fg:#09090b;--fg2:#3f3f46;--muted:#52525b;--border:#e4e4e7;--primary:hsl(228 73% 29%);--bg:#fff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:600px;margin:0 auto;padding:48px 16px 64px}
+.logo{display:block;max-height:32px;max-width:160px;margin-bottom:24px}
+h1{font-size:24px;line-height:1.3;font-weight:600;letter-spacing:-.01em;margin:0 0 12px}
+h2{font-size:16px;font-weight:600;margin:28px 0 8px}
+p{margin:0 0 12px;color:var(--fg2)}
+p b{color:var(--fg)}
+ul{margin:0;padding-left:20px;color:var(--fg2)}
+li{margin:4px 0}
+code{font:14px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f4f4f5;border-radius:4px;padding:1px 5px;color:var(--fg)}
+footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--border);font-size:14px;color:var(--muted)}
+</style></head>
+<body><main>
+${logo}<h1>How Nest handles your messages</h1>
+<p>Your admin turned on Nest in ${where}. It helps the team remember decisions without anyone writing them up.</p>
+<p><b>It reads</b> messages in those channels only${dms ? dms : ","} never DMs between people, and never old history.</p>
+<p><b>It waits</b> until a thread has been quiet for ${s.quiet_minutes} minutes. Then it decides if the thread holds a decision or a fact worth keeping. Usually the answer is no, and nothing happens.</p>
+<p><b>It keeps</b> nothing unless a named teammate approves a short summary. Raw messages are deleted within ${s.buffer_ttl_hours} hours.</p>
+<p><b>It never saves</b> anything about pay, health, performance or personal life.</p>
+<p><b>You can</b> say <code>@Nest skip me</code> to keep your messages out, or ask an admin to remove it from a channel.</p>
+<h2>It will never</h2>
+<ul>${never}</ul>
+<footer>This page is the same for everyone. It doesn't know who you are or which channel you came from.</footer>
+</main></body></html>`;
+}
+
+export const aboutSurfacesRoutes = new Hono();
+
+aboutSurfacesRoutes.get("/", async (c) => {
+  if (!surfacesEnabled()) return c.json({ error: "Not found" }, 404);
+  c.header("X-Robots-Tag", "noindex");
+  // Public and unauthenticated, and it reads the settings row: limit per IP.
+  // An unidentifiable caller ("unknown") isn't limited, as on login, so one
+  // shared bucket can't lock every member out.
+  const ip = clientIp(c);
+  const key = `about-surfaces:${ip}`;
+  if (ip !== "unknown" && !tryConsume(key, ABOUT_SURFACES_LIMIT)) {
+    c.header("Cache-Control", "no-store");
+    c.header("Retry-After", String(retryAfterSeconds(key, ABOUT_SURFACES_LIMIT)));
+    return c.text("Too many requests. Try again in a minute.", 429);
+  }
+  // The numbers on this page are privacy claims. If this server's settings
+  // can't be read, say so (503, never cached) rather than state defaults that
+  // may not be true here.
+  const settings = await getSettings().catch((err) => {
+    console.warn("[surfaces] about page: settings unreadable", err instanceof Error ? err.message : String(err));
+    return null;
+  });
+  if (!settings) {
+    c.header("Cache-Control", "no-store");
+    return c.text("This page is unavailable right now. Try again in a minute.", 503);
+  }
+  // Revalidate every load: an admin's settings change shows on the next visit.
+  c.header("Cache-Control", "no-cache");
+  // Nothing on this page runs script or loads anything but the admin's logo,
+  // and images may come only from that logo's own origin.
+  const logoUrl = config.LOGO_URL;
+  c.header("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; img-src ${logoImgSrc(logoUrl)}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+  c.header("Referrer-Policy", "no-referrer");
+  return c.html(renderAboutSurfaces({ orgName: config.SURFACES_ORG_NAME ?? null, logoUrl, settings }));
+});

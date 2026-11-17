@@ -14,6 +14,8 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
+import { config } from "../config.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import {
   orgContributorRequesters,
   ownsWorkingDraft,
@@ -56,12 +58,14 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
+  callerCanReadNode,
   filterAccessible,
   resolveCallerEmail,
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
+import { readableDeletionRequests } from "./access-guard.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -474,7 +478,15 @@ governanceRoutes.get("/deletion-requests", async (c) => {
   const raw = c.req.query("status");
   const status =
     raw === "declined" || raw === "all" ? raw : "pending";
-  const requests = await reviews.listDeletionRequests({ nestId, status });
+  // Only requests about what the caller can read: each one names its target
+  // and carries who asked and why (PO-1192).
+  const userId = c.get("userId");
+  const requests = await readableDeletionRequests(
+    nestId,
+    userId,
+    await resolveCallerEmail(userId),
+    await reviews.listDeletionRequests({ nestId, status }),
+  );
   return c.json({ requests, total: requests.length });
 });
 
@@ -649,11 +661,21 @@ governanceRoutes.post("/agent-activity/undo", async (c) => {
 // for the entries (the list is ~40 kB on a busy nest).
 governanceRoutes.get("/external-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const refresh = c.req.query("refresh") === "true";
+  // A rescan stages what it finds, which is a write, so it takes the tier
+  // POST …/external-edits/scan takes. Below that the list is served as it
+  // stands (PO-1192).
+  const permission = c.get("nestPermission");
+  const refresh =
+    c.req.query("refresh") === "true" &&
+    (permission === "owner" || permission === "admin" || permission === "write");
   if (refresh) {
     await externalEdits.scanNestForDrift(nestId, "user:refresh");
   }
-  const entries = await externalEdits.listNestExternalEdits(nestId);
+  const entries = await readableExternalEdits(
+    c,
+    nestId,
+    await externalEdits.listNestExternalEdits(nestId),
+  );
   if (c.req.query("count") === "1") return c.json({ total: entries.length });
   return c.json({ entries, total: entries.length });
 });
@@ -889,7 +911,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   // Review notes can carry draft-derived text (e.g. a hidden Surfaces draft).
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ error: "Access denied — no steward assignment for this node" }, 403);
   }
 
@@ -907,7 +929,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   // A node the caller can't read answers like one with no comments (which is
   // also what a node that doesn't exist answers).
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ comments: [] });
   }
   const list = await comments.listComments(nestId, nodeId, {
@@ -945,6 +967,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     parentId?: string;
   }>();
   let comment;
+  // A comment lands only on a node its author can read: the same rule as
+  // reading the node's comments (PO-1192).
+  const userId = c.get("userId");
+  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+    return c.json({ error: "Not found" }, 404);
+  }
   try {
     comment = await comments.createComment({
       nestId,
@@ -984,6 +1012,11 @@ governanceNodeRoutes.post(
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
     const commentId = c.req.param("commentId")!;
+    // A node the caller can't read answers like a comment that isn't there.
+    const userId = c.get("userId");
+    if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+      return c.json({ error: "Comment not found" }, 404);
+    }
     const resolvedBy = await getUserEmail(c);
     if (isChannelId(nodeId)) {
       if (!(await canReadNode(nestId, nodeId, c.get("userId"), resolvedBy))) return c.json({ error: "Not found" }, 404);
@@ -1016,7 +1049,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
   const userId = c.get("userId");
-  if (!(await canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId)))) {
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ activity: [] });
   }
   const activity = await comments.getActivity({ nestId, nodeId, limit });
@@ -1057,6 +1090,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/task-log", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const limit = parseLimit(c.req.query("limit"));
+  // A slice of the node's activity, so the same rule as …/activity above.
+  const userId = c.get("userId");
+  if (!(await callerCanReadNode(nestId, nodeId, userId))) {
+    return c.json({ entries: [] });
+  }
   return c.json({ entries: await listTaskActivity({ nestId, nodeId, limit }) });
 });
 
@@ -1172,6 +1210,34 @@ governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
   return c.json({ request }, 201);
 });
 
+/**
+ * Who may decide an external edit (PO-1193). The nest middleware admits these
+ * two routes at read tier, like every review action, so the handler is the
+ * gate. A document the caller can't open answers like one that isn't there;
+ * one they can open but may not decide is refused with the reason the
+ * version-review routes give (externalEdits.canDecideExternalEdit).
+ */
+async function externalEditDecisionRefusal(
+  c: any,
+  nestId: string,
+  nodeId: string,
+  actor: string,
+  decision: "approve" | "reject",
+) {
+  const notFound = () => c.json({ error: `Node not found: ${nodeId}` }, 404);
+  if (!(await canReadNode(nestId, nodeId, c.get("userId"), actor))) return notFound();
+  // An id that names no document gets the same answer BEFORE the caller's
+  // rights are judged, so "hidden from you" and "not there" can't be told apart.
+  try {
+    const { storage } = await engineCache.get(nestId);
+    await storage.readDocument(assertSafeNodeId(nodeId));
+  } catch {
+    return notFound();
+  }
+  const verdict = await externalEdits.canDecideExternalEdit(nestId, nodeId, actor, decision);
+  return verdict.allowed ? null : c.json({ error: verdict.reason }, 403);
+}
+
 // External-edit approve/reject MUST be registered before the generic
 // /:nodeId{.+}/approve and /reject review routes below: the greedy `{.+}`
 // nodeId otherwise swallows `.../external-edits/:suggestionId` and matches the
@@ -1189,6 +1255,8 @@ governanceNodeRoutes.post(
       .json<{ comment?: string }>()
       .catch(() => ({}) as { comment?: string });
     const actor = await getUserEmail(c);
+    const refused = await externalEditDecisionRefusal(c, nestId, nodeId, actor, "approve");
+    if (refused) return refused;
     // A seed's admin-only folders: nest admins only (S7-R3 R2-L3).
     const adminOnly = await adminFolderRefusal(nestId, nodeId, actor);
     if (adminOnly) return c.json({ error: adminOnly }, 403);
@@ -1230,10 +1298,12 @@ governanceNodeRoutes.post(
     const body = await c.req
       .json<{ reason?: string }>()
       .catch(() => ({}) as { reason?: string });
+    const actor = await getUserEmail(c);
+    const refused = await externalEditDecisionRefusal(c, nestId, nodeId, actor, "reject");
+    if (refused) return refused;
     if (!body.reason) {
       throw new ValidationError("Rejection reason is required");
     }
-    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.rejectExternalEdit({
         nestId,
@@ -1490,6 +1560,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-edit", async (c) => {
 governanceNodeRoutes.get("/:nodeId{.+}/external-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+  // Answers like a node with no pending edit (which is also what a node that
+  // doesn't exist answers).
+  if (!(await readsExternalEdits(c, nestId, nodeId))) {
+    return c.json({ pending: null });
+  }
   const pending = await externalEdits.getPendingChange(nestId, nodeId);
   return c.json({ pending });
 });
@@ -1501,11 +1576,10 @@ governanceNodeRoutes.get(
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
     const suggestionId = c.req.param("suggestionId")!;
-    const detail = await externalEdits.getExternalEditDetail(
-      nestId,
-      nodeId,
-      suggestionId,
-    );
+    // The patch is the edit's text: same answer as an unknown suggestion.
+    const detail = (await readsExternalEdits(c, nestId, nodeId))
+      ? await externalEdits.getExternalEditDetail(nestId, nodeId, suggestionId)
+      : null;
     if (!detail) {
       return c.json({ error: "Suggestion not found" }, 404);
     }
@@ -1532,6 +1606,51 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Open mode (sign-in off) with no credential: the one local user, who has
+ * owner-level access to every nest (the nest gate) — including one an account
+ * from before sign-in was turned off created — and decides external edits
+ * there (canDecideExternalEdit), so it must read the edit it decides
+ * (AC-EED-05). Only the anonymous local identity: an API key or session sent
+ * to an open-mode server authenticates as itself (flexAuthMiddleware) and
+ * keeps every access check.
+ */
+function isOpenModeLocalUser(userId: string | undefined): boolean {
+  return config.AUTH_MODE === "open" && userId === ANON_USER_ID;
+}
+
+/**
+ * May this caller see a document's pending external edits? Such an edit is
+ * text nobody approved, so it follows the document's working copy: never for
+ * someone who reaches the nest only through its visibility (they read approved
+ * versions), otherwise the document's own read rule (PO-1192).
+ */
+async function readsExternalEdits(c: any, nestId: string, nodeId: string): Promise<boolean> {
+  const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return true;
+  if (await isPublicReader(nestId, userId)) return false;
+  return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
+}
+
+/** The nest-wide list under the same rule, resolved once for the whole list. */
+async function readableExternalEdits(
+  c: any,
+  nestId: string,
+  entries: externalEdits.ExternalEditEntry[],
+): Promise<externalEdits.ExternalEditEntry[]> {
+  if (entries.length === 0) return entries;
+  const userId = c.get("userId");
+  if (isOpenModeLocalUser(userId)) return entries;
+  if (await isPublicReader(nestId, userId)) return [];
+  const readable = await filterAccessible(
+    nestId,
+    userId,
+    await resolveCallerEmail(userId),
+    entries.map((entry) => ({ id: entry.document_id, entry })),
+  );
+  return readable.map((r) => r.entry);
+}
 
 async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");

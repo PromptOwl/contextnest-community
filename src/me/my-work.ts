@@ -25,7 +25,8 @@ import { resolveUserRoles } from "../governance/stewardship-service.js";
 import { listNotifications } from "../governance/notify-service.js";
 import { canDecideAccessRequests, listAccessRequests } from "../governance/access-request-service.js";
 import { listAssignedTo } from "../nodes/assigned-service.js";
-import { listOpenMentions, mentionedNodeKeys } from "../mentions/mention-index.js";
+import { listOpenMentions } from "../mentions/mention-index.js";
+import { isCommentMentionNotice } from "../governance/mention-notify.js";
 import { ValidationError } from "../shared/errors.js";
 
 /** The sections of My Work, in the order an agent reads them. */
@@ -296,22 +297,6 @@ export async function buildMyWork(params: {
     ...myAccessAsks.map(toAccessItem),
   );
   waiting.sort(byNewest);
-  // Watcher notifications (HITL tags) ride along so the inbox is one call.
-  // Scoped to the visible nests only for a nest-scoped credential; the REST
-  // inbox keeps listing every unread row, as it always has. A comment
-  // "mentioned you" row is dropped when the Mentions section below carries
-  // that same mention (PO-1180) — one event, counted once in the badge.
-  const mentionedNodes = !want("notifications")
-    ? new Set<string>()
-    : await mentionedNodeKeys(userId, [...nestName.keys()]).catch((err) => {
-        console.error("[me/work] mention keys failed", err);
-        return new Set<string>();
-      });
-  const notifications = (want("notifications") ? await listNotifications(me, { unreadOnly: true, limit: 50 }) : []).filter(
-    (n: { nest_id: string; kind: string; node_id?: string | null; subject_id?: string | null }) =>
-      (!onlyNestId || n.nest_id === onlyNestId) &&
-      !(n.kind === "mention" && mentionedNodes.has(`${n.nest_id}\u0000${n.node_id ?? n.subject_id ?? ""}`)),
-  );
   // `total` from getReviewQueue counts every PENDING REVIEW across every
   // nest the caller can see — full stop, regardless of who requested it or
   // whether the caller can approve it. But items/waiting only ever surface
@@ -377,6 +362,18 @@ export async function buildMyWork(params: {
         return [];
       });
   const mentions = allMentions.slice(mentionsOffset, mentionsOffset + mentionsLimit);
+  const mentionsTotal = allMentions.length;
+  const mentionNodes = new Set(allMentions.map((m) => `${m.nest_id}\u0000${m.node_id}`));
+  // Watcher notifications (HITL tags) ride along so the inbox is one call.
+  // Scoped to the visible nests only for a nest-scoped credential; the REST
+  // inbox keeps listing every unread row, as it always has. A comment
+  // "mentioned you" row is dropped only while the Mentions section shows an
+  // open mention on that node (PO-1180); document-body mentions always stay.
+  const notifications = (want("notifications") ? await listNotifications(me, { unreadOnly: true, limit: 50 }) : []).filter(
+    (n: { nest_id: string; kind: string; message?: string | null; node_id?: string | null; subject_id?: string | null }) =>
+      (!onlyNestId || n.nest_id === onlyNestId) &&
+      !(isCommentMentionNotice(n) && mentionNodes.has(`${n.nest_id}\u0000${n.node_id ?? n.subject_id ?? ""}`)),
+  );
   // The badge's share (CU-wdqcq0658p): the same total minus what waits on
   // others — the caller's own pending reviews and the requests they filed.
   // Plus every open mention (all pages), each counted once.
@@ -399,10 +396,10 @@ export async function buildMyWork(params: {
       has_more: offset + requests.length < total,
     },
     mentions_pagination: {
-      total: allMentions.length,
+      total: mentionsTotal,
       limit: mentionsLimit,
       offset: mentionsOffset,
-      has_more: mentionsOffset + mentions.length < allMentions.length,
+      has_more: mentionsOffset + mentions.length < mentionsTotal,
     },
   };
   if (!sections) return full as Partial<typeof full>;
