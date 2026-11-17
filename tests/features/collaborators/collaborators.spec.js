@@ -1,5 +1,5 @@
 /**
- * Collaborators Test Suite — CN-COLLAB-001 … CN-COLLAB-031
+ * Collaborators Test Suite — CN-COLLAB-001 … CN-COLLAB-034
  *
  * Page under test: the nest page's Collaborators tab
  * (ui/src/components/nest/CollaboratorsTab.tsx) — what each role sees and can
@@ -37,6 +37,7 @@ const WRITE = { timeout: 60_000 };
 
 const DOC_TITLE = 'Collaborators Doc';
 const DOC_BODY = 'Readable body text.';
+const DRAFT_TITLE = 'Collaborators Draft';
 const ROLE_LABEL = { read: 'Viewer', write: 'Editor', admin: 'Admin' };
 
 test.describe('Collaborators', () => {
@@ -89,6 +90,13 @@ test.describe('Collaborators', () => {
     test.skip(res.status === 402, `No free ${ROLE_LABEL[permission]} seat on this server.`);
     expect(res.ok, `share as ${permission}: HTTP ${res.status} ${res.data?.error ?? ''}`).toBe(true);
     return openSecondary(owner, secondary);
+  }
+
+  /** A signed-out visitor: a page in a fresh browser context with no session. */
+  async function signedOut(browser) {
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    cleanups.push(() => context.close());
+    return context.newPage();
   }
 
   /** A third person (a QA test account). Skips when the directory has none. */
@@ -480,7 +488,7 @@ test.describe('Collaborators', () => {
 
   // ── Visibility ─────────────────────────────────────────────────────────────
 
-  test('CN-COLLAB-024: Verify that choosing Public from Private, Organization and Public asks for confirmation, and Cancel keeps the nest Private', async ({ primary_user, commonFunction }) => {
+  test('CN-COLLAB-024: Verify that choosing Public from the visibility menu asks for confirmation, and Cancel keeps the nest Private', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-public-cancel');
 
     await owner.page.goto(owner.nest.id);
@@ -598,5 +606,66 @@ test.describe('Collaborators', () => {
     await owner.page.headlessSwitch.click();
     await expect(owner.page.keyLabelInput).toHaveCount(0, WRITE);
     await expect.poll(() => owner.api.statusWithKey(key, 'GET', path), WRITE).not.toBe(200);
+  });
+
+  // ── Who can read a Public or Organization nest ─────────────────────────────
+
+  test('CN-COLLAB-032: Verify that an Organization nest can be read by a signed-in non-member, but not by a signed-out visitor', async ({ primary_user, secondary_user, commonFunction, browser }) => {
+    const owner = await ownerNest(primary_user, commonFunction, 'collab-org', { withDoc: true });
+    const outsider = await openSecondary(owner, secondary_user);
+    expect(await outsider.api.openStatus(owner.nest.id)).not.toBe(200);
+
+    // Set through the API: on a shared deployment the menu no longer offers
+    // Organization (team sharing replaces it), but an org nest still exists.
+    await owner.api.setVisibility(owner.nest.id, 'org');
+    await expect.poll(() => owner.api.visibility(owner.nest.id), WRITE).toBe('org');
+    await owner.page.goto(owner.nest.id);
+    await expect(owner.page.visibilitySelect).toHaveText('Organization');
+
+    expect(await outsider.api.openStatus(owner.nest.id)).toBe(200);
+    await outsider.page.gotoNest(owner.nest.id);
+    await expect(outsider.page.page.getByText(DOC_TITLE).first()).toBeVisible(WRITE);
+    await expect(outsider.page.noAccess).toHaveCount(0);
+
+    const visitor = await signedOut(browser);
+    expect((await visitor.request.get(`/nests/${owner.nest.id}`)).status()).not.toBe(200);
+    await visitor.goto(`/nest/${owner.nest.id}`);
+    await expect(visitor.getByTestId('login-email-input')).toBeVisible(WRITE);
+    await expect(visitor.getByText(DOC_TITLE)).toHaveCount(0);
+  });
+
+  test('CN-COLLAB-033: Verify that a Public nest can be read by a signed-out visitor', async ({ primary_user, commonFunction, browser }) => {
+    const owner = await ownerNest(primary_user, commonFunction, 'collab-public-visitor', { withDoc: true });
+    const visitor = await signedOut(browser);
+    expect((await visitor.request.get(`/nests/${owner.nest.id}`)).status()).not.toBe(200);
+
+    await owner.api.setVisibility(owner.nest.id, 'public');
+    await expect.poll(async () => (await visitor.request.get(`/nests/${owner.nest.id}`)).status(), WRITE).toBe(200);
+    await visitor.goto(`/nest/${owner.nest.id}`);
+    await expect(visitor.getByText(DOC_TITLE).first()).toBeVisible(WRITE);
+    await expect(visitor.getByText('Public read-only')).toBeVisible();
+    await expect(visitor.getByTestId('login-email-input')).toHaveCount(0);
+  });
+
+  test("CN-COLLAB-034: Verify that someone reading a nest only because it's Public or Organization sees published documents but not drafts", async ({ primary_user, secondary_user, commonFunction }) => {
+    const owner = await ownerNest(primary_user, commonFunction, 'collab-reader-drafts', { withDoc: true, governed: true });
+    // With stewardship on and self-approve off, a new document stays a draft.
+    const draft = await owner.api.createDoc(owner.nest.id, { title: DRAFT_TITLE, content: `# ${DRAFT_TITLE}\n\nNot approved yet.\n` });
+    await expect
+      .poll(async () => (await owner.api.listNodes(owner.nest.id)).find((n) => n.id === draft.id)?.status, WRITE)
+      .toBe('draft');
+    const outsider = await openSecondary(owner, secondary_user);
+
+    for (const visibility of ['public', 'org']) {
+      await owner.api.setVisibility(owner.nest.id, visibility);
+      await expect.poll(() => outsider.api.openStatus(owner.nest.id), WRITE).toBe(200);
+      const ids = (await outsider.api.listNodes(owner.nest.id)).map((n) => n.id);
+      expect(ids, `${visibility}: the published document is listed`).toContain(owner.doc.id);
+      expect(ids, `${visibility}: the draft is not`).not.toContain(draft.id);
+
+      await outsider.page.gotoNest(owner.nest.id);
+      await expect(outsider.page.page.getByText(DOC_TITLE).first()).toBeVisible(WRITE);
+      await expect(outsider.page.page.getByText(DRAFT_TITLE)).toHaveCount(0);
+    }
   });
 });

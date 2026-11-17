@@ -223,6 +223,8 @@ test.describe('Fields', () => {
   // ── Task numbering ─────────────────────────────────────────────────────────
 
   test('CN-FIELD-004: Verify that a lowercase prefix is saved in capitals, Start at 100 gives the next tasks QA-100 and QA-101, and turning numbering off means new tasks get no number', async ({ primary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-numbering');
     const { page, api, nest } = owner;
 
@@ -718,6 +720,8 @@ test.describe('Fields', () => {
   });
 
   test('CN-FIELD-016: Verify that a Number field with a Scale, a Person field and a Date field can be set on a task and are kept after a reload, and the board card shows the Number with its unit', async ({ primary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-types');
     const { page, api, nest } = owner;
     await api.createField(nest.id, { label: 'Owner', key: 'owner', type: 'user' });
@@ -768,6 +772,8 @@ test.describe('Fields', () => {
   });
 
   test("CN-FIELD-018: Verify that a nest-wide Reviewer can add and manage fields, and an archived nest's Fields tab and task values are read-only", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-reviewer');
     const { api, nest } = owner;
     await api.createField(nest.id, { label: 'Customer', key: 'customer', type: 'text' });
