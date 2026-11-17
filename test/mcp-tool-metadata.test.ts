@@ -52,6 +52,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_AGENT_STREAM = "true";
   process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
@@ -71,6 +72,7 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_AGENT_STREAM;
   delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });

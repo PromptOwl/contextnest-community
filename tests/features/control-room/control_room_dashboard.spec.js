@@ -13,6 +13,9 @@
  * - The other cases answer the page's reads in this browser
  *   (tests/src/lib/control_room_dashboard_stubs.js), so they don't depend on
  *   what the server holds: a paused channel, a private-nest row, day zero.
+ *   They do depend on the server's UI: the page under test is the deployed one.
+ * - Every case skips on a server that ships the Control room without these
+ *   tabs (see requireDashboard). CN_EXPECT_CONTROL_ROOM=1 makes that a failure.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
@@ -25,38 +28,52 @@ const primaryRole = samples.primary_user ?? null;
 
 /**
  * CI runs e2e against the deployed server (nest-dev), not this branch's build.
- * Until that server ships the dashboard, the suite skips rather than fails;
- * CN_EXPECT_CONTROL_ROOM=1 turns the skip into a failure.
- *
- * `surfaces_enabled` on /health is not enough: it shipped with CR1, so a server
- * with the setup wizard (CR3) but not the dashboard carries it too. The
- * dashboard ships with its own route, GET /surfaces/cold-start, which such a
- * server answers 404. The probe is made as primary_user (the route needs a
- * session) and only once per worker.
+ * Until that server ships the Control room (its /health carries
+ * `surfaces_enabled`), the suite skips rather than fails, as in
+ * control_room_setup.spec.js. CN_EXPECT_CONTROL_ROOM=1 turns the skip into a failure.
  */
-let deployed = null;
+let deployed = false;
 
-async function dashboardDeployed(page) {
+test.beforeAll(async ({ request }) => {
   try {
-    const h = await (await page.request.get('/health')).json();
-    if (typeof h?.surfaces_enabled !== 'boolean') return false;
-    return (await page.request.get('/surfaces/cold-start')).status() !== 404;
+    const h = await (await request.get('/health')).json();
+    deployed = typeof h?.surfaces_enabled === 'boolean';
   } catch {
-    return false;
+    deployed = false;
   }
-}
+});
 
-test.beforeEach(async ({ primary_user }) => {
-  test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
-  if (deployed === null) {
-    await primary_user.initialize();
-    deployed = await dashboardDeployed(primary_user.page);
+test.beforeEach(() => {
+  if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+    expect(deployed, 'the server under test does not ship the Control room (/health has no surfaces_enabled)').toBe(true);
+  }
+  test.skip(!deployed, 'The server under test does not ship the Control room yet (po-1186 CR2).');
+});
+
+/**
+ * Does the server ship these tabs? The setup wizard (CR3) was released before
+ * them (CR2), and both answer /health the same, so a server can pass the check
+ * above and still show a placeholder Overview. The tabs' own read tells them
+ * apart: `GET /rollups?by=reason` came with CR2, and a server without it
+ * refuses the grouping with 422. It needs a signed-in request, so it is asked
+ * once per worker from the first case's session.
+ */
+let dashboardShipped = null;
+
+async function requireDashboard(page) {
+  if (dashboardShipped === null) {
+    const res = await page.request.get('/rollups?by=reason');
+    // 200: shipped. 422: not shipped. 404: the workflow plane is off here, which
+    // says nothing either way, so the cases run. Anything else is a broken
+    // request, not an answer; fail here rather than remember a wrong one.
+    expect([200, 404, 422], `GET /rollups?by=reason answered ${res.status()}`).toContain(res.status());
+    dashboardShipped = res.status() !== 422;
   }
   if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
-    expect(deployed, 'the server under test does not ship the Control room dashboard (/health has no surfaces_enabled, or GET /surfaces/cold-start answers 404)').toBe(true);
+    expect(dashboardShipped, 'the server under test does not ship the Control room dashboard (GET /rollups?by=reason answers 422)').toBe(true);
   }
-  test.skip(!deployed, 'The server under test does not ship the Control room dashboard yet (po-1186 CR2).');
-});
+  test.skip(!dashboardShipped, 'The server under test ships the Control room without the dashboard tabs yet (po-1186 CR2).');
+}
 
 /** The page's own range: the last 14 UTC days, today included. */
 function range14() {
@@ -79,6 +96,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-008 / AC-CR-03: the tiles equal /surfaces/windows, /surfaces/proposals, /surfaces/commits and the budget for the range', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     const health = await (await page.request.get('/health')).json();
     test.skip(!health.surfaces_enabled, 'Surfaces is off on this server.');
     const { from, to } = range14();
@@ -131,6 +149,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-009 / AC-CR-03b: a paused channel raises an alert naming it, the reason in counts, and the three fix options', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { paused: true });
     const cr = new ControlRoomPage(page);
@@ -151,6 +170,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-010 / AC-CR-04: the cold-start card shows coverage, time to first approved and the folder bars; with no seed it says so and points to Setup', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { coldStart: 'seeded' });
     const cr = new ControlRoomPage(page);
@@ -167,6 +187,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-011 / AC-CR-07c: a private-nest row reads "DM · private nest · title hidden" in the ledger and the drawer', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, {});
     const cr = new ControlRoomPage(page);
@@ -182,6 +203,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-012: the drawer\'s Reason row is the agent\'s reason, never the verdict again; a complete chain says so', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, {});
     const cr = new ControlRoomPage(page);
@@ -200,6 +222,7 @@ test.describe('Control room: dashboard', () => {
   test('CN-CR-013 / AC-CR-13: day zero — Overview, Decision ledger and Agents each show their empty state with a way on, and no charts', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
+    await requireDashboard(page);
     await stubSurfacesOn(page);
     await stubDashboard(page, { empty: true });
     const cr = new ControlRoomPage(page);
@@ -219,6 +242,7 @@ test.describe('Control room: dashboard', () => {
     test(`CN-CR-014 / AC-CR-11: at ${width}px every Control room tab has no horizontal scroll and no chart label under 14px`, async ({ primary_user }) => {
       await primary_user.initialize();
       const { page } = primary_user;
+      await requireDashboard(page);
       await page.setViewportSize({ width, height: width < 500 ? 844 : 900 });
       await stubSurfacesOn(page);
       await stubDashboard(page, { paused: true, coldStart: 'seeded' });

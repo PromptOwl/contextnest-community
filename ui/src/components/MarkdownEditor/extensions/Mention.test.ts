@@ -25,6 +25,11 @@ describe("findMentions", () => {
     expect(m.name).toBe("Hiren F");
   });
 
+  it("leaves a sentence's full stop out of the chip", () => {
+    const [m] = findMentions("thanks @rita.");
+    expect(m).toMatchObject({ name: "rita", start: 7, end: 12 });
+  });
+
   it("handles a mention at the very start of the text", () => {
     const text = "@hiren@promptowl.ai please review";
     const [m] = findMentions(text);

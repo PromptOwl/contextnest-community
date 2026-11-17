@@ -29,18 +29,6 @@ class CollaboratorsApi extends ReviewQueueApi {
     this.teamIds = [];
   }
 
-  // ── Server ─────────────────────────────────────────────────────────────────
-
-  /**
-   * Does the server host several organizations (`/health` `shared_deployment`)?
-   * There the visibility menu offers "Share with a team…" in place of
-   * Organization, and the add form opens on Team (po-1178).
-   */
-  async sharedDeployment() {
-    const { data } = await this.request('GET', '/health');
-    return data?.shared_deployment === true;
-  }
-
   // ── Sharing ────────────────────────────────────────────────────────────────
 
   /**

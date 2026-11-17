@@ -68,3 +68,14 @@ describe("nothingWaitingOnMe (the all-caught-up state)", () => {
     expect(nothingWaitingOnMe({ items: [] })).toBe(true);
   });
 });
+
+describe("AC-MW-04 the badge and the empty state with mentions", () => {
+  const mention = { type: "mention", kind: "channel", nest_id: "n", thread_id: "t" } as any;
+  it("an open mention means you are not caught up", () => {
+    expect(nothingWaitingOnMe({ items: [], assigned: [], mentions: [mention] })).toBe(false);
+    expect(nothingWaitingOnMe({ items: [], assigned: [], mentions: [] })).toBe(true);
+  });
+  it("counts mentions once, through waiting_on_me_total (not per row shown)", () => {
+    expect(waitingOnMeCount({ waiting_on_me_total: 120, assigned: [], notifications: [] } as any)).toBe(120);
+  });
+});

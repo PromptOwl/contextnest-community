@@ -12,8 +12,14 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
+import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
+import { cardRoutes } from "./stream/card-routes.js";
+import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
+import { promoteRoutes } from "./stream/promote-routes.js";
+import { buildMyWork, parseMyWorkPaging, parseMyWorkSections } from "./me/my-work.js";
+import { actingAgentHandle, markMentionDone } from "./mentions/mention-index.js";
+import { readClient } from "./shared/client-metadata.js";
 import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
-import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
@@ -33,11 +39,7 @@ import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
-import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
-import {
-  getReviewQueue,
-  listDeletionRequests,
-} from "./governance/review-service.js";
+import { listVisibleNests } from "./nests/service.js";
 import { listMyDrafts } from "./governance/version-service.js";
 import { streamForCaller } from "./governance/stream-read.js";
 import { folderForNode } from "./governance/title-resolver.js";
@@ -54,7 +56,6 @@ import { contributionRoutes } from "./nests/contribution-routes.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
-  resolveUserRoles,
 } from "./governance/stewardship-service.js";
 import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
@@ -86,7 +87,6 @@ import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
-import { readClient } from "./shared/client-metadata.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
@@ -153,8 +153,6 @@ import {
 import { accessRequestRoutes } from "./governance/access-request-routes.js";
 import {
   accessRequestHint,
-  canDecideAccessRequests,
-  listAccessRequests,
   writeTargetForPath,
 } from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
@@ -222,6 +220,7 @@ import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
+import { documentWebPath, nestWebPath } from "./shared/web-links.js";
 import {
   protectedResourceMetadata,
   authorizationServerMetadata,
@@ -300,6 +299,19 @@ const isDocumentNavigation = (c: { req: { header(n: string): string | undefined 
   c.req.header("Sec-Fetch-Mode") === "navigate" ||
   (c.req.header("Accept") || "").includes("text/html");
 
+// Narrower than isDocumentNavigation, for redirecting an API address to its
+// page in the app: a top-level browser page load that carries no API
+// credentials. Sec-Fetch-Dest says "document" only for the address bar, a link
+// or a reload (never fetch/XHR, an iframe or a download); browsers too old to
+// send it are recognised by an HTML Accept. Anything with an Authorization
+// header is a program, whatever it accepts.
+const isCredentialFreePageLoad = (c: { req: { header(n: string): string | undefined } }) => {
+  if (c.req.header("Authorization")) return false;
+  const dest = c.req.header("Sec-Fetch-Dest");
+  if (dest !== undefined) return dest === "document";
+  return (c.req.header("Accept") || "").includes("text/html");
+};
+
 // The SPA shell, shared by the catch-all below and the /teams guard — same
 // file, same no-cache policy (index.html is unhashed and must always
 // revalidate so a deploy's new bundle is picked up on next load).
@@ -342,6 +354,8 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "hooks",
   "env",
   "connectors",
+  // Where a nest's agent @mentions are POSTed (PO-1181): automation wiring.
+  "agent-webhooks",
   "trace",
   "stewards",
   "archive",
@@ -563,38 +577,6 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     return next();
   },
 );
-
-// Short-TTL cache for the /me/work approve-capability check. The dashboard
-// polls this inbox, and a caller's nest roles change rarely — so caching the
-// per-(nest, user) "can approve here?" boolean for a few seconds skips the
-// repeated resolveUserRoles round-trips on each poll, without holding stale
-// governance long enough to matter. Global map (single-process server).
-const APPROVE_CACHE_TTL_MS = 30_000;
-const approveCache = new Map<string, { ok: boolean; exp: number }>();
-async function canApproveInNest(nestId: string, email: string): Promise<boolean> {
-  const key = `${nestId} ${email.toLowerCase()}`;
-  const now = Date.now();
-  const hit = approveCache.get(key);
-  if (hit && hit.exp > now) return hit.ok;
-  // MUST mirror canUserApprove's nest-level gate, not the pure canApproveWith:
-  // admin/reviewer approve always, but a BARE owner (no admin/reviewer steward
-  // role) can only approve when the nest allows self-approve. Using
-  // canApproveWith here — which treats "owner" as always approve-capable — put
-  // a dead Approve button back in front of owners who delegated approval to a
-  // reviewer and left self-approve off (the default SoD setup). Fetch the flag
-  // only for the owner-only case so reviewers/admins skip the extra read.
-  const roles = await resolveUserRoles(nestId, email);
-  let ok = roles.includes("admin") || roles.includes("reviewer");
-  if (!ok && roles.includes("owner")) ok = await nestAllowsSelfApprove(nestId);
-  // Cheap bound: sweep expired entries when the map grows, so a long-running
-  // server polling /me/work across many (nest, user) pairs doesn't accumulate
-  // stale keys forever. O(n) but only past a threshold, amortized to nothing.
-  if (approveCache.size > 500) {
-    for (const [k, v] of approveCache) if (v.exp <= now) approveCache.delete(k);
-  }
-  approveCache.set(key, { ok, exp: now + APPROVE_CACHE_TTL_MS });
-  return ok;
-}
 
 /**
  * The review actions on a document that the nest middleware admits at read
@@ -824,6 +806,7 @@ export function createApp(): Hono<AuthEnv> {
       experimental: {
         doc_pins: config.EXPERIMENTAL_DOC_PINS,
         doc_stream: config.EXPERIMENTAL_DOC_STREAM,
+        agent_stream: config.EXPERIMENTAL_AGENT_STREAM,
       },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
@@ -1093,6 +1076,7 @@ export function createApp(): Hono<AuthEnv> {
     surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
     experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
+    experimental_agent_stream_enabled: config.EXPERIMENTAL_AGENT_STREAM,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1610,6 +1594,15 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "EXPERIMENTAL_DOC_STREAM",
         value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
+    }
+
+    // Experimental: agent team stream channels (PO-1179). Same tombstone rule
+    // as the doc stream: off writes null, so it stays off across a restart.
+    if ("experimental_agent_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_AGENT_STREAM",
+        value: body.experimental_agent_stream_enabled ? "true" : null,
       });
     }
 
@@ -2438,239 +2431,49 @@ export function createApp(): Hono<AuthEnv> {
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
+    // The whole inbox lives in me/my-work.ts so MCP context_my_work returns
+    // exactly this (PO-1180). limit/offset page the reviews; mentions_limit /
+    // mentions_offset page the Mentions section.
+    // `sections` (comma-separated) returns only those sections, and an
+    // explicit `limit` caps every section (PO-1190). A credential that names
+    // an agent (its key label, or a declared client.agent) also sees the
+    // threads that tag that agent — still only where the person can read.
+    const paging = parseMyWorkPaging({
+      limit: c.req.query("limit"),
+      offset: c.req.query("offset"),
+      mentions_limit: c.req.query("mentions_limit"),
+      mentions_offset: c.req.query("mentions_offset"),
+    });
+    return c.json(
+      await buildMyWork({
+        userId: c.get("userId"),
+        ...paging,
+        sections: parseMyWorkSections(c.req.query("sections")),
+        actingAs: actingAgentHandle(readClient(c)),
+      }),
+    );
+  });
+
+  // POST /me/work/mentions/:threadId/done { for_agent? } — "mark done"
+  // (PO-1189, AC-UX-09). The caller's own mark: it hides their mention of
+  // that thread from My Work until a later message there names them again.
+  // 404 unless they have an open mention in it. MCP twin:
+  // context_resolve_comment { thread, mention_done: true }.
+  app.post("/me/work/mentions/:threadId/done", async (c) => {
     const userId = c.get("userId");
-    const me = await resolveCallerEmail(userId);
-    const nestName = new Map<string, string>();
-    for (const n of await listVisibleNests(userId))
-      nestName.set(n.id, n.name ?? n.id);
-
-    // Page the queue — 50 at a time by default — instead of pulling 200 up
-    // front. limit/offset are query params (?limit=&offset=), clamped to sane
-    // bounds. Scoping to the caller's visible nests up front also keeps
-    // getReviewQueue from title-mapping (= filesystem-scanning) nests they
-    // can't see.
-    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 100);
-    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
-    const { requests, total } = await getReviewQueue({
-      status: "pending",
-      nestIds: [...nestName.keys()],
-      limit,
-      offset,
-    });
-    const toItem = (r: (typeof requests)[number]) => ({
-      type: "review" as const,
-      nest_id: r.nestId,
-      nest_name: nestName.get(r.nestId)!,
-      node_id: r.nodeId,
-      title: r.title || r.nodeId,
-      requested_by: r.requestedBy,
-      requested_at: r.requestedAt,
-      priority: r.priority,
-      // Filed by an agent run (migration 060): the inbox links to its trace.
-      run_id: r.runId ?? null,
-    });
-    // Deletion flags ride the same inbox, as a second item type: `reason` and
-    // `request_id` are the extra fields resolving one needs.
-    const deletions = await listDeletionRequests({
-      nestIds: [...nestName.keys()],
-      status: "pending",
-    });
-    const toDeletionItem = (r: (typeof deletions)[number]) => ({
-      type: "deletion" as const,
-      nest_id: r.nestId,
-      nest_name: nestName.get(r.nestId)!,
-      node_id: r.nodeId,
-      title: r.title || r.nodeId,
-      requested_by: r.requestedBy,
-      requested_at: r.createdAt,
-      priority: "normal" as const,
-      reason: r.reason,
-      request_id: r.id,
-      // node_id holds a folder path / nest id for those targets, so a client
-      // must not treat it as a document to open.
-      target_type: r.targetType,
-    });
-    // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
-    // edit something they can only read. node_id is the document for a node
-    // target, else the folder path / nest id — target_type says which.
-    // Capped (500, newest first), not paginated: a person can have at most
-    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
-    // the count below reflects what is shown.
-    // Decider nests first, so only rows this caller can act on (or filed) load.
-    const deciderNestIds = (
-      await Promise.all(
-        [...nestName.keys()].map(async (id) =>
-          (await canDecideAccessRequests(id, userId)) ? id : null,
-        ),
-      )
-    ).filter((id): id is string => id !== null);
-    const [decidable, myAccessAsks] = await Promise.all([
-      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
-      listAccessRequests({
-        nestIds: [...nestName.keys()],
-        requesterId: userId,
-        status: "pending",
-        limit: 500,
+    const body = (await c.req.json().catch(() => ({}))) as { for_agent?: unknown } | null;
+    const nestNames = new Map<string, string>();
+    for (const n of await listVisibleNests(userId)) nestNames.set(n.id, n.name ?? n.id);
+    return c.json(
+      await markMentionDone({
+        userId,
+        email: await resolveCallerEmail(userId),
+        nestNames,
+        threadId: c.req.param("threadId"),
+        forAgent: body && typeof body === "object" ? body.for_agent : undefined,
+        actingAs: actingAgentHandle(readClient(c)),
       }),
-    ]);
-    const toAccessItem = (r: (typeof decidable)[number]) => ({
-      type: "access" as const,
-      nest_id: r.nest_id,
-      nest_name: nestName.get(r.nest_id)!,
-      node_id: r.target_id,
-      title: r.title || r.target_id,
-      requested_by: r.requested_by,
-      requested_at: r.created_at,
-      priority: "normal" as const,
-      reason: r.note ?? "",
-      request_id: r.id,
-      target_type: r.target_type,
-      level: r.level,
-      run_id: r.run_id ?? null,
-    });
-    type WorkItem =
-      | ReturnType<typeof toItem>
-      | ReturnType<typeof toDeletionItem>
-      | ReturnType<typeof toAccessItem>;
-    const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
-      a.requested_at < b.requested_at ? 1 : -1;
-    // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
-    // An editor/viewer can SEE a nest but can't approve — the "waiting on me"
-    // bucket must only surface reviews this caller can actually action, else the
-    // inbox nags editors/viewers to approve work they have no rights over.
-    // Approve capability is a nest-level property here (a reviewer/admin role
-    // anywhere on the nest, or the owner with self-approve), so resolve it ONCE
-    // per distinct nest — not per request — in parallel. Bounded by nest count,
-    // not queue length, so no per-item latency blowup.
-    // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
-    // will see that whole nest's pending items, not just their scoped docs.
-    // Tighten to per-node canUserApprove if that over-inclusion ever matters.
-    // Resolved for every nest the caller can SEE, not just nests that happen
-    // to appear in this page of `requests` — pagination.total below needs
-    // the full picture (a nest with pending reviews from someone else, on a
-    // page the caller never fetched, still has to be excluded consistently).
-    const others = requests.filter((r) => r.requestedBy !== me);
-    const nestApprove = new Map<string, boolean>(
-      await Promise.all(
-        [...nestName.keys()].map(
-          async (nestId): Promise<[string, boolean]> => [
-            nestId,
-            await canApproveInNest(nestId, me),
-          ],
-        ),
-      ),
     );
-    const items: WorkItem[] = others
-      .filter((r) => nestApprove.get(r.nestId))
-      .map(toItem);
-    const waiting: WorkItem[] = requests
-      .filter((r) => r.requestedBy === me)
-      .map(toItem);
-
-    // Waiting-on-me for the nest admins/owners who can action a flag,
-    // waiting-on-others for whoever asked. Deliberately NOT folded into the
-    // review queue's pagination — the flag set is small, and merging two
-    // offsets into one cursor buys nothing.
-    const othersDeletions = deletions.filter((r) => r.requestedBy !== me);
-    // Deleting is an owner/admin call (the same tier the UI shows Delete to),
-    // NOT the approve capability reviews use — resolved once per nest.
-    const nestManage = new Map<string, boolean>(
-      await Promise.all(
-        [...new Set(othersDeletions.map((r) => r.nestId))].map(
-          async (nestId): Promise<[string, boolean]> => {
-            const roles = await resolveUserRoles(nestId, me);
-            return [nestId, roles.includes("owner") || roles.includes("admin")];
-          },
-        ),
-      ),
-    );
-    items.push(
-      ...othersDeletions
-        .filter((r) => nestManage.get(r.nestId))
-        .map(toDeletionItem),
-    );
-    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
-    items.push(
-      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
-    );
-    items.sort(byNewest);
-    waiting.push(
-      ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
-      ...myAccessAsks.map(toAccessItem),
-    );
-    waiting.sort(byNewest);
-    // Watcher notifications (HITL tags) ride along so the inbox is one call.
-    const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
-    // `total` from getReviewQueue counts every PENDING REVIEW across every
-    // nest the caller can see — full stop, regardless of who requested it or
-    // whether the caller can approve it. But items/waiting only ever surface
-    // a review that is either the caller's own request or one the caller can
-    // actually approve (see nestApprove above); a review from someone else in
-    // a nest where the caller is a bare viewer/editor never appears in either
-    // bucket, yet was still counted in `total` — so the badge (which reads
-    // pagination.total, see my-work/meta.ts) overcounted relative to what My
-    // Work actually shows. Recompute the review portion of the total as
-    // exactly (pending reviews in nests the caller can approve) + (the
-    // caller's own pending reviews elsewhere) — the same two conditions
-    // items/waiting are built from — via two SQL counts rather than the raw,
-    // unfiltered getReviewQueue total.
-    const approvableNestIds = [...nestName.keys()].filter((id) =>
-      nestApprove.get(id),
-    );
-    const restNestIds = [...nestName.keys()].filter(
-      (id) => !nestApprove.get(id),
-    );
-    const [
-      { total: approvableReviewTotal },
-      { total: myReviewsElsewhereTotal },
-      { total: myReviewsTotal },
-    ] = await Promise.all([
-      getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
-      getReviewQueue({
-        status: "pending",
-        nestIds: restNestIds,
-        requestedByEmail: me,
-        limit: 1,
-      }),
-      getReviewQueue({
-        status: "pending",
-        nestIds: [...nestName.keys()],
-        requestedByEmail: me,
-        limit: 1,
-      }),
-    ]);
-    const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
-    // Deletion flags and access requests ride the same two buckets (above)
-    // but aren't paginated (both lists fetch every pending one), so folding in
-    // however many are actually shown keeps the total exact regardless of
-    // which review page this call fetched.
-    const requestsShown =
-      items.filter((i) => i.type === "deletion" || i.type === "access").length +
-      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
-    // Board cards assigned to me (open ones), across every nest I can see.
-    // Best-effort: a failure here must not take the reviews inbox down with it.
-    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
-      console.error("[me/work] assigned list failed", err);
-      return [];
-    });
-    // The badge's share (CU-wdqcq0658p): the same total minus what waits on
-    // others — the caller's own pending reviews and the requests they filed.
-    const waitingOnMeTotal =
-      reviewTotal + requestsShown - myReviewsTotal -
-      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
-    return c.json({
-      items,
-      waiting,
-      notifications,
-      assigned,
-      waiting_on_me_total: waitingOnMeTotal,
-      pagination: {
-        total: reviewTotal + requestsShown,
-        limit,
-        offset,
-        has_more: offset + requests.length < total,
-      },
-    });
   });
 
   // GET /me/drafts — the documents YOU left unsubmitted, across every nest you
@@ -2991,6 +2794,25 @@ export function createApp(): Hono<AuthEnv> {
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
+  // A person who opens a nest's API address in a browser — /nests/<id>, or the
+  // MCP / retrieval URL an agent passed along as "the link" — is sent to the
+  // nest's page in the app, /nest/<id>, instead of JSON, a 401 or a 404
+  // (PO-1336). Ahead of auth on purpose: the app's own sign-in then takes over,
+  // and the redirect is the same for every id, so it confirms nothing about
+  // which nests exist. Programs are untouched: they send an Authorization
+  // header or no HTML Accept (see isCredentialFreePageLoad), and a query
+  // string (?format=…) keeps the API answer for anyone who wants to see it.
+  const nestPageRedirect = createMiddleware<AuthEnv>(async (c, next) => {
+    const nestId = c.req.param("nestId")!;
+    if (nestId === "unsynced" || new URL(c.req.url).search || !isCredentialFreePageLoad(c)) {
+      return next();
+    }
+    return c.redirect(nestWebPath(nestId), 302);
+  });
+  nestsApp.get("/:nestId", nestPageRedirect);
+  nestsApp.get("/:nestId/mcp", nestPageRedirect);
+  nestsApp.get("/:nestId/context", nestPageRedirect);
+
   // Use flexible auth: open mode = no key needed, key mode = key required.
   // Three per-nest paths additionally honor PromptOwl service tickets —
   // POST :id/context (deterministic retrieval for prompt data sources),
@@ -3080,6 +2902,13 @@ export function createApp(): Hono<AuthEnv> {
     // resource segment; documents live under /nodes, never here.
     const isDocPinsPath = parts[1] === "pins";
     if (isDocPinsPath && !config.EXPERIMENTAL_DOC_PINS) {
+      return c.json({ error: "Not found" }, 404);
+    }
+
+    // Experimental agent team stream channels (PO-1179): same rule as pins —
+    // while the switch is off the routes do not exist, for anyone. Exact
+    // resource segment; channel NODES live under /nodes and stay ordinary.
+    if ((parts[1] === "channels" || parts[1] === "agent-handles") && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
 
@@ -3224,7 +3053,11 @@ export function createApp(): Hono<AuthEnv> {
         isAgentActivityPath ||
         // Document pins (CU-wdqcq02crw) are a curation surface, licensed like
         // the governance views even on GET. Exact segment (parts[1]).
-        parts[1] === "pins";
+        parts[1] === "pins" ||
+        // Channels (PO-1179) are a collaboration view over comment threads,
+        // licensed like /comments and /feed even on GET. Exact segment.
+        parts[1] === "channels" ||
+        parts[1] === "agent-handles";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -3294,9 +3127,12 @@ export function createApp(): Hono<AuthEnv> {
     // result to their granted docs via filterAccessible, exactly like the node
     // list. Deliberately NOT graph/publish (nest-write) or changes/overview
     // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
+    // Artifact cards (PO-1181) are a read the same way: POST /cards carries
+    // links to resolve, and every card is checked against the caller's own
+    // node access, so a doc grantee only ever resolves what they can read.
     const isReadQuery =
       parts.length === 2 &&
-      ["context", "query", "search", "export", "chat"].includes(parts[1]);
+      ["context", "query", "search", "export", "chat", "cards"].includes(parts[1]);
     // Checking a title or folder against the structure rules reads, never
     // writes: viewers check names in the new-document form. The handler asks
     // for owner/admin itself when the body carries draft rules.
@@ -3500,6 +3336,12 @@ export function createApp(): Hono<AuthEnv> {
       isPost &&
       (/\/annotations$/.test(path) ||
         /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path));
+    // Marking a channel read (PO-1189) is the caller's own bookmark, like a
+    // pin: anyone who can read the channel may, a read-only member most of
+    // all. The handler checks channel access. Exact segments.
+    //   POST /nests/:id/channels/:name/read
+    const isChannelReadMark =
+      parts.length === 4 && parts[1] === "channels" && parts[3] === "read" && c.req.method === "POST";
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3597,6 +3439,9 @@ export function createApp(): Hono<AuthEnv> {
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
       resource === "headless" ||
+      // agent-webhooks (PO-1181): where this nest's agent @mentions are
+      // POSTed, with the secret that signs them — every method, GET included.
+      resource === "agent-webhooks" ||
       // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
       // first, so changing it is owner/admin. Reading stays at read tier.
       (resource === "instructions" && c.req.method !== "GET")
@@ -3644,6 +3489,7 @@ export function createApp(): Hono<AuthEnv> {
       // steward may hold only read collaborator access.
       !isDocPinsPath &&
       !isAnnotationAction &&
+      !isChannelReadMark &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3840,7 +3686,7 @@ export function createApp(): Hono<AuthEnv> {
     for (const id of raw.startsWith("nodes/") ? [raw] : [raw, `nodes/${raw}`]) {
       if (!(await canReadNode(nestId, id, c.get("userId"), userEmail))) continue;
       const found = await storage.readDocument(id).then(() => true, () => false);
-      if (found) return c.redirect(`/nest/${encodeURIComponent(nestId)}?${new URLSearchParams({ doc: id })}`, 302);
+      if (found) return c.redirect(documentWebPath(nestId, id), 302);
     }
     return next();
   });
@@ -3992,6 +3838,16 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
+  nestsApp.route("/:nestId/channels", channelRoutes);
+  // The agent handles a composer can offer (PO-1189): members only, checked
+  // in the handler.
+  nestsApp.route("/:nestId/agent-handles", agentHandleRoutes);
+  // Agent team stream S3 (PO-1181): artifact cards, agent wake-up targets,
+  // promote a thread to a node. Not behind the channels switch — cards,
+  // wake-up and promote work on document comment threads too.
+  nestsApp.route("/:nestId/cards", cardRoutes);
+  nestsApp.route("/:nestId/agent-webhooks", agentWebhookRoutes);
+  nestsApp.route("/:nestId/threads", promoteRoutes);
   nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);

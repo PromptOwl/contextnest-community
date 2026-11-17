@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
+import { track } from "../lib/analytics";
 import { CopyButton } from "@/components/ui/copy-button";
 import { useAuth } from "../auth/AuthContext";
 import { toast } from "sonner";
@@ -11,6 +12,13 @@ const inviteEmail =
   typeof window !== "undefined"
     ? new URLSearchParams(window.location.search).get("invite")?.trim() || null
     : null;
+
+// A reader who followed "Make your own nest" on a published page (/p/<slug>)
+// arrives with ?ref=share (PO-1365). They came to make an account, so the form
+// opens on Register where this server lets people register themselves.
+const cameFromShare =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("ref") === "share";
 
 export function Login() {
   const { loginSuccess, logoUrl } = useAuth();
@@ -80,6 +88,7 @@ export function Login() {
         if (cancelled) return;
         setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
         setManualMode(h.manual_sign_in ?? "open");
+        if (cameFromShare && (h.manual_sign_in ?? "open") === "open") setMode("register");
         setOidc({ enabled: !!h.oidc_enabled, issuer: h.oidc_issuer ?? "" });
         setGoogleUrl(h.promptowl_google_url ?? "");
       })
@@ -87,6 +96,12 @@ export function Login() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Counted once per arrival, so sign-ups that start on a shared page can be
+  // told apart (a no-op on a server with analytics off).
+  useEffect(() => {
+    if (cameFromShare) track("share_page_arrival", { ref: "share" });
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {

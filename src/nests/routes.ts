@@ -3,6 +3,7 @@ import { backfillTicketNumbers } from "../nodes/ticket-backfill.js";
 import { syncTicketCounters } from "../nodes/ticket-numbers.js";
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isNestMember } from "../channels/channel-service.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
@@ -659,6 +660,8 @@ nestRoutes.get("/:nestId", async (c) => {
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
     grant_only,
+    // A person added to the nest (channelAccess's rule); a client shows channels when true.
+    member: await isNestMember(nestId, userId),
     // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
     // drafts for review — their permission stays 'read'.
     org_contributor:

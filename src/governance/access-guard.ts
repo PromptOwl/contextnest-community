@@ -21,6 +21,7 @@ import {
   grantCoversNode,
   grantRoleForNode,
 } from "./grants-service.js";
+import { isChannelDoc, isChannelId, isChannelNode } from "../channels/channel-node.js";
 import { ownsWorkingDraft, ownWorkingDraftIds } from "./org-contribution.js";
 
 /**
@@ -80,6 +81,10 @@ async function canReadNodeBase(
   userEmail: string,
 ): Promise<boolean> {
   if (await isPublicReader(nestId, userId)) {
+    // Channels are members-only (PO-1190, AC-AX-10): someone who reaches the
+    // nest only because it is public (or org-visible) never reads a channel
+    // node, its purpose or its threads, approved or not.
+    if (await isChannelNode(nestId, nodeId)) return false;
     return (
       (await getApprovedVersion(nestId, nodeId)) !== null ||
       (await seesOwnDraft(nestId, nodeId, userId, userEmail))
@@ -235,7 +240,17 @@ async function filterAccessibleBase<T extends { id: string }>(
     // One scan of the nest, not a sequential lookup per node — and none at all
     // when the caller has already read the map for its own use.
     const approved = approvedVersions ?? (await getApprovedVersions(nestId));
-    return nodes.filter((n) => approved.has(n.id));
+    // …and never a channel (see canReadNodeBase). Only ids under
+    // nodes/channels/ are looked at; a listing row carries its tags, anything
+    // else is read once.
+    const channels = new Set<string>();
+    for (const n of nodes) {
+      if (!isChannelId(n.id) || !approved.has(n.id)) continue;
+      const fm = (n as { frontmatter?: { tags?: unknown } }).frontmatter;
+      const tagged = Array.isArray(fm?.tags) ? isChannelDoc({ id: n.id, frontmatter: fm }) : await isChannelNode(nestId, n.id);
+      if (tagged) channels.add(n.id);
+    }
+    return nodes.filter((n) => approved.has(n.id) && !channels.has(n.id));
   }
   const grants = await listUserGrants(nestId, userId);
   if (!(await isStewardshipEnabled(nestId))) {

@@ -1,0 +1,174 @@
+/**
+ * Agent team stream S3 over MCP (PO-1181): `context_promote_thread`, the twin
+ * of POST /nests/:id/threads/:threadId/promote. It calls the same
+ * `promoteThread` service and returns that object as structuredContent, so
+ * the two surfaces cannot drift (AC-ST-06).
+ *
+ * Write tier: not in MCP_READ_TOOLS, so a read-only key is refused before it
+ * gets here; the service then checks node read, create rights and (on a
+ * channel) posting rights for the caller, exactly as for REST.
+ *
+ * Not behind EXPERIMENTAL_AGENT_STREAM: a document comment thread can be
+ * promoted too.
+ *
+ * Also `context_agent_webhooks`, the twin of /nests/:id/agent-webhooks
+ * (list / set / delete wake-up targets; owner/admin only).
+ *
+ * Inline schema: promoting a thread is Community-only (the comment-thread
+ * store is this edition's), so the engine has no operation to import a
+ * descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 111,
+ * then 112 for context_agent_webhooks, documented there). Artifact cards ride
+ * on context_channel_read's existing output instead of a tool of their own.
+ */
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { promoteText, promoteThread } from "../stream/promote.js";
+import {
+  assertCanManageAgentWebhooks,
+  deleteAgentWebhook,
+  listAgentWebhooks,
+  putAgentWebhook,
+  testAgentWebhook,
+} from "../stream/agent-webhooks.js";
+import { messageClient } from "../channels/message-meta.js";
+import { READ_ONLY_KEY_REFUSAL } from "./channel-tools.js";
+import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
+
+export const STREAM_TOOL_DEFINITIONS = [
+  {
+    name: "context_promote_thread",
+    description:
+      "Turn a settled comment thread — a channel post or a document comment thread — into a governed node: a decision " +
+      '(kind "decision", a document tagged #decision under nodes/decisions/) or a task (kind "task", under nodes/tasks/). ' +
+      "The node's body is your `summary` (optional) followed by the thread quoted with names and times; its `source_thread` points back at the thread, and the thread gets a reply linking the node. " +
+      "Give it a `title` that states the decision or the task; without one the thread's first line is used (at most 80 characters). " +
+      "Promoting the same thread to the same kind again creates nothing and returns the existing node (`existing: true`). " +
+      "Needs write access to the nest. Get thread ids from context_channel_read or context_comments.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        thread: { type: "string", description: "The thread (post) id to promote." },
+        kind: { type: "string", description: 'What to create: "decision" (default) or "task".' },
+        title: { type: "string", description: "The new node's title. Default: the thread's first line, cleaned up, at most 80 characters." },
+        summary: { type: "string", description: "One or two lines stating the outcome, placed above the quoted thread." },
+        folder: { type: "string", description: 'Folder under nodes/ to create it in. Default "decisions" or "tasks".' },
+      },
+      required: ["thread"],
+    },
+  },
+  {
+    name: "context_agent_webhooks",
+    description:
+      "Where an @mention of an agent in this nest is delivered (nest owner or admin only). " +
+      'action "list" (default) shows each agent handle and its target as host#hash — never the URL or the secret; ' +
+      '"set" saves a public https URL for a handle (private, loopback, link-local and metadata addresses are refused) and returns the signing secret ONCE, ' +
+      'on the first save or with rotate: true (url may be left out to rotate an existing handle\'s secret); "test" sends one signed agent.test event to a handle\'s target and reports how it went; "delete" removes a handle\'s target. ' +
+      "Each handle shows its last delivery (time, ok or failed, and why). " +
+      "When a person's message @mentions the handle, the server POSTs one signed event (X-ContextNest-Signature, HMAC-SHA256) to the URL.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: { type: "string", description: 'One of "list" (default), "set", "test", "delete".' },
+        handle: { type: "string", description: 'The agent\'s @name, e.g. "grok" (set, test, delete).' },
+        url: { type: "string", description: "Public https URL the event is POSTed to (set). For a runner on your own machine, a public tunnel's URL." },
+        rotate: { type: "boolean", description: "set: mint a new signing secret (returned once); url may be omitted to keep the stored one." },
+      },
+    },
+  },
+];
+
+const NAMES = new Set(STREAM_TOOL_DEFINITIONS.map((t) => t.name));
+
+export function isStreamTool(name: string): boolean {
+  return NAMES.has(name);
+}
+
+export async function runStreamTool(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  if (toolName === "context_agent_webhooks") return runAgentWebhooks(args, ctx);
+  if (toolName !== "context_promote_thread") return toolError(`Unknown tool: ${toolName}`, "VALIDATION_FAILED");
+  if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
+  try {
+    const data = await promoteThread(
+      {
+        nestId: ctx.nestId,
+        userId: ctx.userId,
+        userEmail: ctx.userEmail,
+        client: ctx.client,
+        replyClient: messageClient(ctx.client, args.client, ctx.apiKeyLabel),
+      },
+      { thread: args.thread, kind: args.kind, title: args.title, summary: args.summary, folder: args.folder },
+    );
+    return { text: promoteText(data), data };
+  } catch (err) {
+    return refusal(err);
+  }
+}
+
+function refusal(err: unknown): ToolResult {
+  if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+  if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
+  if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+  if (err instanceof AppError && err.statusCode === 403) return toolError(err.message, "UNAUTHORIZED_ACTION");
+  throw err;
+}
+
+/**
+ * context_agent_webhooks — twin of /nests/:id/agent-webhooks (PO-1181
+ * follow-up: MCP parity). Same gate (assertCanManageAgentWebhooks), same
+ * service, same objects as REST: list = GET body, set = PUT body (secret only
+ * when minted), delete = DELETE body. A read-only key never reaches it (not
+ * in MCP_READ_TOOLS: even the list is an admin view of where events go).
+ */
+async function runAgentWebhooks(args: Record<string, any>, ctx: McpToolContext): Promise<ToolResult> {
+  const action = String(args.action ?? "list").toLowerCase();
+  try {
+    if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
+    if (action === "list") {
+      await assertCanManageAgentWebhooks(ctx.nestId, ctx.userId, { write: false });
+      const data = { webhooks: await listAgentWebhooks(ctx.nestId) };
+      const text = data.webhooks.length
+        ? `# Agent webhooks (${data.webhooks.length})\n\n${data.webhooks
+            .map(
+              (w) =>
+                `- @${w.handle} → ${w.target} (set by ${w.created_by}, ${w.updated_at}) — last delivery: ${
+                  w.last_delivery
+                    ? `${w.last_delivery.status}${w.last_delivery.reason ? ` (${w.last_delivery.reason})` : ""} at ${w.last_delivery.at}`
+                    : "none yet"
+                }`,
+            )
+            .join("\n")}`
+        : 'No agent webhooks. Add one with context_agent_webhooks { action: "set", handle, url }.';
+      return { text, data };
+    }
+    if (action === "set") {
+      await assertCanManageAgentWebhooks(ctx.nestId, ctx.userId, { write: true });
+      const data = await putAgentWebhook(ctx.nestId, args.handle, { url: args.url, rotate: args.rotate }, ctx.userEmail);
+      const text = data.secret
+        ? `Saved @${data.webhook.handle} → ${data.webhook.target}. Signing secret (shown once — store it in the runner now): ${data.secret}`
+        : `Saved @${data.webhook.handle} → ${data.webhook.target}. The signing secret is unchanged (pass rotate: true for a new one).`;
+      return { text, data };
+    }
+    if (action === "test") {
+      await assertCanManageAgentWebhooks(ctx.nestId, ctx.userId, { write: true });
+      const data = await testAgentWebhook(ctx.nestId, args.handle, ctx.userEmail);
+      return {
+        text: data.ok
+          ? `Test event delivered to @${String(args.handle ?? "").replace(/^@/, "")} (${data.delivery.at}).`
+          : `Test event to @${String(args.handle ?? "").replace(/^@/, "")} failed: ${data.delivery.reason ?? "failed"}.`,
+        data,
+      };
+    }
+    if (action === "delete") {
+      await assertCanManageAgentWebhooks(ctx.nestId, ctx.userId, { write: true });
+      await deleteAgentWebhook(ctx.nestId, args.handle);
+      return { text: `Removed the webhook for @${String(args.handle ?? "").replace(/^@/, "")}.`, data: { deleted: true } };
+    }
+    return toolError(`Unknown action "${action}" — use list, set, test or delete.`, "VALIDATION_FAILED");
+  } catch (err) {
+    return refusal(err);
+  }
+}

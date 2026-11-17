@@ -13,6 +13,16 @@
  */
 const MENTION = /(?:^|\s)@(?:\(([^)]+)\)|([a-zA-Z0-9._@-]+))/g;
 
+/**
+ * The bare form without the full stops that end a sentence: "thanks @rita."
+ * names rita, not "rita." — which matched nobody, so a name at the end of a
+ * sentence silently reached no one and woke no agent (PO-1190). No email,
+ * local part or handle ends in a dot, so nothing real is lost.
+ */
+function bareName(raw: string | undefined): string {
+  return (raw || "").replace(/\.+$/, "");
+}
+
 /** Body with code fences and inline code blanked — `@name` there is source. */
 function stripCode(markdown: string): string {
   return markdown
@@ -28,7 +38,7 @@ export function extractMentions(markdown: string): string[] {
   let match;
   MENTION.lastIndex = 0;
   while ((match = MENTION.exec(text)) !== null) {
-    const name = (match[1] || match[2] || "").trim();
+    const name = (match[1] || bareName(match[2])).trim();
     const key = name.toLowerCase();
     if (!name || seen.has(key)) continue;
     seen.add(key);
@@ -55,7 +65,9 @@ export function stripMentions(text: string): string {
     // The leading whitespace (if any) belongs to the separator, not the
     // mention; keep it so neighbouring words don't fuse.
     const lead = match[0].startsWith("@") ? 0 : 1;
-    spans.push([match.index + lead, match.index + match[0].length]);
+    // A sentence's full stop stays in the text (see bareName).
+    const trailing = match[2] ? match[2].length - bareName(match[2]).length : 0;
+    spans.push([match.index + lead, match.index + match[0].length - trailing]);
   }
   let out = text || "";
   for (const [start, end] of spans.reverse()) {

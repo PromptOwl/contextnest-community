@@ -478,6 +478,13 @@ async function callToolRaw(
   return res.result;
 }
 
+// The web app link every document result ends with (PO-1336), so a person who
+// asks the agent for "the link" gets one a browser can open.
+const webLink = (nest: string, id: string) =>
+  `\nOpen in the web app (the link for people — share this one, not an API or MCP URL): http://localhost/nest/${nest}?doc=${encodeURIComponent(id)}`;
+const webLinkPattern = (nest: string) =>
+  `\n\nTo link a person to one of these, use the web app address (not an API or MCP URL): http://localhost/nest/${nest}?doc=<node id, URL-encoded>`;
+
 describe("MCP tools/call — structuredContent", () => {
   let sid: string;
 
@@ -497,8 +504,12 @@ describe("MCP tools/call — structuredContent", () => {
   it("context_list: prose names the last editor (prose only — no catalog field yet), documents[] alongside it", async () => {
     const r = await callToolRaw("context_list", {}, 710, sid);
     expect(r.content).toHaveLength(1);
-    // po-1213: each row ends with who last edited it, human first.
-    expect(r.content[0].text).toMatch(
+    // po-1213: each row ends with who last edited it, human first; PO-1336:
+    // the listing then ends with the web app link pattern.
+    const text: string = r.content[0].text;
+    const linkTail = webLinkPattern(sid);
+    expect(text.endsWith(linkTail)).toBe(true);
+    expect(text.slice(0, -linkTail.length)).toMatch(
       /^1 node\(s\):\n\n1\. \*\*Pricing Sheet\*\* \[document\] · edited by \S+@\S+( via \S+)?, \d{4}-\d{2}-\d{2}$/,
     );
     expect(r.structuredContent).toEqual({
@@ -533,7 +544,7 @@ describe("MCP tools/call — structuredContent", () => {
       {
         type: "text",
         // The served version's human (and agent, when the write named one).
-        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n**Last edited by:** admin@localhost (v1)\n\n---\n\n${body}`,
+        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n**Last edited by:** admin@localhost (v1)\n**Web link (for people):** http://localhost/nest/${sid}?doc=nodes%2Fpricing-sheet\n\n---\n\n${body}`,
       },
     ]);
     expect(r.structuredContent.id).toBe("nodes/pricing-sheet");
@@ -591,7 +602,7 @@ describe("MCP tools/call — structuredContent", () => {
     expect(r.content).toEqual([
       {
         type: "text",
-        text: `Found 1 node(s) matching "enterprise":\n\n1. **Pricing Sheet** [document] #pricing\n   ${body.slice(0, 200).replace(/\n/g, " ")}`,
+        text: `Found 1 node(s) matching "enterprise":\n\n1. **Pricing Sheet** [document] #pricing\n   ${body.slice(0, 200).replace(/\n/g, " ")}${webLinkPattern(sid)}`,
       },
     ]);
     expect(r.structuredContent.results).toHaveLength(1);
@@ -636,7 +647,7 @@ describe("MCP tools/call — structuredContent", () => {
     expect(created.content).toEqual([
       {
         type: "text",
-        text: `Created node: **Widget Spec** (nodes/widget-spec) — status: ${status}`,
+        text: `Created node: **Widget Spec** (nodes/widget-spec) — status: ${status}${webLink(sid, "nodes/widget-spec")}`,
       },
     ]);
     expect(created.structuredContent).toEqual({
@@ -656,7 +667,7 @@ describe("MCP tools/call — structuredContent", () => {
     expect(updated.content).toEqual([
       {
         type: "text",
-        text: `Updated node: **Widget Spec** — v${updated.structuredContent.version}, status: ${updated.structuredContent.status}`,
+        text: `Updated node: **Widget Spec** — v${updated.structuredContent.version}, status: ${updated.structuredContent.status}${webLink(sid, "nodes/widget-spec")}`,
       },
     ]);
     expect(updated.structuredContent.id).toBe("nodes/widget-spec");
@@ -746,7 +757,7 @@ describe("MCP tools/call — id or title addressing", () => {
     expect(r.content).toEqual([
       {
         type: "text",
-        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}${webLink(aid, "nodes/gtm/deals/win-loss-log")}`,
       },
     ]);
     expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
@@ -771,7 +782,7 @@ describe("MCP tools/call — id or title addressing", () => {
     expect(r.content).toEqual([
       {
         type: "text",
-        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}${webLink(aid, "nodes/gtm/deals/win-loss-log")}`,
       },
     ]);
     expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
