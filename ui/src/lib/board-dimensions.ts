@@ -619,9 +619,11 @@ export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
   emptyFolders: string[] = [],
+  /** Nodes the columns come from — the unfiltered set, so a filter hides cards, never columns. */
+  columnNodes: BoardNode[] = nodes,
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
   const hidden = new Set(config.hiddenColumns ?? []);
-  const columns = buildColumns(nodes, config, emptyFolders);
+  const columns = buildColumns(columnNodes, config, emptyFolders);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {

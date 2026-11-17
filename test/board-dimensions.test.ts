@@ -359,6 +359,16 @@ describe("groupByColumn", () => {
     expect(byColumn["draft"].map((n) => n.id)).toEqual(["a", "b"]);
     expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["c"]);
   });
+
+  it("keeps a column whose cards a filter removed (PO-1259)", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const task = node({ id: "nodes/a/t", type: "task" });
+    const all = [task, node({ id: "nodes/b/doc" })];
+    const { columns, byColumn } = groupByColumn([task], cfg, [], all);
+    expect(columns.map((c) => c.key)).toEqual(["a", "b"]);
+    expect(byColumn["b"]).toEqual([]);
+    expect(byColumn["a"].map((n) => n.id)).toEqual(["nodes/a/t"]);
+  });
 });
 
 describe("planMove", () => {

@@ -742,8 +742,8 @@ function MaturityBoardInner({
     [census.data],
   );
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders),
-    [visibleNodes, effectiveConfig, emptyFolders],
+    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, nodes),
+    [visibleNodes, effectiveConfig, emptyFolders, nodes],
   );
 
   // Each column in the active board's saved order (Linear/Jira stack rank).
