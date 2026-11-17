@@ -791,8 +791,8 @@ function MaturityBoardInner({
   });
   const people = useMemo(
     () =>
-      (roster?.people ?? []).filter((p) => !!p.email && (canShare || p.member !== false)),
-    [roster, canShare],
+      (roster?.people ?? []).filter((p) => !!p.email && p.member !== false),
+    [roster],
   );
   // People a card can land on as-is (an assignee column needs no share step).
   const members = useMemo(() => people.filter((p) => p.member !== false), [people]);
@@ -1764,6 +1764,7 @@ function MaturityBoardInner({
                           people={people}
                           me={me}
                           editable={canEditDocs}
+                          canInvite={canShare}
                           onChange={(assignee, member) =>
                             assignee && member === false
                               ? setPendingShare({ id: n.id, email: assignee })
