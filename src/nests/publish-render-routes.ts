@@ -52,11 +52,20 @@ import {
   excerptOf,
   gateCta,
   previewMetaTags,
+  PUBLISH_ROBOTS,
   withHeadTags,
 } from "./publish-share.js";
 import { DEFAULT_OG_IMAGE_PNG_BASE64 } from "./publish-og-image.js";
 
 export const publishRenderRoutes = new Hono();
+
+// No /p response is for search engines (PUBLISH_ROBOTS): the header covers
+// what a meta tag cannot reach, the sandboxed /view document, the preview
+// image and the "no longer available" page.
+publishRenderRoutes.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("X-Robots-Tag", PUBLISH_ROBOTS);
+});
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
@@ -343,8 +352,6 @@ function previewTags(
     siteName: brand?.b.site_title || "ContextNest",
     image: external ? logoUrl : `${url}/og-image`,
     card: hasLogo ? "summary" : "summary_large_image",
-    // A gate page has nothing to index.
-    robots: doc ? "state" : "noindex",
   });
 }
 

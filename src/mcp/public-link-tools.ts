@@ -39,7 +39,7 @@ export const PUBLIC_LINK_TOOL_DEFINITIONS = [
   {
     name: "context_public_link_create",
     description:
-      "Publish one document as a hosted page at its own link and return the URL. Nest owners/admins only. This puts the document's APPROVED version on the internet: with access_mode public (the default) anyone who has the link can read it without signing in — confirm with the user first. code = one shared passcode; email = the reader confirms an email address and gets a one-time link; invite = only the listed addresses, who are emailed the link. Later approved versions appear at the same link; drafts never do. A document with no approved version is refused. Mirrors POST /nests/:id/publications.",
+      "Publish one document as a hosted page at its own link and return the URL. Nest owners/admins only. This puts the document's APPROVED version on the internet: access_mode is required, so an open link is always an explicit choice: public = anyone who has the link can read it without signing in — confirm with the user first. code = one shared passcode; email = the reader confirms an email address and gets a one-time link; invite = only the listed addresses, who are emailed the link. Later approved versions appear at the same link; drafts never do. A document with no approved version is refused. Mirrors POST /nests/:id/publications.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -47,7 +47,7 @@ export const PUBLIC_LINK_TOOL_DEFINITIONS = [
         access_mode: {
           type: "string",
           enum: MODE_ENUM,
-          description: "Who can open the link. Default public: anyone with the link.",
+          description: "Required. Who can open the link: public (anyone with the link), code, email or invite.",
         },
         code: { type: "string", description: "The passcode readers type (access_mode code)." },
         allowlist: {
@@ -65,7 +65,7 @@ export const PUBLIC_LINK_TOOL_DEFINITIONS = [
             'Show the one-line "Make your own nest" strip on the page. Default true. Pass false for a document sent to a client or anywhere the strip does not belong; the page is then served with nothing added.',
         },
       },
-      required: ["id"],
+      required: ["id", "access_mode"],
     },
   },
   {
@@ -185,6 +185,15 @@ export async function runPublicLinkTool(
     }
 
     if (toolName === "context_public_link_create") {
+      // Unlike REST (whose body defaults to public for the Publish dialog and
+      // one-click Share, where a person chose it), an agent must say who can
+      // open the page: a missing mode never becomes an open link.
+      if (typeof args.access_mode !== "string" || !args.access_mode) {
+        return refusal(
+          `access_mode is required: one of ${MODE_ENUM.join(", ")}. public means anyone with the link can read the document; confirm that with the user.`,
+          "VALIDATION_FAILED",
+        );
+      }
       const { row, link } = await publishDocumentLink({
         nestId: ctx.nestId,
         userId: ctx.userId,

@@ -148,28 +148,22 @@ export interface PreviewMeta {
   image: string;
   /** `summary_large_image` for the default 1200x630 card, `summary` for a logo. */
   card: "summary" | "summary_large_image";
-  /** Default "state". */
-  robots?: PreviewRobots;
 }
 
 /**
- * Indexing of an OPEN page. /p pages have never carried a robots directive,
- * and robots.txt does not disallow /p/, so a published page is indexable by
- * whoever finds its (unguessable) link. This tag states that behaviour rather
- * than changing it; making shared links `noindex` is a policy decision, made
- * here in one place if it is taken. Gate pages are `noindex` (PreviewRobots).
+ * Indexing of every /p page, open or gated: `noindex, nofollow` (maintainer
+ * decision 2026-11-16). A public link is "share with a person", not "publish
+ * to search"; now that a page carries a title, an excerpt and an image for
+ * link previews, it would otherwise be easy to surface. The render routes
+ * also send it as an `X-Robots-Tag` header on every /p response. Link
+ * previews (unfurlers) are unaffected: they read og: tags, not robots.
  */
-export const PUBLISH_ROBOTS = "index, follow";
-
-/** What `previewMetaTags` says about indexing: an open page states the
- *  behaviour above; a gate page ("Protected document", nothing to read) is
- *  `noindex`. */
-export type PreviewRobots = "state" | "noindex";
+export const PUBLISH_ROBOTS = "noindex, nofollow";
 
 /** The `<head>` tags for a link preview. Every value is escaped here. */
 export function previewMetaTags(m: PreviewMeta): string {
   const tags: Array<[string, string, string]> = [
-    ["name", "robots", m.robots === "noindex" ? "noindex" : PUBLISH_ROBOTS],
+    ["name", "robots", PUBLISH_ROBOTS],
     ["property", "og:type", "article"],
     ["property", "og:title", m.title],
     ["property", "og:url", m.url],

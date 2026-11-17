@@ -40,8 +40,8 @@
     "referrerPolicy": "no-referrer",
     "xArtifactSnapshot": null,
     "cacheControl": null,
-    "bodySha256": "fb6037fac225ed19e1d17066fbdd4be15c5085c1eda6574ad8b48be3a7de820f",
-    "bodyLength": 4138
+    "bodySha256": "b18cf3f7910086cb5e9bc5fc112991ddb589f06c8302c981c6a894e374278f47",
+    "bodyLength": 4142
   },
   "artifact /p/:slug/view": {
     "status": 200,
@@ -95,8 +95,8 @@
     "referrerPolicy": "no-referrer",
     "xArtifactSnapshot": null,
     "cacheControl": null,
-    "bodySha256": "2e3a3ef7ddd1db957b9db59c72fea8ed299d5aa8abe4a33561f6dff7cc6e992e",
-    "bodyLength": 3633
+    "bodySha256": "62ecf4f14668a445e88d1ab3280f2e068b3a9608a5d8a05b72209e5179482511",
+    "bodyLength": 3637
   },
   "document /p/:slug/view": {
     "status": 200,

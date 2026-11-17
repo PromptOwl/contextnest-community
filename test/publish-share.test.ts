@@ -121,11 +121,17 @@ describe("link previews on an open link", () => {
     expect(meta(html, "twitter:title")).toBe("Handbook");
   });
 
-  it("states the indexing behaviour it always had", async () => {
+  it("asks search engines not to index or follow it, in the page and the header", async () => {
     const slug = await publish(nestId, "nodes/handbook");
     const { res, html } = await page(`/p/${slug}`);
-    expect(meta(html, "robots")).toBe("index, follow");
-    expect(res.headers.get("x-robots-tag")).toBeNull();
+    expect(meta(html, "robots")).toBe("noindex, nofollow");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    // Every response under /p says the same: the sandboxed view, the preview
+    // image (unfurlers still fetch it; X-Robots-Tag only stops indexing), and
+    // a dead link.
+    for (const path of [`/p/${slug}/view`, `/p/${slug}/og-image`, "/p/no-such-link"]) {
+      expect((await app.request(path)).headers.get("x-robots-tag"), path).toBe("noindex, nofollow");
+    }
   });
 
   it("escapes the title and the excerpt", async () => {
@@ -224,8 +230,9 @@ describe("a gated link reveals nothing about the document", () => {
     expect(meta(html, "description")).toBeNull();
     expect(meta(html, "og:url")).toBe(`http://localhost/p/${slug}`);
     expect(meta(html, "og:image")).toBe(`http://localhost/p/${slug}/og-image`);
-    // A gate page is not something to index; the open page is unchanged.
-    expect(meta(html, "robots")).toBe("noindex");
+    // A gate page is not indexed either, like every /p page.
+    expect(meta(html, "robots")).toBe("noindex, nofollow");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(html).not.toContain("Secret Roadmap");
     expect(html).not.toContain("ninth");
   });

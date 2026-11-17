@@ -3,7 +3,7 @@
  * the excerpt a link preview quotes and the tags it is written into.
  */
 import { describe, it, expect } from "vitest";
-import { excerptOf, previewMetaTags, signUpUrl, withHeadTags, ctaStrip } from "../src/nests/publish-share.js";
+import { excerptOf, previewMetaTags, signUpUrl, withHeadTags, ctaStrip, PUBLISH_ROBOTS } from "../src/nests/publish-share.js";
 
 describe("excerptOf", () => {
   it("turns markdown into plain text and drops a leading title", () => {
@@ -68,13 +68,14 @@ describe("previewMetaTags", () => {
   it("leaves the description tags out when there is none", () => {
     const tags = previewMetaTags(base);
     expect(tags).not.toContain("description");
-    expect(tags).toContain(`<meta name="robots" content="index, follow">`);
+    expect(tags).toContain(`<meta name="robots" content="noindex, nofollow">`);
   });
 
-  it("says noindex for a gate page", () => {
-    const tags = previewMetaTags({ ...base, robots: "noindex" });
-    expect(tags).toContain(`<meta name="robots" content="noindex">`);
-    expect(tags).not.toContain("index, follow");
+  it("says noindex, nofollow on every page, open or gated", () => {
+    expect(PUBLISH_ROBOTS).toBe("noindex, nofollow");
+    const tags = previewMetaTags(base);
+    expect(tags.match(/name="robots"/g)).toHaveLength(1);
+    expect(tags).not.toMatch(/content="index/);
   });
 });
 

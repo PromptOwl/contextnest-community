@@ -102,7 +102,7 @@ describe("who is offered the tools", () => {
 
 describe("context_public_link_create", () => {
   it("publishes a document and says the URL and that it is open", async () => {
-    const r = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const r = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, owner.apiKey);
     expect(r.isError).toBe(false);
     const slug = r.data.publish.slug;
     expect(r.data.link).toBe(`http://localhost/p/${slug}`);
@@ -134,10 +134,10 @@ describe("context_public_link_create", () => {
 
   it("refuses exactly what REST refuses, in the same words", async () => {
     const cases: Array<Record<string, unknown>> = [
-      { id: "nodes/nope" },
+      { id: "nodes/nope", access_mode: "public" },
       { id: "nodes/handbook", access_mode: "code" },
       { id: "nodes/handbook", access_mode: "email" }, // no mail transport on this server
-      { id: "../etc/passwd" },
+      { id: "../etc/passwd", access_mode: "public" },
     ];
     for (const args of cases) {
       const { id, ...rest } = args;
@@ -148,6 +148,27 @@ describe("context_public_link_create", () => {
       expect(r.text).toBe(rest_.data.error);
       expect(r.data.code).toBe("VALIDATION_FAILED");
     }
+  });
+
+  it("refuses a missing access_mode and names the allowed values: an open link is always an explicit choice", async () => {
+    const count = async () =>
+      (await jsonRequest(app, "GET", `/nests/${nestId}/publications`, undefined, owner.apiKey)).data.publishes.length;
+    const before = await count();
+    const r = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    // The SDK's schema check answers first (the field is required), naming
+    // the field and the four values; the handler refuses the same way if it
+    // is ever reached without that check.
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("access_mode");
+    for (const m of ["public", "code", "email", "invite"]) expect(r.text).toContain(m);
+    // Nothing was published.
+    expect(await count()).toBe(before);
+  });
+
+  it("lists access_mode as required in the tool schema", async () => {
+    const body = await mcp("tools/list", {}, owner.apiKey);
+    const t = body.result.tools.find((x: any) => x.name === "context_public_link_create");
+    expect(t.inputSchema.required).toEqual(expect.arrayContaining(["id", "access_mode"]));
   });
 
   it("refuses an access_mode REST does not know, before it reaches the service", async () => {
@@ -162,14 +183,14 @@ describe("context_public_link_create", () => {
   it("refuses an editor, as REST does", async () => {
     const rest = await jsonRequest(app, "POST", `/nests/${nestId}/publications`, { node_id: "nodes/handbook" }, editor.apiKey);
     expect(rest.status).toBe(403);
-    const r = await call("context_public_link_create", { id: "nodes/handbook" }, editor.apiKey);
+    const r = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, editor.apiKey);
     expect(r.isError).toBe(true);
     const before = await jsonRequest(app, "GET", `/nests/${nestId}/publications`, undefined, owner.apiKey);
     expect(before.data.publishes.every((p: any) => p.node_id === "nodes/handbook")).toBe(true);
   });
 
   it("refuses a read-only key", async () => {
-    const r = await call("context_public_link_create", { id: "nodes/roadmap" }, readKey);
+    const r = await call("context_public_link_create", { access_mode: "public", id: "nodes/roadmap" }, readKey);
     expect(r.isError || /read-only/i.test(r.text)).toBe(true);
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/publications`, undefined, owner.apiKey);
     expect(list.data.publishes.some((p: any) => p.node_id === "nodes/roadmap")).toBe(false);
@@ -178,7 +199,7 @@ describe("context_public_link_create", () => {
 
 describe("context_public_links", () => {
   it("lists a document's links with their URL, gate and state", async () => {
-    const made = await call("context_public_link_create", { id: "nodes/roadmap" }, owner.apiKey);
+    const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/roadmap" }, owner.apiKey);
     const r = await call("context_public_links", { id: "nodes/roadmap" }, owner.apiKey);
     expect(r.isError).toBe(false);
     expect(r.data.count).toBe(1);
@@ -215,11 +236,11 @@ describe("context_public_links", () => {
 
 describe("the invitation strip (show_invite)", () => {
   it("is on by default and can be left off when the link is made", async () => {
-    const on = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const on = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, owner.apiKey);
     expect(on.data.publish.show_invite).toBe(true);
     expect(await (await app.request(`/p/${on.data.publish.slug}`)).text()).toContain("data-cn-cta");
 
-    const off = await call("context_public_link_create", { id: "nodes/handbook", show_invite: false }, owner.apiKey);
+    const off = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook", show_invite: false }, owner.apiKey);
     expect(off.isError).toBe(false);
     expect(off.data.publish.show_invite).toBe(false);
     expect(off.text).toMatch(/Make your own nest.*not shown|no .*Make your own nest/i);
@@ -227,7 +248,7 @@ describe("the invitation strip (show_invite)", () => {
   });
 
   it("context_public_link_update switches it on a live link, as PATCH does", async () => {
-    const made = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, owner.apiKey);
     const { id, slug } = made.data.publish;
     const off = await call("context_public_link_update", { link_id: id, show_invite: false }, owner.apiKey);
     expect(off.isError).toBe(false);
@@ -246,7 +267,7 @@ describe("the invitation strip (show_invite)", () => {
   });
 
   it("refuses to update a revoked link, over MCP and REST alike", async () => {
-    const made = await call("context_public_link_create", { id: "nodes/handbook" }, owner.apiKey);
+    const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/handbook" }, owner.apiKey);
     const { id } = made.data.publish;
     await call("context_public_link_revoke", { link_id: id }, owner.apiKey);
     const r = await call("context_public_link_update", { link_id: id, show_invite: false }, owner.apiKey);
@@ -268,7 +289,7 @@ describe("the invitation strip (show_invite)", () => {
 
 describe("context_public_link_revoke", () => {
   it("takes the page down, and a second revoke is not found", async () => {
-    const made = await call("context_public_link_create", { id: "nodes/roadmap" }, owner.apiKey);
+    const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/roadmap" }, owner.apiKey);
     const slug = made.data.publish.slug;
     expect((await app.request(`/p/${slug}`)).status).toBe(200);
     const r = await call("context_public_link_revoke", { link_id: made.data.publish.id }, owner.apiKey);
@@ -288,7 +309,7 @@ describe("context_public_link_revoke", () => {
   });
 
   it("refuses an editor and leaves the link live", async () => {
-    const made = await call("context_public_link_create", { id: "nodes/roadmap" }, owner.apiKey);
+    const made = await call("context_public_link_create", { access_mode: "public", id: "nodes/roadmap" }, owner.apiKey);
     const r = await call("context_public_link_revoke", { link_id: made.data.publish.id }, editor.apiKey);
     expect(r.isError).toBe(true);
     expect((await app.request(`/p/${made.data.publish.slug}`)).status).toBe(200);
