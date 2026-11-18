@@ -195,9 +195,22 @@ describe("review: the editor is a real edit, and the feed's time agrees with its
     expect(attributionChunkSize(true)).toBeLessThan(attributionChunkSize(false));
   });
 
-  it("Given the bump-row filter is `author NOT LIKE <prefix>%`, then the prefix holds no LIKE wildcard", async () => {
-    const { SYSTEM_AUTHOR_PREFIX } = await import("../src/governance/version-service.js");
-    expect(SYSTEM_AUTHOR_PREFIX).not.toMatch(/[_%\\]/);
+  it("Given the bump-row filter is `author NOT LIKE <prefix>% ESCAPE '\\'`, then the prefix is matched literally", async () => {
+    const { likePrefixPattern, SYSTEM_AUTHOR_PREFIX, SYSTEM_AUTHOR_LIKE } = await import(
+      "../src/governance/version-service.js"
+    );
+    // The bound pattern is the escaped prefix plus one trailing wildcard.
+    expect(SYSTEM_AUTHOR_LIKE).toBe(`${SYSTEM_AUTHOR_PREFIX}%`);
+    expect(likePrefixPattern("sys_x%:")).toBe("sys\\_x\\%:%");
+    // A `_` or `%` in a prefix stays literal in the database, not a wildcard.
+    const pattern = likePrefixPattern("sys_x:");
+    const hit = (await getDb().get(
+      "SELECT (CAST(? AS TEXT) LIKE CAST(? AS TEXT) ESCAPE '\\') AS literal, " +
+        "(CAST(? AS TEXT) LIKE CAST(? AS TEXT) ESCAPE '\\') AS wildcard",
+      ["sys_x:alice", pattern, "sysQx:alice", pattern],
+    )) as { literal: number | boolean; wildcard: number | boolean };
+    expect(Boolean(hit.literal)).toBe(true);
+    expect(Boolean(hit.wildcard)).toBe(false);
   });
 
   it("Given more bounded ids than one chunk holds, then every chunk is read and a real id past the boundary is found at its bound", async () => {

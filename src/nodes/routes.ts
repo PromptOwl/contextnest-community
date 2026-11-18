@@ -647,6 +647,8 @@ nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
 // shadows every suffix route (RegExpRouter) or breaks for ids nested 3+
 // segments (TrieRouter fallback) — don't change the router without
 // re-running test/nested-node-actions.test.ts.
+
+// GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;

@@ -30,6 +30,15 @@ export function hashContent(content: string): string {
  */
 export const SYSTEM_AUTHOR_PREFIX = "system:auto-publish:";
 
+/** `prefix` as a LIKE … ESCAPE '\\' pattern: the prefix matched literally (a
+ *  `_` or `%` in it is not a wildcard), then anything. */
+export function likePrefixPattern(prefix: string): string {
+  return `${prefix.replace(/([\\%_])/g, "\\$1")}%`;
+}
+
+/** Bound with `author NOT LIKE ? ESCAPE '\\'` to skip auto-publish bump rows. */
+export const SYSTEM_AUTHOR_LIKE = likePrefixPattern(SYSTEM_AUTHOR_PREFIX);
+
 /** Wrap a real user email as a system-author marker. */
 export function systemAuthor(email: string): string {
   return `${SYSTEM_AUTHOR_PREFIX}${email}`;
@@ -191,12 +200,12 @@ export async function getVersionAttribution(
        FROM node_versions nv
        LEFT JOIN users u ON u.email = nv.author
        LEFT JOIN system_accounts sa ON sa.user_id = u.id
-      WHERE nv.nest_id = ? AND nv.node_id = ? AND nv.author NOT LIKE ?${version === undefined ? "" : " AND nv.version <= ?"}
+      WHERE nv.nest_id = ? AND nv.node_id = ? AND nv.author NOT LIKE ? ESCAPE '\\'${version === undefined ? "" : " AND nv.version <= ?"}
       ORDER BY nv.version DESC
       LIMIT 1`,
     version === undefined
-      ? [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`]
-      : [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`, version],
+      ? [nestId, nodeId, SYSTEM_AUTHOR_LIKE]
+      : [nestId, nodeId, SYSTEM_AUTHOR_LIKE, version],
   )) as any;
   return row ? rowToVersion(row) : null;
 }
@@ -252,13 +261,13 @@ export async function getLatestVersionAttributions(
          JOIN (SELECT node_id, MAX(version) AS v
                  FROM node_versions
                 WHERE nest_id = ? AND ${match}
-                  AND author NOT LIKE ?
+                  AND author NOT LIKE ? ESCAPE '\\'
                 GROUP BY node_id) latest
            ON latest.node_id = nv.node_id AND latest.v = nv.version
          LEFT JOIN users u ON u.email = nv.author
          LEFT JOIN system_accounts sa ON sa.user_id = u.id
         WHERE nv.nest_id = ?`,
-      [nestId, ...matchArgs, `${SYSTEM_AUTHOR_PREFIX}%`, nestId],
+      [nestId, ...matchArgs, SYSTEM_AUTHOR_LIKE, nestId],
     )) as any[];
     for (const row of rows) out.set(row.node_id, rowToVersion(row));
   }
@@ -293,9 +302,9 @@ export async function getCurrentVersions(
   const rows = (await getDb().all(
     `SELECT node_id, MAX(version) as v FROM node_versions
         WHERE nest_id = ? AND node_id IN (${nodeIds.map(() => "?").join(",")})
-          AND author NOT LIKE ?
+          AND author NOT LIKE ? ESCAPE '\\'
         GROUP BY node_id`,
-    [nestId, ...nodeIds, `${SYSTEM_AUTHOR_PREFIX}%`],
+    [nestId, ...nodeIds, SYSTEM_AUTHOR_LIKE],
   )) as Array<{ node_id: string; v: number | null }>;
   for (const r of rows) out.set(r.node_id, r.v || 0);
   return out;
@@ -309,8 +318,8 @@ export async function getCurrentVersion(
   const row = (await db.get(
     `SELECT MAX(version) as v FROM node_versions
         WHERE nest_id = ? AND node_id = ?
-          AND author NOT LIKE ?`,
-    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+          AND author NOT LIKE ? ESCAPE '\\'`,
+    [nestId, nodeId, SYSTEM_AUTHOR_LIKE],
   )) as { v: number | null };
   return row?.v || 0;
 }
@@ -326,8 +335,8 @@ export async function getTrackedNodeIds(nestId: string): Promise<Set<string>> {
   const db = getDb();
   const rows = (await db.all(
     `SELECT DISTINCT node_id FROM node_versions
-        WHERE nest_id = ? AND author NOT LIKE ?`,
-    [nestId, `${SYSTEM_AUTHOR_PREFIX}%`],
+        WHERE nest_id = ? AND author NOT LIKE ? ESCAPE '\\'`,
+    [nestId, SYSTEM_AUTHOR_LIKE],
   )) as Array<{ node_id: string }>;
   return new Set(rows.map((r) => r.node_id));
 }
@@ -568,10 +577,10 @@ export async function checkConflict(
     `SELECT version, content_hash, author, created_at
          FROM node_versions
         WHERE nest_id = ? AND node_id = ?
-          AND author NOT LIKE ?
+          AND author NOT LIKE ? ESCAPE '\\'
         ORDER BY version DESC
         LIMIT 1`,
-    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+    [nestId, nodeId, SYSTEM_AUTHOR_LIKE],
   )) as
     | {
         version: number;
