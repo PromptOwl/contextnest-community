@@ -391,7 +391,11 @@ export default function MyWorkPage() {
         {nestOptions.length > 1 && (
           <select
             value={nestFilter}
-            onChange={(e) => setNestFilter(e.target.value)}
+            onChange={(e) => {
+              setNestFilter(e.target.value);
+              // A hidden row must not stay selected: the bar counts the selection.
+              setWorkSelected(new Set());
+            }}
             aria-label="Filter by nest"
             className="mr-1 h-7 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
             data-testid="my-work-nest-filter"

@@ -224,7 +224,7 @@ export function DocumentSidebar({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {nests.isLoading && (
           <div className="px-2 py-2 text-xs text-muted-foreground">Loading…</div>
         )}

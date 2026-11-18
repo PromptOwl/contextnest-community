@@ -2615,12 +2615,12 @@ export function createApp(): Hono<AuthEnv> {
     // the same reason the totals above are: the page of items may be one row.
     // Overdue and urgent tasks come from `assigned`, which is not paged, so the
     // client counts those in the viewer's own calendar day.
-    const { total: urgentReviewsTotal } = await getReviewQueue({
-      status: "pending",
-      nestIds: approvableNestIds,
-      priority: "urgent",
-      limit: 1,
-    });
+    // Your own urgent submissions wait on others, so they are taken off.
+    const [{ total: urgentApprovable }, { total: urgentMine }] = await Promise.all([
+      getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", limit: 1 }),
+      getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", requestedByEmail: me, limit: 1 }),
+    ]);
+    const urgentReviewsTotal = urgentApprovable - urgentMine;
     return c.json({
       items,
       waiting,

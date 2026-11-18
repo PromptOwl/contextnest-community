@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { getDb } from "../src/db/client.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -45,12 +46,27 @@ beforeAll(async () => {
   ann = await registerUser(app, "ann@acme.com", "Ann");
   const { data } = await jsonRequest(app, "POST", "/nests", { name: "Eng" }, owner.apiKey);
   nestId = data.nest.id;
+  // A new nest saves the five-stage rules at creation. These tests cover a nest
+  // made before that, which never saved rules.
+  await getDb().run("UPDATE nests SET task_rules = NULL WHERE id = ?", [nestId]);
   await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: ann.email, permission: "write" }, owner.apiKey);
 });
 
 afterAll(() => env.cleanup());
 
 describe("settings", () => {
+  it("a new nest starts with the five stages, one stage per task, icebox by default", async () => {
+    const { data: made } = await jsonRequest(app, "POST", "/nests", { name: "Fresh" }, owner.apiKey);
+    const { data } = await jsonRequest(app, "GET", `/nests/${made.nest.id}/settings`, undefined, owner.apiKey);
+    expect(data.task_rules).toMatchObject({
+      exclusive_namespaces: ["stage"],
+      default_stage_tag: "stage:icebox",
+      stage_order: ["icebox", "prioritized", "in-process", "in-review", "done"],
+      ticket_numbering: true,
+      ticket_prefix: "FRE",
+    });
+  });
+
   it("a nest that never saved rules numbers its tasks, with a prefix from its name", async () => {
     const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/settings`, undefined, owner.apiKey);
     expect(data.task_rules).toMatchObject({
