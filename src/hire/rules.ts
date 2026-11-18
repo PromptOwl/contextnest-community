@@ -49,6 +49,8 @@ export interface Recommendation {
 
 /** A question nobody answered for this long is a question for Hootie. */
 export const QUESTION_SILENCE_MS = 24 * 60 * 60_000;
+/** A question older than this no longer counts: a stale thread shouldn't nag forever. */
+export const QUESTION_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
 /** Promotes counted inside this window. */
 export const PROMOTE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 export const PROMOTE_MIN = 3;
@@ -107,7 +109,7 @@ export function ruleUnansweredQuestions(
 ): Recommendation | null {
   if (opts.hootieHired) return null;
   const open = threads.filter(
-    (t) => t.status === "open" && t.replies === 0 && isQuestion(t.body) && opts.now - toMs(t.created_at) >= QUESTION_SILENCE_MS,
+    (t) => t.status === "open" && t.replies === 0 && isQuestion(t.body) && opts.now - toMs(t.created_at) >= QUESTION_SILENCE_MS && opts.now - toMs(t.created_at) <= QUESTION_LOOKBACK_MS,
   );
   if (open.length === 0) return null;
   return {
@@ -252,7 +254,7 @@ export function ruleIdleKeys(keys: KeyRow[], opts: { now: number; nestId: string
       reason: k.last_used_at
         ? `@${k.handle}'s key has not been used for ${plural(days, "day")}. A key nobody uses is one more to revoke later.`
         : `@${k.handle}'s key was minted ${plural(days, "day")} ago and never used.`,
-      evidence: [{ label: `@${k.handle}`, link: `/nest/${opts.nestId}/settings/hire` }],
+      evidence: [{ label: `@${k.handle}`, link: "/api-keys" }],
       channels: [],
       hire: null,
       let_go: { kind: "key", handle: k.handle },

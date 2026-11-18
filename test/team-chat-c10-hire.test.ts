@@ -499,6 +499,8 @@ describe("AC-C10-08: each recommendation rule is a pure function", () => {
       { thread_id: "t4", channel: "ops", body: "Fresh?", created_at: ago(60_000), replies: 0, status: "open" },
       { thread_id: "t5", channel: "ops", body: "Resolved?", created_at: ago(QUESTION_SILENCE_MS * 2), replies: 0, status: "resolved" },
       { thread_id: "t6", channel: "ops", body: "Not a question", created_at: ago(QUESTION_SILENCE_MS * 2), replies: 0, status: "open" },
+      // Older than the lookback: a stale question no longer recommends Hootie.
+      { thread_id: "t7", channel: "ops", body: "Still there?", created_at: ago(15 * QUESTION_SILENCE_MS), replies: 0, status: "open" },
     ];
     const rec = ruleUnansweredQuestions(threads, { now, nestId: N, hootieHired: false });
     expect(rec).toBeTruthy();
@@ -588,6 +590,7 @@ describe("AC-C10-08: each recommendation rule is a pure function", () => {
       { now, nestId: N },
     );
     expect(out.map((r) => r.id)).toEqual(["key-idle:oldie", "key-idle:never", "key-idle:sqlfmt"]);
+    expect(out[0].evidence[0].link).toBe("/api-keys"); // an existing page, not one the UI slice has yet to ship
     expect(out[0].action).toBe("let_go");
     expect(out[0].let_go).toEqual({ kind: "key", handle: "oldie" });
     expect(out[0].hire).toBeNull();
@@ -663,6 +666,14 @@ describe("AC-C10-09: GET /agents/recommendations computes up to 5 from existing 
         `INSERT INTO agent_wake_deliveries (idempotency_key, nest_id, handle, node_id, thread_id, comment_id, status, error, created_at, attempts, finished_at, event)
          VALUES (?, ?, 'flaky', ?, 't', 'c', 'failed', 'timed out', ?, 3, ?, 'agent.mention')`,
         [`k-flaky-${i}`, recNest, OPS, new Date(Date.now() - (3 - i) * 1000).toISOString(), new Date().toISOString()],
+      );
+    }
+    // A busy handle's newer deliveries must not push flaky's failures out of view.
+    for (let i = 0; i < 510; i++) {
+      await db.run(
+        `INSERT INTO agent_wake_deliveries (idempotency_key, nest_id, handle, node_id, thread_id, comment_id, status, error, created_at, attempts, finished_at, event)
+         VALUES (?, ?, 'busy', ?, 't', 'c', 'sent', NULL, ?, 1, ?, 'agent.mention')`,
+        [`k-busy-${i}`, recNest, OPS, new Date().toISOString(), new Date().toISOString()],
       );
     }
     expect((await hire(owner, { kind: "key", handle: "oldie" }, recNest)).status).toBe(201);

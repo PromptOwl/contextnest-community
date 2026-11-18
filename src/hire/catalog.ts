@@ -93,7 +93,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     cost: "none on this server; the agent pays for its own model",
     hire_by: "writer",
     config_fields: [],
-    manage: "settings/hire",
+    manage: "api-keys",
   },
 ];
 

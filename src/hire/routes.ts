@@ -69,11 +69,5 @@ hireRoutes.delete("/:kind/:handle", async (c) => c.json(await letAgentGo(await c
 recommendationRoutes.get("/", async (c) => c.json(await listRecommendations(await caller(c))));
 
 recommendationRoutes.post("/:id/dismiss", async (c) => {
-  let id = c.req.param("id") as string;
-  try {
-    id = decodeURIComponent(id);
-  } catch {
-    /* as given */
-  }
-  return c.json(await dismissRecommendation(await caller(c), id));
+  return c.json(await dismissRecommendation(await caller(c), c.req.param("id")));
 });

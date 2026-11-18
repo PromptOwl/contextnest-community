@@ -147,18 +147,16 @@ async function webhookHealth(nestId: string): Promise<Array<{ handle: string; re
   const db = getDb();
   const hooks = (await db.all("SELECT handle FROM agent_webhooks WHERE nest_id = ?", [nestId])) as Array<{ handle: string }>;
   if (hooks.length === 0) return [];
-  const rows = (await db.all(
-    `SELECT handle, status FROM agent_wake_deliveries WHERE nest_id = ? ORDER BY created_at DESC LIMIT ${SCAN}`,
-    [nestId],
-  )) as Array<{ handle: string; status: string }>;
-  const recent = new Map<string, Array<"ok" | "failed" | "pending">>();
-  for (const r of rows) {
-    const list = recent.get(r.handle) ?? [];
-    if (list.length >= FAILING_WINDOW) continue;
-    list.push(r.status === "sent" ? "ok" : r.status === "failed" ? "failed" : "pending");
-    recent.set(r.handle, list);
-  }
-  return hooks.map((h) => ({ handle: h.handle, recent: recent.get(h.handle) ?? [] }));
+  // Per handle, so a busy handle can't push a quiet failing one out of view.
+  return Promise.all(
+    hooks.map(async (h) => {
+      const rows = (await db.all(
+        `SELECT status FROM agent_wake_deliveries WHERE nest_id = ? AND handle = ? ORDER BY created_at DESC LIMIT ${FAILING_WINDOW}`,
+        [nestId, h.handle],
+      )) as Array<{ status: string }>;
+      return { handle: h.handle, recent: rows.map((r) => (r.status === "sent" ? "ok" : r.status === "failed" ? "failed" : "pending") as "ok" | "failed" | "pending") };
+    }),
+  );
 }
 
 /** Is some enabled watcher already reading this channel? */
