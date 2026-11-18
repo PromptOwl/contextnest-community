@@ -23,6 +23,7 @@ import {
 import * as api from "../lib/api";
 import { DEFAULT_HOOTIE_BRAND, type HootieBrand } from "../lib/api";
 import { initAnalytics } from "../lib/analytics";
+import { setChannelsOn } from "../lib/queries";
 import { captureOAuthReturn, takeOAuthReturn } from "../lib/oauth-return";
 
 type AuthMode = "open" | "key" | null;
@@ -188,6 +189,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setSurfacesEnabled(h.surfaces_enabled === true);
       setDocPinsEnabled(h.experimental?.doc_pins === true);
       setAgentStreamEnabled(h.experimental?.agent_stream === true);
+      // The read layer keeps channel nodes out of document listings while on.
+      setChannelsOn(h.experimental?.agent_stream === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
@@ -242,6 +245,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setSurfacesEnabled(h.surfaces_enabled === true);
         setDocPinsEnabled(h.experimental?.doc_pins === true);
         setAgentStreamEnabled(h.experimental?.agent_stream === true);
+        // The read layer keeps channel nodes out of document listings while on.
+        setChannelsOn(h.experimental?.agent_stream === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);

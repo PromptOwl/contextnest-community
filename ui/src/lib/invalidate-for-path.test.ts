@@ -115,3 +115,59 @@ describe("invalidateForPath — document pins vs nest pins (CU-wdqcq02crw)", () 
     expect(r.drops(keys.docPins(NEST))).toBe(true);
   });
 });
+
+describe("invalidateForPath — channels (PO-1189)", () => {
+  const post = `/nests/${NEST}/nodes/nodes/channels/ops/annotations`;
+
+  it("a post or reply drops the channel list (unread, activity) and My Work, not the open timeline", () => {
+    for (const path of [post, `${post}/t-1/comments`, `${post}/t-1/resolve`]) {
+      const r = recorder();
+      invalidateForPath(r.qc, path);
+      expect(r.drops(keys.channelList(NEST))).toBe(true);
+      expect(r.drops(keys.myWork())).toBe(true);
+      // The page merges what is new itself; a blanket refetch would drop loaded pages.
+      expect(r.drops(keys.channelTimeline(NEST, "ops"))).toBe(false);
+      expect(r.drops(keys.nodes(NEST))).toBe(false);
+    }
+  });
+
+  it("marking a channel read drops nothing: it is the caller's own mark, written into the list by the page", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, `/nests/${NEST}/channels/ops/read`);
+    expect(r.drops(keys.channelList(NEST))).toBe(false);
+    expect(r.drops(keys.nest(NEST))).toBe(false);
+  });
+
+  it("create, archive and restore drop the channel list and the document listing", () => {
+    for (const path of [`/nests/${NEST}/channels`, `/nests/${NEST}/channels/ops/archive`]) {
+      const r = recorder();
+      invalidateForPath(r.qc, path);
+      expect(r.drops(keys.channelList(NEST))).toBe(true);
+      expect(r.drops(keys.nodes(NEST))).toBe(true);
+    }
+  });
+
+  it("promoting a thread drops the document listing, where the new node appears", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, `/nests/${NEST}/threads/t-1/promote`);
+    expect(r.drops(keys.nodes(NEST))).toBe(true);
+    expect(r.drops(keys.search)).toBe(true);
+    expect(r.drops(keys.settings(NEST))).toBe(false);
+  });
+
+  it("a webhook change drops the webhook list and the @ picker's agent handles only", () => {
+    for (const path of [`/nests/${NEST}/agent-webhooks/grok`, `/nests/${NEST}/agent-webhooks/grok/test`]) {
+      const r = recorder();
+      invalidateForPath(r.qc, path);
+      expect(r.drops(keys.agentWebhooks(NEST))).toBe(true);
+      expect(r.drops(keys.agentHandles(NEST))).toBe(true);
+      expect(r.drops(keys.nodes(NEST))).toBe(false);
+    }
+  });
+
+  it("marking a mention done drops My Work", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, "/me/work/mentions/t-1/done");
+    expect(r.drops(keys.myWork())).toBe(true);
+  });
+});
