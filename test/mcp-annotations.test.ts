@@ -31,6 +31,9 @@ const READ_ONLY = [
   "context_export",
   "context_comments",
   "context_channel_read",
+  // Channel messages (PO-1196): the permalink lookup and search.
+  "context_message_read",
+  "context_channel_search",
   // My Work (PO-1180): the caller's own queue.
   "context_my_work",
   "context_relations",
@@ -116,6 +119,8 @@ const DESTRUCTIVE = [
   "context_agent_run_close",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Channel messages (PO-1196): edit replaces text, delete tombstones.
+  "context_message",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -218,8 +223,10 @@ async function allDefinedNames(): Promise<string[]> {
   const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { MESSAGE_TOOL_DEFINITIONS } = await import("../src/mcp/message-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...MESSAGE_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,

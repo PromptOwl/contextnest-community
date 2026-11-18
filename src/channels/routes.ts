@@ -40,6 +40,7 @@ import {
   readChannel,
   setChannelArchived,
 } from "./channel-service.js";
+import { channelMessageRoutes } from "./message-routes.js";
 
 export const channelRoutes = new Hono<AuthEnv>();
 export const agentHandleRoutes = new Hono<AuthEnv>();
@@ -85,6 +86,11 @@ channelRoutes.post("/", async (c) => {
   );
   return c.json(result, 201);
 });
+
+// Message actions, pins and search (PO-1196, message-routes.ts). Mounted
+// before `/:name` so GET /channels/search is the search, not a channel read
+// ("search" is a reserved channel name).
+channelRoutes.route("/", channelMessageRoutes);
 
 /** `:name` may be a node id, so it arrives URL-encoded. */
 function channelParam(c: any): string {

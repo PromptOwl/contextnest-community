@@ -69,6 +69,8 @@ import {
   tagsOf,
 } from "./channel-node.js";
 import { bodyMentions, displayNames, knownAgents, namedActor, type KnownAgent, type MentionRef } from "./message-meta.js";
+import { messageExtras, type MessageExtras } from "./message-extras.js";
+import { broadcastRefusal } from "./broadcast.js";
 
 export { ARCHIVED_TAG, CHANNEL_FOLDER, CHANNEL_TAG, isChannelDoc, isChannelId, isChannelNode } from "./channel-node.js";
 
@@ -94,6 +96,9 @@ const marks = (xs: unknown[]) => xs.map(() => "?").join(", ");
  * "nodes/channels/ops" — → its slug, or a ValidationError. One spelling rule
  * for reading and for posting (AC-AX-03).
  */
+/** Names that are routes under /channels, not channels (PO-1196). */
+const RESERVED_CHANNEL_NAMES = new Set(["search"]);
+
 export function parseChannelName(raw: unknown): string {
   if (typeof raw !== "string") throw new ValidationError("name is required — the channel's name, e.g. \"ops\".");
   const name = raw
@@ -113,6 +118,9 @@ export function parseChannelName(raw: unknown): string {
   if (isMetaFile(name)) {
     throw new ValidationError(`"${name}" is reserved for a file the vault generates; pick another channel name.`);
   }
+  if (RESERVED_CHANNEL_NAMES.has(name)) {
+    throw new ValidationError(`"${name}" is reserved; pick another channel name.`);
+  }
   return name;
 }
 
@@ -122,7 +130,7 @@ export function channelIdFor(name: string): string {
 
 // ─── Access ─────────────────────────────────────────────────────────────
 
-interface Caller {
+export interface Caller {
   nestId: string;
   userId: string;
   userEmail: string;
@@ -131,7 +139,7 @@ interface Caller {
   crossNest?: boolean;
 }
 
-export type PostRefusal = { status: 403 | 409; error: string };
+export type PostRefusal = { status: 400 | 403 | 409 | 429; error: string };
 
 const NOT_A_MEMBER =
   "Posting in a channel is for people added to this nest. Ask the nest's owner to add you as a collaborator.";
@@ -187,6 +195,10 @@ export async function channelPostRefusal(
   nodeId: string,
   userId: string,
   userEmail: string,
+  /** The message about to be written: an `@channel` / `@here` in it is
+   *  refused here, before anything is stored, when the nest is too big to
+   *  broadcast to (PO-1196, channels/broadcast.ts). */
+  body?: string,
 ): Promise<PostRefusal | null> {
   if (!isChannelId(nodeId)) return null;
   const node = await readChannelDoc(nestId, nodeId);
@@ -195,7 +207,13 @@ export async function channelPostRefusal(
     return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
   }
   if (!isChannelDoc(node)) return null;
-  return (await channelAccess({ nestId, userId, userEmail }, node)).post;
+  const refusal = (await channelAccess({ nestId, userId, userEmail }, node)).post;
+  if (refusal) return refusal;
+  if (typeof body === "string") {
+    const broadcast = await broadcastRefusal(nestId, body, userId);
+    if (broadcast) return { status: broadcast.status, error: broadcast.error };
+  }
+  return null;
 }
 
 // ─── Views ──────────────────────────────────────────────────────────────
@@ -240,7 +258,7 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
               CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
               MAX(t.created_at) AS last_at,
               MAX(c.created_at) AS last_activity_at,
-              CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
+              CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND c.deleted_at IS NULL AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
          FROM annotation_threads t
          JOIN annotation_comments c ON c.thread_id = t.id
          LEFT JOIN stream_marks r
@@ -442,12 +460,29 @@ export interface ChannelMessage {
   /** The artifacts the message links, resolved for THIS reader (PO-1181):
    *  a card for what they can read, `{ link, resolved: false }` for the rest. */
   cards: ArtifactCard[];
-  /** Every `@name` in the body, in order: a person, a known agent, or nobody
-   *  — so a client can style what landed and what didn't. */
+  /** Every `@name` in the body, in order: a person, a known agent, everyone
+   *  (`@channel` / `@here`), or nobody — so a client can style what landed
+   *  and what didn't. */
   mentions: MentionRef[];
+  /** Reactions on it, as this reader sees them (PO-1196). */
+  reactions: MessageExtras["reactions"];
+  pinned: boolean;
+  /** The READER saved it. */
+  saved: boolean;
+  /** The in-app permalink: `/nest/<id>/channels?channel=&thread=&message=`. */
+  url: string;
+  edited_at: string | null;
+  /** A tombstone: the body is "", reactions, pins and saves are gone, the
+   *  place in the thread is kept. */
+  deleted: boolean;
+  deleted_at: string | null;
+  deleted_by: MessageExtras["deleted_by"];
 }
 
 export interface ChannelPost extends ChannelMessage {
+  /** The id of the message that opened the thread (`id` is the thread's):
+   *  what the message routes — react, edit, pin, save — take for a post. */
+  message_id: string;
   /** The thread id — pass it as `thread` to read or reply to the thread. */
   status: "open" | "resolved";
   reply_count: number;
@@ -472,14 +507,22 @@ interface ThreadRow {
   status: "open" | "resolved";
 }
 
-interface CommentRow {
+export interface CommentRow {
   id: string;
   thread_id: string;
   author: string;
   body: string;
   created_at: string;
   client_json: string | null;
+  edited_at: string | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  deleted_reason: string | null;
 }
+
+/** The message columns every read selects (`c` = annotation_comments). */
+export const MESSAGE_COLUMNS =
+  "c.id, c.thread_id, c.author, c.body, c.created_at, c.client_json, c.edited_at, c.deleted_at, c.deleted_by, c.deleted_reason";
 
 function parseLimit(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
@@ -496,8 +539,6 @@ function parseOffset(raw: unknown): number {
   return Math.floor(n);
 }
 
-const COMMENT_COLS = "id, thread_id, author, body, created_at, client_json";
-
 /** Each thread's opening comment, plus its reply count and last reply time —
  *  one grouped query, never every reply of every post on the page. */
 async function openingsFor(
@@ -507,7 +548,7 @@ async function openingsFor(
   const db = getDb();
   for (const ids of chunks(threadIds)) {
     const firsts = (await db.all(
-      `SELECT ${COMMENT_COLS} FROM annotation_comments c
+      `SELECT ${MESSAGE_COLUMNS} FROM annotation_comments c
         WHERE c.thread_id IN (${marks(ids)})
           AND NOT EXISTS (SELECT 1 FROM annotation_comments e
                            WHERE e.thread_id = c.thread_id
@@ -533,13 +574,15 @@ async function openingsFor(
  * Rows → messages, in one pass per concern: display names, the actor seam,
  * which @names resolved, and the reader's artifact cards. Same order out as in.
  */
-async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMessage[]> {
+async function toMessages(caller: Caller, channelName: string, rows: CommentRow[]): Promise<ChannelMessage[]> {
   if (rows.length === 0) return [];
-  const bodies = rows.map((r) => r.body);
-  const [names, mentions, cards] = await Promise.all([
+  // A tombstone has no text to resolve names or cards from.
+  const bodies = rows.map((r) => (r.deleted_at ? "" : r.body));
+  const [names, mentions, cards, extras] = await Promise.all([
     displayNames(rows.map((r) => r.author)),
-    bodyMentions(caller.nestId, bodies),
+    bodyMentions(caller.nestId, bodies, { broadcast: true }),
     resolveMessageCards(caller, bodies),
+    messageExtras(caller, channelName, rows),
   ]);
   return Promise.all(
     rows.map(async (row, i) => {
@@ -549,30 +592,66 @@ async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMe
         author: row.author,
         author_name: name,
         actor,
-        body: row.body,
+        body: bodies[i],
         created_at: row.created_at,
         cards: cards[i],
         mentions: mentions[i],
+        ...extras.get(row.id)!,
       };
     }),
   );
 }
 
+/**
+ * Message rows of ONE channel → flat messages with their thread and whether
+ * each is a reply (the thread's opening message is not). For the reads that
+ * start from a message rather than a thread: pins, saved items, search, the
+ * permalink lookup (PO-1196).
+ */
+export async function messagesFromRows(caller: Caller, channelName: string, rows: CommentRow[]): Promise<ChannelNewMessage[]> {
+  if (rows.length === 0) return [];
+  const firsts = await firstMessageIds([...new Set(rows.map((r) => r.thread_id))]);
+  const messages = await toMessages(caller, channelName, rows);
+  return messages.map((m, i) => ({ ...m, thread_id: rows[i].thread_id, reply: firsts.get(rows[i].thread_id) !== m.id }));
+}
+
+/** Thread id → the id of the message that opened it. */
+export async function firstMessageIds(threadIds: string[]): Promise<Map<string, string>> {
+  const firsts = new Map<string, string>();
+  if (threadIds.length === 0) return firsts;
+  // Only each thread's opening row (same rule as openingsFor), never every reply.
+  for (const ids of chunks(threadIds)) {
+    for (const r of (await getDb().all(
+      `SELECT c.thread_id, c.id FROM annotation_comments c
+        WHERE c.thread_id IN (${marks(ids)})
+          AND NOT EXISTS (SELECT 1 FROM annotation_comments e
+                           WHERE e.thread_id = c.thread_id
+                             AND (e.created_at < c.created_at OR (e.created_at = c.created_at AND e.id < c.id)))`,
+      ids,
+    )) as Array<{ thread_id: string; id: string }>) {
+      firsts.set(r.thread_id, r.id);
+    }
+  }
+  return firsts;
+}
+
 /** Threads → posts (the opening message of each, plus its thread's counts). */
-async function toPosts(caller: Caller, threads: ThreadRow[]): Promise<ChannelPost[]> {
+async function toPosts(caller: Caller, channelName: string, threads: ThreadRow[]): Promise<ChannelPost[]> {
   const openings = await openingsFor(threads.map((t) => t.id));
   // A thread is created with its opening message in one transaction, so a
   // thread without one does not occur; skip rather than invent a message.
   const kept = threads.filter((t) => openings.get(t.id)?.first);
   const firsts = kept.map((t) => openings.get(t.id)!.first!);
-  const messages = await toMessages(caller, firsts);
+  const messages = await toMessages(caller, channelName, firsts);
   const promoted = await promotedFromThreads(caller, kept.map((t) => t.id));
   return kept.map((t, i) => {
     const o = openings.get(t.id)!;
     return {
       ...messages[i],
-      // The post IS the thread: its id is what `thread` takes everywhere.
+      // The post IS the thread: its id is what `thread` takes everywhere;
+      // its opening message keeps its own id for the message routes.
       id: t.id,
+      message_id: firsts[i].id,
       created_at: t.created_at,
       status: t.status,
       reply_count: o.replies,
@@ -668,15 +747,15 @@ export async function readChannel(
       )) as ThreadRow | undefined)
       : undefined;
     if (!row) throw new NotFoundError("Thread not found in this channel");
-    const [post] = await toPosts(caller, [row]);
+    const [post] = await toPosts(caller, view.name, [row]);
     if (!post) throw new NotFoundError("Thread not found in this channel");
     // Replies are the comments after the opening one, paged like the timeline.
     const rows = (await db.all(
-      `SELECT ${COMMENT_COLS} FROM annotation_comments WHERE thread_id = ?
-        ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`,
+      `SELECT ${MESSAGE_COLUMNS} FROM annotation_comments c WHERE c.thread_id = ?
+        ORDER BY c.created_at ASC, c.id ASC LIMIT ? OFFSET ?`,
       [row.id, limit, offset + 1],
     )) as CommentRow[];
-    const replies = await toMessages(caller, rows);
+    const replies = await toMessages(caller, view.name, rows);
     return {
       channel: view,
       thread: {
@@ -691,7 +770,7 @@ export async function readChannel(
     const raw = String(input.since).trim();
     const cursor = await sinceCursor(caller.nestId, node.id, raw);
     const rows = (await db.all(
-      `SELECT c.id, c.thread_id, c.author, c.body, c.created_at, c.client_json
+      `SELECT ${MESSAGE_COLUMNS}
          FROM annotation_comments c
          JOIN annotation_threads t ON t.id = c.thread_id
         WHERE t.nest_id = ? AND t.node_id = ?
@@ -706,12 +785,7 @@ export async function readChannel(
     // is the txn start, so a long txn can still land behind; use a sequence if so.
     const page = rows.slice(0, limit);
     if (page.length === 0) return { channel: view, messages: [], has_more: false, next_since: raw };
-    const openings = await openingsFor([...new Set(page.map((r) => r.thread_id))]);
-    const messages = (await toMessages(caller, page)).map((m, i) => ({
-      ...m,
-      thread_id: page[i].thread_id,
-      reply: openings.get(page[i].thread_id)?.first?.id !== m.id,
-    }));
+    const messages = await messagesFromRows(caller, view.name, page);
     return { channel: view, messages, has_more: rows.length > limit, next_since: page[page.length - 1].id };
   }
 
@@ -732,7 +806,7 @@ export async function readChannel(
       LIMIT ? OFFSET ?`,
     [caller.nestId, node.id, limit, offset],
   )) as ThreadRow[];
-  const posts = await toPosts(caller, threads);
+  const posts = await toPosts(caller, view.name, threads);
   const newest = (await db.get(
     `SELECT c.id FROM annotation_comments c
        JOIN annotation_threads t ON t.id = c.thread_id
@@ -755,6 +829,17 @@ function missedText(mentions: MentionRef[]): string {
   return missed.length ? ` [matched nobody: ${missed.join(", ")}]` : "";
 }
 
+/** The body as a tool shows it: a tombstone says so, and edits and
+ *  reactions are noted after the text (PO-1196). */
+export function messageText(m: ChannelMessage): string {
+  if (m.deleted) return `_(message deleted by its ${m.deleted_by === "moderator" ? "moderator" : "author"})_`;
+  const marks: string[] = [];
+  if (m.edited_at) marks.push("edited");
+  if (m.pinned) marks.push("pinned");
+  if (m.reactions.length) marks.push(m.reactions.map((r) => `${r.emoji} ${r.count}`).join(" "));
+  return `${m.body}${marks.length ? ` [${marks.join("; ")}]` : ""}`;
+}
+
 /** Plain-text rendering of a read, for an agent over MCP. */
 export function timelineText(t: ChannelTimeline): string {
   const head = `# ${t.channel.title}${t.channel.archived ? " (archived)" : ""}${
@@ -765,9 +850,9 @@ export function timelineText(t: ChannelTimeline): string {
     const { post, replies, pagination: pg } = t.thread;
     const lines = [
       `## Thread ${post.id} (${post.status})`,
-      `- **${post.actor.label}** (${post.created_at}): ${post.body}${missedText(post.mentions)}${cardsText(post.cards)}`,
+      `- **${post.actor.label}** (${post.created_at}) [message ${post.message_id}]: ${messageText(post)}${missedText(post.mentions)}${cardsText(post.cards)}`,
       ...replies.map(
-        (r) => `  - **${r.actor.label}** (${r.created_at}): ${r.body}${missedText(r.mentions)}${cardsText(r.cards, "    ")}`,
+        (r) => `  - **${r.actor.label}** (${r.created_at}) [message ${r.id}]: ${messageText(r)}${missedText(r.mentions)}${cardsText(r.cards, "    ")}`,
       ),
     ];
     const promoted = post.promoted.length
@@ -780,7 +865,7 @@ export function timelineText(t: ChannelTimeline): string {
     if (t.messages.length === 0) return `${head}\n\nNothing new. Pass since: "${t.next_since}" again later.`;
     const lines = t.messages.map(
       (m) =>
-        `- [thread ${m.thread_id}${m.reply ? ", reply" : ""}] **${m.actor.label}** (${m.created_at}): ${m.body}${missedText(m.mentions)}${cardsText(m.cards)}`,
+        `- [thread ${m.thread_id}${m.reply ? ", reply" : ""}; message ${m.id}] **${m.actor.label}** (${m.created_at}): ${messageText(m)}${missedText(m.mentions)}${cardsText(m.cards)}`,
     );
     return `${head}\n\n${t.messages.length} new message(s), oldest first:\n${lines.join("\n")}\n\n${
       t.has_more ? "More waiting. " : ""
@@ -791,7 +876,7 @@ export function timelineText(t: ChannelTimeline): string {
   }
   const lines = t.posts.map(
     (p) =>
-      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${p.body}${
+      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${messageText(p)}${
         p.reply_count ? ` — ${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}, last ${p.last_activity_at}` : ""
       }${p.status === "resolved" ? " [resolved]" : ""}${p.promoted.length ? " [promoted]" : ""}${missedText(p.mentions)}${cardsText(p.cards)}`,
   );
