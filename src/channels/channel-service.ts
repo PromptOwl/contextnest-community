@@ -206,18 +206,22 @@ export async function channelPostRefusal(
   body?: string,
 ): Promise<PostRefusal | null> {
   // A conversation (C2) is a container with its own member list.
-  if (isConversationId(nodeId)) return conversationPostRefusal(nestId, nodeId, userId, userEmail);
-  if (!isChannelId(nodeId)) return null;
-  const node = await readChannelDoc(nestId, nodeId);
-  if (!node) {
-    // Unreadable, but known to be a channel: closed, not open (channel-node.ts).
-    return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
+  if (isConversationId(nodeId)) {
+    const refusal = await conversationPostRefusal(nestId, nodeId, userId, userEmail);
+    if (refusal) return refusal;
+  } else {
+    if (!isChannelId(nodeId)) return null;
+    const node = await readChannelDoc(nestId, nodeId);
+    if (!node) {
+      // Unreadable, but known to be a channel: closed, not open (channel-node.ts).
+      return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
+    }
+    if (!isChannelDoc(node)) return null;
+    const refusal = (await channelAccess({ nestId, userId, userEmail }, node)).post;
+    if (refusal) return refusal;
   }
-  if (!isChannelDoc(node)) return null;
-  const refusal = (await channelAccess({ nestId, userId, userEmail }, node)).post;
-  if (refusal) return refusal;
   if (typeof body === "string") {
-    const broadcast = await broadcastRefusal(nestId, body, userId);
+    const broadcast = await broadcastRefusal(nestId, nodeId, body, userId);
     if (broadcast) return { status: broadcast.status, error: broadcast.error };
   }
   return null;

@@ -74,7 +74,7 @@ export async function editMessage(
   // An `@channel` the edit ADDS is bounded exactly as in a post; one already there costs nothing.
   const hadBroadcast = new Set(broadcastNames(located.row.body));
   const addsBroadcast = broadcastNames(body).some((n) => !hadBroadcast.has(n));
-  const broadcast = addsBroadcast ? await broadcastRefusal(caller.nestId, body, caller.userId) : null;
+  const broadcast = addsBroadcast ? await broadcastRefusal(caller.nestId, located.node.id, body, caller.userId) : null;
   if (broadcast) throw broadcast.status === 429 ? new RateLimitedError(broadcast.error, broadcast.retryAfter ?? 60) : new ValidationError(broadcast.error);
 
   const { nestId } = caller;

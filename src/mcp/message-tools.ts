@@ -20,6 +20,7 @@
  * (scripts/check-mcp-schemas.mjs baseline raised 112 → 115, documented).
  */
 import { config } from "../config.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { listVisibleNests } from "../nests/service.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
@@ -143,6 +144,8 @@ export async function runMessageTool(toolName: string, args: Record<string, any>
       "DOCUMENT_NOT_FOUND",
     );
   }
+  // The nest's own chat setting (C2): off means off here too.
+  if (!(await nestChatEnabled(ctx.nestId))) return toolError("Chat is turned off for this nest.", "DOCUMENT_NOT_FOUND");
   try {
     if (toolName === "context_message_read") {
       const caller = callerOf(ctx, undefined);

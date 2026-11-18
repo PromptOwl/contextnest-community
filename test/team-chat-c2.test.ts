@@ -1346,3 +1346,53 @@ describe("SEC-C2: existence oracles, cross-nest ids, leaks", () => {
     expect((await conversation(alice, dm)).status).toBe(200);
   });
 });
+
+describe("SEC-C2: C1 message features honour the nest's chat setting and a container's member list", () => {
+  it("SEC-C2-15 per-nest off hides that nest's saved messages, message search hits, channel mentions and context_message", async () => {
+    const r = await post(alice, "@rita the zebrafinch numbers are in");
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const t = r.data.thread as { id: string; message_id?: string; comments: Array<{ id: string }> };
+    const msg = t.message_id ?? t.comments[0].id;
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/general/messages/${msg}/save`, {}, rita.apiKey)).status).toBe(200);
+    const savedIds = async () => ((await jsonRequest(app, "GET", "/me/saved", undefined, rita.apiKey)).data.saved ?? []).map((s: any) => s.thread_id);
+    const hitIds = async () => ((await jsonRequest(app, "GET", "/me/chat/search?q=zebrafinch", undefined, rita.apiKey)).data.results ?? []).map((h: any) => h.thread_id);
+    const mentionIds = async () => (await work(rita, "?sections=mentions")).mentions.map((m: any) => m.thread_id);
+    expect(await savedIds()).toContain(t.id);
+    expect(await hitIds()).toContain(t.id);
+    expect(await mentionIds()).toContain(t.id);
+    expect((await callTool(rita.apiKey, "context_message_read", { message: msg })).isError).toBe(false);
+
+    expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: false }, owner.apiKey)).status).toBe(200);
+    try {
+      expect(await savedIds()).not.toContain(t.id);
+      expect(await hitIds()).not.toContain(t.id);
+      expect(await mentionIds()).not.toContain(t.id);
+      expect((await callTool(rita.apiKey, "context_message_read", { message: msg })).isError).toBe(true);
+      // Another nest with chat on is unaffected.
+      expect((await channels(alice, "", secondNestId)).status).toBe(200);
+    } finally {
+      expect((await jsonRequest(app, "PATCH", `/nests/${nestId}/chat/settings`, { chat: true }, owner.apiKey)).status).toBe(200);
+    }
+    expect(await savedIds()).toContain(t.id);
+  });
+
+  it("SEC-C2-16 @channel in a group conversation reaches its members only; someone added later gets no stale mention", async () => {
+    const group = (await startConversation(alice, [rita.email, owner.email])).data.conversation.id;
+    const r = await post(alice, "@channel group standup", group);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.mentions).toEqual([{ name: "channel", kind: "everyone", reached: 2 }]);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/conversations/${enc(group)}/members`, { member: sam.email }, alice.apiKey)).status).toBe(200);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).not.toContain(r.data.thread.id);
+    expect((await work(rita, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).toContain(r.data.thread.id);
+  });
+
+  it("SEC-C2-17 @channel in a private channel reaches its members only; someone invited later gets no stale mention", async () => {
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "huddle", private: true }, alice.apiKey)).status).toBe(201);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/huddle/members`, { member: rita.email }, alice.apiKey)).status).toBe(200);
+    const r = await post(alice, "@channel huddle at noon", "nodes/channels/huddle");
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.mentions).toEqual([{ name: "channel", kind: "everyone", reached: 1 }]);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/channels/huddle/members`, { member: sam.email }, alice.apiKey)).status).toBe(200);
+    expect((await work(sam, "?sections=mentions")).mentions.map((m: any) => m.thread_id)).not.toContain(r.data.thread.id);
+  });
+});

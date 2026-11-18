@@ -27,6 +27,7 @@ import { getDb } from "../db/client.js";
 import { listNestPeople, type NestPerson } from "../nests/people-service.js";
 import { extractMentions } from "../shared/mentions.js";
 import { retryAfterSeconds, tryConsume, type RateLimitConfig } from "../shared/rate-limit.js";
+import { isPrivateContainer, listPeople } from "../chat/containers.js";
 
 /** `@channel` / `@here` per person: each is a fan-out. */
 export const BROADCAST_LIMIT: RateLimitConfig = { max: 10, windowMs: 10 * 60_000 };
@@ -36,6 +37,15 @@ export const BROADCAST_NAMES = new Set(["channel", "here"]);
 /** People ADDED to the nest: owner, collaborators, stewards, team members —
  *  not someone whose only way in is a share on one document. */
 const isMemberSource = (p: NestPerson) => p.source !== "grant" && p.source !== "directory";
+/** Who a broadcast in this container reaches: the people added to the nest
+ *  and, in a conversation or a private channel (C2), only its members. */
+async function audience(nestId: string, nodeId: string): Promise<NestPerson[]> {
+  const people = (await listNestPeople(nestId)).filter((p) => p.userId && isMemberSource(p));
+  if (!(await isPrivateContainer(nestId, nodeId))) return people;
+  const members = new Set((await listPeople(nestId, nodeId)).map((m) => m.user_id));
+  return people.filter((p) => members.has(p.userId!));
+}
+
 /** Most people one `@channel` may reach; past it the post is refused. */
 export const BROADCAST_MAX_MEMBERS = 200;
 
@@ -63,9 +73,9 @@ export interface BroadcastRefusal {
  * attempt that gets this far). Costs nothing for a body without a broadcast
  * name. Checked BEFORE the message is written, by post and by edit alike.
  */
-export async function broadcastRefusal(nestId: string, body: string, userId: string): Promise<BroadcastRefusal | null> {
+export async function broadcastRefusal(nestId: string, nodeId: string, body: string, userId: string): Promise<BroadcastRefusal | null> {
   if (broadcastNames(body).length === 0) return null;
-  const people = (await listNestPeople(nestId)).filter((p) => p.userId && isMemberSource(p));
+  const people = await audience(nestId, nodeId);
   if (people.length > BROADCAST_MAX_MEMBERS) {
     return {
       status: 400,
@@ -110,9 +120,7 @@ export async function indexBroadcast(params: {
         commentId,
       ])) as Array<{ mentioned_user_id: string }>).map((r) => r.mentioned_user_id),
     );
-    const people = (await listNestPeople(nestId)).filter(
-      (p) => p.userId && isMemberSource(p) && p.email.toLowerCase() !== author && !skip.has(p.userId),
-    );
+    const people = (await audience(nestId, nodeId)).filter((p) => p.email.toLowerCase() !== author && !skip.has(p.userId!));
     if (people.length > BROADCAST_MAX_MEMBERS) return 0;
     const msg = (await db.get("SELECT created_at FROM annotation_comments WHERE id = ?", [commentId])) as
       | { created_at: string }

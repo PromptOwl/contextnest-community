@@ -29,6 +29,7 @@ import { getNest } from "../nests/service.js";
 import { fold, matchDocuments, toSearchHit } from "../nodes/search.js";
 import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { channelNameOf, isChannelNode } from "./channel-node.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import {
   MESSAGE_COLUMNS,
   channelIdFor,
@@ -271,7 +272,10 @@ export async function searchAcrossNests(
   limited = true,
 ): Promise<SearchResult> {
   const member = new Map<string, string>();
-  for (const [id, name] of visible) if (await isNestMember(id, who.userId).catch(() => false)) member.set(id, name);
+  // A nest whose chat is off (C2) has no messages to find.
+  for (const [id, name] of visible) {
+    if ((await isNestMember(id, who.userId).catch(() => false)) && (await nestChatEnabled(id).catch(() => false))) member.set(id, name);
+  }
   return search(who, member, input, limited);
 }
 

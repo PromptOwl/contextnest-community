@@ -360,12 +360,13 @@ export async function listOpenMentions(params: {
   );
 
   // A conversation's mentions exist only while chat is on there (C2): the
-  // server switch, and the nest's own setting (asked once per nest).
+  // server switch, and the nest's own setting (asked once per nest). A
+  // channel's follow the nest's setting while the server switch is on.
   const chatOn = new Map<string, boolean>();
   const shown: Row[] = [];
   for (const r of perThread.values()) {
     if (!allowed.get(key(r.nest_id, r.node_id)) || (params.thread && r.thread_id !== params.thread)) continue;
-    if (isConversationId(r.node_id)) {
+    if (isConversationId(r.node_id) || (config.TEAM_CHAT_ENABLED && isChannelRow(r))) {
       if (!config.TEAM_CHAT_ENABLED) continue;
       if (!chatOn.has(r.nest_id)) chatOn.set(r.nest_id, await nestChatEnabled(r.nest_id).catch(() => false));
       if (!chatOn.get(r.nest_id)) continue;
