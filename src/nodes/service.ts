@@ -2132,7 +2132,10 @@ function enforceTaskTagRules(
   const priorTicket = ticketTagOf(priorTags);
   const nextTicket = ticketTagOf(tags);
   if (priorTicket) {
-    if (nextTicket && nextTicket !== priorTicket) {
+    // Any other ticket: tag, not just the first — an added one beside the
+    // number must be refused, not silently dropped (PO-1218).
+    const other = tags.some((t) => tagNamespace(bareTag(t)) === TICKET_NAMESPACE && bareTag(t) !== priorTicket);
+    if (other) {
       throw new ValidationError(
         `This task is ${priorTicket.slice(TICKET_NAMESPACE.length + 1).toUpperCase()}. Ticket numbers are assigned once and can't be changed.`,
       );

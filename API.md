@@ -885,9 +885,9 @@ Named Board views of a nest (columns, filters, card order). A board is a view, n
 ```
 `created_by_email` is `null` for callers below write — the read tier also serves public/org visitors, and member emails stay write-tier (as with `GET /collaborators`).
 
-**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`.
+**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`. Names are unique (case-insensitive) among the boards the caller can see; a taken name is saved with the next free number ("Sprint 2"). Someone else's private board doesn't count.
 
-**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`.
+**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`. A `name` taken by another visible board, or making a private board shared when a shared one has its name, → `409`.
 - Only the creator may change `private` (`403` otherwise).
 - A `config` without `ranks` keeps the stored ranks.
 - `position`: integer `0`–`10000`.
@@ -1023,9 +1023,9 @@ The roster rows carry `principal_kind` (`human` | `system`). A named system can'
 ```json
 { "people": [{ "email": "owner@x.com", "name": "Olive Owner", "member": true }] }
 ```
-`member` is `false` for an account offered only through `PEOPLE_SUGGEST_ALL_USERS` (not on the nest). Only members can be a card's `assignee`; the Board's picker lists non-members to owners/admins only, behind a share-the-nest step.
+Nest people only — never the server directory, whatever `PEOPLE_SUGGEST_ALL_USERS` says. `member` is always `true` (kept for older clients). Only members can be a card's `assignee`; an owner/admin assigns someone new by typing their full email in the Board's picker, behind a share-the-nest step.
 
-Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, a typed `@` naming a registered account off the nest (exact email, unique local part or name) from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`); they are not listed here.
 
 Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
 

@@ -4,6 +4,7 @@ import {
   assigneesOnBoard,
   dueState,
   formatDue,
+  inDoneFolder,
   isPickedDue,
   matchesAssigneeFilter,
   matchesBlockedFilter,
@@ -175,5 +176,19 @@ describe("blocked badge (task relations)", () => {
     expect(matchesTitleFilter({ title: "Task Alpha" }, "Beta")).toBe(false);
     expect(matchesTitleFilter({ title: "Task Alpha" }, "")).toBe(true);
     expect(matchesTitleFilter({ title: "Task Alpha" }, "#prime")).toBe(true);
+  });
+});
+
+// PO-1241: a task in the folder board's "Done" column isn't overdue.
+describe("inDoneFolder", () => {
+  it("matches the folder's last segment against the nest's done tags", () => {
+    expect(inDoneFolder("nodes/projects/done/fix-login", ["done"])).toBe(true);
+    expect(inDoneFolder("nodes/Done/x", ["#stage:done"])).toBe(true);
+    expect(inDoneFolder("nodes/shipped/x", ["done", "shipped"])).toBe(true);
+  });
+  it("leaves other folders and root documents alone", () => {
+    expect(inDoneFolder("nodes/projects/doing/x", ["done"])).toBe(false);
+    expect(inDoneFolder("nodes/done-later/x", ["done"])).toBe(false);
+    expect(inDoneFolder("nodes/done", ["done"])).toBe(false);
   });
 });

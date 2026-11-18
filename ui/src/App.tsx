@@ -1265,8 +1265,9 @@ export default function App() {
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
   // Beside the sidebar the shell fills its flex column: `w-full`, and no
   // `mx-auto` — auto margins on a flex-column item shrink it to its content.
-  // Without a sidebar the old centred page width applies.
-  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
+  // Without a sidebar the old centred page width applies; `w-full` keeps it
+  // full width now that the shell column is a flex column too (PO-1168).
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto w-full`;
   // Reader branding (CU-wdqcq02ptm): only for a caller in reader mode, and
   // only when the nest has any. Otherwise every value below is inert and the
   // shell renders exactly as before.
@@ -1393,7 +1394,9 @@ export default function App() {
         })()}
         </>
       )}
-      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
+      {/* A full-height column, so the footer's mt-auto pins the version line to
+          the bottom of a short page (PO-1168). */}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : "flex min-h-screen flex-col"}>
       {/* Header */}
       {/* `contents`: a sticky child only sticks within its parent's box, and
           <header> is exactly one row tall — so the row below must have the
@@ -1991,9 +1994,9 @@ export default function App() {
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
         readerBrand ? (
-          <ReaderBrandFooter branding={readerBrand} className={shellWidth} />
+          <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
-        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} mt-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
           {isAdmin && <UpdateBadge />}
         </footer>

@@ -26,6 +26,7 @@ import {
   tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
+import { visibleTags } from "../lib/ticket";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -1589,7 +1590,7 @@ export function DocumentEditor({
   const baseVersionRef = useRef(baseVersion);
   baseVersionRef.current = baseVersion;
   const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
-  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed" | "refused"> => {
     const run = async () => {
       const snap = initialSnapshotRef.current;
       const otherFieldsDirty =
@@ -1611,6 +1612,13 @@ export function DocumentEditor({
         setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
         return "saved" as const;
       } catch (err) {
+        // The server refused the tags (e.g. a second ticket number, PO-1218):
+        // say why and put the saved set back — saving the document won't help.
+        if ((err as any)?.status === 400) {
+          setTags([...initialSnapshotRef.current.tags]);
+          toast.error((err as Error).message, { id: "tag-added" });
+          return "refused" as const;
+        }
         console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
         return "failed" as const;
       }
@@ -1647,7 +1655,9 @@ export function DocumentEditor({
     setTouched(true);
     // Say whether it's kept, or "added" reads as persisted when it's local.
     void saveTagsAlone(next).then((r) =>
-      r === "failed"
+      r === "refused"
+        ? undefined
+        : r === "failed"
         ? tagSaveFailed()
         : toast.success(
             accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
@@ -3429,9 +3439,10 @@ export function DocumentEditor({
                           ))}
                         </datalist>
                       )}
-                      {tags.length > 0 && (
+                      {visibleTags(tags).length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {tags.map((t) => {
+                          {/* The ticket tag shows as the task's ID, not a chip (PO-1231). */}
+                          {visibleTags(tags).map((t) => {
                             // View mode: chip click → filter nest by tag. Edit mode: X removes.
                             const tagClickable = mode === "view" && !!onTagClick;
                             return (
