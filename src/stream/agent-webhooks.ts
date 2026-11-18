@@ -22,6 +22,7 @@
  * refused where the socket opens.
  */
 import { randomBytes } from "node:crypto";
+import { isBroadcastName } from "../channels/broadcast.js";
 import { isIP } from "node:net";
 import { getDb } from "../db/client.js";
 import { decryptSecret, encryptSecret } from "../shared/secret-box.js";
@@ -47,6 +48,11 @@ export function parseAgentHandle(raw: unknown): string {
     throw new ValidationError(
       "handle is an agent's @name: 1–63 characters, lowercase letters, digits, dots, dashes or underscores.",
     );
+  }
+  // `@channel` / `@here` reach the nest's people (channels/broadcast.ts) and
+  // never wake an agent, so a target under either name could never fire.
+  if (isBroadcastName(h)) {
+    throw new ValidationError(`"${h}" is reserved for reaching everyone in a channel; it can't be an agent's handle.`);
   }
   return h;
 }

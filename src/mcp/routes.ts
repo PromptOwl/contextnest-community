@@ -31,8 +31,11 @@ import {
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
 import { CHANNEL_TOOL_DEFINITIONS, READ_KEY_TOOL_VIEWS, READ_ONLY_KEY_REFUSAL } from "./channel-tools.js";
+import { CHAT_READ_KEY_TOOL_VIEWS, CHAT_TOOL_DEFINITIONS } from "./chat-tools.js";
 import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
+import { MESSAGE_TOOL_DEFINITIONS } from "./message-tools.js";
+import { MEMORY_CHANNEL_TOOLS, MEMORY_TOOL_DEFINITIONS } from "./memory-tools.js";
 import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -79,13 +82,20 @@ function nestToolDefinitions() {
       : TOOL_DEFINITIONS),
     // Channels (PO-1179): their own experimental switch, independent of the
     // workflow plane.
-    ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? [...CHANNEL_TOOL_DEFINITIONS, ...MESSAGE_TOOL_DEFINITIONS] : []),
+    // Team chat C2 (PO-1197): conversations, membership, preferences,
+    // presence — the same switch (TEAM_CHAT_ENABLED, alias above).
+    ...(config.TEAM_CHAT_ENABLED ? CHAT_TOOL_DEFINITIONS : []),
     // My Work (PO-1180): the caller's queue, mentions included. Not behind the
     // channels switch — document-comment mentions work without channels.
     ...MY_WORK_TOOL_DEFINITIONS,
     // Promote a thread to a node (PO-1181): document threads too, so not
     // behind the channels switch.
     ...STREAM_TOOL_DEFINITIONS,
+    // Memory snowball (team chat C6, PO-1199): remember / correct / the
+    // decision ledger always (document threads too); the channel knowledge
+    // view and the watcher follow the channels switch.
+    ...MEMORY_TOOL_DEFINITIONS.filter((t) => config.EXPERIMENTAL_AGENT_STREAM || !MEMORY_CHANNEL_TOOLS.has(t.name)),
   ];
 }
 
@@ -149,7 +159,7 @@ function createMcpServerForNest(
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // A tool that also writes is offered to a read-only key as what that key
     // can do with it: a narrower schema and read-only hints (AC-AX-06).
-    const view = capability === "read" ? READ_KEY_TOOL_VIEWS[tool.name] : undefined;
+    const view = capability === "read" ? (READ_KEY_TOOL_VIEWS[tool.name] ?? CHAT_READ_KEY_TOOL_VIEWS[tool.name]) : undefined;
     // `client` is validated against the engine's own schema in handleToolCall.
     const shape = toolShape(tool.name, view?.schema ?? tool.inputSchema);
 

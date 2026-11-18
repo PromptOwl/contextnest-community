@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SuggestDialog } from "./OrgContribution";
@@ -26,6 +27,7 @@ import {
   tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
+import { visibleTags } from "../lib/ticket";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -87,6 +89,7 @@ import {
   Lock,
   Activity,
   LayoutPanelTop,
+  FileDiff,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -215,6 +218,8 @@ interface DocumentEditorProps {
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
+  /** Open this change in the nest's review pane, on its changes. */
+  onOpenReviewPane?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -265,6 +270,7 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onReviewed,
+  onOpenReviewPane,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -298,6 +304,18 @@ export function DocumentEditor({
   // Which tab the Publish dialog opens on: "links" from Share's Manage, where
   // the link already exists and the job is to change or remove it.
   const [showPublish, setShowPublish] = useState<false | "new" | "links">(false);
+  // The edit actions (Publish, Save draft, Submit) go in the app top bar, after
+  // New document, where the bar shows (md and up). On a phone the top bar is
+  // hidden, so they stay in the sticky bar at the bottom. One place at a time.
+  const [topActionsSlot, setTopActionsSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const mq = window.matchMedia?.("(min-width: 768px)");
+    const pick = () =>
+      setTopActionsSlot(mq?.matches ? document.getElementById("top-bar-doc-actions") : null);
+    pick();
+    mq?.addEventListener("change", pick);
+    return () => mq?.removeEventListener("change", pick);
+  }, []);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
@@ -588,26 +606,6 @@ export function DocumentEditor({
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  // Editing controls (toolbar, Type, Prime) show only while the user works in
-  // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
-  // opened from the page count as inside, or opening one would hide the toolbar.
-  const pageRef = useRef<HTMLDivElement | null>(null);
-  // The top bar counts as inside too: putting the controls away on a press
-  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
-  const topBarRef = useRef<HTMLDivElement | null>(null);
-  const [pageActive, setPageActive] = useState(isNew);
-  useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!pageActive) return;
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
-      if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
-      setPageActive(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    return () => document.removeEventListener("pointerdown", onDown);
-  }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   // Threads whose quoted text isn't in the current document text — the rail
   // labels them "text changed". Computed with the highlights, in the
@@ -1589,7 +1587,7 @@ export function DocumentEditor({
   const baseVersionRef = useRef(baseVersion);
   baseVersionRef.current = baseVersion;
   const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
-  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed" | "refused"> => {
     const run = async () => {
       const snap = initialSnapshotRef.current;
       const otherFieldsDirty =
@@ -1611,6 +1609,13 @@ export function DocumentEditor({
         setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
         return "saved" as const;
       } catch (err) {
+        // The server refused the tags (e.g. a second ticket number, PO-1218):
+        // say why and put the saved set back — saving the document won't help.
+        if ((err as any)?.status === 400) {
+          setTags([...initialSnapshotRef.current.tags]);
+          toast.error((err as Error).message, { id: "tag-added" });
+          return "refused" as const;
+        }
         console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
         return "failed" as const;
       }
@@ -1647,7 +1652,9 @@ export function DocumentEditor({
     setTouched(true);
     // Say whether it's kept, or "added" reads as persisted when it's local.
     void saveTagsAlone(next).then((r) =>
-      r === "failed"
+      r === "refused"
+        ? undefined
+        : r === "failed"
         ? tagSaveFailed()
         : toast.success(
             accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
@@ -2565,7 +2572,6 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
-        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
@@ -2750,6 +2756,19 @@ export function DocumentEditor({
                 >
                   <Pencil className="h-4 w-4 sm:mr-1.5" />
                   <span className="hidden sm:inline">Edit</span>
+                </Button>
+              )}
+              {onOpenReviewPane && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={onOpenReviewPane}
+                  title="See what changed, side by side with the published version"
+                  data-testid="document-editor-review-changes"
+                >
+                  <FileDiff className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">See changes</span>
                 </Button>
               )}
               <ReviewActions
@@ -2981,9 +3000,6 @@ export function DocumentEditor({
             while a long one scrolls under it. 7rem = app header + top bar. */}
         <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
           <div
-            ref={pageRef}
-            onFocusCapture={() => setPageActive(true)}
-            onPointerDownCapture={() => setPageActive(true)}
             className="w-full px-5 py-6 sm:px-10 sm:py-8"
           >
 
@@ -3161,6 +3177,12 @@ export function DocumentEditor({
               thing (Notion-style): a borderless heading that takes the caret.
               Read-only sessions get a plain h1. */}
                 <div>
+                  <div
+                    className={`flex flex-wrap items-end gap-x-6 gap-y-1${
+                      mode === "view" && !isNew ? "" : " border-b border-border pb-1 focus-within:border-primary"
+                    }`}
+                  >
+                  <div className="min-w-[12rem] flex-1">
                   {mode === "view" && !isNew ? (
                     <h1
                       className="text-4xl font-bold leading-tight tracking-tight text-foreground"
@@ -3169,7 +3191,6 @@ export function DocumentEditor({
                       {title || (loading ? "Loading…" : "Untitled")}
                     </h1>
                   ) : (
-                    <>
                       <input
                         id="document-editor-title"
                         ref={titleInputRef}
@@ -3206,10 +3227,56 @@ export function DocumentEditor({
                         aria-label="Title"
                         aria-invalid={touched && !title.trim() ? true : undefined}
                         data-testid="document-editor-title"
-                        className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
+                        className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
                           }`}
                       />
-                      {((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
+                  )}
+                  </div>
+                  {/* Who made it and who touched it last, beside the title.
+                Hidden for docs with no recorded author (old imports). */}
+                  {!isNew && (author || lastEditBy) && (
+                    <div
+                      className="flex shrink-0 flex-col items-end gap-0.5 pb-1 text-right text-xs text-muted-foreground"
+                      data-testid="document-editor-byline"
+                    >
+                    {author && (
+                      <span className="inline-flex items-center gap-1.5">
+                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                      </span>
+                    )}
+                    {/* Last edited by: the human, then the agent the write
+                        named — never the agent alone. Same type as Created by. */}
+                    {lastEditBy && (
+                      <span
+                        className="inline-flex flex-wrap items-center gap-x-1"
+                        data-testid="document-last-edited-by"
+                      >
+                        Last edited by{" "}
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                          {lastEditBy.human}
+                        </span>
+                        {lastEditBy.agent && (
+                          <>
+                            {" "}via{" "}
+                            <span
+                              className="font-medium text-foreground/80"
+                              title={clientTitle(lastEdit?.client)}
+                            >
+                              {lastEditBy.agent}
+                            </span>
+                          </>
+                        )}
+                        {lastEdit?.edited_at && (
+                          <span title={formatServerDate(lastEdit.edited_at)}>
+                            {" "}· {relTime(lastEdit.edited_at)}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    </div>
+                  )}
+                  </div>
+                  {!(mode === "view" && !isNew) && ((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
                         <div className="mt-1 flex items-start justify-between gap-2 text-xs">
                           <span className="text-destructive">
                             {touched && !title.trim() ? "Title is required" : ""}
@@ -3219,8 +3286,6 @@ export function DocumentEditor({
                           </span>
                         </div>
                       )}
-                    </>
-                  )}
                   {/* Rename safety: links referencing this doc by its old title
                 either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
                 still resolves but keeps showing the old name). Compare against
@@ -3429,9 +3494,10 @@ export function DocumentEditor({
                           ))}
                         </datalist>
                       )}
-                      {tags.length > 0 && (
+                      {visibleTags(tags).length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {tags.map((t) => {
+                          {/* The ticket tag shows as the task's ID, not a chip (PO-1231). */}
+                          {visibleTags(tags).map((t) => {
                             // View mode: chip click → filter nest by tag. Edit mode: X removes.
                             const tagClickable = mode === "view" && !!onTagClick;
                             return (
@@ -3590,45 +3656,10 @@ export function DocumentEditor({
                   </div>
                 )}
 
-                {/* People — "Created by" + collaborator chips (version authors ∪
-              document grantees, server-resolved). Hidden entirely for docs
-              with no recorded author (old imports) and no collaborators. */}
-                {!isNew && (author || lastEditBy || collaborators.length > 0) && (
+                {/* Collaborator chips (version authors ∪ document grantees,
+              server-resolved). Created by and Last edited by sit under the title. */}
+                {!isNew && collaborators.length > 0 && (
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
-                    {author && (
-                      <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
-                      </span>
-                    )}
-                    {/* Last edited by: the human, then the agent the write
-                        named — never the agent alone. Same type as Created by. */}
-                    {lastEditBy && (
-                      <span
-                        className="inline-flex flex-wrap items-center gap-x-1"
-                        data-testid="document-last-edited-by"
-                      >
-                        Last edited by{" "}
-                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
-                          {lastEditBy.human}
-                        </span>
-                        {lastEditBy.agent && (
-                          <>
-                            {" "}via{" "}
-                            <span
-                              className="font-medium text-foreground/80"
-                              title={clientTitle(lastEdit?.client)}
-                            >
-                              {lastEditBy.agent}
-                            </span>
-                          </>
-                        )}
-                        {lastEdit?.edited_at && (
-                          <span title={formatServerDate(lastEdit.edited_at)}>
-                            {" "}· {relTime(lastEdit.edited_at)}
-                          </span>
-                        )}
-                      </span>
-                    )}
                     {collaborators.length > 0 && (
                       <span
                         className="inline-flex items-center gap-1.5"
@@ -3765,18 +3796,10 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {/* Held in place (invisible, unfocusable) while idle — like the
-              editor toolbar below — so activating the page doesn't push the
-              body down. */}
                 {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
-                  <div
-                    className={`flex flex-col sm:flex-row gap-4 w-full ${pageActive ? "" : "invisible"}`}
-                    aria-hidden={!pageActive || undefined}
-                    {...(pageActive ? {} : ({ inert: "" } as object))}
-                  >
+                  <div className="flex flex-col sm:flex-row gap-4 w-full">
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
-                        <label className="block text-sm font-medium mb-1">Type</label>
                         {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
@@ -4345,7 +4368,6 @@ export function DocumentEditor({
                             // scroll a long document to its last line on arrival.
                             autofocus={false}
                             variant="page"
-                            toolbarHidden={!pageActive}
                             toolbarEnd={
                               <>
                                 {/* Rich ↔ raw markdown at the editor's own right end, where the
@@ -4523,15 +4545,11 @@ export function DocumentEditor({
             )}
 
           </div>
-          {/* Sticky action bar, edit mode only — Submit / Create·Save sit at the
-            bottom of the document column so they stay in reach at the end of
-            a long body. In view mode Submit and Edit live in the top bar. */}
-          {mode === "edit" && (
-            <div
-              className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
-              data-testid="document-editor-actions-bottom"
-            >
-              {(() => {
+          {/* Edit actions, edit mode only: Submit / Save draft / Publish. In the
+            app top bar on md and up; a sticky bar at the bottom on a phone.
+            In view mode Submit and Edit live in the document's own top bar. */}
+          {mode === "edit" && (() => {
+            const editActions = (() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
                 const showSubmit = !isViewOnly && canSubmitForReview;
                 if (reviewerEditing) {
@@ -4653,9 +4671,23 @@ export function DocumentEditor({
                     )}
                   </>
                 );
-              })()}
-            </div>
-          )}
+            })();
+            return topActionsSlot ? (
+              createPortal(
+                <div className="ml-1 flex items-center gap-1" data-testid="document-editor-actions-top">
+                  {editActions}
+                </div>,
+                topActionsSlot,
+              )
+            ) : (
+              <div
+                className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+                data-testid="document-editor-actions-bottom"
+              >
+                {editActions}
+              </div>
+            );
+          })()}
         </div>
         {/* Right rail — the outline while reading, the comments once they
             are opened. A long outline stacked above the body pushed the

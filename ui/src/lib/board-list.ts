@@ -192,8 +192,8 @@ export type FlatRow =
  *  sections are kept out: a list section exists because something is in it. */
 export function flattenSections(sections: ListSection[], collapsed: ReadonlySet<string>): FlatRow[] {
   const out: FlatRow[] = [];
+  // Empty sections stay, like an empty Board column (PO-1263).
   for (const s of sections) {
-    if (s.nodes.length === 0) continue;
     const isCollapsed = collapsed.has(s.key);
     out.push({ kind: "section", key: s.key, label: s.label, count: s.nodes.length, collapsed: isCollapsed });
     if (isCollapsed) continue;

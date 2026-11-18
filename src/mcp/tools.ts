@@ -148,8 +148,14 @@ import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { PUBLIC_LINK_TOOL_DEFINITIONS, PUBLIC_LINK_TOOL_NAMES, isPublicLinkTool, runPublicLinkTool } from "./public-link-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
+import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMessageTool, runMessageTool } from "./message-tools.js";
+import { messageHitsForDocumentSearch } from "../channels/message-search.js";
+import { isMemoryTool, runMemoryTool } from "./memory-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -498,10 +504,18 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_comments",
   // Channels (PO-1179, experimental): reading a timeline or thread.
   "context_channel_read",
+  // Team chat C2 (PO-1197): the read actions; the write actions of the same
+  // tools are refused inside (chat-tools.ts), and a read-only key is offered
+  // a read-only view of each (CHAT_READ_KEY_TOOL_VIEWS).
+  ...CHAT_READ_TOOL_NAMES,
   // …and listing them (PO-1190, AC-AX-06). The tool also creates and
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
   "context_channels",
+  // Channel messages (PO-1196): the permalink lookup and search read only;
+  // context_message (react, edit, …) writes and is not here.
+  "context_message_read",
+  "context_channel_search",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
@@ -512,6 +526,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_deletion_queue",
   "context_unsynced_list",
   "context_relations",
+  // Memory snowball (team chat C6, PO-1199): the decision ledger and the
+  // channel knowledge view are reads (members only, checked in the service).
+  "context_decisions",
+  "context_channel_knowledge",
   "context_boards",
   "context_board_items",
   "context_fields",
@@ -582,6 +600,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // The channel watcher (team chat C6, PO-1199) is the metacognition agent
+  // with a channel trigger: setting and running it is owner/admin too.
+  "context_channel_watch",
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
@@ -2989,10 +3010,23 @@ async function runTool(
         accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
       }
       const count = accessible.length;
+      // Channel messages that match (PO-1196): the same matcher over the
+      // channels this member can read; [] while channels are off.
+      const messageHits = await messageHitsForDocumentSearch(
+        { userId, userEmail },
+        new Map([[nestId, nestId]]),
+        query,
+        limit,
+      );
+      const messagesText = messageHits?.length
+        ? `\n\nChannel messages matching "${query}" (${messageHits.length}):\n${messageHits
+            .map((m) => `- **${m.actor.label}** in #${m.channel} (${m.created_at}) [thread ${m.thread_id}; message ${m.message_id}]: ${m.excerpt}`)
+            .join("\n")}`
+        : "";
       if (count === 0)
         return {
-          text: `No nodes matched search: "${query}"`,
-          data: { results: [], count },
+          text: `No nodes matched search: "${query}"${messagesText}`,
+          data: { results: [], count, ...(messageHits ? { messages: messageHits } : {}) },
         };
       // Bodies stay gated exactly as before: under stewardship the LLM only
       // ever sees the approved version, and a hit with no approved version
@@ -3022,14 +3056,15 @@ async function runTool(
           ? ` (showing the first ${page.length}; pass \`limit\` for more)`
           : "";
       return {
-        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${webLinkPatternProse(ctx)}`,
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${messagesText}${webLinkPatternProse(ctx)}`,
         // `count` is everything found (like REST); `results` is the page.
         // Bodies are the gated ones the prose is built from. No `score`:
         // this is a term-containment filter with title-first ordering, not
-        // a ranked search.
+        // a ranked search. `messages` are the channel hits (PO-1196).
         data: {
           results: page.map(({ node: n, body }) => summarizeNode(n, body)),
           count,
+          ...(messageHits ? { messages: messageHits } : {}),
         },
       };
     }
@@ -3571,6 +3606,11 @@ async function runTool(
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
+      // A channel or a conversation while the nest's chat is off (C2): the
+      // same answer REST gives, not found.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) {
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
       if (oneThread) {
         const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
         if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
@@ -3687,6 +3727,16 @@ async function runTool(
         const t = await getThread(threadId);
         if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
       }
+      // A direct or group conversation (team chat C2) has no document: a
+      // virtual node, so the same read, posting and thread checks run on it.
+      if (!node && config.TEAM_CHAT_ENABLED && !args.channel && !args.title) {
+        let cid = conversationIdOf(args.id);
+        if (!cid && !args.id && threadId) {
+          const t = await getThread(threadId);
+          if (t && t.nestId === nestId && isConversationId(t.nodeId)) cid = t.nodeId;
+        }
+        if (cid) node = { id: cid, frontmatter: { title: "Conversation" } } as unknown as ContextNode;
+      }
       const named = args.channel || args.title || args.id;
       const notFound = async () =>
         toolError(
@@ -3704,15 +3754,17 @@ async function runTool(
         // title — otherwise the refusal confirms what the caller guessed.
         return notFound();
       }
+      // A channel or a conversation while the nest's chat is off (C2): not found, as on REST.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) return notFound();
       const label = node.frontmatter.title || node.id;
 
       // A channel takes posts — and resolves — from people added to the nest
       // only; the same rule the REST comment routes apply.
-      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail, isResolve ? undefined : body);
       if (channelRefusal) {
         return toolError(
           channelRefusal.error,
-          channelRefusal.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+          channelRefusal.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
         );
       }
 
@@ -5281,6 +5333,14 @@ async function runTool(
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
       }
+      // Channel messages (PO-1196): same switch, re-checked in runMessageTool.
+      if (isMessageTool(toolName)) {
+        return runMessageTool(toolName, args, ctx);
+      }
+      // Team chat C2 (PO-1197): registered while TEAM_CHAT_ENABLED is on.
+      if (isChatTool(toolName)) {
+        return runChatTool(toolName, args, ctx);
+      }
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {
         return runMyWorkTool(toolName, args, ctx);
@@ -5291,6 +5351,11 @@ async function runTool(
       }
       if (isPublicLinkTool(toolName)) {
         return runPublicLinkTool(toolName, args, ctx);
+      }
+      // Memory snowball (team chat C6): remember / correct / decisions always;
+      // the channel tools re-check the switch.
+      if (isMemoryTool(toolName)) {
+        return runMemoryTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

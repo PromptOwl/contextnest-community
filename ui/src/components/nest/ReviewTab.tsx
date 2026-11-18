@@ -16,6 +16,7 @@ import { FEED_PAGE, useFeedComments } from "./feed-query";
 import { ReviewQueue, ReviewPane, ReasonDialog, type ReviewRequest } from "../governance";
 import { displayedChangeOrder, nextReviewNodeId } from "../../lib/review-pane";
 import { AgentActivityPanel } from "./AgentActivityPanel";
+import { ExternalEditsTab } from "./ExternalEditsTab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -44,6 +45,10 @@ interface Props {
   /** Approve / send back one change; throws so the pane can show why. */
   onApproveReview: (nodeId: string, note?: string) => Promise<void>;
   onRequestChanges: (nodeId: string, note: string) => Promise<void>;
+  /** Decline for good; omit to hide Reject in the pane. */
+  onReject?: (nodeId: string, note: string) => Promise<void>;
+  /** Title for an external edit's document id. */
+  titleOf?: (nodeId: string) => string | undefined;
   /** Lower-cased email of the caller. */
   currentUser?: string;
   /** The caller can edit documents here — gates the pane's Edit draft. */
@@ -71,15 +76,17 @@ export function ReviewTab({
   onOpenReview,
   onApproveReview,
   onRequestChanges,
+  onReject,
   currentUser,
   canEditDocs,
   primeTags,
   alwaysIncludeTags = [],
   onResolveDeletion,
   onWithdrawSubmission,
+  titleOf,
 }: Props) {
   const qc = useQueryClient();
-  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments" | "agents">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments" | "agents" | "external">("all");
   // First page from the cache; later pages accumulate here. A write that
   // drops keys.feed re-reads page one and resets the rest.
   const firstPage = useFeedComments(nestId, enabled);
@@ -175,6 +182,7 @@ export function ReviewTab({
             // Authoritative server count — the loaded array is paged.
             { key: "comments", label: `Comments (${feedCommentsTotal})` },
             { key: "agents", label: "Agent activity" },
+            { key: "external", label: "External edits" },
           ] as const
         ).map((chip) => (
           <button
@@ -193,6 +201,20 @@ export function ReviewTab({
       </div>
   );
 
+  if (feedFilter === "external") {
+    return (
+      <>
+        {chips}
+        <ExternalEditsTab
+          nestId={nestId}
+          enabled={enabled}
+          onOpenDocument={(id) => onOpenDocument(id)}
+          titleOf={titleOf ?? (() => undefined)}
+        />
+      </>
+    );
+  }
+
   if (feedFilter === "agents") {
     return (
       <>
@@ -202,13 +224,20 @@ export function ReviewTab({
     );
   }
 
+  // Your own submissions you cannot approve yourself. When self-approve is on
+  // they are already in the actionable queue, and a second card for the same
+  // change (saying you "can't approve your own work" beside an Approve button)
+  // is exactly the contradiction this avoids.
+  const blockedOwnSubmissions = myPendingSubmissions.filter(
+    (r) => !reviewableQueue.some((q) => q.nodeId === r.nodeId),
+  );
   const queueColumn = (
     <>
       {chips}
       {/* The caller's own submissions, kept out of the actionable queue
           by separation-of-duties. Shown read-only so "submit for review"
           visibly lands somewhere. */}
-      {feedFilter !== "comments" && myPendingSubmissions.length > 0 && (
+      {feedFilter !== "comments" && blockedOwnSubmissions.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-lg flex items-center gap-2">
@@ -221,7 +250,7 @@ export function ReviewTab({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            {myPendingSubmissions.map((r) => (
+            {blockedOwnSubmissions.map((r) => (
               <div
                 key={r.id}
                 className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50 ${openReviewId === r.nodeId ? "border-primary bg-muted/60" : ""}`}
@@ -518,6 +547,11 @@ export function ReviewTab({
           }
           onRequestChanges={(note) =>
             decideAndAdvance(openRequest.nodeId, () => onRequestChanges(openRequest.nodeId, note))
+          }
+          onReject={
+            onReject
+              ? (note) => decideAndAdvance(openRequest.nodeId, () => onReject(openRequest.nodeId, note))
+              : undefined
           }
           onEditDraft={() => onOpenDocument(openRequest.nodeId)}
           onOpenDocument={(id) => onOpenDocument(id)}

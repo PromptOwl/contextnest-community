@@ -82,6 +82,8 @@ import {
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
+import { isConversationDoc } from "../chat/containers.js";
+import { normalizeTag as normalizeChatTag } from "../governance/tag-index-service.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -1921,6 +1923,12 @@ export interface WriteOptions {
    */
   expectHead?: number;
   /**
+   * The chat services (src/chat) changing a container's membership tags
+   * (#private, agent:<handle>) on a channel or conversation node. Anyone
+   * else editing those tags is refused: they are the node's access rule.
+   */
+  chatMembership?: boolean;
+  /**
    * Never publish this write, whatever the nest's posture (ungoverned,
    * prime-only, self-approve, creator-reviews): it lands as a draft for a
    * reviewer. A metacognition agent's proposals use it — an agent's change is
@@ -2169,7 +2177,10 @@ function enforceTaskTagRules(
   const priorTicket = ticketTagOf(priorTags);
   const nextTicket = ticketTagOf(tags);
   if (priorTicket) {
-    if (nextTicket && nextTicket !== priorTicket) {
+    // Any other ticket: tag, not just the first — an added one beside the
+    // number must be refused, not silently dropped (PO-1218).
+    const other = tags.some((t) => tagNamespace(bareTag(t)) === TICKET_NAMESPACE && bareTag(t) !== priorTicket);
+    if (other) {
       throw new ValidationError(
         `This task is ${priorTicket.slice(TICKET_NAMESPACE.length + 1).toUpperCase()}. Ticket numbers are assigned once and can't be changed.`,
       );
@@ -2985,6 +2996,11 @@ function normalizeDescription(value: unknown): string {
  * here — the one choke point REST and MCP share — with the way that works.
  */
 function channelRetireRefusal(node: { id: string; frontmatter?: { tags?: unknown } | null }, doing: string): ConflictError | null {
+  // A conversation (team chat C2) is a node whose threads are its messages
+  // and whose shares are its members: the same rule, no archive to offer.
+  if (isConversationDoc(node)) {
+    return new ConflictError(`${node.id} is a conversation, so ${doing} would lose its messages. Leave it instead (POST /nests/:id/conversations/<id>/leave).`);
+  }
   if (!isChannelDoc(node)) return null;
   const name = node.id.split("/").pop();
   return new ConflictError(
@@ -3095,6 +3111,20 @@ export async function updateNode(
         if (!hasTag({ frontmatter: { tags: nextTags } }, CHANNEL_TAG)) {
           const refusal = channelRetireRefusal(node, "removing its #channel tag");
           if (refusal) throw refusal;
+        }
+        // A container's membership tags (team chat C2) are its access rule:
+        // #private and agent:<handle> change through the chat routes only
+        // (make private/public: owner/admin; invite: members and writers).
+        if (!opts.chatMembership && (isChannelDoc(node) || isConversationDoc(node))) {
+          const gated = (tags: string[]) =>
+            new Set(tags.map(normalizeChatTag).filter((t) => t === "private" || t.startsWith("agent:")));
+          const before = gated(priorTags);
+          const after = gated(nextTags);
+          if (before.size !== after.size || [...before].some((t) => !after.has(t))) {
+            throw new ConflictError(
+              `${node.id} is a chat container: its #private and agent:<handle> tags are its member list and change through the chat routes (POST …/channels/:name/private, …/members), not by editing tags.`,
+            );
+          }
         }
         if (node.frontmatter.type === TASK_NODE_TYPE) {
           nextTags = enforceTaskTagRules(
@@ -3611,6 +3641,10 @@ export const NODE_KEYED_TABLES = [
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
   ["node_pins", "node_id"],
+  // Reactions on a channel message (PO-1196, migration 097) are keyed to the
+  // channel node; a channel can't be moved or deleted through the document
+  // routes today (archive is the way), but the rule is the same as the pins'.
+  ["message_reactions", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

@@ -31,6 +31,14 @@ const READ_ONLY = [
   "context_export",
   "context_comments",
   "context_channel_read",
+  // Channel messages (PO-1196): the permalink lookup and search.
+  "context_message_read",
+  "context_channel_search",
+  // Team chat C2 (PO-1197): reading a conversation.
+  "context_conversation_read",
+  // Memory snowball (team chat C6, PO-1199): the ledger and the knowledge view are reads.
+  "context_decisions",
+  "context_channel_knowledge",
   // My Work (PO-1180): the caller's own queue.
   "context_my_work",
   "context_relations",
@@ -116,6 +124,17 @@ const DESTRUCTIVE = [
   "context_agent_run_close",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Channel messages (PO-1196): edit replaces text, delete tombstones.
+  "context_message",
+  // Team chat C2 (PO-1197): leave removes a membership, set_private changes
+  // who reads a channel, set replaces a preference.
+  "context_conversations",
+  "context_channel_members",
+  "context_chat_preferences",
+  // Memory snowball (team chat C6): a correction drafts a new version of a node;
+  // the watch setting replaces which agent watches a channel and runs it.
+  "context_correct",
+  "context_channel_watch",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -162,6 +181,10 @@ const OPEN_WORLD = [
   "context_promote_thread",
   // Points a nest's mention events at an outside URL.
   "context_agent_webhooks",
+  // Memory snowball (team chat C6): each can create or change a node a docs site may serve.
+  "context_remember",
+  "context_correct",
+  "context_channel_watch",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -218,10 +241,16 @@ async function allDefinedNames(): Promise<string[]> {
   const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { MESSAGE_TOOL_DEFINITIONS } = await import("../src/mcp/message-tools.js");
+  const { CHAT_TOOL_DEFINITIONS } = await import("../src/mcp/chat-tools.js");
+  const { MEMORY_TOOL_DEFINITIONS } = await import("../src/mcp/memory-tools.js");
   const all = [
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...MESSAGE_TOOL_DEFINITIONS,
+    ...CHAT_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,
+    ...MEMORY_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,

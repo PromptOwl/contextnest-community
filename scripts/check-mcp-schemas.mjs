@@ -103,7 +103,23 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
 //   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
 //   that tool's schema, not a new one.
-const BASELINE = 111;
+//   111->114 context_message_read, context_message, context_channel_search (PO-1196, src/mcp/message-tools.ts) —
+//   twins of the channel message routes (/channels/:name/messages/:id/…, /messages/:id, /channels/search);
+//   reactions, edit history, pins, saved items and the LIKE search are Community-only tables over the
+//   comment-thread store, behind EXPERIMENTAL_AGENT_STREAM, so the engine has no operation to import a
+//   descriptor from. Pins ride on context_channels { action: "pins" } and saved items on context_my_work
+//   { sections: ["saved"] } (no new literal for either).
+//   114->119 team chat C2 (PO-1197, src/mcp/chat-tools.ts): context_conversations, context_conversation_read,
+//   context_channel_members, context_chat_preferences, context_presence — twins of /nests/:id/conversations,
+//   the channel membership routes, /me/chat/preferences and /nests/:id/chat/presence; Community-only: conversations are
+//   nodes with grants and tags, levels are stream_marks rows, presence is in memory; the engine models none, so no
+//   engine op exists. No tool for the SSE stream (an MCP client polls `since`).
+//   119->124 team chat C6 memory snowball (PO-1199, src/mcp/memory-tools.ts): context_remember, context_correct,
+//   context_decisions, context_channel_knowledge, context_channel_watch — twins of POST /threads/:id/remember,
+//   POST /threads/:id/correct, GET /decisions, GET /channels/:name/knowledge and GET/PUT /channels/:name/watch;
+//   the comment-thread store, the review queue and the metacognition agent are Community-only, so the engine
+//   has no operation to import a descriptor from.
+const BASELINE = 124;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

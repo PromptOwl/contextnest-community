@@ -1151,7 +1151,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <CardDescription>
                     Every email, Slack and Teams post, webhook, inbox
                     notification and agent comment this server sends is logged
-                    for superadmins (Admin → Message log). Passwords, sign-in
+                    for superadmins (Workspace settings → Message log). Passwords, sign-in
                     links, keys and webhook URLs are redacted before storage.
                   </CardDescription>
                 </CardHeader>

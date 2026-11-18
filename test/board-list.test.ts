@@ -89,10 +89,11 @@ describe("sections and windowing", () => {
     { key: "done", label: "Done", nodes: [node("c")] },
   ];
 
-  it("flattens sections, drops empty ones and hides collapsed rows", () => {
+  it("flattens sections, keeps empty ones (PO-1263) and hides collapsed rows", () => {
     const flat = flattenSections(sections, new Set(["done"]));
-    expect(flat.map((r) => (r.kind === "section" ? `#${r.key}` : r.node.id))).toEqual(["#todo", "a", "b", "#done"]);
-    expect(flat[3]).toMatchObject({ kind: "section", collapsed: true, count: 1 });
+    expect(flat.map((r) => (r.kind === "section" ? `#${r.key}` : r.node.id))).toEqual(["#todo", "a", "b", "#empty", "#done"]);
+    expect(flat[3]).toMatchObject({ kind: "section", count: 0 });
+    expect(flat[4]).toMatchObject({ kind: "section", collapsed: true, count: 1 });
   });
 
   it("renders only the rows near the viewport of a large list", () => {

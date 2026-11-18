@@ -6,6 +6,6 @@ export const meta: PageMeta = {
   label: "Activity trace",
   icon: ScrollText,
   order: 22,
-  group: "admin",
+  group: "settings",
   visible: ({ isAdmin }) => isAdmin,
 };

@@ -122,6 +122,8 @@ export const HISTORICAL_MIGRATIONS = [
   "094_annotation_comment_client",
   "095_agent_webhooks",
   "096_stream_marks",
+  "097_channel_message_actions",
+  "098_team_chat_c2",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1373,6 +1375,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       )
   `);
 
+  // review_requests.resolution_kind: "changes" or "reject" (NULL reads as changes).
+  await db.exec("ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS resolution_kind TEXT");
+
   // Migration 084 parity: first-run onboarding (PO-1185).
   await db.exec(onboardingDdl(NOW));
   await db.exec("ALTER TABLE surface_oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT");
@@ -1475,6 +1480,59 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;
     ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
+  `);
+
+  // Migration 097 parity: channel message actions (PO-1196) — message pins and
+  // saved messages on node_pins, tombstone columns on a message, and the two
+  // new tables (reactions, edit history). See migrations.ts.
+  await db.exec(`
+    ALTER TABLE node_pins ADD COLUMN IF NOT EXISTS message_id TEXT;
+    ALTER TABLE node_pins ADD COLUMN IF NOT EXISTS thread_id TEXT;
+    DROP INDEX IF EXISTS idx_node_pins_editorial;
+    DROP INDEX IF EXISTS idx_node_pins_personal;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+      ON node_pins(nest_id, node_id) WHERE scope = 'nest' AND message_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+      ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user' AND message_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_editorial
+      ON node_pins(nest_id, message_id) WHERE scope = 'nest' AND message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_personal
+      ON node_pins(nest_id, message_id, user_id) WHERE scope = 'user' AND message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_node_pins_message ON node_pins(message_id) WHERE message_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      author TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (comment_id, emoji, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_reactions_user ON message_reactions(user_id, created_at);
+    CREATE TABLE IF NOT EXISTS message_edits (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      edited_by TEXT NOT NULL,
+      client_json TEXT,
+      replaced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS edited_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+  `);
+
+  // Migration 098 parity: the team chat harness, slice C2 (PO-1197) — the
+  // nest's own chat switch. Conversations, members, the private marker and
+  // notification levels live in existing tables (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS chat_enabled INTEGER NOT NULL DEFAULT 1;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
