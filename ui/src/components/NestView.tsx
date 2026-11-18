@@ -34,6 +34,7 @@ export { NodeTypeIcon } from "./nest/NodeTypeIcon";
 import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
 import { groupNodesByFolder, queueBreakdown } from "@/lib/nest-overview";
+import { nestTabFromParam } from "@/lib/nest-tabs";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { PushConfirmationModal } from "./PushConfirmationModal";
@@ -53,7 +54,6 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
-import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
@@ -463,14 +463,13 @@ export function NestView({
   const [folderFilter, setFolderFilter] = useState<string | null>(
     initialFolder ?? null,
   );
-  // A folder breadcrumb or tag chip click arrives pre-scoped, and both filtered
-  // lists live on Documents — Overview would hide the scope entirely.
+  // Documents is the home tab. A folder breadcrumb or tag chip click arrives
+  // pre-scoped and lands there too.
   const [activeTab, setActiveTabState] = useState(
-    initialTab ??
-    (initialFolder || initialTags?.length ? "documents" : "overview"),
+    nestTabFromParam(initialTab) ?? "documents",
   );
-  // Wrapper so every tab change — the tab strip, and the Overview folder
-  // clicks that jump to Documents — mirrors into ?tab= via App.
+  // Wrapper so every tab change — the tab strip, and the folder clicks that
+  // jump to Documents — mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     setActiveTabState(tab);
     if (tab !== "review" && openReviewId) setOpenReviewId(null);
@@ -899,22 +898,23 @@ export function NestView({
   // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
   // nest they only read, Review Queue while read-only). Radix would render an
   // empty content area against a value with no trigger, so fall back to
-  // overview once the permission flags have resolved.
+  // documents once the permission flags have resolved.
+  // Stewards live in the Collaborators tab, so the steward roster is why that
+  // tab shows for someone who can govern but not share.
+  const showStewards = stewardshipEnabled && canManageGovernance;
   const tabVisible: Record<string, boolean> = {
-    overview: true,
     documents: true,
     instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
     "external-edits": !isReadOnly,
-    stewards: stewardshipEnabled && canManageGovernance,
-    collaborators: canManage || collabCanWrite,
+    collaborators: canManage || collabCanWrite || showStewards,
     settings: !grantOnly,
     activity: canManageGovernance,
     // Experimental document stream, pinned to this nest.
     stream: docStreamEnabled && !isReaderView,
   };
   useEffect(() => {
-    if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
+    if (!initialLoad && !tabVisible[activeTab]) setActiveTab("documents");
   }, [initialLoad, activeTab, tabVisible[activeTab]]);
   // Deep link from a document: open settings only after the first load, so the
   // dialog never seeds itself from the pre-load defaults (stewardship "off").
@@ -1194,8 +1194,6 @@ export function NestView({
   useEffect(() => {
     if (newDocRequest) setImportMenuOpen(true);
   }, [newDocRequest]);
-  // Folder picked for deletion from the Overview index.
-  const [overviewDeleteFolder, setOverviewDeleteFolder] = useState<FolderDeleteTarget | null>(null);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
@@ -1684,7 +1682,6 @@ export function NestView({
             rule. */}
         <div className="flex flex-wrap items-end gap-x-2 gap-y-3 mb-5 min-w-0 border-b">
           <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
-            <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
             <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
             {/* The nest's CONTEXT.md — what every agent reads first. */}
             {!grantOnly && (
@@ -1704,17 +1701,15 @@ export function NestView({
                 )}
               </TabsTrigger>
             )}
-            {/* Steward roster is admin-only (list + manage), and hidden when
-              the admin is viewing a real user's nest. */}
-            {stewardshipEnabled && canManageGovernance && (
-              <TabsTrigger value="stewards" className={NEST_TAB}>Stewards</TabsTrigger>
-            )}
             {/* Collaborators — plain access sharing, independent of
-              stewardship. Owner/admin manage the full roster; write
-              collaborators can invite (escalation-capped server-side), so
-              they see the tab too. The roster controls cap themselves by the
-              caller's permission (see CollaboratorManager). */}
-            {(canManage || collabCanWrite) && (
+              stewardship, with the steward roster below it. Owner/admin manage
+              the full roster; write collaborators can invite
+              (escalation-capped server-side), so they see the tab too. The
+              roster controls cap themselves by the caller's permission (see
+              CollaboratorManager). The steward roster is admin-only (list +
+              manage), and hidden when the admin is viewing a real user's
+              nest. */}
+            {(canManage || collabCanWrite || showStewards) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
             {/* Custom fields — readable by everyone on the nest (they explain
@@ -1868,15 +1863,16 @@ export function NestView({
           </div>
         )}
 
-        {/* Overview — the nest's index/landing: stat tiles, recently-edited
-            rows, and a grouped table-of-contents grid so opening a nest
-            presents an index rather than just the flat node list. */}
-        <TabsContent value="overview" className="space-y-4">
+        <TabsContent value="documents" className="space-y-4">
           {/* An org contributor's way in (CU-wdqcq05rz6); renders nothing for
               anyone else. */}
           <OrgContributorPanel nestId={nestId} />
-          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+          {/* The nest's description and facts line — or, for a nest with
+              nothing in it yet, the ways to start one. Contents are the
+              Documents list right below. */}
+          <Suspense fallback={null}>
             <OverviewTab
+              lede
               initialLoad={!shellReady || !censusSettled}
               stats={stats}
               recentlyEdited={recentlyEdited}
@@ -1897,28 +1893,8 @@ export function NestView({
               onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
               // Same gate as the header's Add with AI button.
               onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
-              // Same gate as the Documents tree's folder trash icon.
-              onDeleteFolder={!isReadOnly && (canManage || canEditDocs) ? setOverviewDeleteFolder : undefined}
             />
           </Suspense>
-          {overviewDeleteFolder && (
-            <FolderDeleteDialog
-              nestId={nestId}
-              folder={overviewDeleteFolder}
-              canManage={canManage}
-              onClose={() => setOverviewDeleteFolder(null)}
-              onDone={() => {
-                // Don't leave Documents filtered to a folder that's gone.
-                const gone = overviewDeleteFolder.path;
-                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
-                  setFolderFilter(null);
-                fetchData();
-              }}
-            />
-          )}
-        </TabsContent>
-
-        <TabsContent value="documents" className="space-y-4">
           {/* Experimental document pins — renders nothing while the switch is
               off or the nest has no pins the caller can read. */}
           <PinnedStrip nestId={nestId} onOpenDocument={(id) => onOpenDocument(id)} />
@@ -2014,21 +1990,6 @@ export function NestView({
             />
           </Suspense>
         </TabsContent>
-
-        {stewardshipEnabled && canManageGovernance && (
-          <TabsContent value="stewards" className="space-y-4">
-            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-              <StewardsTab
-                nestId={nestId}
-                canManage={canManageGovernance && !caps.isReadOnly}
-                currentUserEmail={currentEmail}
-                onAssign={() => setShowAssignSteward(true)}
-                onRemove={setRemoveStewardId}
-                onEditRole={setEditingSteward}
-              />
-            </Suspense>
-          </TabsContent>
-        )}
 
         {!grantOnly && (
           <TabsContent value="instructions" className="space-y-4">
@@ -2139,8 +2100,8 @@ export function NestView({
           </TabsContent>
         )}
 
-        {(canManage || collabCanWrite) && (
-          <TabsContent value="collaborators" className="space-y-4">
+        {(canManage || collabCanWrite || showStewards) && (
+          <TabsContent value="collaborators" className="space-y-6">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
               <CollaboratorsTab
                 nestId={nestId}
@@ -2152,8 +2113,27 @@ export function NestView({
                 callerPermission={permission ?? undefined}
                 onOpenSettings={() => setShowSettings(true)}
                 onChanged={fetchData}
+                showAccess={canManage || collabCanWrite}
               />
             </Suspense>
+            {/* Who governs what. Same roster the Stewards tab used to hold,
+                kept apart from access because sharing a nest does not make
+                anyone a steward. */}
+            {showStewards && (
+              <section aria-labelledby="nest-stewards-heading" className="space-y-4" data-testid="nest-stewards-section">
+                <h2 id="nest-stewards-heading" className="sr-only">Stewards</h2>
+                <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                  <StewardsTab
+                    nestId={nestId}
+                    canManage={canManageGovernance && !caps.isReadOnly}
+                    currentUserEmail={currentEmail}
+                    onAssign={() => setShowAssignSteward(true)}
+                    onRemove={setRemoveStewardId}
+                    onEditRole={setEditingSteward}
+                  />
+                </Suspense>
+              </section>
+            )}
           </TabsContent>
         )}
       </Tabs>

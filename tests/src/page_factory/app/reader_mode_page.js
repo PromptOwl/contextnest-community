@@ -29,7 +29,7 @@ class ReaderModePage {
 
     // ── Nest page (the full view) ──────────────────────────────────────────
     this.backToNests = page.getByTitle('Back to nests');
-    this.overviewTab = page.getByRole('tab', { name: 'Overview', exact: true });
+    this.overviewTab = page.getByRole('tab', { name: 'Documents', exact: true });
     this.documentsTab = page.getByRole('tab', { name: 'Documents', exact: true });
     this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
     this.noAccess = page.getByText(/doesn.t exist or you don.t have access/);

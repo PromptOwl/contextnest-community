@@ -15,7 +15,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
+  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, ChevronDown, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
@@ -27,9 +27,10 @@ import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
 import { MyWorkReviewPane } from "../../../components/MyWorkReviewPane";
-import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
 import { MentionRows } from "../../../components/my-work/MentionRows";
+import { AssignedTasks } from "../../../components/my-work/AssignedTasks";
+import { openTasks, type TaskStatusFilter } from "../../../lib/my-work-tasks";
 
 export default function MyWorkPage() {
   const { openNest: onSelectNest, openReview: onOpenReview, openChannel, goBack, initialReview } = useAppNav();
@@ -87,8 +88,12 @@ export default function MyWorkPage() {
   // discarding them.
   const [notificationsExpanded, setNotificationsExpanded] = useState(false);
   const qc = useQueryClient();
-  // One filter row for everything waiting on you, and the change open beside it.
-  const [chip, setChip] = useState<"all" | "reviews" | "tasks" | "notifications" | "requests" | "waiting">("all");
+  // "Waiting on others" needs nothing from you, so it starts folded.
+  const [waitingOpen, setWaitingOpen] = useState(false);
+  // Finished tasks load only when the Tasks filter asks for Done or All.
+  const [withDone, setWithDone] = useState(false);
+  const [loadingDone, setLoadingDone] = useState(false);
+  // The change open beside the list.
   const [openRev, setOpenRev] = useState<{ nestId: string; nodeId: string } | null>(initialReview ?? null);
   // A new change handed in while the page is open (See changes, an old link).
   useEffect(() => {
@@ -103,7 +108,7 @@ export default function MyWorkPage() {
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
-      const next = await qc.fetchQuery(reads.myWork({ offset }));
+      const next = await qc.fetchQuery(reads.myWork({ offset, doneTasks: withDone || undefined }));
       setWork((prev) => ({
         items: next.items,
         waiting: next.waiting,
@@ -183,6 +188,22 @@ export default function MyWorkPage() {
     }
   };
 
+  // Done / All asks the server for finished tasks once; Open needs nothing
+  // new (the list filters client-side from then on).
+  const onTaskStatusChange = async (status: TaskStatusFilter) => {
+    if (status === "open" || withDone) return;
+    setLoadingDone(true);
+    try {
+      const next = await qc.fetchQuery(reads.myWork({ doneTasks: true }));
+      setWork((prev) => ({ ...prev, assigned: next.assigned ?? prev.assigned }));
+      setWithDone(true);
+    } catch (e: any) {
+      toast.error(e?.message || "Could not load finished tasks");
+    } finally {
+      setLoadingDone(false);
+    }
+  };
+
   // First page on mount, and again whenever the signed-in user changes (in
   // open mode the page stays mounted across login). Best-effort: a failed
   // read shows the empty inbox, not an error.
@@ -211,12 +232,8 @@ export default function MyWorkPage() {
 
   const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
-  const listItems =
-    chip === "reviews" ? reviewItems : chip === "requests" ? requestItems : [...reviewItems, ...requestItems];
-  const showTasks = chip === "all" || chip === "tasks";
-  const showNotes = chip === "all" || chip === "notifications";
-  const showList = chip === "all" || chip === "reviews" || chip === "requests";
-  const showWaiting = chip === "all" || chip === "waiting";
+  const listItems = [...reviewItems, ...requestItems];
+  const openTaskCount = openTasks(work.assigned).length;
   // After a decision in the pane: drop the row, then move on to the next review.
   const afterDecision = () => {
     if (!openRev) return;
@@ -447,10 +464,24 @@ export default function MyWorkPage() {
           )
         }
       />
+      {/* One line says what is waiting; the nest filter narrows everything below. */}
       <div
-        className="flex flex-wrap items-center gap-1.5"
+        className="flex flex-wrap items-center gap-x-3 gap-y-2"
         data-testid="my-work-filter-chips"
       >
+        {!workLoading && (
+          <p className="text-sm text-muted-foreground" data-testid="my-work-summary">
+            {[
+              [work.items.length, "approval"],
+              [openTaskCount, "open task"],
+              [work.mentions_pagination?.total ?? work.mentions?.length ?? 0, "mention"],
+              [work.notifications?.length ?? 0, "notification"],
+            ]
+              .filter(([n]) => (n as number) > 0)
+              .map(([n, label]) => `${n} ${label}${n === 1 ? "" : "s"}`)
+              .join(" · ") || "Nothing waiting on you"}
+          </p>
+        )}
         {nestOptions.length > 1 && (
           <select
             value={nestFilter}
@@ -460,7 +491,7 @@ export default function MyWorkPage() {
               setWorkSelected(new Set());
             }}
             aria-label="Filter by nest"
-            className="mr-1 h-7 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
+            className="ml-auto h-7 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
             data-testid="my-work-nest-filter"
           >
             <option value="all">All nests</option>
@@ -471,171 +502,26 @@ export default function MyWorkPage() {
             ))}
           </select>
         )}
-        {(
-          [
-            { key: "all", label: "All" },
-            { key: "reviews", label: `Reviews (${reviewItems.length})` },
-            { key: "tasks", label: `Tasks (${work.assigned?.length ?? 0})` },
-            { key: "notifications", label: `Notifications (${work.notifications?.length ?? 0})` },
-            { key: "requests", label: `Requests (${requestItems.length})` },
-            { key: "waiting", label: `Waiting on others (${work.waiting.length})` },
-          ] as const
-        ).map((c) => (
-          <button
-            key={c.key}
-            type="button"
-            onClick={() => setChip(c.key)}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-              chip === c.key
-                ? "border-primary bg-primary text-primary-foreground"
-                : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-            }`}
-            data-testid={`my-work-chip-${c.key}`}
-          >
-            {c.label}
-          </button>
-        ))}
       </div>
       <div className={openRev ? "grid gap-6 lg:grid-cols-[minmax(300px,420px)_minmax(0,1fr)]" : undefined}>
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
           <div className="space-y-5">
-            {/* Board cards assigned to you, across nests — Linear's "My
-                issues". Soonest due first; click opens the card. */}
-            {showTasks && (work.assigned?.length ?? 0) > 0 && (
-              <div className="rounded-lg border">
-                <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
-                  Assigned to you
-                  <span className="text-xs text-muted-foreground">({work.assigned!.length})</span>
-                </div>
-                <div className="divide-y border-t">
-                  {work.assigned!.map((a) => (
-                    <button
-                      key={`${a.nest_id}:${a.node_id}`}
-                      type="button"
-                      onClick={() => onOpenReview(a.nest_id, a.nest_name, a.node_id)}
-                      className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-muted/50"
-                    >
-                      <PriorityIcon priority={a.priority ?? undefined} />
-                      <span className="min-w-0 flex-1 truncate">{a.title}</span>
-                      <BlockedBadge count={a.open_blockers ?? 0} />
-                      {a.due && (
-                        <DueChip due={a.due} today={localToday()} editable={false} onChange={() => {}} />
-                      )}
-                      <span className="shrink-0 text-xs text-muted-foreground">{a.nest_name}</span>
-                    </button>
-                  ))}
-                </div>
+            {/* Approvals — what a reviewer has to decide now. First on the page,
+                so it is never pushed below a long task list. */}
+            <section aria-labelledby="my-work-approvals-heading" data-testid="my-work-approvals" className="space-y-2">
+              <div className="flex items-center gap-2">
+                <h3 id="my-work-approvals-heading" className="text-sm font-medium">
+                  Approvals
+                </h3>
+                {listItems.length > 0 && (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                    {work.pagination?.total ?? listItems.length}
+                  </span>
+                )}
               </div>
-            )}
-            {/* Open threads that @mention you, in channels and on documents,
-                waiting on your reply (PO-1180). Reply, resolve or mark done
-                and the row goes. Newest first; click jumps to the thread. */}
-            <MentionRows
-              mentions={chip === "all" ? (work.mentions ?? []) : []}
-              viewer={adminStatus?.me ?? null}
-              pagination={work.mentions_pagination}
-              loading={loadingMentions}
-              busyThread={doneThread}
-              onOpen={openMention}
-              onDone={markMentionDone}
-              onPage={goToMentionsPage}
-            />
-            <div>
-              {showNotes && (work.notifications?.length ?? 0) > 0 && (
-                <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
-                  <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
-                    <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
-                    <span className="text-xs text-muted-foreground">
-                      ({work.notifications!.length})
-                    </span>
-                    <div className="flex-1" />
-                    <button
-                      type="button"
-                      className="text-xs text-primary hover:underline"
-                      onClick={async () => {
-                        await api.markNotificationsRead("all");
-                        setWork((prev) => ({ ...prev, notifications: [] }));
-                      }}
-                    >
-                      Mark all read
-                    </button>
-                  </div>
-                  <div
-                    className={cn(
-                      "divide-y border-t",
-                      notificationsExpanded && "max-h-80 overflow-y-auto",
-                    )}
-                  >
-                    {visibleNotifications(
-                      work.notifications!,
-                      notificationsExpanded,
-                    ).map((n) => (
-                      <div
-                        key={n.id}
-                        className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => openNotification(n)}
-                          className="flex-1 flex items-center gap-2 text-left"
-                        >
-                          <span className="flex-1">{n.message}</span>
-                          <span className="text-muted-foreground shrink-0">
-                            {formatServerDate(n.created_at)}
-                          </span>
-                        </button>
-                        {/* Per-row dismiss: "Mark all read" alone forces an
-                            all-or-nothing triage (CU-wdqcq007pu). */}
-                        <button
-                          type="button"
-                          title="Mark as read"
-                          aria-label="Mark as read"
-                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
-                          onClick={async () => {
-                            try {
-                              await api.markNotificationsRead([n.id]);
-                              setWork((prev) => ({
-                                ...prev,
-                                notifications: dismissNotification(
-                                  prev.notifications ?? [],
-                                  n.id,
-                                ),
-                              }));
-                            } catch (err: any) {
-                              // Same feedback the row's siblings give — a
-                              // silent failure left the row sitting there
-                              // with no explanation.
-                              toast.error(
-                                err?.message || "Failed to mark as read",
-                              );
-                            }
-                          }}
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  {work.notifications!.length > NOTIFICATIONS_PREVIEW_COUNT && (
-                    <div className="border-t px-4 py-1.5 text-center">
-                      <button
-                        type="button"
-                        className="text-xs text-primary hover:underline"
-                        onClick={() =>
-                          setNotificationsExpanded((expanded) => !expanded)
-                        }
-                      >
-                        {notificationsExpanded
-                          ? "Show less"
-                          : `Show all (${work.notifications!.length})`}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-              {!showList ? null : workLoading ? (
+              {workLoading ? (
                 // Loader, not the empty state: "nothing here" while the
                 // best-effort /me/work fetch is still in flight reads as an
                 // answer, same reasoning as draftsLoading below.
@@ -643,7 +529,7 @@ export default function MyWorkPage() {
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Loading your work…
                 </div>
-              ) : chip === "all" && nothingWaitingOnMe(work) ? (
+              ) : nothingWaitingOnMe(work) ? (
                 <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
@@ -717,7 +603,7 @@ export default function MyWorkPage() {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
                       <Fragment key={workItemKey(w)}>
-                      {chip === "all" && i === reviewItems.length && (
+                      {i === reviewItems.length && requestItems.length > 0 && (
                         <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
                           {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
                         </div>
@@ -832,22 +718,175 @@ export default function MyWorkPage() {
                   })}
                 </div>
               ) : (
-                <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                  Nothing here.
+                <p className="px-1 text-sm text-muted-foreground" data-testid="my-work-no-approvals">
+                  No approvals waiting on you.
+                </p>
+              )}
+            </section>
+            {work.pagination && work.pagination.total > work.pagination.limit && (
+              <div className="flex items-center justify-center gap-3 pt-1 text-sm text-muted-foreground">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={loadingMoreWork || work.pagination.offset === 0}
+                  onClick={() =>
+                    goToWorkPage(Math.max(0, work.pagination!.offset - work.pagination!.limit))
+                  }
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <span>
+                  Page {Math.floor(work.pagination.offset / work.pagination.limit) + 1} of{" "}
+                  {Math.max(1, Math.ceil(work.pagination.total / work.pagination.limit))}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={loadingMoreWork || !work.pagination.has_more}
+                  onClick={() =>
+                    goToWorkPage(work.pagination!.offset + work.pagination!.limit)
+                  }
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            )}
+            {/* Tasks assigned to you, across nests: open ones by default,
+                most pressing first, filterable. */}
+            {!workLoading && (
+              <AssignedTasks
+                items={work.assigned ?? []}
+                today={localToday()}
+                loadingDone={loadingDone}
+                onStatusChange={(st) => void onTaskStatusChange(st)}
+                onOpen={(a) => onOpenReview(a.nest_id, a.nest_name, a.node_id)}
+              />
+            )}
+            {/* Open threads that @mention you, in channels and on documents,
+                waiting on your reply (PO-1180). Reply, resolve or mark done
+                and the row goes. Newest first; click jumps to the thread. */}
+            <MentionRows
+              mentions={work.mentions ?? []}
+              viewer={adminStatus?.me ?? null}
+              pagination={work.mentions_pagination}
+              loading={loadingMentions}
+              busyThread={doneThread}
+              onOpen={openMention}
+              onDone={markMentionDone}
+              onPage={goToMentionsPage}
+            />
+              {(work.notifications?.length ?? 0) > 0 && (
+                <div className="rounded-lg border border-amber-300/50 bg-amber-500/5">
+                  <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
+                    <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
+                    <span className="text-xs text-muted-foreground">
+                      ({work.notifications!.length})
+                    </span>
+                    <div className="flex-1" />
+                    <button
+                      type="button"
+                      className="text-xs text-primary hover:underline"
+                      onClick={async () => {
+                        await api.markNotificationsRead("all");
+                        setWork((prev) => ({ ...prev, notifications: [] }));
+                      }}
+                    >
+                      Mark all read
+                    </button>
+                  </div>
+                  <div
+                    className={cn(
+                      "divide-y border-t",
+                      notificationsExpanded && "max-h-80 overflow-y-auto",
+                    )}
+                  >
+                    {visibleNotifications(
+                      work.notifications!,
+                      notificationsExpanded,
+                    ).map((n) => (
+                      <div
+                        key={n.id}
+                        className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openNotification(n)}
+                          className="flex-1 flex items-center gap-2 text-left"
+                        >
+                          <span className="flex-1">{n.message}</span>
+                          <span className="text-muted-foreground shrink-0">
+                            {formatServerDate(n.created_at)}
+                          </span>
+                        </button>
+                        {/* Per-row dismiss: "Mark all read" alone forces an
+                            all-or-nothing triage (CU-wdqcq007pu). */}
+                        <button
+                          type="button"
+                          title="Mark as read"
+                          aria-label="Mark as read"
+                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
+                          onClick={async () => {
+                            try {
+                              await api.markNotificationsRead([n.id]);
+                              setWork((prev) => ({
+                                ...prev,
+                                notifications: dismissNotification(
+                                  prev.notifications ?? [],
+                                  n.id,
+                                ),
+                              }));
+                            } catch (err: any) {
+                              // Same feedback the row's siblings give — a
+                              // silent failure left the row sitting there
+                              // with no explanation.
+                              toast.error(
+                                err?.message || "Failed to mark as read",
+                              );
+                            }
+                          }}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  {work.notifications!.length > NOTIFICATIONS_PREVIEW_COUNT && (
+                    <div className="border-t px-4 py-1.5 text-center">
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() =>
+                          setNotificationsExpanded((expanded) => !expanded)
+                        }
+                      >
+                        {notificationsExpanded
+                          ? "Show less"
+                          : `Show all (${work.notifications!.length})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-
-            {showWaiting && work.waiting.length > 0 && (
+            {work.waiting.length > 0 && (
               <div>
-                <div className="flex items-center gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={() => setWaitingOpen((v) => !v)}
+                  aria-expanded={waitingOpen}
+                  className="mb-2 flex items-center gap-2 text-left"
+                  data-testid="my-work-waiting-toggle"
+                >
+                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${waitingOpen ? "" : "-rotate-90"}`} aria-hidden />
                   <h3 className="text-sm font-medium">
                     Waiting on others
                   </h3>
                   <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
                     {work.waiting.length}
                   </span>
-                </div>
+                </button>
+                {waitingOpen && (
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {work.waiting.map((w) => (
                     <div
@@ -929,36 +968,7 @@ export default function MyWorkPage() {
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-            {work.pagination && work.pagination.total > work.pagination.limit && (
-              <div className="flex items-center justify-center gap-3 pt-1 text-sm text-muted-foreground">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={loadingMoreWork || work.pagination.offset === 0}
-                  onClick={() =>
-                    goToWorkPage(Math.max(0, work.pagination!.offset - work.pagination!.limit))
-                  }
-                >
-                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
-                  Prev
-                </Button>
-                <span>
-                  Page {Math.floor(work.pagination.offset / work.pagination.limit) + 1} of{" "}
-                  {Math.max(1, Math.ceil(work.pagination.total / work.pagination.limit))}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={loadingMoreWork || !work.pagination.has_more}
-                  onClick={() =>
-                    goToWorkPage(work.pagination!.offset + work.pagination!.limit)
-                  }
-                >
-                  Next
-                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
-                </Button>
+                )}
               </div>
             )}
           </div>

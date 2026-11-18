@@ -173,8 +173,8 @@ export const keys = {
   me: ["me"] as const,
   unreadNotifications: () => [...keys.me, "notifications", "unread"] as const,
   myWorkAll: () => [...keys.me, "work"] as const,
-  myWork: (limit?: number, offset?: number, mentionsOffset?: number) =>
-    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
+  myWork: (limit?: number, offset?: number, mentionsOffset?: number, doneTasks?: boolean) =>
+    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null, doneTasks ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
     [...keys.me, "drafts", limit ?? null, offset ?? null, q ?? null, sort ?? null] as const,
 
@@ -1154,9 +1154,9 @@ export const reads = {
       queryFn: () => api.listPromptowlTeams(),
       staleTime: STALE.reference,
     }),
-  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number }) =>
+  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number; doneTasks?: boolean }) =>
     queryOptions({
-      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset),
+      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset, opts?.doneTasks),
       queryFn: () => api.getMyWork(opts),
       staleTime: STALE.governance,
     }),

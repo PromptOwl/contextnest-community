@@ -30,7 +30,8 @@ class StewardsPage {
 
     // ── Nest page ──────────────────────────────────────────────────────────
     this.tabs = page.getByRole('tab');
-    this.stewardsTab = page.getByRole('tab', { name: /^Stewards/ });
+    // Stewards now sit under the Collaborators tab, so that is the tab that opens them.
+    this.stewardsTab = page.getByRole('tab', { name: 'Collaborators', exact: true });
     this.nestMenu = page.getByTitle('More actions').first();
     this.assignStewardItem = page.getByRole('menuitem', { name: 'Assign Steward', exact: true });
 

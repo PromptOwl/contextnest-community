@@ -2475,6 +2475,8 @@ export function createApp(): Hono<AuthEnv> {
         ...paging,
         sections: parseMyWorkSections(c.req.query("sections")),
         actingAs: actingAgentHandle(readClient(c)),
+        // ?assigned_done=1 — My Work's "Done" / "All" task filter.
+        includeDoneTasks: c.req.query("assigned_done") === "1",
       }),
     );
   });

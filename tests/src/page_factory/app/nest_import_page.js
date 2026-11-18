@@ -52,7 +52,7 @@ class NestImportPage {
   async gotoNest(nestId) {
     this._log(`Opening nest ${nestId}`);
     await this.page.goto(`/nest/${nestId}`);
-    await this.tab('Overview').waitFor({ state: 'visible' });
+    await this.tab('Documents').waitFor({ state: 'visible' });
   }
 
   /** A nest tab by its label (Overview, Documents, …). */

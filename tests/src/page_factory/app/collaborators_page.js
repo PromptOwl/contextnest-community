@@ -27,7 +27,7 @@ class CollaboratorsPage {
     // ── Nest page ──────────────────────────────────────────────────────────
     this.backToNests = page.getByTitle('Back to nests');
     this.collaboratorsTab = page.getByRole('tab', { name: 'Collaborators', exact: true });
-    this.overviewTab = page.getByRole('tab', { name: 'Overview', exact: true });
+    this.overviewTab = page.getByRole('tab', { name: 'Documents', exact: true });
     this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
     this.requestEditAccess = this.main.getByRole('button', { name: 'Request edit access' });
     this.editableBody = this.main.locator('[contenteditable="true"]');

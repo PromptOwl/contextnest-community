@@ -83,7 +83,7 @@ test.describe('Nest overview', () => {
     const { nest, page } = await ownerNest(primary_user, commonFunction, 'ovr-landing', STANDARD);
 
     await page.gotoNest(nest.id);
-    await expect(page.selectedTab).toHaveText('Overview');
+    await expect(page.selectedTab).toHaveText('Documents');
     await expect(page.overview.getByText(DESCRIPTION, { exact: true })).toBeVisible();
     await expect(page.contents).toBeVisible();
   });

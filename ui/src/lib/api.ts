@@ -4065,6 +4065,11 @@ export interface AssignedItem {
   assigned_at: string | null;
   /** Open blockers (task relations); absent when nothing open blocks it. */
   open_blockers?: number;
+  /** Lowercase tags without `#` — the stage (`stage:doing`) among them. */
+  tags?: string[];
+  /** True on a finished task; only present when Done tasks were asked for. */
+  done?: true;
+  completed_at?: string | null;
 }
 
 /**
@@ -4106,8 +4111,15 @@ export async function markMentionDone(threadId: string) {
   );
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
+export async function getMyWork(opts?: {
+  limit?: number;
+  offset?: number;
+  mentionsOffset?: number;
+  /** Also list finished tasks in `assigned` (the Done / All task filter). */
+  doneTasks?: boolean;
+}) {
   const q = new URLSearchParams();
+  if (opts?.doneTasks) q.set("assigned_done", "1");
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
   if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));

@@ -137,7 +137,7 @@ test.describe('New document', () => {
     await page.publishButton.click();
 
     await expect(page.toast(publishedToast('Create Probe'))).toBeVisible(WRITE);
-    await expect(page.selectedTab).toHaveText('Overview', WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
     const doc = await landed(api, nest, 'nodes/create-probe');
     expect(doc.status).toBe('published');
 
@@ -463,7 +463,7 @@ test.describe('New document', () => {
 
     await page.saveDraftButton.click();
     await expect(page.toast('"Governed Draft" saved as a draft.')).toBeVisible(WRITE);
-    await expect(page.selectedTab).toHaveText('Overview', WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
     await expect.poll(() => api.nodeStatus(nest.id, 'nodes/governed-draft'), WRITE).toBe('draft');
   });
 });

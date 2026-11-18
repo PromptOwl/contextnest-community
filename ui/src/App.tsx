@@ -790,9 +790,9 @@ export default function App() {
       else params.delete("doc");
       params.delete("thread");
       params.delete("view");
-      // Overview is the default, so it stays out of the URL — a plain ?nest
-      // link keeps working and doesn't grow a redundant &tab=overview.
-      if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
+      // Documents is the default, so it stays out of the URL — a plain ?nest
+      // link keeps working and doesn't grow a redundant &tab=documents.
+      if (view.tab && view.tab !== "documents") params.set("tab", view.tab);
       else params.delete("tab");
       // ?review= (the change open in the review pane) only means something
       // on the Review tab; NestView writes it, App drops it everywhere else.
@@ -1044,13 +1044,13 @@ export default function App() {
             nestName: view.nestName,
             isOwner: view.isOwner,
             isAnonOwned: view.isAnonOwned,
-            tab: "overview",
+            tab: "documents",
           }),
       };
       if (pageTail.length) return [home, nest, ...pageTail];
       const leaf =
         view.page === "nest"
-          ? NEST_TAB_LABELS[view.tab ?? "overview"] ?? "Overview"
+          ? NEST_TAB_LABELS[view.tab ?? "documents"] ?? "Documents"
           : view.page === "document" ? "Document"
           : view.page === "nest-trace" ? "Trace"
           : nestPageForView(view.page)?.label ?? "";
@@ -1783,7 +1783,7 @@ export default function App() {
                   view.page === "nest"
                     ? view.tab === "review" || view.tab === "external-edits"
                       ? view.tab
-                      : "overview"
+                      : "documents"
                     : view.page === "document"
                       ? null
                       : nestPageForView(view.page)?.id ?? null

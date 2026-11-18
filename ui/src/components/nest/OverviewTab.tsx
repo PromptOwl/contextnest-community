@@ -53,6 +53,10 @@ interface Props {
   onAddWithAI?: () => void;
   /** Delete (or request deletion of) a folder; omitted for read-only callers. */
   onDeleteFolder?: (folder: { path: string; label: string; total: number }) => void;
+  /** Lede only: the description and facts line for a nest that has content —
+   *  no Contents tree, no Recently edited. The Documents list below does that
+   *  job. A nest with nothing in it still gets its empty-state options. */
+  lede?: boolean;
 }
 
 /** Documents shown per folder before "View all". */
@@ -91,6 +95,7 @@ export function OverviewTab({
   onImport,
   onAddWithAI,
   onDeleteFolder,
+  lede = false,
 }: Props) {
   // Folder rows: closed until opened; a click wins either way.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(() => new Map());
@@ -104,6 +109,8 @@ export function OverviewTab({
   const cappedGroups = useMemo(() => capFolderDocs(tocGroups, DOCS_PER_FOLDER), [tocGroups]);
 
   if (initialLoad) {
+    // The lede sits above a list that has its own loading state.
+    if (lede) return null;
     return (
       <div className="flex items-center justify-center py-16">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -116,7 +123,42 @@ export function OverviewTab({
   // neither docs nor folders is empty.
   const empty = stats.total === 0 && knownFolders.length === 0;
   const facts = overviewFacts({ total: stats.total, folderCount, editedThisWeek: recentlyEditedCount, governance });
-  const showRecent = recentlyEdited.length > 0;
+  const showRecent = recentlyEdited.length > 0 && !lede;
+
+  // The facts line, shared by the full index and the lede.
+  const factsLine = (
+    <p className={"flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? " mt-3" : "")} data-testid="nest-overview-facts">
+      {facts.map((f) => {
+        const dot = f.tone && (
+          <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />
+        );
+        return f.action === "review" && onOpenReview ? (
+          <button key={f.key} type="button" onClick={onOpenReview} className={"inline-flex items-center gap-1.5 rounded-sm text-primary underline-offset-2 hover:underline " + FOCUS}>
+            {dot}
+            {f.text}
+          </button>
+        ) : (
+          <span key={f.key} className="inline-flex items-center gap-1.5">
+            {dot}
+            {f.text}
+          </span>
+        );
+      })}
+    </p>
+  );
+
+  if (lede && !empty) {
+    return (
+      <header className="min-w-0" data-testid="nest-overview-lede">
+        {description && (
+          <p className="max-w-[65ch] text-[15px] leading-6 text-muted-foreground" data-testid="nest-overview-description">
+            {description}
+          </p>
+        )}
+        {factsLine}
+      </header>
+    );
+  }
 
   return (
     <div className={"grid min-w-0 gap-5 " + (showRecent ? "lg:grid-cols-[minmax(0,1fr)_16rem]" : "")}>
@@ -138,24 +180,7 @@ export function OverviewTab({
                 {nestName}
               </h2>
               {description && <p className="max-w-[65ch] text-[17px] leading-7 text-muted-foreground">{description}</p>}
-              <p className={"flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground" + (description ? " mt-3" : "")} data-testid="nest-overview-facts">
-                {facts.map((f) => {
-                  const dot = f.tone && (
-                    <span aria-hidden className={"inline-block h-1.5 w-1.5 rounded-full " + (f.tone === "ok" ? "bg-emerald-500" : "bg-amber-500")} />
-                  );
-                  return f.action === "review" && onOpenReview ? (
-                    <button key={f.key} type="button" onClick={onOpenReview} className={"inline-flex items-center gap-1.5 rounded-sm text-primary underline-offset-2 hover:underline " + FOCUS}>
-                      {dot}
-                      {f.text}
-                    </button>
-                  ) : (
-                    <span key={f.key} className="inline-flex items-center gap-1.5">
-                      {dot}
-                      {f.text}
-                    </span>
-                  );
-                })}
-              </p>
+              {factsLine}
             </header>
 
             <nav aria-label="Contents" className="border-t pt-5">
