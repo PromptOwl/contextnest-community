@@ -316,6 +316,13 @@ test.describe('Community Dashboard', () => {
       await nestsPage.goto();
       await nestsPage.createNest(name, 'Created by CN-DASH-014');
 
+      // Then where its agents run (PO-1411): Local, Central lite, Central durable.
+      await expect(nestsPage.harnessDialog).toBeVisible();
+      for (const id of ['local', 'central-lite', 'central-durable']) {
+        await expect(nestsPage.harnessChoice(id)).toBeVisible();
+      }
+      await nestsPage.harnessSkip.click();
+
       // Straight into the new nest — the next thing anyone does is add a doc.
       await expect(page).toHaveURL(/\/nest\/[^/]+/, { timeout: 15000 });
 

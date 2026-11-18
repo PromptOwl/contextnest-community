@@ -12,6 +12,7 @@
  * /auth/keys and shown to the user once via the Connect modal.
  */
 
+import type { Recipe, RecipeApplied } from "./recipes";
 import { clearDraft } from "./draft";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
 import type { ClientAttribution } from "./client-attribution";
@@ -1376,12 +1377,16 @@ export async function listNests(opts?: { archived?: boolean }) {
   );
 }
 
-export async function createNest(name: string, description?: string) {
-  return request<{ nest: any }>("/nests", {
+/** Create a nest, optionally from a recipe (an id from GET /recipes; PO-1411). */
+export async function createNest(name: string, description?: string, recipe?: string) {
+  return request<{ nest: any; recipe?: RecipeApplied }>("/nests", {
     method: "POST",
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, ...(recipe ? { recipe } : {}) }),
   });
 }
+
+/** The recipe catalog a new nest can start from, Blank last. */
+export const listRecipes = () => request<{ recipes: Recipe[] }>("/recipes");
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
@@ -5490,10 +5495,10 @@ export type DistillStart =
 export const getOnboarding = () => request<OnboardingState>("/onboarding");
 export const dismissOnboarding = () => request<OnboardingState>("/onboarding/dismiss", { method: "POST", body: "{}" });
 export const reopenOnboarding = () => request<OnboardingState>("/onboarding/reopen", { method: "POST", body: "{}" });
-export const createMyNest = (name?: string) =>
-  request<{ nest: { id: string; name: string; created: boolean }; state: OnboardingState }>("/onboarding/nest", {
+export const createMyNest = (name?: string, recipe?: string) =>
+  request<{ nest: { id: string; name: string; created: boolean; recipe?: RecipeApplied }; state: OnboardingState }>("/onboarding/nest", {
     method: "POST",
-    body: JSON.stringify(name ? { name } : {}),
+    body: JSON.stringify({ ...(name ? { name } : {}), ...(recipe ? { recipe } : {}) }),
   });
 export const getConnectionEvidence = (nestId: string, since: string) =>
   request<ConnectionEvidence>(`/onboarding/connection?nest_id=${encodeURIComponent(nestId)}&since=${encodeURIComponent(since)}`);

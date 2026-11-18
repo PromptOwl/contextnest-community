@@ -46,10 +46,60 @@ export interface SeedNodeRef {
    *  relative to `nodes/` (the default is the id's path inside the seed). */
   target: string;
 }
+/**
+ * A recipe (PO-1411): a seed offered when a nest is created. `name` and
+ * `purpose` are what the picker card says; `order` places it in the catalog.
+ */
+export interface SeedRecipe {
+  name: string;
+  purpose: string;
+  order: number;
+}
+/** A saved Board view grouped by the stage tag namespace, one column per stage, in order. */
+export interface SeedBoard {
+  name: string;
+  stages: string[];
+  /** This board's stages become the nest's task stages (order and default). At most one board. */
+  task_stages: boolean;
+}
+/** A team chat channel (created only where team chat is on). */
+export interface SeedChannel {
+  name: string;
+  purpose: string;
+}
+/** An agent the recipe suggests hiring: a C10 hire-catalog kind plus a handle. Never hired automatically. */
+export interface SeedAgent {
+  kind: SeedAgentKind;
+  handle: string;
+  why: string;
+  /** watcher only: the seed channels it reads. */
+  channels: string[];
+}
+/** The C10 hire catalog's kinds (src/hire/catalog.ts KINDS; a test keeps the two equal). */
+export const SEED_AGENT_KINDS = ["hootie", "watcher", "webhook", "key"] as const;
+export type SeedAgentKind = (typeof SEED_AGENT_KINDS)[number];
+/** The tag namespace a seed board groups by (`stage:intent`, `stage:build`). */
+export const STAGE_NAMESPACE = "stage";
+/** Where a seed's distill ontology lands: the node the onboarding distill reads (src/onboarding/distill.ts ONTOLOGY_SLUG; a test keeps the two equal). */
+export const DISTILL_TARGET = "distill/default-ontology";
+export const SEED_MAX_BOARDS = 5;
+export const SEED_MAX_STAGES = 12;
+export const SEED_MAX_CHANNELS = 10;
+export const SEED_MAX_AGENTS = 10;
+
 export interface SeedManifest {
   id: string;
   version: number;
   title: string;
+  /** One or two plain sentences on what the seed is for. */
+  description: string | null;
+  recipe: SeedRecipe | null;
+  boards: SeedBoard[];
+  channels: SeedChannel[];
+  /** `hire:` in the manifest. */
+  agents: SeedAgent[];
+  /** The node id (under seeds/<id>/) that becomes the nest's distill ontology, or null. */
+  distill: string | null;
   layers: SeedLayer[];
   folders: SeedFolder[];
   tags: Array<{ tag: string; meaning: string }>;
@@ -83,7 +133,26 @@ export const RESERVED_LEAVES: ReadonlySet<string> = new Set(
 const reservedLeaf = (path: string) => RESERVED_LEAVES.has(path.split("/").pop()!.toLowerCase());
 const TERM_RE = /^[\p{L}\p{N}][\p{L}\p{N}' -]{0,59}$/u;
 export const MAX_TERMS_PER_CATEGORY = 20;
-const TOP_KEYS = new Set(["id", "version", "title", "layers", "folders", "tags", "definitions", "thesis", "listener", "nodes", "description"]);
+const TOP_KEYS = new Set([
+  "id",
+  "version",
+  "title",
+  "layers",
+  "folders",
+  "tags",
+  "definitions",
+  "thesis",
+  "listener",
+  "nodes",
+  "description",
+  "recipe",
+  "boards",
+  "channels",
+  "hire",
+  "distill",
+]);
+const CHANNEL_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const HANDLE_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
 const bad = (reason: string): never => {
   throw new SeedInvalidError(reason);
@@ -219,7 +288,28 @@ export function parseManifestWith(text: string, loadYaml: (yamlText: string) => 
     const tn = nodes.find((n) => n.id === t)!;
     if (tn.target === CONTEXT_TARGET) bad("the thesis can't be CONTEXT.md");
   }
+  let distill: string | null = null;
+  if (m.distill !== undefined && m.distill !== null) {
+    distill = typeof m.distill === "string" ? m.distill : bad("distill must be a node id");
+    if (!distill.startsWith(seedRoot) || !safeSegments(distill, 6)) bad(`distill "${distill}" is outside ${seedRoot}`);
+    if (reservedLeaf(distill)) bad(`distill "${distill}" uses a reserved name`);
+    const d = distill;
+    const listed = nodes.find((n) => n.id === d);
+    if (listed && listed.target !== DISTILL_TARGET) bad(`distill "${d}" is also listed with another target`);
+    if (!listed) {
+      if (nodes.some((o) => o.target === DISTILL_TARGET)) bad(`two nodes target "${DISTILL_TARGET}"`);
+      // The ontology's own folder is the onboarding distill's, not one the seed declares.
+      nodes.push({ id: d, target: DISTILL_TARGET });
+    }
+  }
   if (nodes.length > SEED_MAX_NODES) bad(`more than ${SEED_MAX_NODES} nodes`);
+
+  const description = m.description === undefined || m.description === null ? null : str(m.description, "description", 1, 600);
+  const recipe = parseRecipe(m.recipe);
+  const boards = parseBoards(m.boards);
+  const channels = parseChannels(m.channels);
+  // `hire:` in the manifest: the agents worth hiring (C10 catalog kinds).
+  const agents = parseAgents(m.hire, new Set(channels.map((c) => c.name)));
 
   const l = (m.listener ?? {}) as Record<string, unknown>;
   if (typeof l !== "object" || Array.isArray(l)) bad("listener must be a mapping");
@@ -254,6 +344,12 @@ export function parseManifestWith(text: string, loadYaml: (yamlText: string) => 
     id,
     version,
     title,
+    description,
+    recipe,
+    boards,
+    channels,
+    agents,
+    distill,
     layers,
     folders,
     tags,
@@ -261,6 +357,87 @@ export function parseManifestWith(text: string, loadYaml: (yamlText: string) => 
     thesis,
     listener: { propose_folders: [...new Set(propose)], domain_tags: [...new Set(domainTags)], never_propose: [...new Set(never)], never_terms: [...new Set(neverTerms)] },
     nodes,
+  };
+}
+
+function mapping(v: unknown, what: string): Record<string, unknown> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) bad(`${what} must be a mapping`);
+  return v as Record<string, unknown>;
+}
+function onlyKeys(x: Record<string, unknown>, keys: string[], what: string): void {
+  for (const k of Object.keys(x)) if (!keys.includes(k)) bad(`unknown ${what} key "${k}"`);
+}
+
+function parseRecipe(v: unknown): SeedRecipe | null {
+  if (v === undefined || v === null) return null;
+  const x = mapping(v, "recipe");
+  onlyKeys(x, ["name", "purpose", "order"], "recipe");
+  const order = x.order === undefined ? 100 : x.order;
+  if (typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 1000) bad("recipe.order must be a whole number 0–1000");
+  return { name: str(x.name, "recipe.name", 1, 60), purpose: str(x.purpose, "recipe.purpose", 1, 200), order: order as number };
+}
+
+function parseBoards(v: unknown): SeedBoard[] {
+  const list = arr(v, "boards");
+  if (list.length > SEED_MAX_BOARDS) bad(`more than ${SEED_MAX_BOARDS} boards`);
+  const out: SeedBoard[] = [];
+  for (const b of list) {
+    const x = mapping(b, "each board");
+    onlyKeys(x, ["name", "stages", "task_stages"], "board");
+    const name = str(x.name, "board name", 1, 80);
+    if (out.some((o) => o.name.toLowerCase() === name.toLowerCase())) bad(`board "${name}" is listed twice`);
+    const stages = arr(x.stages, `board "${name}" stages`).map((s) => (typeof s === "string" && SLUG_RE.test(s) ? s : bad(`board "${name}": stage "${String(s)}" must be a lowercase slug`)));
+    if (stages.length < 2 || stages.length > SEED_MAX_STAGES) bad(`board "${name}" needs 2–${SEED_MAX_STAGES} stages`);
+    if (new Set(stages).size !== stages.length) bad(`board "${name}" lists a stage twice`);
+    if (x.task_stages !== undefined && typeof x.task_stages !== "boolean") bad(`board "${name}": task_stages must be true or false`);
+    out.push({ name, stages, task_stages: x.task_stages === true });
+  }
+  if (out.filter((b) => b.task_stages).length > 1) bad("only one board can set the nest's task stages");
+  return out;
+}
+
+function parseChannels(v: unknown): SeedChannel[] {
+  const list = arr(v, "channels");
+  if (list.length > SEED_MAX_CHANNELS) bad(`more than ${SEED_MAX_CHANNELS} channels`);
+  const out: SeedChannel[] = [];
+  for (const c of list) {
+    const x = mapping(c, "each channel");
+    onlyKeys(x, ["name", "purpose"], "channel");
+    const name = typeof x.name === "string" && CHANNEL_RE.test(x.name) && !RESERVED_LEAVES.has(x.name) && x.name !== "search" ? x.name : bad(`channel "${String(x.name)}" must be a lowercase name (letters, digits, dashes)`);
+    if (out.some((o) => o.name === name)) bad(`channel "${name}" is listed twice`);
+    out.push({ name, purpose: str(x.purpose, `channel ${name} purpose`, 1, 280) });
+  }
+  return out;
+}
+
+function parseAgents(v: unknown, channelNames: Set<string>): SeedAgent[] {
+  const list = arr(v, "hire");
+  if (list.length > SEED_MAX_AGENTS) bad(`more than ${SEED_MAX_AGENTS} agents to hire`);
+  const out: SeedAgent[] = [];
+  for (const a of list) {
+    const x = mapping(a, "each agent");
+    onlyKeys(x, ["kind", "handle", "why", "channels"], "agent");
+    const kind = (SEED_AGENT_KINDS as readonly unknown[]).includes(x.kind) ? (x.kind as SeedAgentKind) : bad(`agent kind "${String(x.kind)}" must be one of ${SEED_AGENT_KINDS.join(", ")}`);
+    const handle = typeof x.handle === "string" && HANDLE_RE.test(x.handle) ? x.handle : bad(`agent handle "${String(x.handle)}" must be a lowercase handle`);
+    if (out.some((o) => o.handle === handle)) bad(`agent "${handle}" is listed twice`);
+    const channels = arr(x.channels, `agent ${handle} channels`).map((c) => (typeof c === "string" && channelNames.has(c) ? c : bad(`agent "${handle}" reads channel "${String(c)}", which the seed doesn't declare`)));
+    if (kind === "watcher" && channels.length === 0) bad(`watcher "${handle}" needs at least one of the seed's channels`);
+    if (kind !== "watcher" && channels.length > 0) bad(`agent "${handle}": only a watcher reads channels`);
+    out.push({ kind, handle, why: str(x.why, `agent ${handle} why`, 1, 280), channels });
+  }
+  return out;
+}
+
+/**
+ * The saved Board config (src/nests/board-service.ts BoardConfig) for a seed
+ * board: tasks grouped by the stage tag, the stages as its exact columns.
+ */
+export function boardConfigFor(b: Pick<SeedBoard, "stages">): Record<string, unknown> {
+  return {
+    dimension: "tag",
+    tagNamespace: STAGE_NAMESPACE,
+    tasksOnly: true,
+    layouts: { [`tag:${STAGE_NAMESPACE}`]: { columnOrder: [...b.stages] } },
   };
 }
 
@@ -290,7 +467,7 @@ export const seedOrigin = (m: Pick<SeedManifest, "id" | "version">) => `${m.id}@
  * What apply does to one seeded item (AC-SEED-02/03), decided from what the
  * nest holds now and what the seed recorded when it last wrote it.
  */
-export type ItemAction = "created" | "unchanged" | "kept_human_edit" | "kept_human_delete" | "upgrade_available" | "updated" | "failed" | "create" | "update";
+export type ItemAction = "created" | "unchanged" | "kept_human_edit" | "kept_human_delete" | "upgrade_available" | "updated" | "failed" | "create" | "update" | "skipped";
 export function decideItem(input: {
   present: boolean;
   recordedHash: string | null;

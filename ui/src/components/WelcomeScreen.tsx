@@ -3,9 +3,11 @@
  * list for a signed-in person with no nest of their own, and from Home via
  * "Getting started". Three steps on one page:
  *
- *   1. Your nest        — "Create my nest" (one click, "<Name>'s nest")
- *   2. Connect agents   — one tile per harness, each with the nest's MCP URL
- *                         and the connect proof (the server saw a real read)
+ *   1. Your nest        — pick a recipe (PO-1411), then "Create my nest"
+ *                         (one click, "<Name>'s nest")
+ *   2. Connect a harness — Local (one tile per agent client, each with the
+ *                         nest's MCP URL and the connect proof: the server saw
+ *                         a real read), Central lite, Central durable
  *   3. Fill it          — write, distill a site or repo, or connect Slack
  *
  * Pure logic lives in lib/onboarding.ts; every server call is /onboarding/*.
@@ -35,6 +37,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { RecipePicker, useRecipes } from "./recipes/RecipePicker";
+import { HarnessStep } from "./recipes/HarnessStep";
+import { BLANK_RECIPE_ID, appliedSummary, recipeParam, type HarnessKind, type RecipeApplied } from "../lib/recipes";
 import { CopyButton } from "@/components/ui/copy-button";
 import { cn } from "@/lib/utils";
 
@@ -299,6 +304,10 @@ export function WelcomeScreen({ state, logoUrl, userName, onOpenNest, onManageKe
   const [creating, setCreating] = useState(false);
   const [closing, setClosing] = useState(false);
   const [openTile, setOpenTile] = useState<string | null>(null);
+  const [recipe, setRecipe] = useState<string>(BLANK_RECIPE_ID);
+  const [applied, setApplied] = useState<{ result: RecipeApplied; name: string } | null>(null);
+  const [harness, setHarness] = useState<HarnessKind>("local");
+  const recipes = useRecipes();
   const nest = state.nest;
 
   const tiles = useMemo(
@@ -321,7 +330,8 @@ export function WelcomeScreen({ state, logoUrl, userName, onOpenNest, onManageKe
   const create = async () => {
     setCreating(true);
     try {
-      const out = await api.createMyNest();
+      const out = await api.createMyNest(undefined, recipeParam(recipe));
+      if (out.nest.recipe) setApplied({ result: out.nest.recipe, name: recipes.data?.recipes.find((r) => r.id === recipe)?.name ?? "The recipe" });
       qc.setQueryData(ONBOARDING_QUERY_KEY, out.state);
       void qc.invalidateQueries({ queryKey: ["nests"] });
       setOpenTile("hootie");
@@ -357,7 +367,7 @@ export function WelcomeScreen({ state, logoUrl, userName, onOpenNest, onManageKe
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">{first ? `Welcome, ${first}` : "Welcome"}</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              A nest is a governed knowledge base your agents read from. Make yours, connect an agent, then fill it.
+              A nest is a governed knowledge base your agents read from. Make yours from a recipe, connect a harness, then fill it.
             </p>
           </div>
         </div>
@@ -366,56 +376,82 @@ export function WelcomeScreen({ state, logoUrl, userName, onOpenNest, onManageKe
         </Button>
       </header>
 
-      <Step n={1} title="Your nest" done={!!nest} description={nest ? undefined : "One click. You own it, and it is private until you share it."}>
+      <Step
+        n={1}
+        title="Your nest"
+        done={!!nest}
+        description={
+          nest || !state.can_create_nest
+            ? undefined
+            : "Pick what it is for, and it starts with the folders, rules and board for that work. You own it, and it is private until you share it."
+        }
+      >
         {nest ? (
-          <div className="flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
-            <div className="min-w-0">
-              <p className="truncate font-medium">{nest.name}</p>
-              <p className="text-xs text-muted-foreground">Private · owned by you</p>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate font-medium">{nest.name}</p>
+                <p className="text-xs text-muted-foreground">Private · owned by you</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => onOpenNest(nest)}>
+                Open
+              </Button>
             </div>
-            <Button variant="outline" size="sm" onClick={() => onOpenNest(nest)}>
-              Open
-            </Button>
+            {applied && (
+              <p className="text-xs text-muted-foreground" role="status" data-testid="recipe-applied">
+                {appliedSummary(applied.result, applied.name)}
+              </p>
+            )}
           </div>
         ) : state.can_create_nest ? (
-          <Button onClick={create} disabled={creating} data-testid="create-my-nest">
-            {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Create {state.suggested_nest_name}
-          </Button>
+          <div className="space-y-4">
+            <RecipePicker value={recipe} onChange={setRecipe} disabled={creating} />
+            <Button onClick={create} disabled={creating} data-testid="create-my-nest">
+              {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Create {state.suggested_nest_name}
+            </Button>
+          </div>
         ) : (
           <p className="text-sm text-muted-foreground">Only a server admin can create nests on this server. Ask your admin to make one for you or share one with you.</p>
         )}
       </Step>
 
-      <Step n={2} title="Connect your agents" description="Pick the agent you use. Each one gets this nest's address, and the check turns green when it really reads your nest.">
+      <Step n={2} title="Connect a harness" description="Where your agents run. Start with a local agent; the central options run one for the whole team.">
         {!nest ? (
           <p className="text-sm text-muted-foreground">Create your nest first.</p>
         ) : (
-          <>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label="Agents">
-              {tiles.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={openTile === t.id}
-                  data-testid={`tile-${t.id}`}
-                  onClick={() => setOpenTile(openTile === t.id ? null : t.id)}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    openTile === t.id && "border-primary bg-muted/40",
-                  )}
-                >
-                  <Monogram tile={t} logoUrl={logoUrl} />
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium">{t.name}</span>
-                    <span className="block truncate text-xs text-muted-foreground">{t.confirmed ? t.maker : "General steps"}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-            {active && <TilePanel key={active.id} tile={active} state={state} onOpenNest={onOpenNest} onManageKeys={onManageKeys} />}
-          </>
+          <HarnessStep
+            value={harness}
+            onChange={setHarness}
+            local={
+              <div className="space-y-3">
+                <p className="text-xs text-muted-foreground">Pick the agent you use. Each one gets this nest's address, and the check turns green when it really reads your nest.</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label="Agents">
+                  {tiles.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={openTile === t.id}
+                      data-testid={`tile-${t.id}`}
+                      onClick={() => setOpenTile(openTile === t.id ? null : t.id)}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        openTile === t.id && "border-primary bg-muted/40",
+                      )}
+                    >
+                      <Monogram tile={t} logoUrl={logoUrl} />
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">{t.name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">{t.confirmed ? t.maker : "General steps"}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {active && <TilePanel key={active.id} tile={active} state={state} onOpenNest={onOpenNest} onManageKeys={onManageKeys} />}
+              </div>
+            }
+          />
         )}
       </Step>
 

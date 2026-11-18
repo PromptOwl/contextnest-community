@@ -29,6 +29,7 @@ import {
   reopenOnboarding,
 } from "./service.js";
 import { getDistillJob, startDistill, TooManyRequestsError } from "./distill.js";
+import { parseRecipeRef } from "../nests/recipe-service.js";
 
 type C = Context<AuthEnv>;
 
@@ -93,8 +94,8 @@ onboardingRoutes.post("/reopen", async (c) => {
 onboardingRoutes.post("/nest", async (c) => {
   try {
     if (!credentialMayContribute(c)) return c.json({ error: "Creating your nest needs your own full credential (a browser session or a read-write key)." }, 403);
-    const b = (await c.req.json().catch(() => ({}))) as { name?: unknown };
-    const nest = await createMyNest(c.get("userId"), typeof b.name === "string" ? b.name : undefined);
+    const b = (await c.req.json().catch(() => ({}))) as { name?: unknown; recipe?: unknown };
+    const nest = await createMyNest(c.get("userId"), typeof b.name === "string" ? b.name : undefined, parseRecipeRef(b.recipe), c.get("apiKeyId") ?? null);
     return c.json({ nest, state: await getOnboardingState(c.get("userId"), requestBaseUrl(c.req.url)) }, nest.created ? 201 : 200);
   } catch (err) {
     return fail(c, err);

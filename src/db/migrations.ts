@@ -3,7 +3,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
-import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { surfacesS3Ddl, surfacesS3AlterSqlite, seedItemKindsRebuildSqlite } from "../surfaces/schema-ddl-s3.js";
 import { onboardingDdl } from "../onboarding/schema-ddl.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 import { runTotals } from "../workflow/run-totals.js";
@@ -2841,6 +2841,17 @@ export function runMigrations(db: Database.Database): void {
       );
     `);
     recordMigration("100_hired_agents");
+  }
+
+  // 101: recipes (PO-1411). A seed also writes a board, a channel and the
+  //   nest's task stages, so surface_seed_items.kind takes three more values.
+  //   SQLite can't alter a CHECK: rebuild the table when it has the old one.
+  if (!hasMigration("101_seed_item_kinds")) {
+    db.transaction(() => {
+      const t = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='surface_seed_items'").get() as { sql?: string } | undefined;
+      if (t?.sql && !t.sql.includes("'task_rules'")) db.exec(seedItemKindsRebuildSqlite("(datetime('now'))"));
+    })();
+    recordMigration("101_seed_item_kinds");
   }
 }
 

@@ -3,7 +3,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
-import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { surfacesS3Ddl, surfacesS3AlterPostgres, seedItemKindsPostgres } from "../surfaces/schema-ddl-s3.js";
 import { onboardingDdl } from "../onboarding/schema-ddl.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 import { runTotals } from "../workflow/run-totals.js";
@@ -127,6 +127,7 @@ export const HISTORICAL_MIGRATIONS = [
   "098_team_chat_c2",
   "099_agent_profiles",
   "100_hired_agents",
+  "101_seed_item_kinds",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1576,6 +1577,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       PRIMARY KEY (nest_id, kind, handle)
     );
   `);
+
+  // Migration 101 parity: a seed also writes boards, channels and task stages
+  // (PO-1411). A fresh table already has the wider CHECK; an older one swaps it once.
+  await db.exec(seedItemKindsPostgres());
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
