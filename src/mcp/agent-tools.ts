@@ -1,143 +1,305 @@
 /**
- * The nest in the conversation over MCP (team chat C7, PO-1198) — the twins
- * of src/agents/routes.ts. Registered only while EXPERIMENTAL_AGENT_STREAM is
- * on (mcp/routes.ts) and re-checked here.
+ * MCP twins of the agent control room REST routes (po-1186 CR1, AC-CR-09).
  *
- *   context_ask_nest  ask the nest from a channel or thread, as the caller;
- *                     post: true posts the answer (and any proposal cards)
- *                     into the thread as Hootie, for the caller.
- *   context_agents    the agents this nest knows (list), one agent's profile
- *                     (handle), or set its description (owner/admin).
- *   context_handoff   hand a thread to a person or an agent (create), or
- *                     accept / done one.
+ * Same service functions, same zod schemas (src/workflow/agent-event-schema.ts):
+ * each tool's input schema is GENERATED from the schema its REST route
+ * validates with, so the two can't drift and no inline schema literal is
+ * added here (lint:mcp-schemas).
  *
- * Proposals are decided with the existing `context_approve` / `context_reject`
- * (the review queue lists them under requested_by "hootie"); no tool here.
- * Each tool returns the service's object as structuredContent, so REST and
- * MCP cannot drift. A read-only key may call `context_agents` (a read) and
- * nothing else here (`context_ask_nest` spends model credits).
+ *   context_agent_register       POST /nests/:id/agents            owner/admin
+ *   context_agent_run_start      POST /nests/:id/run/:agent        write (report_only default true)
+ *   context_agent_run_step       POST /runs/:id/steps              write
+ *   context_agent_run_close      PATCH /runs/:id                   write
+ *   context_agent_ledger         GET /nests/:id/ledger             read
+ *   context_agent_ledger_trace   GET /ledger/:entryId              read
+ *   context_agent_ledger_export  GET /nests/:id/ledger/export      read (a page of NDJSON + cursor)
+ *   context_agent_rollups        GET /nests/:id/rollups            read
+ *   context_agent_ledger_org     GET /ledger                       server-level MCP
+ *   context_agent_rollups_org    GET /rollups                      server-level MCP
  *
- * Inline schemas: Community-only features over the comment-thread store
- * (scripts/check-mcp-schemas.mjs baseline raised to 106, documented there).
+ * The per-nest MCP endpoint sits behind the nestsApp gate (licence,
+ * suspension, key nest scope); each tool here adds its own tier check, since
+ * the gate admits read-tier callers to MCP.
  */
 import { config } from "../config.js";
-import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
-import { askNest, askText, NoModelKeyError } from "../agents/ask-nest.js";
-import { agentsText, agentText, getAgent, listAgents, setAgentDescription } from "../agents/profiles.js";
-import { createHandoff, handoffText, updateHandoff } from "../agents/handoffs.js";
-import { mentionsLine } from "../channels/post-message.js";
-import { messageClient } from "../channels/message-meta.js";
-import { READ_ONLY_KEY_REFUSAL } from "./channel-tools.js";
-import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
+import { getDb } from "../db/client.js";
+import { resolveNestPermission, permissionLevel, type NestPermission } from "../shared/access.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
+import { ConflictError, ForbiddenError, NotFoundError } from "../shared/errors.js";
+import type { McpToolContext } from "./tools.js";
+import {
+  AGENT_MCP_INPUTS,
+  type AgentMcpTool,
+  mcpInputSchema,
+  parseIdempotencyKey,
+  parseOr422,
+} from "../workflow/agent-event-schema.js";
+import {
+  assertExternalWriteCredential,
+  closeRunIdempotent,
+  consumeAgentRate,
+  registerAgent,
+  startReportRun,
+} from "../workflow/agent-events.js";
+import { appendRunStep, loadRun, triggerRun } from "../workflow/run-service.js";
+import { SERVER_CLAIM } from "../metacognition/store.js";
+import { ledgerEntryNest, ledgerTrace, listLedger, nestScope, orgScope } from "../governance/ledger-service.js";
+import { rollups } from "../governance/rollup-service.js";
+import { recordNodeAccess } from "../governance/access-log.js";
 
-export const AGENT_TOOL_DEFINITIONS = [
-  {
-    name: "context_ask_nest",
-    description:
-      "Ask the nest a question from inside a conversation — Hootie answers AS YOU, from what you can read, with the thread's messages as context and citations to documents. " +
-      "Pass `thread` (a post id from context_channel_read) or `channel` (a name). Returns the answer, the documents it cites and any writes it proposed (nothing is written). " +
-      "With post: true the answer is posted into the thread as a message from Hootie, for you, and each proposal becomes a draft in the review queue with a card in the thread, for a writer to approve with context_approve or reject with context_reject. " +
-      "Rate-limited per person; needs HOOTIE_ENABLED and a model key on the server.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        question: { type: "string", description: "What to ask (at most 4,000 characters)." },
-        thread: { type: "string", description: "The thread (post id) to answer in." },
-        channel: { type: "string", description: 'Or the channel name ("ops") — with post: true the answer opens a new post there.' },
-        post: { type: "boolean", description: "Post the answer and proposal cards into the thread (default false)." },
-      },
-      required: ["question"],
-    },
-  },
-  {
-    name: "context_agents",
-    description:
-      "The agents this nest knows — Hootie, every handle with a wake-up webhook, and every declared agent that has posted in a channel — with what each is (kind hootie | webhook | key, owner, description), " +
-      "when it was last seen and whether a mention wakes it. Pass `handle` for one agent's profile: its last messages, the proposals it filed, the nodes it authored or proposed (only what you can read). " +
-      "A nest owner or admin passes `handle` and `description` to describe an agent (at most 500 characters; empty clears). Members only.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        handle: { type: "string", description: 'An agent\'s @name, e.g. "grok" or "hootie" (profile, or set its description).' },
-        description: { type: "string", description: "Set the agent's description (owner/admin). Empty string clears it." },
-      },
-    },
-  },
-  {
-    name: "context_handoff",
-    description:
-      "Hand a channel thread to a person or an agent, recorded in the thread. action \"create\" (default) with `thread`, `to` (a person's name or email on this nest, or an agent handle) and an optional `note` posts a handoff message by you that @mentions the target, " +
-      "so it lands in their My Work or wakes the agent; it carries handoff.status \"open\". action \"accept\" or \"done\" with `message_id` (the handoff's id) posts an update by you and moves the status. Members only; note at most 1,000 characters.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        action: { type: "string", description: 'One of "create" (default), "accept", "done".' },
-        thread: { type: "string", description: "The thread (post id) to hand off (create)." },
-        to: { type: "string", description: "Who takes it: a person's name or email on this nest, or an agent handle (create)." },
-        note: { type: "string", description: "What to do, or what was done (optional, at most 1,000 characters)." },
-        message_id: { type: "string", description: "The handoff message's id (accept, done)." },
-      },
-    },
-  },
+const DESCRIPTIONS: Record<AgentMcpTool, string> = {
+  context_agent_register:
+    "Register an outside agent (Claude Code, a script, a fleet member) as an agent node in this nest, so its runs show in the decision ledger. Upsert: an existing agent with that node_id is returned with created: false. Owner/admin only.",
+  context_agent_run_start:
+    "Start a run for a registered agent. report_only (default true) records that the agent ran without building an executable bundle; set report_only: false to get the bundle as workflow_run does. Pass idempotency_key so a retry never creates a second run. External reports need a nest-scoped API key.",
+  context_agent_run_step:
+    "Record one step of a run. Typed actions: decision {verdict: no_op|propose|act|escalate, reason_code, summary (<=280 chars, your own words), evidence [{kind, ref}] (<=10, references only)}, proposal {review_id} for a review you opened (links it to the run), outcome {kind, ref, status}. Never put message text in a step. idempotency_key makes a retry safe.",
+  context_agent_run_close:
+    "Close a run: succeeded | failed | cancelled, with optional usage {input_tokens, output_tokens}, est_cost_usd and a one-line summary. Repeating the same close is an idempotent replay; a different status after close is a conflict.",
+  context_agent_ledger:
+    "List this nest's decision ledger: one row per agent decision (including decisions to do nothing), with its run, verdict, proposal, review, saved version and source, plus totals for the range. Filter by from/to, agent, verdict, state, source, binding, q; page with cursor.",
+  context_agent_ledger_trace:
+    "Trace one ledger entry: its full chain (run → verdict → proposal → review → saved version → source), the run's steps, and gaps: the hops it should have and doesn't.",
+  context_agent_ledger_export:
+    "Export ledger rows as NDJSON, one page at a time (same filters and redaction as context_agent_ledger). Returns {ndjson, next_cursor}; call again with the cursor for more. Each call is recorded in the nest's access log.",
+  context_agent_rollups:
+    "Count this nest's decision ledger by day or ISO week, grouped by agent, nest, binding or none: runs, no-ops, proposals and their outcomes, cost and tokens. Every bucket matches the ledger totals for the same range.",
+  context_agent_ledger_org:
+    "List the decision ledger across nests: every nest for a server admin, otherwise the nests you own or administer. Same filters and redaction as context_agent_ledger; nest_id narrows to one.",
+  context_agent_rollups_org:
+    "Count the decision ledger across the nests you administer (every nest for a server admin). Same parameters as context_agent_rollups; nest_id narrows to one.",
+};
+
+const def = (name: AgentMcpTool) => ({
+  name,
+  description: DESCRIPTIONS[name],
+  inputSchema: mcpInputSchema(AGENT_MCP_INPUTS[name]),
+});
+
+/** Per-nest tools (registered with the workflow tools, FEATURE_WORKFLOW_PLANE). */
+export const AGENT_TOOL_DEFINITIONS = (
+  [
+    "context_agent_register",
+    "context_agent_run_start",
+    "context_agent_run_step",
+    "context_agent_run_close",
+    "context_agent_ledger",
+    "context_agent_ledger_trace",
+    "context_agent_ledger_export",
+    "context_agent_rollups",
+  ] as const
+).map(def);
+
+/** Server-level (/mcp) org-wide reads. */
+export const AGENT_ORG_TOOL_DEFINITIONS = (["context_agent_ledger_org", "context_agent_rollups_org"] as const).map(def);
+
+export const AGENT_READ_TOOL_NAMES = [
+  "context_agent_ledger",
+  "context_agent_ledger_trace",
+  "context_agent_ledger_export",
+  "context_agent_rollups",
+  "context_agent_ledger_org",
+  "context_agent_rollups_org",
 ];
+export const AGENT_ADMIN_TOOL_NAMES = ["context_agent_register"];
 
-const NAMES = new Set(AGENT_TOOL_DEFINITIONS.map((t) => t.name));
+/** The REST route each tool twins (the AC-CR-09 parity table). */
+export const AGENT_TOOL_REST: Record<AgentMcpTool, string> = {
+  context_agent_register: "POST /nests/:nestId/agents",
+  context_agent_run_start: "POST /nests/:nestId/run/:agent",
+  context_agent_run_step: "POST /runs/:id/steps",
+  context_agent_run_close: "PATCH /runs/:id",
+  context_agent_ledger: "GET /nests/:nestId/ledger",
+  context_agent_ledger_trace: "GET /ledger/:entryId",
+  context_agent_ledger_export: "GET /nests/:nestId/ledger/export",
+  context_agent_rollups: "GET /nests/:nestId/rollups",
+  context_agent_ledger_org: "GET /ledger",
+  context_agent_rollups_org: "GET /rollups",
+};
 
-export function isAgentTool(name: string): boolean {
-  return NAMES.has(name);
+const PER_NEST = new Set<string>(AGENT_TOOL_DEFINITIONS.map((t) => t.name));
+const ORG = new Set<string>(AGENT_ORG_TOOL_DEFINITIONS.map((t) => t.name));
+export const isAgentTool = (name: string): boolean => PER_NEST.has(name);
+export const isAgentOrgTool = (name: string): boolean => ORG.has(name);
+
+const json = (v: unknown): string => JSON.stringify(v, null, 2);
+
+async function permOf(ctx: McpToolContext): Promise<NestPermission> {
+  const perm = config.AUTH_MODE === "open" ? "owner" : await resolveNestPermission(ctx.nestId, ctx.userId);
+  // A read-only key reads, whatever its owner may do (same clamp as REST).
+  return ctx.capability === "read" && permissionLevel(perm) > permissionLevel("read") ? "read" : perm;
 }
 
-function refusal(err: unknown): ToolResult {
-  if (err instanceof NoModelKeyError) return toolError(err.message, "UNAUTHORIZED_ACTION");
-  if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
-  if (err instanceof ForbiddenError) return toolError(err.message, "UNAUTHORIZED_ACTION");
-  if (err instanceof ConflictError) return toolError(err.message, "DOCUMENT_ALREADY_EXISTS");
-  if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
-  if (err instanceof AppError && (err.statusCode === 403 || err.statusCode === 429)) return toolError(err.message, "UNAUTHORIZED_ACTION");
-  throw err;
+function requireTier(perm: NestPermission, tier: "read" | "write" | "admin"): void {
+  if (permissionLevel(perm) < permissionLevel(tier)) {
+    throw new ForbiddenError(tier === "admin" ? "Only an owner or admin of this nest can register an agent." : `This action needs ${tier} access to the nest.`);
+  }
 }
 
-export async function runAgentTool(toolName: string, args: Record<string, any>, ctx: McpToolContext): Promise<ToolResult> {
-  if (!config.EXPERIMENTAL_AGENT_STREAM) {
-    return toolError("Channels are an experimental feature that is not enabled on this server (EXPERIMENTAL_AGENT_STREAM).", "DOCUMENT_NOT_FOUND");
+async function loadNestRun(ctx: McpToolContext, runId: unknown) {
+  const run = typeof runId === "string" && runId ? await loadRun(runId) : undefined;
+  // A run in another nest is "not found" to a caller scoped to this one.
+  if (!run || run.nest_id !== ctx.nestId) throw new NotFoundError("Run not found");
+  return run as typeof run & { claimed_by?: string | null; source?: string | null };
+}
+
+/** Dispatch for the per-nest context_agent_* tools. Returns the JSON result. */
+export async function runAgentTool(toolName: string, args: Record<string, any>, ctx: McpToolContext): Promise<string> {
+  const perm = await permOf(ctx);
+  const who = { apiKeyId: ctx.apiKeyId ?? null, userId: ctx.userId };
+  const detail = permissionLevel(perm) >= permissionLevel("write");
+  switch (toolName) {
+    case "context_agent_register": {
+      requireTier(perm, "admin");
+      const svc = (await getDb().get("SELECT is_service FROM users WHERE id = ?", [ctx.userId])) as { is_service: number | null } | undefined;
+      if (svc?.is_service) throw new ForbiddenError("A service or system identity can't register agents.");
+      return json(
+        await registerAgent({ nestId: ctx.nestId, storage: ctx.storage, callerEmail: await resolveCallerEmail(ctx.userId), raw: stripClient(args) }),
+      );
+    }
+    case "context_agent_run_start": {
+      requireTier(perm, "write");
+      consumeAgentRate("runs", who);
+      const input = parseOr422(AGENT_MCP_INPUTS.context_agent_run_start, stripClient(args));
+      const key = parseIdempotencyKey(input.idempotency_key);
+      const triggeredBy = await resolveCallerEmail(ctx.userId);
+      if (input.report_only === false) {
+        return json(
+          await triggerRun({
+            nestId: ctx.nestId,
+            agentNode: input.agent,
+            inputs: input.inputs,
+            triggeredBy,
+            storage: ctx.storage,
+            parentRunId: input.parent_run_id,
+            userId: ctx.userId,
+            idempotencyKey: key,
+            externalRef: input.external_ref ?? null,
+          }),
+        );
+      }
+      await assertExternalWriteCredential({ nestId: ctx.nestId, apiKeyId: ctx.apiKeyId ?? null, requireKey: true });
+      return json(
+        await startReportRun({
+          nestId: ctx.nestId,
+          agentNode: input.agent,
+          storage: ctx.storage,
+          triggeredBy,
+          inputs: input.inputs,
+          startedAt: input.started_at,
+          externalRef: input.external_ref,
+          idempotencyKey: key,
+        }),
+      );
+    }
+    case "context_agent_run_step": {
+      requireTier(perm, "write");
+      consumeAgentRate("events", who);
+      const input = parseOr422(AGENT_MCP_INPUTS.context_agent_run_step, stripClient(args));
+      const run = await loadNestRun(ctx, input.run_id);
+      if (run.claimed_by === SERVER_CLAIM) {
+        throw new ConflictError("This run is executed by the server; its steps are recorded by the server");
+      }
+      if (run.source === "external") {
+        await assertExternalWriteCredential({ nestId: ctx.nestId, apiKeyId: ctx.apiKeyId ?? null, requireKey: true });
+      }
+      const out = await appendRunStep(run.id, input, { clientKey: parseIdempotencyKey(input.idempotency_key) });
+      return json({ ok: true, run_id: run.id, ...out });
+    }
+    case "context_agent_run_close": {
+      requireTier(perm, "write");
+      const input = parseOr422(AGENT_MCP_INPUTS.context_agent_run_close, stripClient(args));
+      const run = await loadNestRun(ctx, input.run_id);
+      if (run.claimed_by === SERVER_CLAIM && input.status !== "cancelled") {
+        throw new ConflictError("This run is executed by the server — it can be cancelled, not closed");
+      }
+      if (run.source === "external") {
+        await assertExternalWriteCredential({ nestId: ctx.nestId, apiKeyId: ctx.apiKeyId ?? null, requireKey: true });
+      }
+      const { run_id: _r, ...body } = input;
+      return json({ ok: true, run_id: run.id, ...(await closeRunIdempotent(run.id, body)) });
+    }
+    case "context_agent_ledger": {
+      requireTier(perm, "read");
+      consumeAgentRate("reads", who);
+      const q = parseOr422(AGENT_MCP_INPUTS.context_agent_ledger, stripClient(args));
+      return json(await listLedger(nestScope(ctx.nestId, ctx.userId, detail), q));
+    }
+    case "context_agent_ledger_trace": {
+      requireTier(perm, "read");
+      consumeAgentRate("reads", who);
+      const { entry_id } = parseOr422(AGENT_MCP_INPUTS.context_agent_ledger_trace, stripClient(args));
+      if ((await ledgerEntryNest(entry_id)) !== ctx.nestId) throw new NotFoundError("Ledger entry not found");
+      return json(await ledgerTrace(nestScope(ctx.nestId, ctx.userId, detail), entry_id));
+    }
+    case "context_agent_ledger_export": {
+      requireTier(perm, "read");
+      // Validate before spending an export (as REST does); audit a failure too.
+      const q = parseOr422(AGENT_MCP_INPUTS.context_agent_ledger_export, stripClient(args));
+      consumeAgentRate("export", who);
+      const audit = (detail: string) =>
+        recordNodeAccess({
+          nestId: ctx.nestId,
+          wholeNest: true,
+          action: "export",
+          surface: "mcp",
+          unthrottled: true,
+          userId: ctx.userId,
+          userEmail: ctx.userEmail,
+          client: ctx.client,
+          detail,
+        });
+      let page;
+      try {
+        page = await listLedger(nestScope(ctx.nestId, ctx.userId, detail), { ...q, limit: q.limit ?? 200 }, { totals: false });
+      } catch (err) {
+        audit("decision ledger export failed (ndjson)");
+        throw err;
+      }
+      audit(`decision ledger export (${page.entries.length} rows, ndjson)`);
+      return json({
+        api_version: page.api_version,
+        rows: page.entries.length,
+        ndjson: page.entries.map((e) => JSON.stringify(e)).join("\n"),
+        next_cursor: page.next_cursor,
+      });
+    }
+    case "context_agent_rollups": {
+      requireTier(perm, "read");
+      consumeAgentRate("reads", who);
+      const q = parseOr422(AGENT_MCP_INPUTS.context_agent_rollups, stripClient(args));
+      return json(await rollups(nestScope(ctx.nestId, ctx.userId, detail), q, `/nests/${ctx.nestId}/ledger`));
+    }
+    default:
+      return json({ error: `Unknown agent tool: ${toolName}` });
   }
-  const caller = { nestId: ctx.nestId, userId: ctx.userId, userEmail: ctx.userEmail, baseUrl: ctx.baseUrl ?? "" };
-  try {
-    if (toolName === "context_ask_nest") {
-      if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
-      const data = await askNest(caller, { channel: args.channel, thread: args.thread, question: args.question, post: args.post === true });
-      return { text: askText(data), data };
-    }
-    if (toolName === "context_agents") {
-      if (args.description !== undefined && args.handle) {
-        if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
-        const data = await setAgentDescription(caller, args.handle, args.description);
-        return { text: `@${data.agent.handle}: ${data.agent.description ?? "(description cleared)"}`, data };
-      }
-      if (args.handle) {
-        const data = await getAgent(caller, args.handle);
-        return { text: agentText(data.agent), data };
-      }
-      const data = await listAgents(caller);
-      return { text: agentsText(data.agents), data };
-    }
-    if (toolName === "context_handoff") {
-      if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
-      const action = String(args.action ?? "create").toLowerCase();
-      const who = { ...caller, client: messageClient(ctx.client, args.client, ctx.apiKeyLabel) };
-      if (action === "create") {
-        const data = await createHandoff(who, args.thread, { to: args.to, note: args.note });
-        const reached = mentionsLine(data.mentions);
-        return { text: `${handoffText(data.handoff)}${reached ? `\n${reached}` : ""}`, data };
-      }
-      if (action === "accept" || action === "done") {
-        const data = await updateHandoff(who, args.message_id, action === "accept" ? "accepted" : "done", args.note);
-        return { text: handoffText(data.handoff), data };
-      }
-      return toolError(`Unknown action "${action}" — use create, accept or done.`, "VALIDATION_FAILED");
-    }
-    return toolError(`Unknown tool: ${toolName}`, "VALIDATION_FAILED");
-  } catch (err) {
-    return refusal(err);
+}
+
+/** `client` (caller attribution) rides on every tool call; the read schemas don't name it. */
+function stripClient(args: Record<string, any>): Record<string, any> {
+  const { client: _c, confirm_billing: _b, ...rest } = args ?? {};
+  return rest;
+}
+
+/** Dispatch for the server-level org tools (GET /ledger, GET /rollups twins). */
+export async function runAgentOrgTool(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: { userId: string; apiKeyId: string | null; nestScope: string | null; capability: "read" | "write" },
+): Promise<string> {
+  if (!config.FEATURE_WORKFLOW_PLANE) {
+    return "The workflow plane is not enabled on this server. An admin can turn it on with FEATURE_WORKFLOW_PLANE=true.";
   }
+  consumeAgentRate("reads", { apiKeyId: ctx.apiKeyId, userId: ctx.userId });
+  if (toolName === "context_agent_ledger_org") {
+    const { nest_id, ...q } = parseOr422(AGENT_MCP_INPUTS.context_agent_ledger_org, stripClient(args));
+    const scope = await orgScope(ctx.userId, { keyNestScope: ctx.nestScope, readOnlyKey: ctx.capability === "read", onlyNest: nest_id });
+    return json(await listLedger(scope, q));
+  }
+  if (toolName === "context_agent_rollups_org") {
+    const { nest_id, ...q } = parseOr422(AGENT_MCP_INPUTS.context_agent_rollups_org, stripClient(args));
+    const scope = await orgScope(ctx.userId, { keyNestScope: ctx.nestScope, readOnlyKey: ctx.capability === "read", onlyNest: nest_id });
+    return json(await rollups(scope, q, "/ledger"));
+  }
+  return json({ error: `Unknown agent tool: ${toolName}` });
 }

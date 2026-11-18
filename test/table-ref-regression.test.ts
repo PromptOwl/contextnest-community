@@ -100,8 +100,9 @@ describe("ref-less graph + write responses (unchanged)", () => {
   afterAll(() => env.cleanup());
 
   it("create responses for a document and a ref-less table have the same keys as before", () => {
-    expect(Object.keys(created.Alpha).sort()).toEqual(["node"]);
-    expect(Object.keys(created.Plain).sort()).toEqual(["node"]);
+    // `web_url` (PO-1336) is on every create and update; still no table_refs.
+    expect(Object.keys(created.Alpha).sort()).toEqual(["node", "web_url"]);
+    expect(Object.keys(created.Plain).sort()).toEqual(["node", "web_url"]);
   });
 
   it("update response for a ref-less table has the same keys as before", async () => {
@@ -113,7 +114,7 @@ describe("ref-less graph + write responses (unchanged)", () => {
       owner.apiKey,
     );
     expect(res.status).toBe(200);
-    expect(Object.keys(res.data).sort()).toEqual(["node", "version"]);
+    expect(Object.keys(res.data).sort()).toEqual(["node", "version", "web_url"]);
   });
 
   it("prose and plain-cell wikilinks are untyped {source, target} edges", async () => {

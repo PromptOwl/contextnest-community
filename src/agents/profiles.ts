@@ -20,7 +20,7 @@
  *
  * Members only; a non-member and an unknown handle get the same NotFound.
  * The description (≤500 chars) is the one stored thing: `agent_profiles`
- * (migration 091), set by the nest owner or an admin.
+ * (migration 099), set by the nest owner or an admin.
  */
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";

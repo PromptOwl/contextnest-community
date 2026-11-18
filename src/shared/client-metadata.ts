@@ -189,6 +189,10 @@ export function readClient(c: Context<any>): ClientMetadata | undefined {
   return (c.get("clientMetadata") as ClientMetadata | undefined) ?? orAbsent(derivedClient(c));
 }
 
+/** Stored as compact JSON.stringify output — no whitespace, keys as given.
+ *  The document stream's agent filter (AGENT_SQL in
+ *  governance/stream-service.ts) text-matches this exact format; change it
+ *  there too if this ever changes. */
 export function serializeClient(value: ClientMetadata | undefined): string | null {
   return value ? JSON.stringify(value) : null;
 }

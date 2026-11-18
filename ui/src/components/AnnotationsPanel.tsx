@@ -19,13 +19,15 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Lightbulb,
+  ListChecks,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { keys, reads } from "../lib/queries";
 import { MentionTextarea, CommentBody } from "./MentionTextarea";
 import { ArtifactCards, useCommentCards } from "./ArtifactCards";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
@@ -38,6 +40,9 @@ interface Props {
   nodeId: string;
   /** Hide composer/actions for read-only (public) viewers. */
   readOnly?: boolean;
+  /** May create documents in this nest, so a thread can be promoted to a
+   *  decision or task node (PO-1181). The server checks again. */
+  canPromote?: boolean;
   /** Anchor staged by a text selection in the document, if any. */
   pendingAnchor?: api.AnnotationAnchor | null;
   /** Clear the staged anchor (after submit or cancel). */
@@ -70,6 +75,7 @@ export function AnnotationsPanel({
   nestId,
   nodeId,
   readOnly,
+  canPromote,
   pendingAnchor,
   onClearAnchor,
   onFocusAnchor,
@@ -193,6 +199,23 @@ export function AnnotationsPanel({
       await load(true);
     } catch (e: any) {
       toast.error(e?.message || "Failed to update thread");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Promote a thread to a decision or task node (PO-1181). The server posts a
+  // reply linking the node; a resolved thread stays resolved.
+  const promote = async (threadId: string, kind: "decision" | "task") => {
+    setBusy(true);
+    try {
+      const r = await api.promoteThread(nestId, threadId, { kind });
+      toast.success(`Promoted to a ${kind}: ${r.node.title}`);
+      await load(true);
+      // The new node joins the nest's tree.
+      void qc.invalidateQueries({ queryKey: keys.nest(nestId) });
+    } catch (e: any) {
+      toast.error(e?.message || "Could not promote the thread");
     } finally {
       setBusy(false);
     }
@@ -366,7 +389,7 @@ export function AnnotationsPanel({
             </div>
           </div>
         ) : (
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
               className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -395,6 +418,30 @@ export function AnnotationsPanel({
               >
                 <RotateCcw className="h-3 w-3" /> Reopen
               </button>
+            )}
+            {canPromote && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                  onClick={() => promote(t.id, "decision")}
+                  title="Turn this thread into a decision node that links back here"
+                  data-testid="annotations-promote-decision"
+                >
+                  <Lightbulb className="h-3 w-3" /> Decision
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                  onClick={() => promote(t.id, "task")}
+                  title="Turn this thread into a task node that links back here"
+                  data-testid="annotations-promote-task"
+                >
+                  <ListChecks className="h-3 w-3" /> Task
+                </button>
+              </>
             )}
           </div>
         ))}

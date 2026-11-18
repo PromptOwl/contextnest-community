@@ -10,7 +10,7 @@
  *   POST /threads/:threadId/handoff { to, note? }      → 201 { handoff, message, mentions }
  *   POST /handoffs/:messageId/accept | /done { note? } → { handoff, message }
  *
- * Thin: each handler calls the service its MCP twin calls (mcp/agent-tools.ts)
+ * Thin: each handler calls the service its MCP twin calls (mcp/nest-agent-tools.ts)
  * and returns that object. Hootie's answer and proposal cards are posted by
  * the service (src/agents/ask-nest.ts); proposals are decided with the
  * ordinary review routes (`POST …/nodes/:id/approve` · `/reject`), not here.
