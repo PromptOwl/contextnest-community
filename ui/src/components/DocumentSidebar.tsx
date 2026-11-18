@@ -36,7 +36,6 @@ import {
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
 import { appRail, type AppPage } from "../lib/pages";
-import { useAdministersNest } from "../lib/administers-nest";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
@@ -336,10 +335,7 @@ function WorkShortcuts({
   onOpen?: (id: string) => void;
 }) {
   const { mcpOauthEnabled, docStreamEnabled, surfacesEnabled } = useAuth();
-  // The Control room is listed for nest owners/admins too (po-1186 CR2); the
-  // row appears once the nest list says so.
-  const administersNest = useAdministersNest(surfacesEnabled && !isAdmin) ?? false;
-  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest });
+  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled, surfacesEnabled });
   const pages = rail.groups.find((g) => g.id === "work")?.pages ?? [];
   if (pages.length === 0) return null;
   const alwaysShown = pages.some((p) => !RIBBON_PAGE_IDS.has(p.id));

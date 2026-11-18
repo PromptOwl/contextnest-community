@@ -652,13 +652,18 @@ surfacesRoutes.get("/seeds", async (c) => {
 // GET /surfaces/cold-start?nest_id=   one seeded nest, or every seeded nest the
 // caller administers (all for a server admin). Read-only, counts only; MCP twin
 // context_surfaces_cold_start; same zod query (src/surfaces/cold-start-schema.ts).
+// The REST route serves the Control room page, so it is superadmin-only since
+// po-1406 (nest-scoped keys never reach /surfaces); the MCP twin is unchanged.
 
 import { coldStart, coldStartAll } from "./services/cold-start-service.js";
 import { ColdStartQuery } from "./cold-start-schema.js";
+import { assertControlRoomReader } from "../governance/control-room-access.js";
 import { parseOr422 } from "../workflow/agent-event-schema.js";
 
 surfacesRoutes.get("/cold-start", async (c) => {
   try {
+    // Serves the Control room page only: superadmins (po-1406).
+    await assertControlRoomReader(c);
     const q = parseOr422(ColdStartQuery, c.req.query());
     const scope = c.get("nestScope");
     const nestId = q.nest_id ?? scope ?? undefined;

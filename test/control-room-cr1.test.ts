@@ -31,6 +31,10 @@ let P: string; // pat's personal nest
 let writeKey: string; // nest-scoped write key for N (the external agent)
 let readKey: string; // nest-scoped read key for N
 let n2Key: string; // nest-scoped write key for N2
+// po-1406: the REST reads serve the superadmin-only Control room; anyone else
+// reads them as an agent, with a key scoped to the nest.
+let pKey: string; // alice's key scoped to P (she administers it, not its owner)
+let patKey: string; // pat's key scoped to P (the owner)
 
 const db = async () => (await import("../src/db/client.js")).getDb();
 const all = async (sql: string, p: any[] = []) => (await db()).all(sql, p) as Promise<any[]>;
@@ -230,6 +234,8 @@ beforeAll(async () => {
   writeKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "claude-code-agent", nest_id: N }, alice.apiKey)).data.api_key;
   readKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "ro", nest_id: N, capability: "read" }, alice.apiKey)).data.api_key;
   n2Key = (await jsonRequest(app, "POST", "/auth/keys", { label: "ops-agent", nest_id: N2 }, alice.apiKey)).data.api_key;
+  pKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "alice-on-p", nest_id: P }, alice.apiKey)).data.api_key;
+  patKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "pat-agent", nest_id: P }, pat.apiKey)).data.api_key;
   installId = `inst_${randomUUID()}`;
   await run(
     `INSERT INTO surface_installs (id, org_id, surface, mode, tenant_key, team_id, status) VALUES (?, 'org', 'slack', 'manifest', 'T0CR', 'T0CR', 'active')`,
@@ -304,7 +310,7 @@ describe("agent event API", () => {
     const c3 = await req("PATCH", `/runs/${runId}`, { status: "failed" }, writeKey);
     expect(c3.status).toBe(409);
 
-    const ledger = await req("GET", `/ledger`, undefined, alice.apiKey);
+    const ledger = await req("GET", `/ledger`, undefined, writeKey);
     expect(ledger.status).toBe(200);
     const row = ledger.data.entries.find((e: any) => e.entry_id === runId);
     expect(row).toBeTruthy();
@@ -315,7 +321,7 @@ describe("agent event API", () => {
       decision: { summary: "Chose vitest over jest" },
       source: { kind: "agent", label: "cc-session-1" },
     });
-    const roll = await req("GET", `/rollups?by=agent&grain=day`, undefined, alice.apiKey);
+    const roll = await req("GET", `/rollups?by=agent&grain=day`, undefined, writeKey);
     expect(roll.status).toBe(200);
     const r = roll.data.rows.find((x: any) => x.key === "nodes/agents/claude-code-laptop");
     expect(r).toMatchObject({ runs: 1, propose: 1, cost_usd: 0.05, tokens: 1200 });
@@ -437,7 +443,7 @@ describe("agent event API", () => {
     const ok = await req("POST", `/nests/${N}/nodes/${nodeId}/approve`, { note: "Agreed in standup" }, bob.apiKey);
     expect(ok.status).toBe(200);
 
-    const tr = await req("GET", `/ledger/${id}`, undefined, alice.apiKey);
+    const tr = await req("GET", `/ledger/${id}`, undefined, writeKey);
     expect(tr.status).toBe(200);
     for (const hop of ["run", "verdict", "proposal", "review", "version", "source"]) expect(tr.data.chain[hop], hop).toBeTruthy();
     expect(tr.data.chain.review).toMatchObject({ state: "approved", by: bob.email });
@@ -461,7 +467,7 @@ describe("agent event API", () => {
     // Metacognition back-links the review it opened (linkRunArtifacts).
     await run("UPDATE review_requests SET run_id = ? WHERE id = ?", [id, rv.id]);
     expect((await req("POST", `/nests/${N}/nodes/${nodeId}/approve`, {}, bob.apiKey)).status).toBe(200);
-    const tr = await req("GET", `/ledger/${id}`, undefined, alice.apiKey);
+    const tr = await req("GET", `/ledger/${id}`, undefined, writeKey);
     expect(tr.status).toBe(200);
     expect(tr.data.entry.agent.source).toBe("metacognition");
     expect(tr.data.entry.verdict.code).toBe("propose");
@@ -545,7 +551,7 @@ describe("ledger, redaction and rollups", () => {
       .join("&");
 
   it("AC-CR-06 (seeded): a no_op window row has verdict + reason_code and no proposal, review or commit", async () => {
-    const r = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), verdict: "no_op", limit: "5" })}`, undefined, alice.apiKey);
+    const r = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), verdict: "no_op", limit: "5" })}`, undefined, writeKey);
     expect(r.status).toBe(200);
     expect(r.data.entries.length).toBe(5);
     for (const e of r.data.entries) {
@@ -564,7 +570,7 @@ describe("ledger, redaction and rollups", () => {
     let cursor: string | undefined;
     let totals: any;
     do {
-      const r = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), limit: "17", cursor })}`, undefined, alice.apiKey);
+      const r = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), limit: "17", cursor })}`, undefined, writeKey);
       expect(r.status).toBe(200);
       for (const e of r.data.entries) {
         expect(seen.has(e.entry_id)).toBe(false);
@@ -592,7 +598,7 @@ describe("ledger, redaction and rollups", () => {
       for (const h of hidden) expect(s).not.toContain(h);
     };
     // Nest admin (not owner).
-    const asAlice = await req("GET", `/nests/${P}/ledger?${qs(range())}`, undefined, alice.apiKey);
+    const asAlice = await req("GET", `/nests/${P}/ledger?${qs(range())}`, undefined, pKey);
     expect(asAlice.status).toBe(200);
     expect(asAlice.data.entries.length).toBe(6);
     asAlice.data.entries.forEach(assertRedacted);
@@ -604,18 +610,18 @@ describe("ledger, redaction and rollups", () => {
     pRows.forEach(assertRedacted);
     // Trace.
     for (const id of [`win_${pWindow}`, pRun]) {
-      const tr = await req("GET", `/ledger/${id}`, undefined, alice.apiKey);
+      const tr = await req("GET", `/ledger/${id}`, undefined, pKey);
       expect(tr.status).toBe(200);
       assertRedacted(tr.data.entry);
       const s = JSON.stringify(tr.data);
       for (const h of hidden) expect(s).not.toContain(h);
     }
     // Export.
-    const ex = await req("GET", `/nests/${P}/ledger/export?${qs({ ...range(), format: "ndjson" })}`, undefined, alice.apiKey);
+    const ex = await req("GET", `/nests/${P}/ledger/export?${qs({ ...range(), format: "ndjson" })}`, undefined, pKey);
     expect(ex.status).toBe(200);
     for (const h of hidden) expect(ex.text).not.toContain(h);
     // Rollups: labels redacted, counts still sum to the total.
-    const roll = await req("GET", `/nests/${P}/rollups?${qs({ ...range(), by: "binding" })}`, undefined, alice.apiKey);
+    const roll = await req("GET", `/nests/${P}/rollups?${qs({ ...range(), by: "binding" })}`, undefined, pKey);
     expect(roll.status).toBe(200);
     for (const h of hidden) expect(JSON.stringify(roll.data)).not.toContain(h);
     expect(roll.data.rows.reduce((n: number, r: any) => n + r.entries, 0)).toBe(6);
@@ -627,7 +633,7 @@ describe("ledger, redaction and rollups", () => {
     expect(viaOrg.data?.entries?.length).toBe(6);
     viaOrg.data.entries.forEach(assertRedacted);
     // The owner sees full rows.
-    const asPat = await req("GET", `/nests/${P}/ledger?${qs(range())}`, undefined, pat.apiKey);
+    const asPat = await req("GET", `/nests/${P}/ledger?${qs(range())}`, undefined, patKey);
     const win = asPat.data.entries.find((e: any) => e.entry_id === `win_${pWindow}`);
     expect(win.redacted).toBeNull();
     expect(win.proposal.title).toBe(PRIVATE_TITLE_TEXT);
@@ -635,9 +641,9 @@ describe("ledger, redaction and rollups", () => {
     const ext = asPat.data.entries.find((e: any) => e.entry_id === pRun);
     expect(ext.decision.summary).toBe("Pat secret summary");
     // q never matches a redacted row.
-    const search = await req("GET", `/nests/${P}/ledger?${qs({ ...range(), q: "salary" })}`, undefined, alice.apiKey);
+    const search = await req("GET", `/nests/${P}/ledger?${qs({ ...range(), q: "salary" })}`, undefined, pKey);
     expect(search.data.entries.length).toBe(0);
-    const searchOwner = await req("GET", `/nests/${P}/ledger?${qs({ ...range(), q: "salary" })}`, undefined, pat.apiKey);
+    const searchOwner = await req("GET", `/nests/${P}/ledger?${qs({ ...range(), q: "salary" })}`, undefined, patKey);
     expect(searchOwner.data.entries.length).toBe(3);
   });
 
@@ -662,7 +668,7 @@ describe("ledger, redaction and rollups", () => {
     expect(viaMcp.data?.chain?.run?.inputs).toBeNull();
     expect(viaMcp.data?.entry?.decision?.evidence).toBeNull();
     // A write-tier caller sees it.
-    const full = await req("GET", `/ledger/${id}`, undefined, alice.apiKey);
+    const full = await req("GET", `/ledger/${id}`, undefined, writeKey);
     expect(full.data.chain.run.inputs).toEqual({ task: "secret task" });
     expect(full.data.entry.decision.summary).toBe("Fixed the flaky test");
   });
@@ -687,9 +693,10 @@ describe("ledger, redaction and rollups", () => {
             by === "agent"
               ? `/nests/${r.nest_id}/ledger?${qs({ from, to, agent: r.key, limit: "1" })}`
               : `/nests/${r.key}/ledger?${qs({ from, to, limit: "1" })}`;
-          // Alice administers every nest in the fixture (and sees P redacted:
-          // counts are the same either way).
-          const l = await req("GET", path, undefined, alice.apiKey);
+          // Alice administers every nest in the fixture; her key for each one
+          // (P redacted: counts are the same either way).
+          const nestOfRow = by === "agent" ? r.nest_id : r.key;
+          const l = await req("GET", path, undefined, nestOfRow === N ? writeKey : nestOfRow === N2 ? n2Key : pKey);
           expect(l.status, path).toBe(200);
           expect(pick(l.data.totals), `${grain}/${by}/${r.bucket}/${r.key}`).toEqual(pick(r));
         }
@@ -705,14 +712,14 @@ describe("ledger, redaction and rollups", () => {
 
   it("AC-CR-12: a ledger export writes an export row to node_access_events, and the file has the same rows and redaction as the API", async () => {
     const before = Number((await one("SELECT COUNT(*) AS n FROM node_access_events WHERE nest_id = ? AND action = 'export'", [N])).n);
-    const ex = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range(), format: "ndjson" })}`, undefined, alice.apiKey);
+    const ex = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range(), format: "ndjson" })}`, undefined, writeKey);
     expect(ex.status).toBe(200);
     expect(ex.headers.get("Content-Type")).toMatch(/ndjson/);
     const lines = ex.text.trim().split("\n").map((l: string) => JSON.parse(l));
     const api: any[] = [];
     let cursor: string | undefined;
     do {
-      const p = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), limit: "200", cursor })}`, undefined, alice.apiKey);
+      const p = await req("GET", `/nests/${N}/ledger?${qs({ ...range(), limit: "200", cursor })}`, undefined, writeKey);
       api.push(...p.data.entries);
       cursor = p.data.next_cursor ?? undefined;
     } while (cursor);
@@ -724,24 +731,31 @@ describe("ledger, redaction and rollups", () => {
     expect(after[0]).toMatchObject({ node_id: null, surface: "api", user_id: alice.userId });
     expect(after[0].detail).toMatch(/decision ledger export/);
     // CSV: same rows, formula cells neutralised.
-    const csv = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range(), format: "csv" })}`, undefined, alice.apiKey);
+    const csv = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range(), format: "csv" })}`, undefined, writeKey);
     expect(csv.status).toBe(200);
     expect(csv.text.trim().split("\n").length).toBe(api.length + 1);
     // Personal-nest export redacts like the API (checked in AC-CR-07).
   });
 
-  it("AC-CR-09 (org scope, decision 3): org-wide reads cover every nest for a server admin, only administered nests for others, and a scoped key stays in its nest", async () => {
-    const asBob = await req("GET", `/ledger?${qs({ ...range(), limit: "200" })}`, undefined, bob.apiKey);
-    expect(asBob.status).toBe(200);
-    expect(asBob.data.entries.length).toBe(0); // Bob only reads N; he administers nothing
-    const asAlice = await req("GET", `/ledger?${qs({ ...range(), limit: "200" })}`, undefined, alice.apiKey);
-    expect(new Set(asAlice.data.entries.map((e: any) => e.nest.id))).toEqual(new Set([N, N2, P]));
+  it("AC-CR-09 (org scope, po-1406): org-wide REST reads cover every nest for a superadmin, refuse everyone else, and a scoped key stays in its nest; the MCP twin still narrows to administered nests", async () => {
+    const asRoot = await req("GET", `/ledger?${qs({ ...range(), limit: "200" })}`, undefined, root.apiKey);
+    expect(asRoot.status).toBe(200);
+    expect(new Set(asRoot.data.entries.map((e: any) => e.nest.id))).toEqual(new Set([N, N2, P]));
+    // Superadmins only (Misha, 2026-11-18), replacing the 2026-11-09 owners/admins rule.
+    for (const who of [bob, alice, pat]) {
+      expect((await req("GET", `/ledger?${qs({ ...range(), limit: "200" })}`, undefined, who.apiKey)).status, who.email).toBe(403);
+      expect((await req("GET", `/rollups?${qs({ ...range(), by: "nest" })}`, undefined, who.apiKey)).status, who.email).toBe(403);
+    }
     const asKey = await req("GET", `/rollups?${qs({ ...range(), by: "nest" })}`, undefined, n2Key);
     expect(new Set(asKey.data.rows.map((r: any) => r.key))).toEqual(new Set([N2]));
-    const asPat = await req("GET", `/rollups?${qs({ ...range(), by: "nest" })}`, undefined, pat.apiKey);
-    expect(new Set(asPat.data.rows.map((r: any) => r.key))).toEqual(new Set([P]));
+    const asPatKey = await req("GET", `/rollups?${qs({ ...range(), by: "nest" })}`, undefined, patKey);
+    expect(new Set(asPatKey.data.rows.map((r: any) => r.key))).toEqual(new Set([P]));
+    const viaMcp = await mcp(null, alice.apiKey, "context_agent_ledger_org", { ...range(), limit: 200 });
+    expect(new Set((viaMcp.data?.entries ?? []).map((e: any) => e.nest.id))).toEqual(new Set([N, N2, P]));
     const outsider = await req("GET", `/ledger/win_${pWindow}`, undefined, bob.apiKey);
-    expect(outsider.status).toBe(404);
+    expect(outsider.status).toBe(403);
+    // A key scoped to another nest is refused P's entry.
+    expect((await req("GET", `/ledger/win_${pWindow}`, undefined, n2Key)).status).toBe(403);
   });
 });
 

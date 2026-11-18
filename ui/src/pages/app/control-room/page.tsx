@@ -3,10 +3,10 @@
  * nest is filling up, the Slack setup and how it all works.
  *
  * CR3 shipped the shell, Setup and How it works; CR2 fills Overview,
- * Decision ledger and Agents from the CR1 ledger and rollups. Who sees what
- * (decision 3, 2026-11-09): a server admin sees every nest and runs Setup;
- * a nest owner or admin sees the nests they administer (the org ledger and
- * rollups narrow themselves server-side) and gets no Setup tab.
+ * Decision ledger and Agents from the CR1 ledger and rollups. Who sees it:
+ * superadmins only (Misha, 2026-11-18, po-1406), replacing the 2026-11-09
+ * owners/admins rule; meta.visible hides it and the page-only reads refuse
+ * everyone else.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, RefreshCw } from "lucide-react";
