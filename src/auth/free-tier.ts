@@ -41,3 +41,16 @@ export async function writesAllowed(): Promise<boolean> {
   if (getCurrentLicense()?.valid) return true;
   return withinFreeTier();
 }
+
+/**
+ * May this server serve its licensed reads (version history: GET /me/stream,
+ * GET …/versions and the other governance views) right now? Yes with a valid
+ * license; without one, exactly when writes are allowed (the Free tier, not
+ * suspended, not offline-locked). One predicate for the REST gates and the
+ * server-level MCP (po-1375), so they cannot drift. A refused request then
+ * asks readOnlyDenial for the wording, which calls writesAllowed again: a
+ * second count on a request already refused, deliberately not cached away.
+ */
+export async function licensedReadsAllowed(): Promise<boolean> {
+  return !!getCurrentLicense()?.valid || (await writesAllowed());
+}

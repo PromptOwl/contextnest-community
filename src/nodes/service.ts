@@ -262,9 +262,46 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /** The change note the server writes when it publishes a write itself
- *  ("Auto-published on create (<reason>)"). The document stream reads the
- *  prefix to tell this stamp from a note a person wrote (po-1214). */
+ *  ("Auto-published on create (<reason>)"). Both stamp sites build it with
+ *  autoPublishNote, and the document stream tells it from a note a person
+ *  wrote with isAutoPublishStamp (po-1214, po-1375). */
 export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
+
+/** Every reason autoPublishReason gives. A reason must not contain "(", ")"
+ *  or a newline: isAutoPublishStamp matches the stamp by that shape
+ *  (tested over this list). */
+export const AUTO_PUBLISH_REASONS = {
+  ungoverned: "no stewards configured",
+  task: "task — board work skips review",
+  creatorReviews: "creator is the document's reviewer",
+  primeOnly: "prime-only review, document is not prime",
+  selfApprove: "owner/admin self-approve",
+} as const;
+
+export function autoPublishNote(on: "create" | "edit", reason: string): string {
+  return `${AUTO_PUBLISH_NOTE_PREFIX}${on} (${reason})`;
+}
+
+/**
+ * Is this change note the server's own stamp? The whole note must have the
+ * stamp's shape — "Auto-published on create|edit (<reason>)" and nothing
+ * after it — not just the prefix, so a person's "Auto-published on Tuesday
+ * after the sync" stays theirs. The reason is not matched against today's
+ * list: stamps stored before the reasons were reworded ("no stewards",
+ * 2026-07) are stamps too. The version row's author cannot tell the two
+ * apart: the stamp is stored under the editor's own email.
+ *
+ * Accepted false positive: a person's note shaped exactly like a stamp
+ * ("Auto-published on edit (see ticket)") is hidden too. That is the price
+ * of still recognising stamps whose reason wording has since changed.
+ */
+// A literal, so no regex metacharacter can slip in from the prefix. If
+// AUTO_PUBLISH_NOTE_PREFIX changes, the reason-list test (every
+// autoPublishNote must read as a stamp) fails until this is updated too.
+const AUTO_PUBLISH_STAMP = /^Auto-published on (create|edit) \([^()\n]+\)$/;
+export function isAutoPublishStamp(note: string): boolean {
+  return AUTO_PUBLISH_STAMP.test(note.trim());
+}
 
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
@@ -1996,23 +2033,23 @@ async function autoPublishReason(
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
   // already looked this up passes it in — create is a hot path.
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
-  if (!governed) return "no stewards configured";
+  if (!governed) return AUTO_PUBLISH_REASONS.ungoverned;
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
   // Board work moves column many times a day; gating every drag behind a
   // reviewer would make a project board unusable. Prime still wins (above):
   // a steward who flags a task prime has asked for review on purpose.
-  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
+  if (doc.type === TASK_NODE_TYPE) return AUTO_PUBLISH_REASONS.task;
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
   // through the queue.
-  if (opts.creatorReviews) return "creator is the document's reviewer";
+  if (opts.creatorReviews) return AUTO_PUBLISH_REASONS.creatorReviews;
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
-    return "prime-only review, document is not prime";
+    return AUTO_PUBLISH_REASONS.primeOnly;
   }
   return (await actorAutoPublishes(nestId, userEmail))
-    ? "owner/admin self-approve"
+    ? AUTO_PUBLISH_REASONS.selfApprove
     : null;
 }
 
@@ -2373,7 +2410,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
+          : autoPublishNote("create", publishReason);
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -3436,7 +3473,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
+          patch.changeNote || autoPublishNote("edit", publishReason);
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(

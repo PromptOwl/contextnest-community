@@ -9,10 +9,12 @@
  * -----------
  * - The stream is experimental (EXPERIMENTAL_DOC_STREAM). While it is off on
  *   the server under test, GET /me/stream answers 404 and the suite skips.
- * - CI runs e2e against the deployed server (nest-dev), not this branch's
- *   build. Until that server ships the feed (a `facets=0` read then answers
- *   with `counts: null`), the suite skips rather than fails;
- *   CN_EXPECT_STREAM_FEED=1 turns that skip into a failure.
+ * - Until the server under test ships the feed (a `facets=0` read then
+ *   answers with `counts: null`) with the switch on, the suite skips rather
+ *   than fails; CN_EXPECT_STREAM_FEED=1 turns that skip into a failure.
+ *   e2e (PR build) always sets it (the server is the PR's own build). For
+ *   nest-dev it is set once deploy-dev has shipped the feed and a nest-dev
+ *   superadmin has turned EXPERIMENTAL_DOC_STREAM on; see tests/env.template.
  * - Cases that need posts skip when the primary account's stream is empty.
  */
 
