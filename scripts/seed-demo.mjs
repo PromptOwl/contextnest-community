@@ -4,9 +4,8 @@
  *
  *   CN_API_KEY=<your key> CN_EMAIL=<your login email> node scripts/seed-demo.mjs [http://localhost:3838]
  *
- * Your key: Settings → API keys. The script makes ONE new nest, "Demo Ops
- * (POGOSA) <time>", owned by you. Nothing else is touched. Running it twice
- * makes a second nest, so delete the old one in the UI.
+ * Your key: Settings → API keys. The script makes ONE new nest, named
+ * "Demo" ("Demo 2" if that is taken), owned by you. Nothing else is touched.
  *
  * What you get:
  *   - published docs in governed/ and tasks assigned to you across stages,
@@ -70,8 +69,15 @@ async function must(method, path, body, key) {
 const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 
 // 1. Your nest, with published content (stewardship is still off)
-const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-const nest = (await must("POST", "/nests", { name: `Demo Ops (POGOSA) ${stamp}` })).nest;
+// A short name, since deleting a nest means typing it back. "Demo", then "Demo 2"... if taken.
+let nest;
+for (let i = 1; i <= 30 && !nest; i++) {
+  const name = i === 1 ? "Demo" : `Demo ${i}`;
+  const { res, data } = await call("POST", "/nests", { name });
+  if (res.ok) nest = data.nest;
+  else if (!/already have a nest/i.test(JSON.stringify(data))) await must("POST", "/nests", { name }); // throws with the real reason
+}
+if (!nest) throw new Error("Demo, Demo 2 ... Demo 30 are all taken. Delete an old demo nest and run again.");
 const N = `/nests/${nest.id}`;
 const me = ME;
 console.log(`Created nest ${nest.name}`);
@@ -123,7 +129,7 @@ let agentKey;
   if (!res.ok) ({ res, data } = await call("POST", "/auth/login", { email: AGENT_EMAIL, password: AGENT_PASSWORD }, null));
   if (!res.ok) throw new Error(`Could not register or sign in ${AGENT_EMAIL}: ${JSON.stringify(data)}`);
   const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
-  const k = await call("POST", "/auth/keys", { label: "demo seed" }, null, { Cookie: cookie });
+  const k = await call("POST", "/auth/keys", { label: `demo seed ${Date.now()}` }, null, { Cookie: cookie });
   agentKey = k.data.api_key;
   if (!agentKey) throw new Error(`No agent key: ${JSON.stringify(k.data)}`);
 }
