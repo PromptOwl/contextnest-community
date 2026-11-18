@@ -305,17 +305,24 @@ export function OntologyGraphView({
     };
   }, [nestId]);
 
+  // The page stays mounted when the nest changes, so a late answer for the
+  // previous nest must not land in this one.
+  const pullsNest = useRef(nestId);
+  pullsNest.current = nestId;
   const loadPulls = (before?: string) => {
+    const forNest = nestId;
+    const current = () => pullsNest.current === forNest;
     setPullsLoading(true);
     setPullsError(null);
     getPulls(nestId, { limit: 25, before })
       .then((page) =>
+        current() &&
         setPullPage((cur) =>
           before && cur ? { ...page, pulls: [...cur.pulls, ...page.pulls] } : page,
         ),
       )
-      .catch((e) => setPullsError(e?.message || "Couldn't load pulls"))
-      .finally(() => setPullsLoading(false));
+      .catch((e) => current() && setPullsError(e?.message || "Couldn't load pulls"))
+      .finally(() => current() && setPullsLoading(false));
   };
   useEffect(() => {
     setPullPage(null);
