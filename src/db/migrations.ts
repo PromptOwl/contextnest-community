@@ -189,6 +189,12 @@ export function runMigrations(db: Database.Database): void {
   if (!nestCols.includes("stewardship_enabled")) {
     db.exec("ALTER TABLE nests ADD COLUMN stewardship_enabled INTEGER NOT NULL DEFAULT 0");
   }
+  // How a reviewer closed a review: "changes" (sent back, expected to return)
+  // or "reject" (declined for good). NULL on older rows, which read as changes.
+  const rrCols = (db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>).map((c) => c.name);
+  if (rrCols.length && !rrCols.includes("resolution_kind")) {
+    db.exec("ALTER TABLE review_requests ADD COLUMN resolution_kind TEXT");
+  }
   // Imported flag — set when a nest was created by importing a folder (its
   // files are copied into <DATA_ROOT>/nests/<id>). Drives the "Imported" badge
   // and flat document discovery (markdown anywhere, not just nodes/).

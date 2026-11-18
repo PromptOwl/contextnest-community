@@ -176,6 +176,8 @@ export async function buildMyWork(params: {
     requested_by: r.requestedBy,
     requested_at: r.requestedAt,
     priority: r.priority,
+    // The version under review, so an approve dialog names the right one.
+    version: r.version,
     // Filed by an agent run (migration 060): the inbox links to its trace.
     run_id: r.runId ?? null,
   });
@@ -413,6 +415,18 @@ export async function buildMyWork(params: {
     reviewTotal + requestsShown - myReviewsTotal -
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
     mentionsTotal;
+  // Reviews filed as urgent that this caller can decide. Counted in SQL for
+  // the same reason the totals above are: the page of items may be one row.
+  // Overdue and urgent tasks come from `assigned`, which is not paged, so the
+  // client counts those in the viewer's own calendar day. Your own urgent
+  // submissions wait on others, so they are taken off.
+  const [{ total: urgentApprovable }, { total: urgentMine }] = !wantQueue
+    ? [{ total: 0 }, { total: 0 }]
+    : await Promise.all([
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", limit: 1 }),
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", requestedByEmail: me, limit: 1 }),
+      ]);
+  const urgentReviewsTotal = urgentApprovable - urgentMine;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
   // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
   const chat =
@@ -435,6 +449,7 @@ export async function buildMyWork(params: {
     assigned: cap(assigned),
     mentions,
     waiting_on_me_total: waitingOnMeTotal,
+    urgent_reviews_total: urgentReviewsTotal,
     pagination: {
       total: reviewTotal + requestsShown,
       limit,

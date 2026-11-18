@@ -270,7 +270,7 @@ export function NestVisibilityControl({
                 variant="outline"
                 size="sm"
                 disabled={saving}
-                className={`shrink-0 h-7 gap-1.5 ${isPublic ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100" : ""}`}
+                className={`shrink-0 gap-1.5 ${isPublic ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100" : ""}`}
                 title={title}
                 aria-label={`Nest visibility: ${label}`}
                 data-testid="nest-visibility-header"

@@ -6,7 +6,7 @@ export const meta: PageMeta = {
   label: "Message log",
   icon: Mail,
   order: 23,
-  group: "admin",
+  group: "settings",
   // Superadmin only — never open mode. The server enforces the same rule.
   visible: ({ isSuperadmin }) => !!isSuperadmin,
 };

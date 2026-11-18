@@ -6,6 +6,6 @@ export const meta: PageMeta = {
   label: "Server settings",
   icon: Shield,
   order: 21,
-  group: "admin",
+  group: "settings",
   visible: ({ isAdmin }) => isAdmin,
 };

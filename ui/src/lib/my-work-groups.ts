@@ -1,4 +1,5 @@
 import type { AssignedItem, MentionItem, WorkItem, WorkPagination } from "./api";
+import { dueState, localToday } from "./board-tasks";
 
 /**
  * Split the inbox: reviews (the only rows a batch decision applies to) and
@@ -54,4 +55,21 @@ export function nothingWaitingOnMe(work: {
   mentions?: MentionItem[];
 }): boolean {
   return work.items.length === 0 && (work.assigned?.length ?? 0) === 0 && (work.mentions?.length ?? 0) === 0;
+}
+
+/**
+ * How many of the things waiting on you are urgent — the My Work count turns
+ * red when this is above zero. Urgent means: a review filed as urgent (the
+ * server counts those), a task marked urgent, or a task past its due day.
+ * Due days are compared in the viewer's own calendar day, so a deadline
+ * never flips early or late with the server's time zone.
+ */
+export function urgentOnMeCount(
+  work: { urgent_reviews_total?: number; assigned?: AssignedItem[] } | undefined,
+  today: string = localToday(),
+): number {
+  const tasks = (work?.assigned ?? []).filter(
+    (a) => a.priority === "urgent" || (!!a.due && dueState(a.due, today) === "overdue"),
+  ).length;
+  return (work?.urgent_reviews_total ?? 0) + tasks;
 }

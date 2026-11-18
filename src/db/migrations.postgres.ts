@@ -1375,6 +1375,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       )
   `);
 
+  // review_requests.resolution_kind: "changes" or "reject" (NULL reads as changes).
+  await db.exec("ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS resolution_kind TEXT");
+
   // Migration 084 parity: first-run onboarding (PO-1185).
   await db.exec(onboardingDdl(NOW));
   await db.exec("ALTER TABLE surface_oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT");
