@@ -35,6 +35,7 @@ import { CHAT_READ_KEY_TOOL_VIEWS, CHAT_TOOL_DEFINITIONS } from "./chat-tools.js
 import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
 import { MESSAGE_TOOL_DEFINITIONS } from "./message-tools.js";
+import { MEMORY_CHANNEL_TOOLS, MEMORY_TOOL_DEFINITIONS } from "./memory-tools.js";
 import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -91,6 +92,10 @@ function nestToolDefinitions() {
     // Promote a thread to a node (PO-1181): document threads too, so not
     // behind the channels switch.
     ...STREAM_TOOL_DEFINITIONS,
+    // Memory snowball (team chat C6, PO-1199): remember / correct / the
+    // decision ledger always (document threads too); the channel knowledge
+    // view and the watcher follow the channels switch.
+    ...MEMORY_TOOL_DEFINITIONS.filter((t) => config.EXPERIMENTAL_AGENT_STREAM || !MEMORY_CHANNEL_TOOLS.has(t.name)),
   ];
 }
 

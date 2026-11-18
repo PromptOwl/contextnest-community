@@ -55,6 +55,9 @@ import { isMetaFile } from "../nodes/meta-files.js";
 import type { ActorLabel } from "./actor-label.js";
 import { cardsText, resolveMessageCards, type ArtifactCard } from "../stream/artifact-cards.js";
 import { promotedFromThreads, type PromotedRef } from "../stream/promote.js";
+import { knowledgeCounts } from "../memory/knowledge.js";
+import { relatedNodesForThreads, relatedNodesText, type RelatedNode } from "../memory/links.js";
+import { watchedChannels } from "../memory/watcher.js";
 import {
   ARCHIVED_TAG,
   CHANNEL_FOLDER,
@@ -255,6 +258,11 @@ export interface ChannelView {
   /** This caller is on the channel's member list (joined, invited, or its
    *  creator). Always true for a readable private channel. */
   member: boolean;
+  /** Nodes this channel produced that the caller can read (team chat C6):
+   *  promoted, remembered, corrected, proposed. See GET …/knowledge. */
+  knowledge_count: number;
+  /** A metacognition agent watches this channel (team chat C6). */
+  watched: boolean;
 }
 
 interface Stats {
@@ -317,6 +325,8 @@ function toView(
     post_refusal: post?.error ?? null,
     private: flags.private,
     member: flags.member,
+    knowledge_count: 0,
+    watched: false,
   };
 }
 
@@ -324,6 +334,20 @@ function toView(
 async function channelFlags(caller: Caller, nodeId: string): Promise<{ private: boolean; member: boolean }> {
   const [priv, member] = await Promise.all([isPrivateChannel(caller.nestId, nodeId), isContainerMember(caller.nestId, nodeId, caller.userId)]);
   return { private: priv, member };
+}
+
+/** Fill the memory-snowball fields of channel views (team chat C6, PO-1199). */
+async function withKnowledge(caller: Caller, views: ChannelView[]): Promise<ChannelView[]> {
+  if (views.length === 0) return views;
+  const [counts, watched] = await Promise.all([
+    knowledgeCounts(caller, views.map((v) => v.id)).catch(() => new Map<string, number>()),
+    watchedChannels(caller.nestId).catch(() => new Set<string>()),
+  ]);
+  for (const v of views) {
+    v.knowledge_count = counts.get(v.id) ?? 0;
+    v.watched = watched.has(v.name);
+  }
+  return views;
 }
 
 /** The channel by name, if it exists and the caller may read it; NotFound
@@ -343,7 +367,8 @@ export async function getReadableChannel(
   const access = await channelAccess(caller, node);
   if (!access.read) throw new NotFoundError("Channel not found");
   const stats = await channelStats(caller, [node.id]);
-  return { node, view: toView(node, stats.get(node.id), access.post, await channelFlags(caller, node.id)) };
+  const [view] = await withKnowledge(caller, [toView(node, stats.get(node.id), access.post, await channelFlags(caller, node.id))]);
+  return { node, view };
 }
 
 // ─── List / create / archive / mark read ────────────────────────────────
@@ -372,8 +397,11 @@ export async function listChannels(
   const refusal = await nestPostRefusal(caller.nestId, caller.userId);
   // Private channels and the caller's memberships, two queries for the list (C2).
   const [priv, mine] = await Promise.all([privateContainerIds(caller.nestId), memberContainers(caller.nestId, caller.userId)]);
-  const all = readable.map((d) =>
+  const all = await withKnowledge(
+    caller,
+    readable.map((d) =>
     toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal, { private: priv.has(d.id), member: mine.has(d.id) }),
+    ),
   );
   const live = all.filter((c) => !c.archived);
   const most = live
@@ -534,6 +562,9 @@ export interface ChannelPost extends ChannelMessage {
   last_activity_at: string;
   /** Nodes this thread was promoted to that the reader can open. */
   promoted: PromotedRef[];
+  /** Nodes this thread touched — mentioned, promoted, remembered, corrected,
+   *  proposed — that the reader can open (team chat C6, PO-1199). */
+  related_nodes: RelatedNode[];
 }
 
 /** A message in a "what is new since" read: flat, oldest first. */
@@ -679,7 +710,7 @@ export async function firstMessageIds(threadIds: string[]): Promise<Map<string, 
 }
 
 /** Threads → posts (the opening message of each, plus its thread's counts). */
-async function toPosts(caller: Caller, channelName: string, threads: ThreadRow[]): Promise<ChannelPost[]> {
+async function toPosts(caller: Caller, hostNodeId: string, channelName: string, threads: ThreadRow[]): Promise<ChannelPost[]> {
   const openings = await openingsFor(threads.map((t) => t.id));
   // A thread is created with its opening message in one transaction, so a
   // thread without one does not occur; skip rather than invent a message.
@@ -687,6 +718,7 @@ async function toPosts(caller: Caller, channelName: string, threads: ThreadRow[]
   const firsts = kept.map((t) => openings.get(t.id)!.first!);
   const messages = await toMessages(caller, channelName, firsts);
   const promoted = await promotedFromThreads(caller, kept.map((t) => t.id));
+  const related = await relatedNodesForThreads(caller, hostNodeId, kept.map((t) => t.id)).catch(() => new Map<string, RelatedNode[]>());
   return kept.map((t, i) => {
     const o = openings.get(t.id)!;
     return {
@@ -701,6 +733,7 @@ async function toPosts(caller: Caller, channelName: string, threads: ThreadRow[]
       last_reply_at: o.lastReplyAt,
       last_activity_at: o.lastReplyAt ?? t.created_at,
       promoted: promoted.get(t.id) ?? [],
+      related_nodes: related.get(t.id) ?? [],
     };
   });
 }
@@ -720,7 +753,7 @@ export type ChannelTimeline =
       /** Pass as `since` next time to get only what was written after this read. */
       next_since: string;
     }
-  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: Pagination } }
+  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: Pagination; related_nodes: RelatedNode[] } }
   | {
       channel: ChannelView;
       /** Posts and replies written after `since`, oldest first. */
@@ -793,7 +826,7 @@ export async function readChannel(
       )) as ThreadRow | undefined)
       : undefined;
     if (!row) throw new NotFoundError("Thread not found in this channel");
-    const [post] = await toPosts(caller, view.name, [row]);
+    const [post] = await toPosts(caller, node.id, view.name, [row]);
     if (!post) throw new NotFoundError("Thread not found in this channel");
     // Replies are the comments after the opening one, paged like the timeline.
     const rows = (await db.all(
@@ -807,6 +840,7 @@ export async function readChannel(
       thread: {
         post,
         replies,
+        related_nodes: post.related_nodes,
         pagination: { total: post.reply_count, limit, offset, has_more: offset + replies.length < post.reply_count },
       },
     };
@@ -852,7 +886,7 @@ export async function readChannel(
       LIMIT ? OFFSET ?`,
     [caller.nestId, node.id, limit, offset],
   )) as ThreadRow[];
-  const posts = await toPosts(caller, view.name, threads);
+  const posts = await toPosts(caller, node.id, view.name, threads);
   const newest = (await db.get(
     `SELECT c.id FROM annotation_comments c
        JOIN annotation_threads t ON t.id = c.thread_id
@@ -905,7 +939,7 @@ export function timelineText(t: ChannelTimeline): string {
       ? `\n\nPromoted to: ${post.promoted.map((p) => `${p.kind} "${p.title}" (${p.node_id})`).join("; ")}.`
       : "";
     const more = pg.has_more ? `\n\nMore replies: pass offset ${pg.offset + replies.length}.` : "";
-    return `${head}\n\n${lines.join("\n")}${promoted}${more}\n\nReply with context_comment { channel: "${name}", thread: "${post.id}", body }.`;
+    return `${head}\n\n${lines.join("\n")}${promoted}${relatedNodesText(post.related_nodes)}${more}\n\nReply with context_comment { channel: "${name}", thread: "${post.id}", body }. Keep something from it with context_remember { thread: "${post.id}" }.`;
   }
   if ("messages" in t) {
     if (t.messages.length === 0) return `${head}\n\nNothing new. Pass since: "${t.next_since}" again later.`;

@@ -37,6 +37,8 @@ import { indexBroadcast } from "./broadcast.js";
 // Team chat harness C2 (PO-1197): conversations, the live event, 'all' subscribers.
 import { isConversationId } from "../chat/containers.js";
 import { afterPostedMessage, indexConversationAgents } from "../chat/hooks.js";
+import { recordMessageLinks } from "../memory/links.js";
+import { onPostedMessage as watchPostedMessage } from "../memory/watcher.js";
 
 export type MentionOutcome =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
@@ -87,6 +89,13 @@ export async function fanOutPostedMessage(params: {
   const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: commentId, mentions: [] };
   // The live event and the 'all' subscribers (C2); never for a document thread.
   if (channel) await afterPostedMessage({ nestId, nodeId, thread, isReply, authorEmail, commentId });
+  // Memory snowball (team chat C6, PO-1199): the nodes this message names
+  // become thread→node relations, and a watched channel's agent sees it.
+  // Both best effort — never the poster's problem.
+  await recordMessageLinks({ nestId, nodeId, threadId: thread.id, messageId: commentId, body, authorEmail, authorUserId: params.authorUserId }).catch((err) =>
+    console.warn("[memory] links not recorded", nestId, thread.id, err?.message ?? err),
+  );
+  await watchPostedMessage({ nestId, nodeId, threadId: thread.id, body }).catch(() => {});
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 

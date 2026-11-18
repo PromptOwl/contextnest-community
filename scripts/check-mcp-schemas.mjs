@@ -115,7 +115,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   the channel membership routes, /me/chat/preferences and /nests/:id/chat/presence; Community-only: conversations are
 //   nodes with grants and tags, levels are stream_marks rows, presence is in memory; the engine models none, so no
 //   engine op exists. No tool for the SSE stream (an MCP client polls `since`).
-const BASELINE = 120;
+//   120->125 team chat C6 memory snowball (PO-1199, src/mcp/memory-tools.ts): context_remember, context_correct,
+//   context_decisions, context_channel_knowledge, context_channel_watch — twins of POST /threads/:id/remember,
+//   POST /threads/:id/correct, GET /decisions, GET /channels/:name/knowledge and GET/PUT /channels/:name/watch;
+//   the comment-thread store, the review queue and the metacognition agent are Community-only, so the engine
+//   has no operation to import a descriptor from.
+const BASELINE = 125;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

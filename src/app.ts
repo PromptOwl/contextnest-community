@@ -23,6 +23,7 @@ import { conversationIdOf, hiddenContainersFor, isContainerMember, isPrivateCont
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
+import { decisionRoutes, memoryChannelRoutes, memoryThreadRoutes } from "./memory/routes.js";
 import { buildMyWork, parseMyWorkPaging, parseMyWorkSections } from "./me/my-work.js";
 import { actingAgentHandle, markMentionDone } from "./mentions/mention-index.js";
 import { readClient } from "./shared/client-metadata.js";
@@ -3437,6 +3438,13 @@ export function createApp(): Hono<AuthEnv> {
       (parts[1] === "conversations" ||
         (parts[1] === "chat" && parts.length === 3 && ["settings", "presence", "typing"].includes(parts[2])) ||
         (parts.length === 4 && parts[1] === "channels" && ["members", "join", "leave", "private"].includes(parts[3])));
+    // Remember this / correct (team chat C6, PO-1199): admitted at read tier
+    // so a read-only member reaches the service and is told to ask a writer
+    // (AC-C6-04); the service holds the real gate (canCreateInNest /
+    // canUserEdit), as promote's does. Exact segments.
+    //   POST /nests/:id/threads/:threadId/{remember,correct}
+    const isMemoryAction =
+      parts.length === 4 && parts[1] === "threads" && (parts[3] === "remember" || parts[3] === "correct") && c.req.method === "POST";
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3587,6 +3595,7 @@ export function createApp(): Hono<AuthEnv> {
       !isChannelReadMark &&
       !isChannelMessageAction &&
       !isChatAction &&
+      !isMemoryAction &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3956,6 +3965,13 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/cards", cardRoutes);
   nestsApp.route("/:nestId/agent-webhooks", agentWebhookRoutes);
   nestsApp.route("/:nestId/threads", promoteRoutes);
+  // Memory snowball (team chat C6, PO-1199): remember this / correct on
+  // any thread (document threads too, like promote); the decision ledger;
+  // the channel knowledge view and the channel watcher (these two follow
+  // the channels switch through the middleware above).
+  nestsApp.route("/:nestId/threads", memoryThreadRoutes);
+  nestsApp.route("/:nestId/decisions", decisionRoutes);
+  nestsApp.route("/:nestId/channels", memoryChannelRoutes);
   nestsApp.route("/:nestId/contributions", contributionRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
