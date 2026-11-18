@@ -343,6 +343,19 @@ export const defaultTaskRules = (nestName: string): TaskRules => ({
   ticket_prefix: defaultTicketPrefix(nestName),
 });
 
+/**
+ * What a brand-new nest starts with: the five-stage task flow. Stored at
+ * creation (not inferred), so existing nests that never saved rules are
+ * untouched.
+ */
+export const NEW_NEST_STAGE_ORDER = ["icebox", "prioritized", "in-process", "in-review", "done"];
+export const newNestTaskRules = (nestName: string): TaskRules => ({
+  ...defaultTaskRules(nestName),
+  exclusive_namespaces: ["stage"],
+  default_stage_tag: "stage:icebox",
+  stage_order: [...NEW_NEST_STAGE_ORDER],
+});
+
 /** Stored form. */
 export const serializeTaskRules = (rules: TaskRules): string => JSON.stringify(rules);
 

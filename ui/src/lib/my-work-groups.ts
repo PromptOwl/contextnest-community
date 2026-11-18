@@ -1,4 +1,5 @@
-import type { AssignedItem, WorkItem, WorkPagination } from "./api";
+import type { AssignedItem, MentionItem, WorkItem, WorkPagination } from "./api";
+import { dueState, localToday } from "./board-tasks";
 
 /**
  * Split the inbox: reviews (the only rows a batch decision applies to) and
@@ -30,7 +31,9 @@ export function workItemKey(w: WorkItem): string {
  * pagination.total because they don't page with the reviews. Unread
  * notifications (comments, mentions, watched documents) count too — /me/work
  * carries them whatever the page size. What you handed off (Waiting on others)
- * needs nothing from you, so it stays out (CU-wdqcq0658p).
+ * needs nothing from you, so it stays out (CU-wdqcq0658p). Open @mentions
+ * (PO-1180) are inside waiting_on_me_total, and the server drops the matching
+ * "mentioned you" notification rows, so a mention counts once.
  */
 export function waitingOnMeCount(
   work:
@@ -44,7 +47,29 @@ export function waitingOnMeCount(
   );
 }
 
-/** "All caught up" only when no review, request or assigned task waits on you. */
-export function nothingWaitingOnMe(work: { items: WorkItem[]; assigned?: AssignedItem[] }): boolean {
-  return work.items.length === 0 && (work.assigned?.length ?? 0) === 0;
+/** "All caught up" only when no review, request, assigned task or open
+ *  mention waits on you. */
+export function nothingWaitingOnMe(work: {
+  items: WorkItem[];
+  assigned?: AssignedItem[];
+  mentions?: MentionItem[];
+}): boolean {
+  return work.items.length === 0 && (work.assigned?.length ?? 0) === 0 && (work.mentions?.length ?? 0) === 0;
+}
+
+/**
+ * How many of the things waiting on you are urgent — the My Work count turns
+ * red when this is above zero. Urgent means: a review filed as urgent (the
+ * server counts those), a task marked urgent, or a task past its due day.
+ * Due days are compared in the viewer's own calendar day, so a deadline
+ * never flips early or late with the server's time zone.
+ */
+export function urgentOnMeCount(
+  work: { urgent_reviews_total?: number; assigned?: AssignedItem[] } | undefined,
+  today: string = localToday(),
+): number {
+  const tasks = (work?.assigned ?? []).filter(
+    (a) => a.priority === "urgent" || (!!a.due && dueState(a.due, today) === "overdue"),
+  ).length;
+  return (work?.urgent_reviews_total ?? 0) + tasks;
 }

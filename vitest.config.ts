@@ -17,5 +17,13 @@ export default defineConfig({
     // users/vault index; under parallel cold load the default 10s is too tight.
     hookTimeout: 30000,
     testTimeout: 30000,
+    // CI: console output only from failing tests, so the failure isn't buried in a log
+    // GitHub truncates; JSON feeds the step summary (tests/scripts/vitest-ci-summary.mjs).
+    ...(process.env.GITHUB_ACTIONS
+      ? {
+          silent: "passed-only" as const,
+          reporters: ["default", "github-actions", ["json", { outputFile: "vitest-results.json" }]],
+        }
+      : {}),
   },
 });

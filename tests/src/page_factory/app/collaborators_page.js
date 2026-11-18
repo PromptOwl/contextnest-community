@@ -102,6 +102,21 @@ class CollaboratorsPage {
     this._log(`Opening the Collaborators tab of nest ${nestId}`);
     await this._open(`/nest/${nestId}?tab=collaborators`);
     await this.peopleWithAccess.waitFor({ state: 'visible' });
+    await this.showPersonForm();
+  }
+
+  /**
+   * Show the add-a-person form. On a shared deployment with teams on, the add
+   * control opens on Team (team sharing is how a nest reaches a group there),
+   * so the person box is on the page only once Person is chosen. Everyone who
+   * gets this tab gets the add control, so wait for it before looking.
+   */
+  async showPersonForm() {
+    await this.personInput.or(this.personMode).first().waitFor({ state: 'visible' });
+    if (await this.personInput.isVisible()) return;
+    this._log('The add control opened on Team; choosing Person');
+    await this.personMode.click();
+    await this.personInput.waitFor({ state: 'visible' });
   }
 
   /** Follow a Collaborators link, without waiting for the tab (it may be withheld). */
@@ -153,6 +168,7 @@ class CollaboratorsPage {
 
   /** The roles the add form offers. */
   async grantableRoles() {
+    await this.showPersonForm();
     await this.roleSelect.click();
     const roles = (await this.page.getByRole('option').allInnerTexts()).map((r) => r.trim());
     await this.page.keyboard.press('Escape');
@@ -162,6 +178,7 @@ class CollaboratorsPage {
   /** Fill the add form and submit it. */
   async addPerson(email, roleLabel = 'Viewer') {
     this._log(`Adding ${email} as ${roleLabel}`);
+    await this.showPersonForm();
     if (roleLabel !== 'Viewer') {
       await this.roleSelect.click();
       await this.page.getByRole('option', { name: roleLabel, exact: true }).click();
@@ -199,7 +216,10 @@ class CollaboratorsPage {
 
   // ── Visibility ─────────────────────────────────────────────────────────────
 
-  /** Choose a visibility tier from the menu (Private, Organization, Public). */
+  /**
+   * Choose a visibility tier from the menu: Private, Organization, Public. A
+   * shared deployment offers "Share with a team…" in place of Organization.
+   */
   async chooseVisibility(label) {
     this._log(`Choosing visibility ${label}`);
     await this.visibilitySelect.click();

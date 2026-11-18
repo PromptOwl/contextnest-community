@@ -41,12 +41,15 @@ import { getDb } from "../db/client.js";
 import { batchViewCollisions } from "../views/collision.js";
 import { isNestArchived } from "../shared/access.js";
 import { resolveNestPath } from "../shared/paths.js";
+import { config } from "../config.js";
+import { isStewardshipEnabled } from "../nests/service.js";
+import { canUserApprove, canUserEdit, type PermissionResult } from "./stewardship-service.js";
 
 /** Community-tier RBAC stub.
  *
- * The community server enforces nest-level permissions at the route
- * middleware layer, so by the time the engine is called the actor is
- * already authorized. The engine still needs an `RbacHook` shape — we
+ * The community server authorizes the actor before the engine is called:
+ * nest access at the route middleware, and who may decide an external edit
+ * in canDecideExternalEdit below. The engine still needs an `RbacHook` shape — we
  * grant doc-owner uniformly; czar paths are not used (community runs
  * standard tier only). */
 const communityRbac: RbacHook = {
@@ -587,6 +590,61 @@ async function mirrorVersion(input: {
   );
 }
 
+/** Stands in for a submitter where the approval check wants one: an external edit has none. */
+const NO_SUBMITTER = "external-edit:no-submitter";
+
+/**
+ * May this person decide (approve or reject) a pending external edit on this
+ * document? Approving makes text nobody reviewed the approved version and
+ * rejecting puts the file back, so this is the decision a reviewer makes on a
+ * submitted version and takes the same authority (PO-1193):
+ *
+ *  - Governed nest: `canUserApprove`, the check the version-review routes
+ *    use. Separation of duties is left out: an external edit has no submitter
+ *    (the scan records who ran it, not who typed the text), so there is nobody
+ *    the decider has to differ from. A reject skips the admin-folder rule, as
+ *    rejecting a version does — it publishes nothing.
+ *  - Open nest (stewardship off): there is no approval step, an edit is
+ *    published by whoever may edit, so whoever may edit this document decides
+ *    (`canUserEdit`). With sign-in turned off there is one user, who edits
+ *    everything.
+ *
+ * The routes ask this before they touch the edit, and answer 404 first for a
+ * document the caller can't open. approveExternalEdit and rejectExternalEdit
+ * ask again, so no other way in can skip it.
+ */
+export async function canDecideExternalEdit(
+  nestId: string,
+  documentId: string,
+  userEmail: string,
+  decision: "approve" | "reject",
+): Promise<PermissionResult> {
+  if (await isStewardshipEnabled(nestId)) {
+    return canUserApprove(nestId, documentId, userEmail, {
+      requestedBy: NO_SUBMITTER,
+      ignoreAdminFolders: decision === "reject",
+    });
+  }
+  if (config.AUTH_MODE === "open") {
+    return { allowed: true, reason: "open mode", role: "owner" };
+  }
+  const edit = await canUserEdit(nestId, documentId, userEmail);
+  if (edit.allowed) return edit;
+  return {
+    ...edit,
+    reason:
+      "Only people who can edit this document can approve or reject an external edit to it. Ask the nest owner for edit access.",
+  };
+}
+
+async function assertCanDecide(
+  input: { nestId: string; documentId: string; actor: string },
+  decision: "approve" | "reject",
+): Promise<void> {
+  const verdict = await canDecideExternalEdit(input.nestId, input.documentId, input.actor, decision);
+  if (!verdict.allowed) throw new ForbiddenError(verdict.reason);
+}
+
 /** Approve a pending external edit — commits the patch as a new version. */
 export async function approveExternalEdit(input: {
   nestId: string;
@@ -595,6 +653,7 @@ export async function approveExternalEdit(input: {
   actor: string;
   comment?: string;
 }) {
+  await assertCanDecide(input, "approve");
   // A seed's admin-only folders: nest admins only (S7-R3 R2-L3; the route checks first).
   const adminOnly = await adminFolderRefusal(input.nestId, input.documentId, input.actor);
   if (adminOnly) throw new ForbiddenError(adminOnly);
@@ -673,6 +732,7 @@ export async function rejectExternalEdit(input: {
   actor: string;
   reason: string;
 }) {
+  await assertCanDecide(input, "reject");
   const { storage } = await engineCache.get(input.nestId);
   const result = await rejectSuggestion({
     storage,

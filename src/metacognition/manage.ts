@@ -169,7 +169,13 @@ export async function configureAgent(opts: {
   body: Record<string, unknown>;
   savedBy: string;
 }) {
-  const { nodeId, config: parsed, enabled } = await validateAgentConfig(opts.nestId, opts.nodeId, opts.body);
+  // The channels it watches (team chat C6) are set through the channel
+  // watch route, so a settings save that doesn't mention them keeps them.
+  const body =
+    opts.body.channels === undefined
+      ? { ...opts.body, channels: (await getAgent(opts.nestId, assertSafeNodeId(opts.nodeId)))?.config.channels }
+      : opts.body;
+  const { nodeId, config: parsed, enabled } = await validateAgentConfig(opts.nestId, opts.nodeId, body);
   const agent = await upsertAgent({
     nestId: opts.nestId,
     nodeId,

@@ -57,9 +57,84 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   (surface_seed_applications, surface_seed_items) the engine does not model, so no engine op exists.
 //   97->98 context_table_rows (CU-wdqcq06fjy) — twin of POST /nodes/:id/rows; table row ops are Community-only
 //   (src/tables), the engine has no table op, so no engine descriptor exists (same as context_table_query).
-//   98->101 Nest Plugins trio (CU-wdqcq05raz; nest_plugins registry — the engine's `sync`
-//   ops take settings per call, these act on stored per-nest config).
-const BASELINE = 101;
+//   98->99 context_nest_teams — twin of GET/POST/DELETE /nests/:id/teams; Community-only: teams and
+//   nests.shared_teams are server state the engine does not model, so there is no engine op to consume.
+//   (context_stream, po-1214, takes its schema from zod via mcpInputSchema since po-1375: no literal, no bump.)
+//   99->102 (PO-1185 first-run onboarding, src/mcp/onboarding-tools.ts; Community-only exception, maintainer decision
+//   2026-10-24 recorded in docs/prds/api-convergence.md Phase 3). Upstream checked: @promptowl/contextnest-engine 3.5.0
+//   (latest) /api has no onboarding or distill op (its markOnboarding is the local CLI registry flag, not an op).
+//     context_onboarding — twin of GET /onboarding + /onboarding/connection + /onboarding/distill/:id (one read, `job_id`
+//       folds the job progress in; no separate status tool). Per-person welcome state (user_onboarding table) and the
+//       distill job row (distill_jobs) are Community server state the engine does not model.
+//     context_onboarding_update — twin of POST /onboarding/{dismiss,reopen,nest}. Flips the per-person welcome flag
+//       (user_onboarding) and creates the caller's own nest idempotently; the engine has no users or onboarding state.
+//     context_distill — twin of POST /onboarding/distill. A server job: SSRF-fenced fetch + model passes + draft writes
+//       through Community's createNode governance path (alwaysDraft); fetching URLs and running models are server
+//       concerns outside the engine's vault-operation catalog, so there is no op to consume.
+//   102->104 context_channels, context_channel_read (PO-1179, src/mcp/channel-tools.ts) — twins of
+//   /nests/:id/channels (list/create/archive, timeline/thread). Community-only (a node convention over the
+//   comment-thread store) and experimental (EXPERIMENTAL_AGENT_STREAM). Upstream checked:
+//   @promptowl/contextnest-engine 3.7.0 (latest) /api has no channel op, so there is no descriptor to import.
+//   104->105 context_my_work (PO-1180, src/mcp/my-work-tools.ts) — twin of GET /me/work (reviews,
+//   requests, notifications, assigned cards, and the new @mention section); My Work is a Community-only
+//   aggregate over this edition's governance tables and the comment_mentions index, so the engine has no
+//   operation to import a descriptor from.
+//   105->109 public links (PO-1365, src/mcp/public-link-tools.ts; Community-only exception, same maintainer decision
+//   2026-10-24, listed in docs/prds/api-convergence.md Phase 3; engine 3.7.0 /api has no public-link op).
+//   Upstream checked: @promptowl/contextnest-engine /api has no publish-link op — its `publish` is the version checkpoint,
+//   a different thing. A public link is server state (the `publish` and `access_grant` tables and the /p render surface).
+//     context_public_link_create — twin of POST /nests/:id/publications. Mints an unguessable /p/<slug> page for one
+//       document's approved version under a gate (public, passcode, email, invite); the engine has no hosted pages or gates.
+//     context_public_links — twin of GET /nests/:id/publications. Reads the `publish` rows; no engine op lists them.
+//     context_public_link_update — twin of PATCH /nests/:id/publications/:id. Sets the per-link `show_invite` flag on a
+//       `publish` row (whether the hosted page carries the "Make your own nest" strip); page chrome is not an engine concept.
+//     context_public_link_revoke — twin of DELETE /nests/:id/publications/:id. Soft-revokes a `publish` row; separate from
+//       the list and create tools so each carries a true read-only / destructive hint (src/mcp/annotations.ts).
+//   109->110 context_promote_thread (PO-1181, src/mcp/stream-tools.ts) — twin of
+//   POST /nests/:id/threads/:threadId/promote; promoting a comment thread to a decision or task node
+//   is Community-only (the comment-thread store is this edition's), so the engine has no operation to
+//   import a descriptor from. Artifact cards extend context_channel_read's output, no new tool.
+//   110->111 context_agent_webhooks (PO-1181 follow-up, src/mcp/stream-tools.ts) — twin of
+//   /nests/:id/agent-webhooks (list/set/delete agent wake-up targets); MCP parity for an admin
+//   setting that lives in a Community-only table (agent_webhooks), so no engine op exists.
+//   111 (unchanged) agent team stream S4b (PO-1190 / PO-1189): no new tool. `channel`, `since`, `sections`,
+//   `summary`, `mention_done` and the "agents" / "mark_read" / "test" actions extend the existing
+//   context_comment, context_resolve_comment, context_comments, context_channel_read, context_channels,
+//   context_my_work, context_promote_thread and context_agent_webhooks schemas in place. The list-only view of
+//   context_channels a read-only key is offered (src/mcp/channel-tools.ts READ_KEY_TOOL_VIEWS) is a subset of
+//   that tool's schema, not a new one.
+//   111->114 context_message_read, context_message, context_channel_search (PO-1196, src/mcp/message-tools.ts) —
+//   twins of the channel message routes (/channels/:name/messages/:id/…, /messages/:id, /channels/search);
+//   reactions, edit history, pins, saved items and the LIKE search are Community-only tables over the
+//   comment-thread store, behind EXPERIMENTAL_AGENT_STREAM, so the engine has no operation to import a
+//   descriptor from. Pins ride on context_channels { action: "pins" } and saved items on context_my_work
+//   { sections: ["saved"] } (no new literal for either).
+//   114->119 team chat C2 (PO-1197, src/mcp/chat-tools.ts): context_conversations, context_conversation_read,
+//   context_channel_members, context_chat_preferences, context_presence — twins of /nests/:id/conversations,
+//   the channel membership routes, /me/chat/preferences and /nests/:id/chat/presence; Community-only: conversations are
+//   nodes with grants and tags, levels are stream_marks rows, presence is in memory; the engine models none, so no
+//   engine op exists. No tool for the SSE stream (an MCP client polls `since`).
+//   119->124 team chat C6 memory snowball (PO-1199, src/mcp/memory-tools.ts): context_remember, context_correct,
+//   context_decisions, context_channel_knowledge, context_channel_watch — twins of POST /threads/:id/remember,
+//   POST /threads/:id/correct, GET /decisions, GET /channels/:name/knowledge and GET/PUT /channels/:name/watch;
+//   the comment-thread store, the review queue and the metacognition agent are Community-only, so the engine
+//   has no operation to import a descriptor from.
+//   124->127 team chat C7 (PO-1198, src/mcp/nest-agent-tools.ts): context_ask_nest, context_agents, context_handoff —
+//   twins of POST /nests/:id/ask, /agent-profiles, /threads/:id/handoff + /handoffs/:id/{accept,done}; Community-only
+//   (the comment-thread store, agent webhooks, Hootie) and experimental (EXPERIMENTAL_AGENT_STREAM), so the engine
+//   has no operation to import a descriptor from. Proposals ride the existing context_approve / context_reject.
+//   127->131 context_hire_catalog, context_hire_agent, context_hired_agents, context_agent_recommendations
+//   (PO-1201, src/mcp/hire-tools.ts) — twins of /nests/:id/hire and /nests/:id/agents/recommendations.
+//   Hiring composes this edition's Hootie switch, metacognition agents, agent webhooks and nest-scoped
+//   keys, and the recommendations read this edition's comment, mention and delivery tables, so the
+//   engine has no operation to import a descriptor from.
+//   131->132 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
+//   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
+//   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
+//   132->135 Nest Plugins trio (CU-wdqcq05raz, src/mcp/plugin-tools.ts): context_plugins, context_plugin_run,
+//   context_plugin_configure — twins of /nests/:id/plugins; the nest_plugins registry is stored per-nest config,
+//   while the engine's `sync` ops take settings per call.
+const BASELINE = 135;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -19,6 +19,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
+import { TeamCreateInline } from "./TeamCreateInline";
 
 interface SharedTeam {
   teamId: string;
@@ -104,8 +105,9 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
         Teams
       </Label>
       <p className="text-xs text-muted-foreground">
-        Share a whole team at once. Each member gets the role you gave them on
-        the Teams page. Manage members there.
+        Share with a whole team at once. Only its members can read the nest,
+        each at the role they hold on the team. Manage members on the Teams
+        page.
       </p>
 
       {error && (
@@ -144,6 +146,15 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
             </div>
           )}
 
+          {myTeams.length === 0 ? (
+            <TeamCreateInline
+              nestId={nestId}
+              onShared={async () => {
+                await fetchAll();
+                onChanged();
+              }}
+            />
+          ) : (
           <div className="flex items-center gap-2 pt-1">
             <div className="flex-1">
               {/* Searchable rather than a flat dropdown: past a handful of
@@ -168,6 +179,7 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
               Share
             </Button>
           </div>
+          )}
         </>
       )}
     </div>

@@ -22,11 +22,12 @@ export interface PageBadge {
   tone?: "primary" | "muted";
 }
 
-/** Sidebar groups, in rail order. Ungrouped pages (Nests) sit above them. */
+/** Page groups. "work" is the header ribbon (and the phone drawer); "settings"
+ *  and "help" are reached from the account menu, settings through a page with
+ *  its own left nav. Ungrouped pages (Nests) are the app's home. */
 export const PAGE_GROUPS = [
   { id: "work", label: "Work" },
-  { id: "workspace", label: "Workspace" },
-  { id: "admin", label: "Admin" },
+  { id: "settings", label: "Workspace settings" },
   { id: "help", label: "Help" },
 ] as const;
 export type PageGroupId = (typeof PAGE_GROUPS)[number]["id"];
@@ -40,6 +41,11 @@ export interface PageCaps {
   isSuperadmin?: boolean;
   /** The experimental cross-nest document stream is on (/health). */
   docStreamEnabled?: boolean;
+  /** Surfaces (Slack → nest) is on for this server (/health surfaces_enabled). */
+  surfacesEnabled?: boolean;
+  /** The signed-in person owns or administers at least one nest (po-1186 CR2:
+   *  the Control room shows them their nests). See useAdministersNest. */
+  administersNest?: boolean;
 }
 
 export interface PageMeta {

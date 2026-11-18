@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../db/client.js";
 import type { NestPermission } from "../shared/access.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
-import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 
 const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority", "field"] as const;
 const SWIMLANES = ["assignee", "priority", "parent", "field"] as const;
@@ -248,12 +248,33 @@ async function getVisible(nestId: string, boardId: string, userId: string): Prom
   return toBoard(row);
 }
 
+/** Lowercased names of the boards the caller can see, minus `exceptId` — a
+ *  name is unique among these (PO-1244). Someone else's private board doesn't
+ *  count: refusing on it would reveal it exists.
+ *  ponytail: checked, not a DB constraint (private scope); two simultaneous
+ *  creates can still collide — add a unique index if that ever matters. */
+async function takenNames(nestId: string, userId: string, exceptId?: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT id, name FROM boards WHERE nest_id = ? AND (private = 0 OR created_by = ?)",
+    [nestId, userId],
+  )) as Array<{ id: string; name: string }>;
+  return new Set(rows.filter((r) => r.id !== exceptId).map((r) => r.name.toLowerCase()));
+}
+
 export async function createBoard(
   nestId: string,
   userId: string,
   input: { name?: unknown; private?: unknown; config?: unknown },
 ): Promise<Board> {
-  const name = cleanName(input.name);
+  let name = cleanName(input.name);
+  // New board / Duplicate save a placeholder ("Untitled board", "X copy") and
+  // then open rename — so a taken name gets the next free number, not a 409.
+  const taken = await takenNames(nestId, userId);
+  const base = name;
+  for (let i = 2; taken.has(name.toLowerCase()); i++) {
+    const suffix = ` ${i}`;
+    name = `${base.slice(0, MAX_NAME - suffix.length)}${suffix}`;
+  }
   const config = cleanConfig(input.config ?? { dimension: "tag" });
   const db = getDb();
   const count = (await db.get("SELECT COUNT(*) AS n FROM boards WHERE nest_id = ?", [
@@ -300,9 +321,17 @@ export async function updateBoard(
   const board = await getVisible(nestId, boardId, userId);
   const sets: string[] = [];
   const params: SqlParam[] = [];
+  const finalName = patch.name !== undefined ? cleanName(patch.name) : board.name;
   if (patch.name !== undefined) {
     sets.push("name = ?");
-    params.push(cleanName(patch.name));
+    params.push(finalName);
+  }
+  // A new name, or a private board going shared, must not match another board.
+  if (
+    (patch.name !== undefined || (patch.private === false && board.private)) &&
+    (await takenNames(nestId, userId, boardId)).has(finalName.toLowerCase())
+  ) {
+    throw new ConflictError(`A board named "${finalName}" already exists in this nest. Pick another name.`);
   }
   if (patch.private !== undefined) {
     // Hiding a shared board from the team is the creator's call alone.

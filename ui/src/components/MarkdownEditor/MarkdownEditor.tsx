@@ -1442,7 +1442,7 @@ export const MarkdownEditor = forwardRef<
           className={cn(
             "sticky z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75",
             isPage
-              ? "top-14 -mx-2 mb-3 rounded-md border shadow-sm"
+              ? "top-14 mb-3 rounded-md border shadow-sm"
               : "top-0 border-b",
             toolbarHidden && "invisible",
           )}

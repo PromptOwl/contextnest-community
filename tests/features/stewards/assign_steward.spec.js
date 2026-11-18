@@ -493,6 +493,8 @@ test.describe('Assign Steward', () => {
   });
 
   test('CN-STEW-013: Verify that a Reviewer can\'t reject without feedback ("Please provide feedback explaining why this document is being rejected."), and that rejecting with a reason marks the document Rejected, removes it from the queue, notifies the author with "‹Doc› was rejected by ‹reviewer›", shows "Rejected (‹reason›)" in the document\'s Activity panel, and lets the author edit it again', async ({ primary_user, secondary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'stew-reject');
     const { page, api, nest } = owner;
     const doc = await pending(owner, 'Reject Me', ['qa']);

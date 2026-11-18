@@ -20,8 +20,9 @@ export interface VersionAuthorLike {
 /** The agent a version's write named, or null when it named none. */
 export function versionAgent(v: { client?: ClientAttribution | null }): string | null {
   const agent = v.client?.agent;
-  if (agent === undefined || agent === null) return null;
-  const s = String(agent).trim();
+  // A name or nothing: the schema allows any scalar, but "via 5" is no agent.
+  if (typeof agent !== "string") return null;
+  const s = agent.trim();
   return s ? s : null;
 }
 

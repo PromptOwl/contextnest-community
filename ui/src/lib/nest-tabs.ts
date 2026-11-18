@@ -12,7 +12,8 @@ export const NEST_TAB_LABELS: Record<string, string> = {
   "external-edits": "External edits",
   stewards: "Stewards",
   collaborators: "Collaborators",
-  fields: "Fields",
+  settings: "Settings",
+  activity: "Activity",
   stream: "Stream",
 };
 
@@ -20,5 +21,7 @@ export const NEST_TABS: string[] = Object.keys(NEST_TAB_LABELS);
 
 /** The tab a ?tab= value opens, or undefined for an unknown slug. */
 export function nestTabFromParam(raw: string | null | undefined): string | undefined {
+  // Fields moved into Settings; old ?tab=fields links keep working.
+  if (raw === "fields") return "settings";
   return raw && NEST_TABS.includes(raw) ? raw : undefined;
 }

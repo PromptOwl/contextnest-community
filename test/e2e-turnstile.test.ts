@@ -56,3 +56,41 @@ describe("e2e turnstile (one run at a time on the shared server, none dropped)",
     expect(rateLimitWaitMs({ status: 500, headers: {} }, now, 60_000)).toBe(60_000);
   });
 });
+
+describe("shared-server e2e workflow (tests the deployment, not pull requests)", () => {
+  const wf = yaml.load(readFileSync(".github/workflows/contextnest-community-tests.yml", "utf8")) as any;
+  const prBuild = yaml.load(readFileSync(".github/workflows/e2e-pr-build.yml", "utf8")) as any;
+  const deploy = yaml.load(readFileSync(".github/workflows/deploy-dev.yml", "utf8")) as any;
+
+  it("does not run on pull requests; the PR build does", () => {
+    expect(wf.on).not.toHaveProperty("pull_request");
+    expect(wf.on).not.toHaveProperty("pull_request_target");
+    expect(prBuild.on).toHaveProperty("pull_request");
+  });
+
+  it("runs on a merge to development or main, and by hand", () => {
+    expect(wf.on.push.branches).toEqual(["main", "development"]);
+    expect(wf.on).toHaveProperty("workflow_dispatch");
+  });
+
+  it("runs after the dev deploy, named as that workflow names itself, and only when it succeeded", () => {
+    expect(wf.on.workflow_run.workflows).toEqual([deploy.name]);
+    expect(wf.on.workflow_run.types).toEqual(["completed"]);
+    expect(wf.jobs.e2e.if).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(wf.jobs.e2e.if).toContain("github.event_name != 'workflow_run'");
+  });
+
+  it("after a deploy, checks out development (a workflow_run starts on the default branch)", () => {
+    const checkout = wf.jobs.e2e.steps.find((s: any) => String(s.uses ?? "").startsWith("actions/checkout@"));
+    expect(checkout.with.ref).toContain("github.event_name == 'workflow_run' && 'development'");
+    expect(deploy.jobs.deploy.steps.find((s: any) => String(s.uses ?? "").startsWith("actions/checkout@")).with.ref).toBe("development");
+  });
+
+  it("never cancels or drops a run: one concurrency group per run, ordered by the turnstile", () => {
+    expect(wf.concurrency.group).toBe("e2e-${{ github.run_id }}");
+    expect(wf.concurrency["cancel-in-progress"]).toBe(false);
+    const names = wf.jobs.e2e.steps.map((s: any) => s.name);
+    expect(names.indexOf(GATE_STEP)).toBeGreaterThan(-1);
+    expect(names.indexOf(GATE_STEP)).toBeLessThan(names.indexOf("Run Playwright tests"));
+  });
+});
