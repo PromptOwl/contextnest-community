@@ -21,6 +21,7 @@ import { nowMsExpr } from "../db/sql.js";
 import { canOpenNode } from "../governance/mention-notify.js";
 import { isUniqueViolation } from "../governance/stewardship-service.js";
 import { channelNameOf } from "./channel-node.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import {
   MESSAGE_COLUMNS,
   isNestMember,
@@ -124,7 +125,10 @@ export async function listSaved(params: {
   const member = new Map<string, boolean>();
   const readable = new Map<string, boolean>();
   for (const r of rows) {
-    if (!member.has(r.nest_id)) member.set(r.nest_id, await isNestMember(r.nest_id, userId).catch(() => false));
+    // A member, and the nest's chat is on (C2).
+    if (!member.has(r.nest_id)) {
+      member.set(r.nest_id, (await isNestMember(r.nest_id, userId).catch(() => false)) && (await nestChatEnabled(r.nest_id).catch(() => false)));
+    }
     const k = `${r.nest_id}\u0000${r.node_id}`;
     if (!readable.has(k)) {
       readable.set(

@@ -18,6 +18,21 @@ import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { ConflictError } from "../shared/errors.js";
+import { isConversationId, isPrivateContainer, privateContainerIds } from "../chat/containers.js";
+import { isChannelId } from "../channels/channel-node.js";
+
+/** A conversation's or a private channel's shares ARE its member list (team
+ *  chat C2): they are changed through the chat routes, by the rules there,
+ *  and the sharing roster does not list them (it would name every private
+ *  room and who is in it to an admin who is not a member). */
+async function refuseChatContainer(nestId: string, target: string): Promise<void> {
+  if (isConversationId(target) || (isChannelId(target) && (await isPrivateContainer(nestId, target)))) {
+    throw new ConflictError(
+      "This document is a chat conversation or a private channel: its members are managed through the chat routes (invite, join, leave), not as shares.",
+    );
+  }
+}
 import {
   canEditWith,
   collabPermToRole,
@@ -159,6 +174,7 @@ grantRoutes.post("/", async (c) => {
   // Check before minting an invited user for an unknown address, so a refused
   // share leaves no placeholder row behind.
   const email = normalizeEmail(body.email);
+  if (targetType === "document") await refuseChatContainer(nestId, target);
   const known = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = ?", [
     email,
   ])) as { id: string } | undefined;
@@ -187,7 +203,8 @@ grantRoutes.post("/", async (c) => {
 grantRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId, { readOnly: true });
-  const grants = await listGrants(nestId);
+  const priv = await privateContainerIds(nestId);
+  const grants = (await listGrants(nestId)).filter((g) => !(g.target_type === "document" && (isConversationId(g.target) || priv.has(g.target))));
   // Annotate with the grantee email so the UI shows who, not a uuid.
   const db = getDb();
   const withEmail = await Promise.all(
@@ -205,6 +222,10 @@ grantRoutes.get("/", async (c) => {
 grantRoutes.delete("/:id", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId);
+  const row = (await getDb().get("SELECT target_type, target FROM grants WHERE id = ? AND nest_id = ?", [c.req.param("id"), nestId])) as
+    | { target_type: string; target: string }
+    | undefined;
+  if (row?.target_type === "document") await refuseChatContainer(nestId, row.target);
   const ok = await deleteGrant(nestId, c.req.param("id")!);
   if (!ok) throw new NotFoundError("Grant not found");
   return c.json({ deleted: true });

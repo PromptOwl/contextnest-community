@@ -29,14 +29,15 @@
  * a descriptor from (scripts/check-mcp-schemas.mjs baseline raised to 106,
  * documented there).
  */
-import { MY_WORK_SECTIONS, buildMyWork, parseMyWorkPaging, parseMyWorkSections, type MyWork, type MyWorkSection } from "../me/my-work.js";
+import { availableMyWorkSections, buildMyWork, parseMyWorkPaging, parseMyWorkSections, type MyWork, type MyWorkSection } from "../me/my-work.js";
+import { chatUnreadText } from "../chat/unread.js";
 import { actingAgentHandle } from "../mentions/mention-index.js";
 import { ValidationError } from "../shared/errors.js";
 import { toolError, type McpToolContext, type ToolResult } from "./tools.js";
 
 /** What a call gets when it names no sections: everything but the person's
- *  unread-notification list. */
-const DEFAULT_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting"];
+ *  unread-notification list and saved messages (plus the chat unread summary while chat is on). */
+const defaultSections = (): MyWorkSection[] => availableMyWorkSections().filter((s) => s !== "notifications" && s !== "saved");
 /** The sections the totals are built from. */
 const CORE_SECTIONS: MyWorkSection[] = ["mentions", "items", "assigned", "waiting", "notifications"];
 
@@ -56,7 +57,7 @@ export const MY_WORK_TOOL_DEFINITIONS = [
         sections: {
           type: "array",
           items: { type: "string" },
-          description: `Which sections to return: any of ${MY_WORK_SECTIONS.join(", ")}. Default: all but notifications.`,
+          description: "Which sections to return: any of mentions, items, assigned, waiting, notifications, saved (your saved channel messages, when channels are on), chat (the team chat unread summary, when chat is on). Default: all but notifications.",
         },
         limit: { type: "number", description: "Rows per section (max 100). Default: 50 reviews and 50 mentions, the other sections whole." },
         offset: { type: "number", description: "Reviews to skip (default 0)." },
@@ -119,6 +120,9 @@ export function myWorkText(w: MyWork, actingAs: string | null = null): string {
       out.push(`- ${s.message.actor.label} in #${s.channel} · ${s.nest_name} — ${line(s.message.body)}\n  thread: ${s.thread_id} · message: ${s.message.id} · ${s.message.url}`);
     }
   }
+  if ((w as { chat?: Parameters<typeof chatUnreadText>[0] }).chat) {
+    out.push(chatUnreadText((w as { chat: Parameters<typeof chatUnreadText>[0] }).chat));
+  }
   if (w.waiting_on_me_total !== undefined) {
     out.push(`\n**Waiting on you in total:** ${w.waiting_on_me_total}${w.assigned ? ` (plus ${w.assigned.length} assigned)` : ""}.`);
   }
@@ -132,7 +136,7 @@ export async function runMyWorkTool(
 ): Promise<ToolResult> {
   let sections: MyWorkSection[];
   try {
-    sections = parseMyWorkSections(args?.sections) ?? DEFAULT_SECTIONS;
+    sections = parseMyWorkSections(args?.sections) ?? defaultSections();
   } catch (err) {
     if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
     throw err;
@@ -140,8 +144,8 @@ export async function runMyWorkTool(
   const paging = parseMyWorkPaging(args ?? {});
   const actingAs = actingAgentHandle(ctx.client);
   // Every counted section asked for (the REST default set) → the full object,
-  // totals included, exactly as GET /me/work returns it (`saved` rides on it
-  // while channels are on; it is not part of any total).
+  // totals included, exactly as GET /me/work returns it (`saved` and the C2
+  // chat summary ride on it while on; neither is part of any total).
   const all = CORE_SECTIONS.every((s) => sections.includes(s));
   const data = await buildMyWork({
     userId: ctx.userId,

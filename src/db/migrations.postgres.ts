@@ -123,6 +123,7 @@ export const HISTORICAL_MIGRATIONS = [
   "095_agent_webhooks",
   "096_stream_marks",
   "097_channel_message_actions",
+  "098_team_chat_c2",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1522,6 +1523,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_at TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_by TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+  `);
+
+  // Migration 098 parity: the team chat harness, slice C2 (PO-1197) — the
+  // nest's own chat switch. Conversations, members, the private marker and
+  // notification levels live in existing tables (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS chat_enabled INTEGER NOT NULL DEFAULT 1;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

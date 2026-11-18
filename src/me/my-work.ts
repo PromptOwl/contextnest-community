@@ -30,16 +30,20 @@ import { isCommentMentionNotice } from "../governance/mention-notify.js";
 import { SAVED_PAGE_DEFAULT, listSaved, type SavedList } from "../channels/saved.js";
 import { config } from "../config.js";
 import { ValidationError } from "../shared/errors.js";
+import { chatUnreadSummary } from "../chat/unread.js";
 
 /** The sections of My Work, in the order an agent reads them. `saved` (the
  *  caller's saved channel messages, PO-1196) exists only while
- *  EXPERIMENTAL_AGENT_STREAM is on. */
-export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications", "saved"] as const;
+ *  EXPERIMENTAL_AGENT_STREAM is on; `chat` (the team chat unread summary,
+ *  C2 PO-1197) only while TEAM_CHAT_ENABLED is on. */
+export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications", "saved", "chat"] as const;
 export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
 
-/** The sections that exist right now (the switch decides `saved`). */
+/** The sections that exist right now (the switches decide `saved` and `chat`). */
 export function availableMyWorkSections(): MyWorkSection[] {
-  return MY_WORK_SECTIONS.filter((s) => s !== "saved" || config.EXPERIMENTAL_AGENT_STREAM);
+  return MY_WORK_SECTIONS.filter(
+    (s) => (s !== "saved" || config.EXPERIMENTAL_AGENT_STREAM) && (s !== "chat" || config.TEAM_CHAT_ENABLED),
+  );
 }
 
 /** `sections` from a query string ("mentions,items") or an MCP argument
@@ -410,7 +414,21 @@ export async function buildMyWork(params: {
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
     mentionsTotal;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
+  // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
+  const chat =
+    config.TEAM_CHAT_ENABLED && want("chat")
+      ? await chatUnreadSummary({
+          userId,
+          email: me,
+          onlyNestId,
+          actingAs: params.actingAs ?? null,
+        }).catch((err) => {
+          console.error("[my-work] chat unread failed", err);
+          return undefined;
+        })
+      : undefined;
   const full = {
+    ...(chat ? { chat } : {}),
     items: cap(items),
     waiting: cap(waiting),
     notifications: cap(notifications),

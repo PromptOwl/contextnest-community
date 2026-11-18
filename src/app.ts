@@ -15,6 +15,11 @@ import { pinRoutes } from "./nests/pin-routes.js";
 import { agentHandleRoutes, channelRoutes } from "./channels/routes.js";
 import { meChatRoutes, messageLookupRoutes } from "./channels/message-routes.js";
 import { messageHitsForDocumentSearch } from "./channels/message-search.js";
+// Team chat harness C2 (PO-1197): conversations, channel membership, chat
+// settings/presence/typing/events, /me/chat.
+import { channelMembershipRoutes, chatRoutes, conversationRoutes, meChatRoutes as meTeamChatRoutes } from "./chat/routes.js";
+import { nestChatEnabled } from "./chat/settings.js";
+import { conversationIdOf, hiddenContainersFor, isContainerMember, isPrivateContainer } from "./chat/containers.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
@@ -810,6 +815,9 @@ export function createApp(): Hono<AuthEnv> {
         doc_stream: config.EXPERIMENTAL_DOC_STREAM,
         agent_stream: config.EXPERIMENTAL_AGENT_STREAM,
       },
+      // The team chat harness (PO-1197; TEAM_CHAT_ENABLED, superadmin
+      // `team_chat_enabled`). `experimental.agent_stream` above is its alias.
+      team_chat: config.TEAM_CHAT_ENABLED,
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -1079,6 +1087,8 @@ export function createApp(): Hono<AuthEnv> {
     experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     experimental_agent_stream_enabled: config.EXPERIMENTAL_AGENT_STREAM,
+    // The team chat harness (PO-1197). The agent-stream field above is its alias.
+    team_chat_enabled: config.TEAM_CHAT_ENABLED,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1601,11 +1611,13 @@ export function createApp(): Hono<AuthEnv> {
 
     // Experimental: agent team stream channels (PO-1179). Same tombstone rule
     // as the doc stream: off writes null, so it stays off across a restart.
-    if ("experimental_agent_stream_enabled" in body) {
-      pending.push({
-        name: "EXPERIMENTAL_AGENT_STREAM",
-        value: body.experimental_agent_stream_enabled ? "true" : null,
-      });
+    // Since the team chat harness (PO-1197) this is an alias of
+    // team_chat_enabled: either field writes BOTH keys, so turning the
+    // harness off through one name cannot leave it on through the other.
+    if ("experimental_agent_stream_enabled" in body || "team_chat_enabled" in body) {
+      const on = "team_chat_enabled" in body ? !!body.team_chat_enabled : !!body.experimental_agent_stream_enabled;
+      pending.push({ name: "TEAM_CHAT_ENABLED", value: on ? "true" : null });
+      pending.push({ name: "EXPERIMENTAL_AGENT_STREAM", value: on ? "true" : null });
     }
 
     // Experimental: document pins (CU-wdqcq02crw). Default OFF — enabling
@@ -2435,6 +2447,8 @@ export function createApp(): Hono<AuthEnv> {
   // Saved messages and cross-nest message search (PO-1196); each 404s while
   // the channels switch is off.
   app.route("/me", meChatRoutes);
+  // Team chat C2 (PO-1197): preferences and the app-wide unread summary.
+  app.route("/me/chat", meTeamChatRoutes);
   app.get("/me/work", async (c) => {
     // The whole inbox lives in me/my-work.ts so MCP context_my_work returns
     // exactly this (PO-1180). limit/offset page the reviews; mentions_limit /
@@ -2919,12 +2933,54 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: "Not found" }, 404);
     }
 
-    // Experimental agent team stream channels (PO-1179): same rule as pins —
-    // while the switch is off the routes do not exist, for anyone. Exact
-    // resource segment; channel NODES live under /nodes and stay ordinary.
-    // …and the message permalink lookup (PO-1196) with them.
-    if ((parts[1] === "channels" || parts[1] === "agent-handles" || parts[1] === "messages") && !config.EXPERIMENTAL_AGENT_STREAM) {
-      return c.json({ error: "Not found" }, 404);
+    // The team chat harness (PO-1179 channels; PO-1196 message permalinks;
+    // PO-1197 conversations, chat):
+    // same rule as pins — while the switch is off the routes do not exist,
+    // for anyone; and a nest whose owner turned chat off has none of them
+    // either (except its own settings route, so chat can be turned back on).
+    // Exact resource segments; channel NODES live under /nodes and stay
+    // ordinary — but a CONVERSATION under /nodes exists for its members
+    // only: the thread routes on `nodes/nodes/conversations/<id>` answer the
+    // same 404 to everyone else (and while chat is off), so "no such
+    // conversation" and "not yours" are one answer.
+    {
+      const chatSegment =
+        parts[1] === "channels" ||
+        parts[1] === "agent-handles" ||
+        parts[1] === "messages" ||
+        parts[1] === "conversations" ||
+        (parts[1] === "chat" && parts.length >= 3);
+      // A node path naming a conversation (nodes/conversations/<uuid>) or a
+      // channel (nodes/channels/<name>), encoded or not.
+      let containerInPath: string | null = null;
+      if (parts[1] === "nodes" && parts.length >= 3) {
+        let decoded = parts.slice(2).join("/");
+        try {
+          decoded = decodeURIComponent(decoded);
+        } catch {
+          /* keep raw */
+        }
+        const m = /^nodes\/(conversations\/[^/]+|channels\/[^/]+)/.exec(decoded);
+        if (m) containerInPath = m[1].startsWith("conversations/") ? conversationIdOf(`nodes/${m[1]}`) ?? `nodes/${m[1]}` : `nodes/${m[1]}`;
+      }
+      if (chatSegment || (containerInPath && containerInPath.startsWith("nodes/conversations/"))) {
+        if (!config.TEAM_CHAT_ENABLED) return c.json({ error: "Not found" }, 404);
+        const isChatSettings = parts[1] === "chat" && parts[2] === "settings" && parts.length === 3;
+        if (!isChatSettings && parts[0] !== "unsynced" && !(await nestChatEnabled(parts[0]))) {
+          return c.json({ error: "Not found" }, 404);
+        }
+      }
+      // A conversation node, or a private channel node, exists for its
+      // members only — whatever the switch says for a private channel (its
+      // shares are a property of the node, not of the harness).
+      if (
+        containerInPath &&
+        parts[0] !== "unsynced" &&
+        (await isPrivateContainer(parts[0], containerInPath)) &&
+        !(await isContainerMember(parts[0], containerInPath, c.get("userId")))
+      ) {
+        return c.json({ error: "Not found" }, 404);
+      }
     }
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
@@ -3073,7 +3129,10 @@ export function createApp(): Hono<AuthEnv> {
         // licensed like /comments and /feed even on GET. Exact segment.
         parts[1] === "channels" ||
         parts[1] === "agent-handles" ||
-        parts[1] === "messages";
+        parts[1] === "messages" ||
+        // Team chat C2 (PO-1197): conversations and the chat routes, the same way.
+        parts[1] === "conversations" ||
+        (parts[1] === "chat" && parts.length >= 3);
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -3365,6 +3424,19 @@ export function createApp(): Hono<AuthEnv> {
     // above by the capability gate. Exact segments:
     //   /nests/:id/channels/:name/messages/:id[/…]
     const isChannelMessageAction = parts.length >= 5 && parts[1] === "channels" && parts[3] === "messages";
+    // Team chat C2 (PO-1197): messaging is for everyone added to the nest, a
+    // read collaborator included, so these POSTs stay at read tier and each
+    // handler applies its own rule (membership; owner/admin for the nest's
+    // chat setting and for making a channel private). A read-only API key is
+    // refused earlier, by the capability gate.
+    //   POST /nests/:id/conversations[/:cid/(read|leave|members)]
+    //   POST /nests/:id/channels/:name/(members|join|leave|private)
+    //   POST|PATCH /nests/:id/chat/(settings|presence|typing)
+    const isChatAction =
+      c.req.method !== "GET" &&
+      (parts[1] === "conversations" ||
+        (parts[1] === "chat" && parts.length === 3 && ["settings", "presence", "typing"].includes(parts[2])) ||
+        (parts.length === 4 && parts[1] === "channels" && ["members", "join", "leave", "private"].includes(parts[3])));
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3514,6 +3586,7 @@ export function createApp(): Hono<AuthEnv> {
       !isAnnotationAction &&
       !isChannelReadMark &&
       !isChannelMessageAction &&
+      !isChatAction &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3801,7 +3874,10 @@ export function createApp(): Hono<AuthEnv> {
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });
-    return c.json(page);
+    // A conversation or a private channel the admin is not a member of is
+    // not theirs to watch (team chat C2).
+    const hidden = await hiddenContainersFor(nestId, c.get("userId"), page.items.map((i: { nodeId?: string | null }) => String(i.nodeId ?? "")));
+    return c.json(hidden.size ? { ...page, items: page.items.filter((i: { nodeId?: string | null }) => !hidden.has(String(i.nodeId ?? ""))) } : page);
   });
 
   // Nest list/CRUD
@@ -3863,6 +3939,12 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/pins", pinRoutes);
   nestsApp.route("/:nestId/channels", channelRoutes);
+  // Team chat C2 (PO-1197): channel membership beside the channel routes,
+  // conversations, and the chat settings / presence / typing / event stream
+  // (beside Hootie's POST /chat).
+  nestsApp.route("/:nestId/channels", channelMembershipRoutes);
+  nestsApp.route("/:nestId/conversations", conversationRoutes);
+  nestsApp.route("/:nestId/chat", chatRoutes);
   // The agent handles a composer can offer (PO-1189): members only, checked
   // in the handler.
   nestsApp.route("/:nestId/agent-handles", agentHandleRoutes);

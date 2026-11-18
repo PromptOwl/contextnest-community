@@ -110,7 +110,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   comment-thread store, behind EXPERIMENTAL_AGENT_STREAM, so the engine has no operation to import a
 //   descriptor from. Pins ride on context_channels { action: "pins" } and saved items on context_my_work
 //   { sections: ["saved"] } (no new literal for either).
-const BASELINE = 115;
+//   115->120 team chat C2 (PO-1197, src/mcp/chat-tools.ts): context_conversations, context_conversation_read,
+//   context_channel_members, context_chat_preferences, context_presence — twins of /nests/:id/conversations,
+//   the channel membership routes, /me/chat/preferences and /nests/:id/chat/presence; Community-only: conversations are
+//   nodes with grants and tags, levels are stream_marks rows, presence is in memory; the engine models none, so no
+//   engine op exists. No tool for the SSE stream (an MCP client polls `since`).
+const BASELINE = 120;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

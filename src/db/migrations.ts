@@ -2754,6 +2754,20 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("097_channel_message_actions");
   }
+
+  // 098: the team chat harness, slice C2 (PO-1197).
+  //   One column: `nests.chat_enabled` — the nest's own chat switch (owner/
+  //   admin; PATCH /nests/:id/chat/settings), kept like allow_self_approve.
+  //   Everything else C2 adds lives in existing stores: conversations are
+  //   nodes (nodes/conversations/<uuid>), their messages comment threads,
+  //   their members the node's `grants` rows, the private marker a tag in
+  //   `node_tag_index`, notification levels rows in `stream_marks`
+  //   (kind 'notify'); presence and typing are in memory.
+  if (!hasMigration("098_team_chat_c2")) {
+    const nestCols098 = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestCols098.includes("chat_enabled")) db.exec("ALTER TABLE nests ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 1");
+    recordMigration("098_team_chat_c2");
+  }
 }
 
 /**

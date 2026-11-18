@@ -25,6 +25,7 @@ import {
   resolveMention,
 } from "../shared/mentions.js";
 import { buildDocContext } from "./title-resolver.js";
+import { filterMentionRecipients } from "../chat/preferences.js";
 import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
@@ -111,7 +112,13 @@ async function resolveRecipients(params: {
       allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
     })),
   );
-  return checked.filter((c) => c.allowed).map((c) => c.r);
+  // Team chat C2 (PO-1197): someone who muted this channel or conversation
+  // (level "none") is not pinged; a document comment is never filtered.
+  return filterMentionRecipients(
+    nestId,
+    nodeId,
+    checked.filter((c) => c.allowed).map((c) => c.r),
+  );
 }
 
 /**

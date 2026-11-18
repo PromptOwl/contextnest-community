@@ -66,6 +66,7 @@ import { config } from "../config.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { resolveActorLabel } from "../channels/actor-label.js";
 import { isChannelNode } from "../channels/channel-node.js";
+import { isConversationId } from "../chat/containers.js";
 import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webhook.js";
 import { senderFor } from "../notify/outbound-log.js";
 import { guardedFetch } from "../metacognition/net.js";
@@ -429,6 +430,8 @@ export async function wakeMentionedAgents(params: {
         delivery_id: deliveryId,
         nest: { id: nestId, name: nestName },
         channel,
+        // A direct or group conversation (C2): read it with context_conversation_read.
+        conversation: isConversationId(nodeId) ? nodeId : null,
         node_id: nodeId,
         thread_id: threadId,
         message_id: commentId,
@@ -441,7 +444,9 @@ export async function wakeMentionedAgents(params: {
         ...(sameNest ? { author_email: msg.author, excerpt: excerptOf(msg.body) } : {}),
         read: channel
           ? { tool: "context_channel_read", arguments: { channel, thread: threadId } }
-          : { tool: "context_comments", arguments: { id: nodeId, thread: threadId } },
+          : isConversationId(nodeId)
+            ? { tool: "context_conversation_read", arguments: { conversation: nodeId, thread: threadId } }
+            : { tool: "context_comments", arguments: { id: nodeId, thread: threadId } },
       });
       outcomes.set(handle, "sent");
       void deliver({
