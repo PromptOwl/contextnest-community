@@ -21,7 +21,8 @@ import { getSessionIdFromRequest } from "../../../auth/sessions.js";
 import { credentialMayContribute } from "../../../governance/org-contribution.js";
 import { config } from "../../../config.js";
 import { getDb } from "../../../db/client.js";
-import { surfacesEnabled, ORG_ID } from "../../flags.js";
+import { tryConsume } from "../../../shared/rate-limit.js";
+import { surfacesEnabled, hostedEnabled, ORG_ID } from "../../flags.js";
 import { createInstall, getInstall, type InstallRow } from "../../services/install-store.js";
 import { getSecret, secretPresence, setSecret, deleteSecrets } from "../../services/secret-store.js";
 import { completeInstallerLink, recordUserChange } from "../../services/identity-service.js";
@@ -34,12 +35,12 @@ import { buildManifest, BOT_SCOPES, slackUrls } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
 import { slackCall } from "./api.js";
+import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
 
 type C = Context<AuthEnv>;
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
-export const hostedEnabled = () => surfacesEnabled() && config.FEATURE_SURFACES_SLACK_HOSTED;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -261,7 +262,10 @@ slackAdminRoutes.get("/installs/:id", async (c) => {
   if (denied) return denied;
   const i = await getInstall(c.req.param("id"));
   if (!i || i.surface !== "slack") return c.json({ error: "Not found" }, 404);
-  return c.json({ install: installView(i, await secretPresence(i.id)) });
+  // po-1186 CR3: a manifest install hands its manifest back, so the setup
+  // wizard can offer "Download manifest" again on a later visit. No secrets in it.
+  const manifest = i.mode === "manifest" ? buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: i.id }) : null;
+  return c.json({ install: installView(i, await secretPresence(i.id)), manifest });
 });
 
 slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
@@ -281,20 +285,41 @@ slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
   return c.json({ stored, credentials: await secretPresence(i.id) });
 });
 
+/**
+ * po-1186 CR3: the channels the setup wizard offers. Only conversations the
+ * bot is already a member of (users.conversations), never every channel in
+ * the workspace: Nest can't listen where it hasn't been added. Names and
+ * member counts only. Each row says whether this install already binds it.
+ */
+slackAdminRoutes.get("/installs/:id/channels", async (c) => {
+  const denied = await assertAdmin(c);
+  if (denied) return denied;
+  const i = await getInstall(c.req.param("id"));
+  if (!i || i.surface !== "slack") return c.json({ error: "Not found" }, 404);
+  if (i.status !== "active") return c.json({ error: "Finish connecting Slack first: this install isn't active yet." }, 409);
+  try {
+    return c.json(await listInstallChannels(i));
+  } catch (err) {
+    const f = channelListFailure(err);
+    if (f.retryAfterSec) c.header("Retry-After", String(f.retryAfterSec));
+    return c.json({ error: f.error }, f.status);
+  }
+});
+
 /** The state is bound to this browser session (or this credential) and single use. */
 function sessionBinding(c: C): string | null {
   const sid = getSessionIdFromRequest(c);
   return sid ? sha(`session:${sid}`) : null;
 }
 
-async function startOAuth(c: C, install: InstallRow, clientId: string | null, redirectBase: "manifest" | "hosted") {
+async function startOAuth(c: C, install: InstallRow, clientId: string | null, redirectBase: "manifest" | "hosted", returnTo: string | null = null) {
   const bindingHash = sessionBinding(c);
   if (!bindingHash) return c.json({ error: "Open this link from a signed-in browser session." }, 403);
   if (!clientId) return c.json({ error: "Save the app's client id first." }, 409);
   const state = randomBytes(32).toString("base64url");
   await getDb().run(
-    `INSERT INTO surface_oauth_states (state_hash, install_id, org_id, user_id, session_hash, nest_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [sha(state), install.id, ORG_ID, c.get("userId"), bindingHash, install.home_nest_id, iso(Date.now() + OAUTH_STATE_TTL_MS), iso(Date.now())],
+    `INSERT INTO surface_oauth_states (state_hash, install_id, org_id, user_id, session_hash, nest_id, expires_at, created_at, return_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [sha(state), install.id, ORG_ID, c.get("userId"), bindingHash, install.home_nest_id, iso(Date.now() + OAUTH_STATE_TTL_MS), iso(Date.now()), returnTo],
   );
   const url = new URL("https://slack.com/oauth/v2/authorize");
   url.searchParams.set("client_id", clientId);
@@ -328,12 +353,67 @@ slackAdminRoutes.get("/hosted/oauth/start", async (c) => {
   return startOAuth(c, install, hostedCreds().clientId, "hosted");
 });
 
+/**
+ * Self-serve install (PO-1185): a signed-in person connects their OWN Slack
+ * workspace to a nest they OWN, through the hosted app, from the welcome
+ * screen. Needs SURFACES_SLACK_SELF_SERVE (superadmin toggle) on top of the
+ * hosted app; a server admin may always use it. What stays admin-only: the
+ * Slack app's credentials (server settings), manifest installs, and every
+ * other install route above. Safety comes from the same callback as the admin
+ * path (session-bound single-use state, one workspace per install, Grid
+ * refused). An install grants no one a seat or a nest role: channels reach
+ * the nest only through bindings, which need the nest's own admin.
+ */
+export const SELF_SERVE_RETURN = "/?onboarding=slack";
+export const SELF_SERVE_LIMIT = { max: 5, windowMs: 60 * 60_000 };
+slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
+  if (!hostedEnabled()) return c.json({ error: "Not found" }, 404);
+  const userId = c.get("userId");
+  if (!credentialMayContribute(c)) return c.json({ error: "Connecting Slack needs your own full credential (a browser session)." }, 403);
+  const admin = await isOrgAdmin(userId);
+  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "A server admin must turn on self-serve Slack first." }, 403);
+  const nestId = c.req.query("home_nest_id") ?? "";
+  const nest = nestId ? ((await getDb().get("SELECT user_id FROM nests WHERE id = ? AND archived_at IS NULL", [nestId])) as { user_id: string } | undefined) : undefined;
+  // Your own nest only (a server admin may target any nest, as on the admin path).
+  if (!nest || (nest.user_id !== userId && !admin)) return c.json({ error: "home_nest_id must name a nest you own" }, 422);
+  // Configuration and session first: a misconfigured server must not spend
+  // the person's attempts.
+  const creds = hostedCreds();
+  if (!creds.clientId || !creds.clientSecret || !creds.signing) return c.json({ error: "A server admin must configure the Slack app on this server first." }, 409);
+  if (!sessionBinding(c)) return c.json({ error: "Open this link from a signed-in browser session." }, 403);
+  if (!tryConsume(`slack-self-serve:${userId}`, SELF_SERVE_LIMIT)) return c.json({ error: "Too many Slack connect attempts. Try again in an hour." }, 429);
+  // An abandoned attempt left a pending install for this person and nest:
+  // start again on it, so retries never pile up `pending:*` rows.
+  const pending = (await getDb().get(
+    "SELECT id FROM surface_installs WHERE surface = 'slack' AND mode = 'hosted' AND status = 'pending' AND home_nest_id = ? AND installed_by_user_id = ? AND tenant_key LIKE 'pending:%' ORDER BY created_at DESC LIMIT 1",
+    [nestId, userId],
+  )) as { id: string } | undefined;
+  const install =
+    (pending && (await getInstall(pending.id))) ||
+    (await createInstall({
+      surface: "slack",
+      mode: "hosted",
+      tenantKey: `pending:${randomBytes(8).toString("hex")}`,
+      homeNestId: nestId,
+      installedByUserId: userId,
+    }));
+  return startOAuth(c, install, creds.clientId, "hosted", SELF_SERVE_RETURN);
+});
+
+/** Only a same-origin app path may be a return target (no //host, no scheme). */
+export function safeReturnPath(p: string | null | undefined): string | null {
+  if (!p || !p.startsWith("/") || p.startsWith("//") || p.includes("\\")) return null;
+  return p;
+}
+
 const REFUSED_NO_TOKEN = "Nest was not connected. No token was kept and nothing was read from your workspace.";
 
-function done(c: C, status: number, message: string, extra: Record<string, unknown> = {}) {
+function done(c: C, status: number, message: string, extra: Record<string, unknown> = {}, backToSetup = false) {
   if ((c.req.header("Accept") || "").includes("application/json")) return c.json({ ok: status === 200, message, ...extra }, status as any);
   const esc = message.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
-  return c.html(`<!doctype html><meta charset="utf-8"><title>Slack</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><p>${esc}</p></body>`, status as any);
+  // po-1186 CR3: a finished install goes back to the setup wizard (a fixed, same-origin path).
+  const back = backToSetup ? `<p><a href="/control-room?section=setup">Continue setup</a></p>` : "";
+  return c.html(`<!doctype html><meta charset="utf-8"><title>Slack</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><p>${esc}</p>${back}</body>`, status as any);
 }
 
 /**
@@ -349,7 +429,7 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
   const bindingHash = sessionBinding(c);
   if (!state || !code || !bindingHash) return done(c, 400, "This sign-in link isn't valid. Start again from Surfaces.");
   const row = (await getDb().get("SELECT * FROM surface_oauth_states WHERE state_hash = ?", [sha(state)])) as
-    | { state_hash: string; install_id: string; user_id: string; session_hash: string; expires_at: string; used_at: string | null }
+    | { state_hash: string; install_id: string; user_id: string; session_hash: string; expires_at: string; used_at: string | null; return_to?: string | null }
     | undefined;
   const a = Buffer.from(row?.session_hash ?? "");
   const b = Buffer.from(bindingHash);
@@ -420,5 +500,14 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
   if (res.authed_user?.id) {
     await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch(() => {});
   }
-  return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id });
+  const back = safeReturnPath(row.return_to);
+  if (back && !(c.req.header("Accept") || "").includes("application/json")) {
+    const to = new URL(back, "http://app.invalid");
+    to.searchParams.set("slack", "connected");
+    return c.redirect(`${to.pathname}${to.search}`, 302);
+  }
+  // Self-serve (PO-1185) returns to its own page; an admin install goes on to
+  // the Control room setup wizard (po-1186 CR3).
+  if (back) return done(c, 200, "Nest is connected to your Slack workspace. Bind a channel in Surfaces to start.", { install_id: install.id, return_to: back });
+  return done(c, 200, "Nest is connected to your Slack workspace. Continue setup to choose the channels Nest listens in.", { install_id: install.id, next: "/control-room?section=setup" }, true);
 });

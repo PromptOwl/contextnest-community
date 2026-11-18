@@ -4,6 +4,9 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 /**
  * PostgreSQL schema — the CONSOLIDATED END STATE of the SQLite migration
@@ -112,11 +115,17 @@ export const HISTORICAL_MIGRATIONS = [
   "081_surfaces_cards",
   "082_surfaces_seeds",
   "083_view_summaries",
-  "084_annotation_comment_client",
+  "084_onboarding",
   "085_comment_mentions",
-  "086_agent_webhooks",
-  "087_stream_marks",
+  "086_control_room_ledger",
+  "090_control_room_run_totals",
+  "094_annotation_comment_client",
+  "095_agent_webhooks",
+  "096_stream_marks",
 ];
+
+/** Migration ids whose Postgres backfill must run once, not on every boot. */
+const ONE_TIME_BACKFILLS = ["086_control_room_ledger", "090_control_room_run_totals"];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
   await db.exec(`
@@ -485,6 +494,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created by an earlier build of 037 still gets them on upgrade.
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
+    -- PO-1365: the per-link switch for the "Make your own nest" strip (on by default).
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS show_invite INTEGER NOT NULL DEFAULT 1;
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
@@ -881,6 +892,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
+  // One-time backfills run under their migration id. The ids are in
+  // HISTORICAL_MIGRATIONS (seeded just below), so read what was pending first.
+  const pendingOnce = new Set<string>();
+  for (const id of ONE_TIME_BACKFILLS) {
+    if (!(await db.get("SELECT id FROM schema_migrations WHERE id = ?", [id]))) pendingOnce.add(id);
+  }
+
   // Seed historical migration ids as already-applied (idempotent).
   for (const id of HISTORICAL_MIGRATIONS) {
     await db.run(
@@ -1176,7 +1194,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
-    -- caller attribution on comment-thread messages (migration 084, PO-1179)
+    -- caller attribution on comment-thread messages (migration 094, PO-1179)
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS client_json TEXT;
     ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
@@ -1355,7 +1373,49 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       )
   `);
 
-  // Migration 085 parity: the @mention index My Work reads (PO-1180).
+  // Migration 084 parity: first-run onboarding (PO-1185).
+  await db.exec(onboardingDdl(NOW));
+  await db.exec("ALTER TABLE surface_oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT");
+
+  // Migration 086 parity: agent control room ledger columns (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'runner';
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS external_ref TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS verdict TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS reason_code TEXT;
+    ALTER TABLE run_steps ADD COLUMN IF NOT EXISTS client_key TEXT;
+    ALTER TABLE surface_windows ADD COLUMN IF NOT EXISTS run_id TEXT;
+  `);
+  // Once, like SQLite: a re-run on a later boot would attach an old run-less
+  // window to an unrelated, newer listener run.
+  if (pendingOnce.has("086_control_room_ledger")) {
+    await db.exec(controlRoomLedgerIndexesAndBackfill("postgres"));
+  }
+
+  // Migration 090 parity: a run's cost and tokens on the run (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS est_cost_micros BIGINT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS tokens BIGINT;
+  `);
+  if (pendingOnce.has("090_control_room_run_totals")) {
+    // Keyset pages, so a large runs table is never held in memory at once.
+    let after = "";
+    for (;;) {
+      const page = (await db.all(
+        "SELECT id, trace FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL AND id > ? ORDER BY id LIMIT 500",
+        [after],
+      )) as Array<{ id: string; trace: string }>;
+      if (!page.length) break;
+      for (const r of page) {
+        const t = runTotals(r.trace);
+        await db.run("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?", [t.costMicros, t.tokens, r.id]);
+      }
+      after = page[page.length - 1].id;
+    }
+  }
+  // Migration 085 parity: the @mention index My Work reads (PO-1180). Placed
+  // after 086/090 on purpose (085 was reserved); it depends on neither.
   await db.exec(`
     CREATE TABLE IF NOT EXISTS comment_mentions (
       id TEXT PRIMARY KEY,
@@ -1373,7 +1433,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
   `);
 
-  // Migration 086 parity: agent wake-up targets + delivery ledger (PO-1181).
+  // Migration 095 parity: agent wake-up targets + delivery ledger (PO-1181).
   await db.exec(`
     CREATE TABLE IF NOT EXISTS agent_webhooks (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,

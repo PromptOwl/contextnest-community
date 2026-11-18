@@ -27,7 +27,7 @@
  * Each handler still checks its own rule through the service, so MCP and REST
  * share one gate.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { attributeRequest } from "../shared/client-metadata.js";
@@ -46,10 +46,10 @@ export const agentHandleRoutes = new Hono<AuthEnv>();
 
 agentHandleRoutes.get("/", async (c) => c.json(await listKnownAgents(await caller(c))));
 
-async function caller(c: any) {
-  const userId = c.get("userId") as string;
+async function caller(c: Context<AuthEnv>) {
+  const userId = c.get("userId");
   return {
-    nestId: c.req.param("nestId") as string,
+    nestId: c.req.param("nestId")!,
     userId,
     userEmail: await resolveCallerEmail(userId),
     // Artifact cards (PO-1181) may resolve links into other nests only for a
@@ -58,7 +58,7 @@ async function caller(c: any) {
   };
 }
 
-async function jsonObject(c: any): Promise<Record<string, unknown>> {
+async function jsonObject(c: Context<AuthEnv>): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
     body = await c.req.json();

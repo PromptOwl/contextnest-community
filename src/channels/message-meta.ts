@@ -122,29 +122,32 @@ export interface KnownAgent {
  * every declared agent label seen on a message in the nest's channels. Never
  * a target, never a key label.
  */
-export async function knownAgents(nestId: string): Promise<KnownAgent[]> {
+export async function knownAgents(nestId: string, only?: Set<string>): Promise<KnownAgent[]> {
   const db = getDb();
-  const [hooks, seen] = await Promise.all([
-    db.all("SELECT handle FROM agent_webhooks WHERE nest_id = ? ORDER BY handle", [nestId]) as Promise<Array<{ handle: string }>>,
-    db.all(
+  const hooks = (await db.all("SELECT handle FROM agent_webhooks WHERE nest_id = ? ORDER BY handle", [nestId])) as Array<{
+    handle: string;
+  }>;
+  // Handles with a target first, then declared labels newest first, so a
+  // burst of made-up labels (anyone who can post can declare one) can't push
+  // a real handle out of the list.
+  const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
+  // `only`: the names a body actually uses — skip the label scan once all are hooks.
+  if (!only || [...only].some((h) => !handles.has(h))) {
+    const seen = (await db.all(
       `SELECT c.client_json FROM annotation_comments c
          JOIN annotation_threads t ON t.id = c.thread_id
         WHERE t.nest_id = ? AND t.node_id LIKE 'nodes/channels/%' AND c.client_json LIKE '%"agent"%'
         ORDER BY c.created_at DESC
         LIMIT ${SEEN_SCAN}`,
       [nestId],
-    ) as Promise<Array<{ client_json: string | null }>>,
-  ]);
-  // Handles with a target first, then declared labels newest first, so a
-  // burst of made-up labels (anyone who can post can declare one) can't push
-  // a real handle out of the list.
-  const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
-  for (const r of seen) {
-    const h = normHandle(deserializeClient(r.client_json)?.agent);
-    if (AGENT_HANDLE_RE.test(h)) handles.add(h);
+    )) as Array<{ client_json: string | null }>;
+    for (const r of seen) {
+      const h = normHandle(deserializeClient(r.client_json)?.agent);
+      if (AGENT_HANDLE_RE.test(h)) handles.add(h);
+    }
   }
   const { agentWakeTarget } = await import("../stream/agent-wake.js");
-  const list = [...handles].filter(Boolean).slice(0, MAX_KNOWN_AGENTS).sort();
+  const list = [...handles].filter((h) => h && (!only || only.has(h))).slice(0, MAX_KNOWN_AGENTS).sort();
   return Promise.all(list.map(async (handle) => ({ handle, wakeable: (await agentWakeTarget(nestId, handle)) !== null })));
 }
 
@@ -188,7 +191,11 @@ export async function resolveBodyMentions(nestId: string, bodies: string[]): Pro
         row.push({ name, person });
         continue;
       }
-      agents ??= new Map((await knownAgents(nestId)).map((a) => [a.handle, a]));
+      agents ??= new Map(
+        (await knownAgents(nestId, new Set(names.flat().filter((n) => !people.get(n.toLowerCase())).map(normHandle)))).map(
+          (a) => [a.handle, a],
+        ),
+      );
       const agent = agents.get(normHandle(name));
       row.push(agent ? { name, agent } : { name });
     }

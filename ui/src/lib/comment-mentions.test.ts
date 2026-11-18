@@ -46,6 +46,17 @@ describe("mentionSegments", () => {
     ]);
   });
 
+  it("leaves a sentence's full stop out of the name, like the server", () => {
+    const segs = mentionSegments("thanks @ada@acme.com.", members);
+    expect(segs.map((s) => s.text).join("")).toBe("thanks @ada@acme.com.");
+    expect(segs.find((s) => s.kind === "mention")).toEqual({
+      kind: "mention",
+      text: "@ada@acme.com",
+      name: "ada@acme.com",
+      resolved: true,
+    });
+  });
+
   it("marks a name that resolves to nobody as unresolved", () => {
     const segs = mentionSegments("cc @nobody", members);
     expect(segs.filter((s) => s.kind === "mention")).toEqual([

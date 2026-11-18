@@ -646,6 +646,17 @@ describe("AC-AX-08: a failed wake-up is retried with the same idempotency key, a
     await vi.waitFor(async () => expect((await lastDelivery("flaky"))?.status).toBe("failed"), { timeout: 3000, interval: 20 });
     expect(await lastDelivery("flaky")).toMatchObject({ status: "failed", attempts: 4, reason: "HTTP 500" });
   });
+
+  it("AC-AX-08 a 4xx refusal (other than 408/429) is not retried", async () => {
+    wake.setAgentWakeBackoff([5, 5, 5]);
+    captureWakes([401]);
+    await open(alice, GENERAL, "@flaky wake up, bad signature");
+    await waitForSent(1);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(sent.length).toBe(1);
+    await vi.waitFor(async () => expect((await lastDelivery("flaky"))?.reason).toBe("HTTP 401"), { timeout: 3000, interval: 20 });
+    expect(await lastDelivery("flaky")).toMatchObject({ status: "failed", attempts: 1 });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
