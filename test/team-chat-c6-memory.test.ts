@@ -348,6 +348,19 @@ describe("AC-C6-05: a correction becomes an edit proposal on the node it correct
     expect(body).toContain("Correction from #ops");
     expect((await queue(sam)).some((q) => q.nodeId === id && q.status === "pending")).toBe(true);
   });
+
+  it("a blank `replacement` keeps the body: the correction is appended, nothing is wiped", async () => {
+    const doc = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Escalation Path", content: "# Escalation Path\n\nPage the on-call lead." }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const id: string = doc.data.node.id;
+    await publish(id);
+    const t = await open(alice, OPS, "Escalation now goes to the duty manager.");
+    const c = await correct(alice, t.id, { message_id: t.comments[0].id, node_id: id, replacement: "  \n" });
+    expect(c.status, JSON.stringify(c.data)).toBe(201);
+    const body: string = (await readNode(alice, id)).node.content ?? (await readNode(alice, id)).node.body;
+    expect(body).toContain("Page the on-call lead.");
+    expect(body).toContain("Correction from #ops");
+  });
 });
 
 // ─── AC-C6-06 ───────────────────────────────────────────────────────────

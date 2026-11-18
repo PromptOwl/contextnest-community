@@ -18,6 +18,7 @@
  * node the caller can't open is not found; a node with a review pending is
  * locked (409), as it is for any edit.
  */
+import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { updateNode } from "../nodes/service.js";
 import { engineCache } from "../nodes/engine.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
@@ -66,7 +67,8 @@ export async function correctNode(
   if (typeof input.node_id !== "string" || !input.node_id.trim()) throw new ValidationError("node_id is required — the node the message corrects.");
   if (input.replacement !== undefined && input.replacement !== null && typeof input.replacement !== "string") throw new ValidationError("replacement must be a string");
   if (input.note !== undefined && input.note !== null && typeof input.note !== "string") throw new ValidationError("note must be a string");
-  const replacement = typeof input.replacement === "string" ? input.replacement : null;
+  // A blank replacement is no replacement: it must never wipe the node's body.
+  const replacement = typeof input.replacement === "string" && input.replacement.trim() ? input.replacement : null;
   if (replacement !== null && replacement.length > MAX_REPLACEMENT) throw new ValidationError(`replacement is at most ${MAX_REPLACEMENT} characters`);
   const note = String(input.note ?? "").trim().slice(0, MAX_NOTE);
   const nodeId = assertSafeNodeId(input.node_id.trim());
@@ -82,8 +84,9 @@ export async function correctNode(
   let node;
   try {
     node = await storage.readDocument(nodeId);
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
+  } catch (err) {
+    if (err instanceof DocumentNotFoundError) throw new NotFoundError(`Node not found: ${nodeId}`);
+    throw err;
   }
   if (!(await canOpenNode(nestId, nodeId, userId, userEmail)) || !(await callerCanRead({ nestId, userId, userEmail }, nodeId))) {
     throw new NotFoundError(`Node not found: ${nodeId}`);
