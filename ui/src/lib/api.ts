@@ -1807,6 +1807,9 @@ export async function getNest(nestId: string) {
      *  a team-share member), as opposed to someone who reaches it only through
      *  its visibility or a document share. Channels are for members (PO-1190). */
     member?: boolean;
+    /** Team chat (C2, PO-1197): the switch is on, the nest's own setting is
+     *  on, and the caller is a member. The whole chat UI gates on this. */
+    chat?: boolean;
   }>(`/nests/${nestId}`);
 }
 
@@ -3139,6 +3142,13 @@ export interface ChannelSummary {
   can_post: boolean;
   /** The one line to show in place of the composer when `can_post` is false. */
   post_refusal: string | null;
+  /** Members-only channel (C2). */
+  private?: boolean;
+  /** The caller is on its member list: creator, joined or invited (C2). */
+  member?: boolean;
+  /** Set when this row is a conversation read as a channel (C2): its kind
+   *  and members, for the header. */
+  conversation?: ConversationView;
 }
 
 /** One `@name` in a message body as the reader sees it (PO-1190). */
@@ -3507,6 +3517,159 @@ export async function lookupMessage(nestId: string, messageId: string) {
     `/nests/${nestId}/messages/${encodeURIComponent(messageId)}`,
   );
 }
+
+// ─── Team chat C2 (PO-1197): conversations, membership, preferences, presence, live ──
+
+export type ChatMember =
+  | { kind: "person"; email: string; name: string; added_at: string }
+  | { kind: "agent"; handle: string; added_at: string };
+
+export interface ConversationView {
+  /** A NODE id: "nodes/conversations/<uuid>". */
+  id: string;
+  type: "conversation";
+  kind: "dm" | "group";
+  /** The OTHER members' names, for this caller. */
+  title: string;
+  members: ChatMember[];
+  created_by: string;
+  created_at: string;
+  post_count: number;
+  last_post_at: string | null;
+  last_activity_at: string | null;
+  unread: number;
+  can_post: boolean;
+  post_refusal: string | null;
+}
+
+const conversationPath = (nestId: string, uuid: string) => `/nests/${nestId}/conversations/${encodeURIComponent(uuid)}`;
+
+export async function listConversations(nestId: string) {
+  return request<{ conversations: ConversationView[] }>(`/nests/${nestId}/conversations`);
+}
+
+/** Start a conversation, or find the one with exactly these members. */
+export async function createConversation(nestId: string, members: string[]) {
+  return request<{ conversation: ConversationView; created: boolean }>(`/nests/${nestId}/conversations`, {
+    method: "POST",
+    body: JSON.stringify({ members }),
+  });
+}
+
+export async function getConversationTimeline(nestId: string, uuid: string, opts: { limit?: number; offset?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ conversation: ConversationView; posts: ChannelPost[]; pagination: ChannelPagination; next_since?: string }>(`${conversationPath(nestId, uuid)}${qs ? `?${qs}` : ""}`);
+}
+
+export async function getConversationThread(nestId: string, uuid: string, threadId: string) {
+  return request<{ conversation: ConversationView; thread: { post: ChannelPost; replies: ChannelMessage[] } }>(`${conversationPath(nestId, uuid)}?thread=${encodeURIComponent(threadId)}`);
+}
+
+export async function getConversationSince(nestId: string, uuid: string, since: string) {
+  return request<{ conversation: ConversationView; messages: ChannelNewMessage[]; has_more: boolean; next_since: string }>(`${conversationPath(nestId, uuid)}?since=${encodeURIComponent(since)}`);
+}
+
+export async function markConversationRead(nestId: string, uuid: string) {
+  return request<{ conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/read`, { method: "POST", body: "{}" });
+}
+
+export async function leaveConversation(nestId: string, uuid: string) {
+  return request<{ left: true; conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/leave`, { method: "POST", body: "{}" });
+}
+
+export async function addConversationMember(nestId: string, uuid: string, member: string) {
+  return request<{ conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/members`, { method: "POST", body: JSON.stringify({ member }) });
+}
+
+export interface ChannelMembers {
+  channel: ChannelSummary;
+  private: boolean;
+  members: ChatMember[];
+}
+
+export async function listChannelMembers(nestId: string, name: string) {
+  return request<ChannelMembers>(`${channelPath(nestId, name)}/members`);
+}
+
+export async function inviteChannelMember(nestId: string, name: string, member: string) {
+  return request<ChannelMembers>(`${channelPath(nestId, name)}/members`, { method: "POST", body: JSON.stringify({ member }) });
+}
+
+export async function joinChannel(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/join`, { method: "POST", body: "{}" });
+}
+
+export async function leaveChannel(nestId: string, name: string) {
+  return request<{ left: true; channel: ChannelSummary }>(`${channelPath(nestId, name)}/leave`, { method: "POST", body: "{}" });
+}
+
+export async function setChannelPrivate(nestId: string, name: string, isPrivate: boolean) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/private`, { method: "POST", body: JSON.stringify({ private: isPrivate }) });
+}
+
+export type ChatNotifyLevel = "all" | "mentions" | "none";
+
+export interface ChatPreferences {
+  default: ChatNotifyLevel;
+  nests: Array<{ nest_id: string; level: ChatNotifyLevel; conversations: Array<{ conversation: string; level: ChatNotifyLevel }> }>;
+}
+
+export async function getChatPreferences() {
+  return request<ChatPreferences>(`/me/chat/preferences`);
+}
+
+export async function setChatPreference(input: { nest_id: string; conversation?: string; level: ChatNotifyLevel }) {
+  return request<{ preference: { nest_id: string; conversation: string | null; level: ChatNotifyLevel } }>(`/me/chat/preferences`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface ChatPresence {
+  email: string;
+  name: string;
+  agent: string | null;
+  label: string;
+  status: string | null;
+  last_seen: string;
+}
+
+export async function heartbeatPresence(nestId: string, status?: string) {
+  return request<{ ok: true; expires_in: number }>(`/nests/${nestId}/chat/presence`, { method: "POST", body: JSON.stringify(status ? { status } : {}) });
+}
+
+export async function getPresence(nestId: string) {
+  return request<{ active: ChatPresence[]; expires_in: number }>(`/nests/${nestId}/chat/presence`);
+}
+
+export async function sendTyping(nestId: string, conversation: string) {
+  return request<{ ok: true }>(`/nests/${nestId}/chat/typing`, { method: "POST", body: JSON.stringify({ conversation }) });
+}
+
+export interface ChatUnread {
+  total: number;
+  mentions: number;
+  nests: Array<{ nest_id: string; nest_name: string; unread: number; mentions: number; channels: Array<{ id: string; name: string; unread: number }>; conversations: Array<{ id: string; unread: number }> }>;
+}
+
+export async function getChatUnread() {
+  return request<ChatUnread>(`/me/chat/unread`);
+}
+
+/** The nest's own chat switch (owner/admin). */
+export async function getChatSettings(nestId: string) {
+  return request<{ chat: boolean }>(`/nests/${nestId}/chat/settings`);
+}
+
+export async function setChatSettings(nestId: string, chat: boolean) {
+  return request<{ chat: boolean }>(`/nests/${nestId}/chat/settings`, { method: "PATCH", body: JSON.stringify({ chat }) });
+}
+
+/** The live event stream's address (cookie auth; `fetch` with text/event-stream). */
+export const chatEventsUrl = (nestId: string) => `${API_BASE}/nests/${nestId}/chat/events`;
 
 /** Mark the channel read for the caller as of now (`unread` comes back 0). */
 export async function markChannelRead(nestId: string, name: string) {

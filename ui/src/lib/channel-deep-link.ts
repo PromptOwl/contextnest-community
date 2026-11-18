@@ -12,15 +12,24 @@ import { nestPath } from "./nest-url";
 export const CHAT_SEGMENT = "chat";
 
 export function channelThreadLink(nestId: string, channel: string, threadId: string, messageId?: string | null): string {
-  const q = new URLSearchParams({ channel, thread: threadId });
+  const q = new URLSearchParams(channel.startsWith("~") ? { conversation: channel.slice(1), thread: threadId } : { channel, thread: threadId });
   if (messageId) q.set("message", messageId);
   return `${nestPath(nestId, CHAT_SEGMENT)}?${q.toString()}`;
+}
+
+/** A conversation's container key (`~<uuid>`), from `?conversation=` (a node id or a uuid). */
+function conversationKeyOf(raw: string | null): string | null {
+  const v = (raw || "").trim();
+  if (!v) return null;
+  const uuid = v.replace(/^nodes\/conversations\//, "");
+  return uuid ? `~${uuid}` : null;
 }
 
 export function readChannelDeepLink(search: string): { channel: string | null; thread: string | null; message: string | null } {
   const p = new URLSearchParams(search);
   // "#ops" and "ops" name the same channel; the page works with the bare name.
-  const channel = (p.get("channel") || "").trim().toLowerCase().replace(/^#+/, "");
+  // A conversation (C2) rides as ?conversation= and becomes the `~uuid` key.
+  const channel = conversationKeyOf(p.get("conversation")) ?? (p.get("channel") || "").trim().toLowerCase().replace(/^#+/, "");
   const thread = (p.get("thread") || "").trim();
   const message = (p.get("message") || "").trim();
   const t = channel && thread ? thread : null;
@@ -36,8 +45,16 @@ export function writeChannelParams(
   params: URLSearchParams,
   loc: { channel?: string | null; thread?: string | null },
 ): void {
-  if (loc.channel) params.set("channel", loc.channel);
-  else params.delete("channel");
+  if (loc.channel?.startsWith("~")) {
+    params.set("conversation", loc.channel.slice(1));
+    params.delete("channel");
+  } else if (loc.channel) {
+    params.set("channel", loc.channel);
+    params.delete("conversation");
+  } else {
+    params.delete("channel");
+    params.delete("conversation");
+  }
   if (loc.channel && loc.thread) {
     // A message only means something inside the thread it was linked in.
     if (params.get("thread") !== loc.thread) params.delete("message");

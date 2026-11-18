@@ -8,6 +8,17 @@ describe("AC-MW-01 jump-to-thread: channel deep links", () => {
     expect(readChannelDeepLink(link.slice(link.indexOf("?")))).toEqual({ channel: "ops", thread: "t-1", message: null });
   });
 
+  it("AC-C3-12 a conversation rides as ?conversation= and reads back as its ~uuid key", () => {
+    expect(channelThreadLink("n1", "~abc", "t-1")).toBe("/nest/n1/chat?conversation=abc&thread=t-1");
+    expect(readChannelDeepLink("?conversation=abc&thread=t-1")).toEqual({ channel: "~abc", thread: "t-1", message: null });
+    expect(readChannelDeepLink("?conversation=nodes%2Fconversations%2Fabc")).toEqual({ channel: "~abc", thread: null, message: null });
+    const p = new URLSearchParams("channel=ops&thread=t-1");
+    writeChannelParams(p, { channel: "~abc", thread: "t-2" });
+    expect(p.toString()).toBe("thread=t-2&conversation=abc");
+    writeChannelParams(p, { channel: "ops" });
+    expect(p.toString()).toBe("channel=ops");
+  });
+
   it("AC-C3-01 names one message inside the thread, never outside one", () => {
     const link = channelThreadLink("n1", "ops", "t-1", "m-9");
     expect(link).toBe("/nest/n1/chat?channel=ops&thread=t-1&message=m-9");

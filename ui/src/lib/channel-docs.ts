@@ -28,8 +28,12 @@ export function channelNameOfDoc(nodeId: string): string | null {
   return CHANNEL_ID.exec(nodeId)?.[1] ?? null;
 }
 
+const CONVERSATION_ID = /^nodes\/conversations\/[^/]+$/;
+
+/** A channel node, or a conversation node (C2): neither is a document. */
 export function isChannelDoc(node: Tagged): boolean {
-  return CHANNEL_ID.test(node.id) && tagsOf(node).some((t) => normalizeTag(t) === "channel");
+  const tags = tagsOf(node).map(normalizeTag);
+  return (CHANNEL_ID.test(node.id) && tags.includes("channel")) || (CONVERSATION_ID.test(node.id) && tags.includes("conversation"));
 }
 
 /** A `{ count, nodes }` listing without its channel nodes (the same object when it has none). */

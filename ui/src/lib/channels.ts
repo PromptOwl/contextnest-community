@@ -202,3 +202,37 @@ export function mentionNotice(outcomes: PostedMention[] | undefined): string | n
     );
   return parts.length ? parts.join(" ") : null;
 }
+
+/**
+ * One "what is new" pull per timeline at a time (PO-1200, from the review of
+ * PR #552): a pull asked for while one runs on the SAME timeline makes that
+ * run go once more when it finishes, so a post that overlaps a pull is never
+ * dropped; a pull on ANOTHER timeline (the channel changed mid-pull) runs on
+ * its own. `start` returns null when a run is already going (and marks it to
+ * go again); otherwise the mark for the new run. `shouldRepeat` reads and
+ * clears the mark at the end of a loop.
+ */
+export class PullGuard {
+  private runs = new Map<string, { again: boolean }>();
+  start(key: string): { again: boolean } | null {
+    const running = this.runs.get(key);
+    if (running) {
+      running.again = true;
+      return null;
+    }
+    const mark = { again: false };
+    this.runs.set(key, mark);
+    return mark;
+  }
+  shouldRepeat(mark: { again: boolean }): boolean {
+    const again = mark.again;
+    mark.again = false;
+    return again;
+  }
+  finish(key: string): void {
+    this.runs.delete(key);
+  }
+  running(key: string): boolean {
+    return this.runs.has(key);
+  }
+}

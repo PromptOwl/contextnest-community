@@ -89,6 +89,16 @@ export const keys = {
     [...keys.channels(nestId), "timeline", name] as const,
   channelThread: (nestId: string, name: string, threadId: string) =>
     [...keys.channels(nestId), "thread", name, threadId] as const,
+  // C2 (PO-1197): conversations, a container's members, presence, my
+  // preferences, the app-wide unread, the nest's chat switch.
+  conversations: (nestId: string) => [...keys.channels(nestId), "conversations"] as const,
+  conversationTimeline: (nestId: string, uuid: string) => [...keys.channels(nestId), "conv-timeline", uuid] as const,
+  conversationThread: (nestId: string, uuid: string, threadId: string) => [...keys.channels(nestId), "conv-thread", uuid, threadId] as const,
+  containerMembers: (nestId: string, key: string) => [...keys.channels(nestId), "members", key] as const,
+  presence: (nestId: string) => [...keys.nest(nestId), "presence"] as const,
+  chatPreferences: () => [...keys.me, "chat-preferences"] as const,
+  chatUnread: () => [...keys.me, "chat-unread"] as const,
+  chatSettings: (nestId: string) => [...keys.nest(nestId), "chat-settings"] as const,
   // C1 message features (PO-1196): a channel's pins, my saved messages, a search.
   channelPins: (nestId: string, name: string) => [...keys.channels(nestId), "pins", name] as const,
   mySaved: () => [...keys.me, "saved"] as const,
@@ -276,6 +286,16 @@ const NEST_WRITE_SCOPES: Array<{
   // Mark read is the caller's own mark; the page writes the returned row into
   // the cached list, so nothing needs refetching.
   { match: /^\/channels\/[^/]+\/read$/, affects: () => [] },
+  // C2: posting into a conversation is an annotation write on its node.
+  {
+    match: /^\/nodes\/nodes\/conversations\/[^/]+\/annotations(?:\/|$)/,
+    affects: (n) => [keys.conversations(n), keys.myWorkAll()],
+  },
+  { match: /^\/conversations\/[^/]+\/read$/, affects: () => [] },
+  { match: /^\/conversations(?:\/|$)/, affects: (n) => [keys.conversations(n), [...keys.channels(n), "members"]] },
+  { match: /^\/channels\/[^/]+\/(?:members|join|leave|private)$/, affects: (n) => [keys.channelList(n), [...keys.channels(n), "members"]] },
+  { match: /^\/chat\/settings$/, affects: (n) => [keys.nest(n), keys.chatSettings(n)] },
+  { match: /^\/chat\/(?:presence|typing)$/, affects: () => [] },
   // A reaction, edit, delete, pin or save on one message (C1): the channel's
   // timeline and threads are patched in place by the hook; pins and the
   // saved list are re-read.
@@ -1175,6 +1195,42 @@ export const reads = {
       queryKey: keys.promptowlTeams(),
       queryFn: () => api.listPromptowlTeams(),
       staleTime: STALE.reference,
+    }),
+  conversations: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.conversations(nestId),
+      queryFn: () => api.listConversations(nestId),
+      staleTime: 0,
+    }),
+  containerMembers: (nestId: string, key: string, fetcher: () => Promise<api.ChatMember[]>) =>
+    queryOptions({
+      queryKey: keys.containerMembers(nestId, key),
+      queryFn: fetcher,
+      staleTime: 30_000,
+    }),
+  presence: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.presence(nestId),
+      queryFn: () => api.getPresence(nestId),
+      staleTime: 30_000,
+    }),
+  chatPreferences: () =>
+    queryOptions({
+      queryKey: keys.chatPreferences(),
+      queryFn: () => api.getChatPreferences(),
+      staleTime: 60_000,
+    }),
+  chatUnread: () =>
+    queryOptions({
+      queryKey: keys.chatUnread(),
+      queryFn: () => api.getChatUnread(),
+      staleTime: 10_000,
+    }),
+  chatSettings: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.chatSettings(nestId),
+      queryFn: () => api.getChatSettings(nestId),
+      staleTime: 0,
     }),
   channelPins: (nestId: string, name: string) =>
     queryOptions({
