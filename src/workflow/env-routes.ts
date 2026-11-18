@@ -15,6 +15,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { OWN_KEY_ENV, resolveModelCredential } from "../shared/model-credential.js";
+import { promptOwlFallbackFor } from "../shared/model-route.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
@@ -114,9 +115,19 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
   const env = await storedEnvValues(nestId);
   const credential = resolveModelCredential(env);
   for (const k of OWN_KEY_ENV) delete env[k];
+  delete env.PROMPTOWL_GATEWAY_URL;
+  delete env.PROMPTOWL_GATEWAY_KEY;
   if (credential) {
     env.ANTHROPIC_API_KEY = credential.apiKey;
     if (credential.baseUrl) env.ANTHROPIC_BASE_URL = credential.baseUrl;
+    // po-1419: on an own key, the runner's fallback (contextnest-runner
+    // model-route) gets PromptOwl's licence gateway as its own pair, under
+    // its own names. Only when the server's fallback setting is on.
+    const fallback = promptOwlFallbackFor(credential);
+    if (fallback?.baseUrl) {
+      env.PROMPTOWL_GATEWAY_URL = fallback.baseUrl;
+      env.PROMPTOWL_GATEWAY_KEY = fallback.apiKey;
+    }
   }
   return env;
 }

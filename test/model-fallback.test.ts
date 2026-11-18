@@ -320,6 +320,30 @@ describe("Hootie's streamed round through the route", () => {
   });
 });
 
+describe("the run bundle (runner fallback)", () => {
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_BASE_URL;
+  });
+
+  it("on the server's own gateway, the bundle carries PromptOwl's gateway as a separate pair; off or on PromptOwl's key, it doesn't", async () => {
+    await boot();
+    const { envValues } = await import("../src/workflow/env-routes.js");
+    process.env.ANTHROPIC_API_KEY = OWN_KEY;
+    process.env.ANTHROPIC_BASE_URL = `${base}/own`;
+    const env = await envValues("no-such-nest");
+    expect(env).toMatchObject({ ANTHROPIC_API_KEY: OWN_KEY, ANTHROPIC_BASE_URL: `${base}/own`, PROMPTOWL_GATEWAY_URL: `${base}/po`, PROMPTOWL_GATEWAY_KEY: PO_KEY });
+    process.env.MODEL_FALLBACK_PROMPTOWL = "false";
+    expect(await envValues("no-such-nest")).not.toHaveProperty("PROMPTOWL_GATEWAY_KEY");
+    delete process.env.MODEL_FALLBACK_PROMPTOWL;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_BASE_URL;
+    const po = await envValues("no-such-nest");
+    expect(po.ANTHROPIC_API_KEY).toBe(PO_KEY);
+    expect(po).not.toHaveProperty("PROMPTOWL_GATEWAY_KEY");
+  });
+});
+
 describe("fallbackReason: the trigger table", () => {
   it("matches the judge's reason codes, and leaves request errors and our own errors alone", async () => {
     const { fallbackReason, modelFailureCode } = await import("../src/shared/model-route.js");
