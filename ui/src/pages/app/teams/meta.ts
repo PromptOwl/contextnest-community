@@ -6,5 +6,5 @@ export const meta: PageMeta = {
   label: "Teams",
   icon: Users,
   order: 10,
-  group: "workspace",
+  group: "settings",
 };

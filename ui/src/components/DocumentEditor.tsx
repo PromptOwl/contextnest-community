@@ -86,6 +86,7 @@ import {
   Lock,
   Activity,
   LayoutPanelTop,
+  FileDiff,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -212,6 +213,8 @@ interface DocumentEditorProps {
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
+  /** Open this change in the nest's review pane, on its changes. */
+  onOpenReviewPane?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -262,6 +265,7 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onReviewed,
+  onOpenReviewPane,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -2648,6 +2652,19 @@ export function DocumentEditor({
                 >
                   <Pencil className="h-4 w-4 sm:mr-1.5" />
                   <span className="hidden sm:inline">Edit</span>
+                </Button>
+              )}
+              {onOpenReviewPane && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={onOpenReviewPane}
+                  title="See what changed, side by side with the published version"
+                  data-testid="document-editor-review-changes"
+                >
+                  <FileDiff className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">See changes</span>
                 </Button>
               )}
               <ReviewActions

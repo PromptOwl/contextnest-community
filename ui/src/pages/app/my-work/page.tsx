@@ -26,20 +26,38 @@ import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
+import { MyWorkReviewPane } from "../../../components/MyWorkReviewPane";
 import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
 
 export default function MyWorkPage() {
-  const { openNest: onSelectNest, openReview: onOpenReview, goBack } = useAppNav();
+  const { openNest: onSelectNest, openReview: onOpenReview, goBack, initialReview } = useAppNav();
   const { adminStatus } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
-  const [work, setWork] = useState<{
+  const [rawWork, setWork] = useState<{
     items: api.WorkItem[];
     waiting: api.WorkItem[];
     notifications?: api.WatcherNotification[];
     assigned?: api.AssignedItem[];
     pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
+  // One nest, or all of them.
+  const [nestFilter, setNestFilter] = useState<string>("all");
+  const nestOptions = (() => {
+    const m = new Map<string, string>();
+    for (const w of [...rawWork.items, ...rawWork.waiting]) m.set(w.nest_id, w.nest_name);
+    for (const a of rawWork.assigned ?? []) m.set(a.nest_id, a.nest_name);
+    for (const n of rawWork.notifications ?? []) m.set(n.nest_id, n.nest_name);
+    return [...m].sort((a, b) => a[1].localeCompare(b[1]));
+  })();
+  const inNest = (id: string) => nestFilter === "all" || id === nestFilter;
+  const work = {
+    ...rawWork,
+    items: rawWork.items.filter((w) => inNest(w.nest_id)),
+    waiting: rawWork.waiting.filter((w) => inNest(w.nest_id)),
+    assigned: (rawWork.assigned ?? []).filter((a) => inNest(a.nest_id)),
+    notifications: (rawWork.notifications ?? []).filter((n) => inNest(n.nest_id)),
+  };
   // Gates the "My Work" empty state — without it, the empty message flashes
   // on every mount/tab switch before the best-effort /me/work fetch resolves.
   const [workLoading, setWorkLoading] = useState(true);
@@ -63,6 +81,19 @@ export default function MyWorkPage() {
   // discarding them.
   const [notificationsExpanded, setNotificationsExpanded] = useState(false);
   const qc = useQueryClient();
+  // One filter row for everything waiting on you, and the change open beside it.
+  const [chip, setChip] = useState<"all" | "reviews" | "tasks" | "notifications" | "requests" | "waiting">("all");
+  const [openRev, setOpenRev] = useState<{ nestId: string; nodeId: string } | null>(initialReview ?? null);
+  // A new change handed in while the page is open (See changes, an old link).
+  useEffect(() => {
+    if (initialReview) setOpenRev(initialReview);
+  }, [initialReview]);
+  // Clicking My Work in the nav while a change is open goes back to the list.
+  useEffect(() => {
+    const home = () => setOpenRev(null);
+    window.addEventListener("my-work:home", home);
+    return () => window.removeEventListener("my-work:home", home);
+  }, []);
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
@@ -117,6 +148,20 @@ export default function MyWorkPage() {
 
   const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
+  const listItems =
+    chip === "reviews" ? reviewItems : chip === "requests" ? requestItems : [...reviewItems, ...requestItems];
+  const showTasks = chip === "all" || chip === "tasks";
+  const showNotes = chip === "all" || chip === "notifications";
+  const showList = chip === "all" || chip === "reviews" || chip === "requests";
+  const showWaiting = chip === "all" || chip === "waiting";
+  // After a decision in the pane: drop the row, then move on to the next review.
+  const afterDecision = () => {
+    if (!openRev) return;
+    const idx = reviewItems.findIndex((w) => w.nest_id === openRev.nestId && w.node_id === openRev.nodeId);
+    const next = reviewItems[idx + 1] ?? reviewItems[idx - 1];
+    if (idx >= 0) dropWorkItem(reviewItems[idx]);
+    setOpenRev(next ? { nestId: next.nest_id, nodeId: next.node_id } : null);
+  };
 
   // The cap is per call and a call is per nest, so what matters is the biggest
   // per-nest group, not the total selection. How many to deselect, or 0.
@@ -282,6 +327,12 @@ export default function MyWorkPage() {
       onSelectNest(w.nest_id, w.nest_name, false, false);
       return;
     }
+    // A change waiting on you is decided in the Review tab's side pane, which
+    // opens on its changes — the same screen the nest's queue opens.
+    if (w.type === "review") {
+      setOpenRev({ nestId: w.nest_id, nodeId: w.node_id });
+      return;
+    }
     onOpenReview(w.nest_id, w.nest_name, w.node_id);
   };
 
@@ -333,14 +384,59 @@ export default function MyWorkPage() {
           )
         }
       />
-      <div>
+      <div
+        className="flex flex-wrap items-center gap-1.5"
+        data-testid="my-work-filter-chips"
+      >
+        {nestOptions.length > 1 && (
+          <select
+            value={nestFilter}
+            onChange={(e) => setNestFilter(e.target.value)}
+            aria-label="Filter by nest"
+            className="mr-1 h-7 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
+            data-testid="my-work-nest-filter"
+          >
+            <option value="all">All nests</option>
+            {nestOptions.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+        )}
+        {(
+          [
+            { key: "all", label: "All" },
+            { key: "reviews", label: `Reviews (${reviewItems.length})` },
+            { key: "tasks", label: `Tasks (${work.assigned?.length ?? 0})` },
+            { key: "notifications", label: `Notifications (${work.notifications?.length ?? 0})` },
+            { key: "requests", label: `Requests (${requestItems.length})` },
+            { key: "waiting", label: `Waiting on others (${work.waiting.length})` },
+          ] as const
+        ).map((c) => (
+          <button
+            key={c.key}
+            type="button"
+            onClick={() => setChip(c.key)}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+              chip === c.key
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+            }`}
+            data-testid={`my-work-chip-${c.key}`}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <div className={openRev ? "grid gap-6 lg:grid-cols-[minmax(300px,420px)_minmax(0,1fr)]" : undefined}>
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
           <div className="space-y-5">
             {/* Board cards assigned to you, across nests — Linear's "My
                 issues". Soonest due first; click opens the card. */}
-            {(work.assigned?.length ?? 0) > 0 && (
+            {showTasks && (work.assigned?.length ?? 0) > 0 && (
               <div className="rounded-lg border">
                 <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
                   Assigned to you
@@ -367,7 +463,7 @@ export default function MyWorkPage() {
               </div>
             )}
             <div>
-              {(work.notifications?.length ?? 0) > 0 && (
+              {showNotes && (work.notifications?.length ?? 0) > 0 && (
                 <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
                   <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
                     🔔 Notifications
@@ -459,7 +555,7 @@ export default function MyWorkPage() {
                   )}
                 </div>
               )}
-              {workLoading ? (
+              {!showList ? null : workLoading ? (
                 // Loader, not the empty state: "nothing here" while the
                 // best-effort /me/work fetch is still in flight reads as an
                 // answer, same reasoning as draftsLoading below.
@@ -467,16 +563,16 @@ export default function MyWorkPage() {
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Loading your work…
                 </div>
-              ) : nothingWaitingOnMe(work) ? (
+              ) : chip === "all" && nothingWaitingOnMe(work) ? (
                 <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
-              ) : work.items.length > 0 ? (
+              ) : listItems.length > 0 ? (
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {/* Batch decision bar — a folder import lands here as many
                       rows carrying the same decision. Reviews only. */}
                   {reviewItems.length > 1 && (
-                    <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
+                    <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 bg-muted px-4 py-2 text-sm shadow-sm">
                       <Checkbox
                         // Partial selections read as "some", not "none".
                         checked={
@@ -537,11 +633,11 @@ export default function MyWorkPage() {
                       )}
                     </div>
                   )}
-                  {[...reviewItems, ...requestItems].map((w, i) => {
+                  {listItems.map((w, i) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
                       <Fragment key={workItemKey(w)}>
-                      {i === reviewItems.length && (
+                      {chip === "all" && i === reviewItems.length && (
                         <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
                           {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
                         </div>
@@ -644,7 +740,7 @@ export default function MyWorkPage() {
                           ) : (
                             <ReviewActions
                               documentTitle={w.title}
-                              version={1}
+                              version={w.version ?? 1}
                               onApprove={(note) => approveReviewItem(w, note)}
                               onReject={(note) => rejectReviewItem(w, note)}
                             />
@@ -655,10 +751,14 @@ export default function MyWorkPage() {
                     );
                   })}
                 </div>
-              ) : null}
+              ) : (
+                <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+                  Nothing here.
+                </div>
+              )}
             </div>
 
-            {work.waiting.length > 0 && (
+            {showWaiting && work.waiting.length > 0 && (
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <h3 className="text-sm font-medium">
@@ -676,25 +776,24 @@ export default function MyWorkPage() {
                     >
                       <button
                         onClick={() => openWorkItem(w)}
-                        className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                        className="flex-1 min-w-0 text-left"
                       >
-                        <span className="font-medium truncate">{w.title}</span>
-                        <span className="text-xs text-muted-foreground shrink-0">
+                        <span className="block truncate font-medium">{w.title}</span>
+                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                           in {w.nest_name} ·{" "}
                           {w.type === "review" ? "submitted" : "requested"}{" "}
                           {relTime(w.requested_at)}
                         </span>
-                        <span className="flex-1" />
-                        <span className="text-xs text-muted-foreground">
-                          {w.type === "access"
-                            ? "Access Requested"
-                            : w.type !== "deletion"
-                              ? "Pending Review"
-                              : isArchiveAsk(w)
-                                ? "Archive Requested"
-                                : "Deletion Requested"}
-                        </span>
                       </button>
+                      <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+                        {w.type === "access"
+                          ? "Access Requested"
+                          : w.type !== "deletion"
+                            ? "Pending Review"
+                            : isArchiveAsk(w)
+                              ? "Archive Requested"
+                              : "Deletion Requested"}
+                      </span>
                       {w.type === "deletion" && w.request_id && (
                         <Button
                           size="sm"
@@ -783,6 +882,22 @@ export default function MyWorkPage() {
               </div>
             )}
           </div>
+          {openRev && (
+            <div className="min-w-0" data-testid="my-work-review-pane">
+              <MyWorkReviewPane
+                key={`${openRev.nestId}:${openRev.nodeId}`}
+                nestId={openRev.nestId}
+                nodeId={openRev.nodeId}
+                currentUser={currentUserEmail?.toLowerCase()}
+                onDecided={afterDecision}
+                onOpenDocument={(id) => {
+                  const w = [...reviewItems, ...work.waiting].find((x) => x.node_id === id);
+                  onOpenReview(openRev.nestId, w?.nest_name ?? "", id);
+                }}
+                onClose={() => setOpenRev(null)}
+              />
+            </div>
+          )}
       </div>
 
 
@@ -795,11 +910,15 @@ export default function MyWorkPage() {
               ? `Approve ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
               : `Reject ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
           }
-          description={
+          description={`${
             workBulkAction === "approve"
               ? "Approving publishes each one. Anything that changed since this inbox loaded is reported back and left alone."
               : "Each author gets the same reason and the work goes back to them."
-          }
+          } ${(() => {
+            const titles = reviewItems.filter((w) => workSelected.has(workKey(w))).map((w) => w.title);
+            const shown = titles.slice(0, 6).join(", ");
+            return titles.length > 6 ? `${shown}, and ${titles.length - 6} more.` : `${shown}.`;
+          })()}`}
           // Rejecting in bulk demands a reason exactly as one at a time does.
           // Approving offers the same comment field, shared across the batch,
           // without demanding one — as the review queue's bulk approve does.

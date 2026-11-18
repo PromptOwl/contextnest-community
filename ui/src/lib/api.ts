@@ -2819,10 +2819,11 @@ export async function rejectNode(
   nestId: string,
   nodeId: string,
   note: string,
+  kind?: "changes" | "reject",
 ) {
   return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ note }),
+    body: JSON.stringify({ note, kind }),
   });
 }
 
@@ -3672,6 +3673,8 @@ export interface WorkItem {
   requested_by: string;
   requested_at: string;
   priority?: string;
+  /** Review items: the version under review. */
+  version?: number;
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;
@@ -3732,6 +3735,8 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     assigned?: AssignedItem[];
     /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
     waiting_on_me_total?: number;
+    /** Pending reviews filed as urgent that this caller can decide. */
+    urgent_reviews_total?: number;
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -3847,10 +3852,15 @@ export async function approveReview(nestId: string, nodeId: string, note?: strin
   });
 }
 
-export async function rejectReview(nestId: string, nodeId: string, note?: string) {
+export async function rejectReview(
+  nestId: string,
+  nodeId: string,
+  note?: string,
+  kind?: "changes" | "reject",
+) {
   return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ note }),
+    body: JSON.stringify({ note, kind }),
   });
 }
 

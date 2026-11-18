@@ -113,7 +113,7 @@ test.describe('Nest overview', () => {
     await expect(page.overview.locator('header p')).toHaveCount(1);
   });
 
-  test('CN-OVR-004: Verify that a governed nest shows “AI ready” and “pending review” facts, and “pending review” opens the Review Queue', async ({
+  test('CN-OVR-004: Verify that a governed nest shows “AI ready” and “pending review” facts, and “pending review” opens My Work', async ({
     primary_user,
     commonFunction,
   }) => {
@@ -128,7 +128,9 @@ test.describe('Nest overview', () => {
     await expect(page.facts.locator('.bg-emerald-500')).toHaveCount(0);
 
     await page.factLink('1 pending review').click();
-    await expect(page.selectedTab).toHaveText('Review Queue');
+    // The review queue is My Work now: the link leaves the nest for it.
+    await expect(page.page).toHaveURL(/my-work/);
+    await expect(page.page.getByTestId('my-work-filter-chips')).toBeVisible();
   });
 
   test('CN-OVR-005: Verify that folders in Contents start collapsed and expand and collapse on click', async ({

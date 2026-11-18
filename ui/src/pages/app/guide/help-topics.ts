@@ -7,7 +7,7 @@
 export interface HelpTopic {
   id: string;
   title: string;
-  /** Where the admin goes in the app: "Admin → <page> → <tab>". */
+  /** Where the admin goes in the app: "Workspace settings → <page> → <tab>". */
   where: string;
   summary: string;
   steps: string[];
@@ -18,7 +18,7 @@ export const ADMIN_HELP_TOPICS: HelpTopic[] = [
   {
     id: "sso",
     title: "Single sign-on (OIDC)",
-    where: "Admin → Server settings → Single sign-on",
+    where: "Workspace settings → Server settings → Single sign-on",
     summary:
       "Let people sign in with your identity provider: Microsoft Entra ID, Google, Okta, Keycloak or any OpenID Connect issuer. It is one setup for the whole server, and only a server admin can change it.",
     steps: [
@@ -30,7 +30,7 @@ export const ADMIN_HELP_TOPICS: HelpTopic[] = [
     ],
     notes: [
       "People are matched by email. Someone who already has a password account with the same email signs into that account, and their password still works.",
-      "API keys (cnst_…) do not go through SSO. Disabling someone at your identity provider does not stop their keys or their open sessions. Remove them under Admin → Teammates to end both.",
+      "API keys (cnst_…) do not go through SSO. Disabling someone at your identity provider does not stop their keys or their open sessions. Remove them under Workspace settings → Teammates to end both.",
       "A failed sign-in comes back with a short error. Each code, what causes it and how to fix it are listed in CONFIGURATION.md → Single sign-on (OIDC) → Troubleshooting.",
     ],
   },

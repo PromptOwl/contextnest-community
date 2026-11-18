@@ -2304,7 +2304,19 @@ function MaturityBoardInner({
           <button
             type="button"
             aria-pressed={!!config.tasksOnly}
-            onClick={() => updateConfig({ tasksOnly: !config.tasksOnly })}
+            onClick={() => {
+              // Turning Tasks only on lands on Columns = Tag, grouped by
+              // stage, so the task flow is visible without more clicks.
+              if (!config.tasksOnly && defaultTagGroup) {
+                updateConfig({
+                  tasksOnly: true,
+                  dimension: "tag",
+                  tagNamespace: defaultTagGroup,
+                });
+              } else {
+                updateConfig({ tasksOnly: !config.tasksOnly });
+              }
+            }}
             className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-sm transition-colors ${
               config.tasksOnly
                 ? "border-primary/30 bg-primary/10 font-medium text-primary"
@@ -2485,7 +2497,7 @@ function MaturityBoardInner({
       {!hintGone && numberingOffHint && (
         <HintBanner testId="board-numbering-hint" onDismiss={dismissHint}>
           <span>These tasks have no ticket numbers yet, so cards can't show one.</span>
-          <a className="font-medium text-primary underline-offset-2 hover:underline" href={`${nestPath(nestId)}?tab=fields`}>
+          <a className="font-medium text-primary underline-offset-2 hover:underline" href={`${nestPath(nestId)}?tab=settings`}>
             Turn on task numbering
           </a>
         </HintBanner>

@@ -21,6 +21,13 @@ export interface AppNav {
     nodeId: string,
     opts?: { thread?: string },
   ) => void;
+  /** Open a change waiting for review in My Work, in the side-by-side pane
+   *  that opens on its changes. This is the one place a review is decided,
+   *  whichever list the change was reached from. */
+  openReviewPane: (nestId: string, nestName: string, nodeId: string) => void;
+  /** A change My Work should open beside its list on arrival (from a link to
+   *  a nest's old Review tab, or See changes on a document). */
+  initialReview?: { nestId: string; nodeId: string } | null;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
   /** Return to the page this one was opened from (the header bell), if any. */

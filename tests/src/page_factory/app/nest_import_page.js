@@ -26,7 +26,7 @@ class NestImportPage {
     this.main = page.locator('main');
 
     // ── Nest page ─────────────────────────────────────────────────────────
-    this.importButton = page.getByTestId('nest-import-files');
+    this.importButton = page.getByTestId('top-bar-new-document');
     this.contents = page.getByRole('navigation', { name: 'Contents' });
 
     // ── "Import into this nest" dialog ────────────────────────────────────

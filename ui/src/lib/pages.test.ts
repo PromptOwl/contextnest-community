@@ -55,14 +55,29 @@ describe("dashboard rail groups", () => {
     expect(appRail({ isAdmin: true }).top.map((p) => p.id)).toEqual(["nests"]);
   });
 
-  it("shows the Admin group to admins only and keeps Account out of the rail", () => {
+  it("keeps Work, Workspace settings and Help as the only groups, and Account out of the rail", () => {
     const admin = appRail({ isAdmin: true });
     const member = appRail({ isAdmin: false });
-    expect(admin.groups.map((g) => g.id)).toEqual(["work", "workspace", "admin", "help"]);
-    expect(member.groups.map((g) => g.id)).toEqual(["work", "workspace", "help"]);
+    expect(admin.groups.map((g) => g.id)).toEqual(["work", "settings", "help"]);
+    expect(member.groups.map((g) => g.id)).toEqual(["work", "settings", "help"]);
     const listed = [...admin.top, ...admin.groups.flatMap((g) => g.pages)].map((p) => p.id);
     expect(listed).not.toContain("account");
     expect(appPageIdFromPath("/account")).toBe("account");
+  });
+
+  it("lists the admin pages inside Workspace settings for admins only", () => {
+    const settingsIds = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.find((g) => g.id === "settings")!.pages.map((p) => p.id);
+    expect(settingsIds({ isAdmin: true, isSuperadmin: true })).toEqual([
+      "teams",
+      "api-keys",
+      "teammates",
+      "settings",
+      "trace",
+      "messages",
+    ]);
+    // A member still gets their own pages (teams, API keys), never the admin ones.
+    expect(settingsIds({ isAdmin: false })).toEqual(["teams", "api-keys"]);
   });
 
   it("resolves a gated page to the default for a member, itself for an admin", () => {

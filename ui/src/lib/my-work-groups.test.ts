@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitWorkItems, workItemKey, waitingOnMeCount, nothingWaitingOnMe } from "./my-work-groups";
+import { splitWorkItems, workItemKey, waitingOnMeCount, nothingWaitingOnMe, urgentOnMeCount } from "./my-work-groups";
 import type { AssignedItem, WorkItem } from "./api";
 
 const item = (node_id: string, type: WorkItem["type"], target_type?: string) =>
@@ -66,5 +66,45 @@ describe("nothingWaitingOnMe (the all-caught-up state)", () => {
   it("is false when a review waits, true when nothing does", () => {
     expect(nothingWaitingOnMe({ items: [item("r1", "review")], assigned: [] })).toBe(false);
     expect(nothingWaitingOnMe({ items: [] })).toBe(true);
+  });
+});
+
+describe("urgentOnMeCount (turns the My Work count red)", () => {
+  const task = (over: Partial<AssignedItem>): AssignedItem => ({
+    nest_id: "n",
+    nest_name: "N",
+    node_id: "t",
+    title: "T",
+    type: "task",
+    due: null,
+    priority: null,
+    assigned_at: null,
+    ...over,
+  });
+  const TODAY = "2026-11-09";
+
+  it("is zero with nothing waiting", () => {
+    expect(urgentOnMeCount(undefined, TODAY)).toBe(0);
+    expect(urgentOnMeCount({ assigned: [] }, TODAY)).toBe(0);
+  });
+
+  it("counts urgent reviews the server totals", () => {
+    expect(urgentOnMeCount({ urgent_reviews_total: 3 }, TODAY)).toBe(3);
+  });
+
+  it("counts an urgent task and an overdue task, not a high-priority or future one", () => {
+    const assigned = [
+      task({ node_id: "a", priority: "urgent" }),
+      task({ node_id: "b", due: "2026-11-08" }),
+      task({ node_id: "c", priority: "high", due: "2026-11-20" }),
+      task({ node_id: "d", due: "2026-11-09" }),
+    ];
+    expect(urgentOnMeCount({ assigned }, TODAY)).toBe(2);
+  });
+
+  it("adds reviews and tasks together", () => {
+    expect(
+      urgentOnMeCount({ urgent_reviews_total: 2, assigned: [task({ priority: "urgent" })] }, TODAY),
+    ).toBe(3);
   });
 });

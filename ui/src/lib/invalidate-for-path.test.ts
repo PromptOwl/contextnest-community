@@ -7,8 +7,13 @@
  * that is not recognised at all, because the unrecognised case errs broad and a
  * narrow match silently returns before the fallback can.
  */
-import { describe, it, expect } from "vitest";
-import { invalidateForPath, keys } from "./queries";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  invalidateForPath,
+  keys,
+  resetVerdictDrops,
+  VERDICT_REFETCH_WINDOW_MS,
+} from "./queries";
 
 /** Records the keys a call to invalidateForPath would drop. */
 function recorder() {
@@ -113,5 +118,82 @@ describe("invalidateForPath — document pins vs nest pins (CU-wdqcq02crw)", () 
     const r = recorder();
     invalidateForPath(r.qc, `/nests/${NEST}/nodes/nodes/a`);
     expect(r.drops(keys.docPins(NEST))).toBe(true);
+  });
+});
+
+describe("invalidateForPath — review verdicts arrive in runs", () => {
+  // A reviewer clearing a queue approves one item after another. Each approval
+  // dropped the same five groups of reads, so five quick approvals refetched
+  // them all five times in a few seconds. The first verdict after a quiet spell
+  // still drops at once (one approval must update the screen straight away);
+  // the ones that follow share a single drop when the window ends.
+  const QUEUE = [...keys.nest(NEST), "review-queue"];
+
+  /** Counts how many times each key is invalidated. */
+  function counter() {
+    const hits = new Map<string, number>();
+    const qc = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        const k = JSON.stringify(queryKey);
+        hits.set(k, (hits.get(k) ?? 0) + 1);
+      },
+    } as any;
+    return { qc, count: (key: readonly unknown[]) => hits.get(JSON.stringify(key)) ?? 0 };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T12:00:00Z"));
+    resetVerdictDrops();
+  });
+  afterEach(() => {
+    resetVerdictDrops();
+    vi.useRealTimers();
+  });
+
+  it("drops straight away for a single approval", () => {
+    const c = counter();
+    invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/a/approve`);
+    expect(c.count(QUEUE)).toBe(1);
+  });
+
+  it("folds a run of approvals into one extra drop at the end of the window", () => {
+    const c = counter();
+    for (const id of ["a", "b", "c", "d", "e"]) {
+      invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/${id}/approve`);
+      vi.advanceTimersByTime(200);
+    }
+    // The first went through at once, the other four are waiting.
+    expect(c.count(QUEUE)).toBe(1);
+    vi.advanceTimersByTime(VERDICT_REFETCH_WINDOW_MS);
+    expect(c.count(QUEUE)).toBe(2);
+    // Nothing further is pending.
+    vi.advanceTimersByTime(VERDICT_REFETCH_WINDOW_MS * 4);
+    expect(c.count(QUEUE)).toBe(2);
+  });
+
+  it("treats a rejection like an approval", () => {
+    const c = counter();
+    invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/a/reject`);
+    invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/b/reject`);
+    expect(c.count(QUEUE)).toBe(1);
+    vi.advanceTimersByTime(VERDICT_REFETCH_WINDOW_MS);
+    expect(c.count(QUEUE)).toBe(2);
+  });
+
+  it("drops at once again after a quiet spell", () => {
+    const c = counter();
+    invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/a/approve`);
+    vi.advanceTimersByTime(VERDICT_REFETCH_WINDOW_MS + 1);
+    invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/b/approve`);
+    expect(c.count(QUEUE)).toBe(2);
+  });
+
+  it("does not delay other writes, including submitting for review", () => {
+    const c = counter();
+    for (let i = 0; i < 3; i++) {
+      invalidateForPath(c.qc, `/nests/${NEST}/nodes/nodes/a/submit-review`);
+    }
+    expect(c.count(QUEUE)).toBe(3);
   });
 });

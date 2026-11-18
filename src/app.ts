@@ -2417,6 +2417,8 @@ export function createApp(): Hono<AuthEnv> {
       requested_by: r.requestedBy,
       requested_at: r.requestedAt,
       priority: r.priority,
+      // The version under review, so an approve dialog names the right one.
+      version: r.version,
       // Filed by an agent run (migration 060): the inbox links to its trace.
       run_id: r.runId ?? null,
     });
@@ -2609,12 +2611,23 @@ export function createApp(): Hono<AuthEnv> {
     const waitingOnMeTotal =
       reviewTotal + requestsShown - myReviewsTotal -
       waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
+    // Reviews filed as urgent that this caller can decide. Counted in SQL for
+    // the same reason the totals above are: the page of items may be one row.
+    // Overdue and urgent tasks come from `assigned`, which is not paged, so the
+    // client counts those in the viewer's own calendar day.
+    const { total: urgentReviewsTotal } = await getReviewQueue({
+      status: "pending",
+      nestIds: approvableNestIds,
+      priority: "urgent",
+      limit: 1,
+    });
     return c.json({
       items,
       waiting,
       notifications,
       assigned,
       waiting_on_me_total: waitingOnMeTotal,
+      urgent_reviews_total: urgentReviewsTotal,
       pagination: {
         total: reviewTotal + requestsShown,
         limit,

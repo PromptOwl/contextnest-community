@@ -1349,6 +1349,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       )
   `);
 
+  // review_requests.resolution_kind: "changes" or "reject" (NULL reads as changes).
+  await db.exec("ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS resolution_kind TEXT");
+
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
     "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",

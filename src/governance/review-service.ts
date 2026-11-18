@@ -668,9 +668,14 @@ export async function reject(params: {
   nodeId: string;
   rejectedBy: string;
   note: string;
+  /** "changes" sends it back expecting a revision (the default); "reject"
+   *  declines it for good. Same status either way; the kind is recorded so
+   *  the author and the history can tell them apart. */
+  kind?: "changes" | "reject";
   /** Request origin, for building the notification's document link. */
   baseUrl?: string;
 }): Promise<ReviewRequest> {
+  const kind = params.kind === "reject" ? "reject" : "changes";
   // Same lock as approve: serialize against a concurrent author edit so the
   // rejected version reflects the author's latest committed edit.
   const { pending, version } = await withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
@@ -690,7 +695,7 @@ export async function reject(params: {
       params.nestId,
       params.nodeId,
       params.rejectedBy,
-      { requestedBy: pending.requested_by },
+      { requestedBy: pending.requested_by, ignoreAdminFolders: true },
     );
     if (!check.allowed) {
       throw new Error(check.reason);
@@ -698,9 +703,9 @@ export async function reject(params: {
 
     await db.run(
       `UPDATE review_requests
-     SET status = 'rejected', resolved_by = ?, resolved_at = ${nowExpr(db)}, resolution_note = ?
+     SET status = 'rejected', resolved_by = ?, resolved_at = ${nowExpr(db)}, resolution_note = ?, resolution_kind = ?
      WHERE id = ?`,
-      [params.rejectedBy, params.note, pending.id],
+      [params.rejectedBy, params.note, kind, pending.id],
     );
     await markReviewNotificationsRead(pending.id);
 
@@ -719,11 +724,11 @@ export async function reject(params: {
     nestId: params.nestId,
     subjectId: params.nodeId,
     actor: params.rejectedBy,
-    message: `*${rejectCtx.label}* v${version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    message: `*${rejectCtx.label}* v${version} ${kind === "reject" ? "rejected" : "sent back for changes"} by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
   });
   void notifyNestEvent(
     params.nestId,
-    `:x: *${rejectCtx.label}* v${version} rejected by ${params.rejectedBy} — "${params.note}"`,
+    `:x: *${rejectCtx.label}* v${version} ${kind === "reject" ? "rejected" : "sent back for changes"} by ${params.rejectedBy} — "${params.note}"`,
     {
       status: "rejected",
       docTitle: rejectCtx.docTitle,
@@ -870,6 +875,8 @@ export async function getReviewQueue(params: {
   // approve — a JS post-filter over one paginated page can't produce an
   // accurate total.
   requestedByEmail?: string;
+  /** Only requests filed at this priority (My Work's urgent count). */
+  priority?: ReviewRequestPriority;
   limit?: number;
   offset?: number;
 }): Promise<{ requests: ReviewRequest[]; total: number }> {
@@ -907,6 +914,11 @@ export async function getReviewQueue(params: {
   if (params.requestedByEmail) {
     whereClauses.push("requested_by = ?");
     args.push(params.requestedByEmail);
+  }
+
+  if (params.priority) {
+    whereClauses.push("priority = ?");
+    args.push(params.priority);
   }
 
   const where =
