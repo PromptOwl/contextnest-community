@@ -222,6 +222,18 @@ describe("AP-3/AP-4: any member DMs the agent; its key reads only its own conver
     expect(JSON.stringify(mine.data)).toContain(dm);
   });
 
+  it("AP-3 an @mention of the handle in a channel is in the agent's own My Work", async () => {
+    const ch = await jsonRequest(app, "POST", `/nests/${nestId}/channels`, { name: "general", purpose: "General" }, owner.apiKey);
+    expect(ch.status, JSON.stringify(ch.data)).toBeLessThan(300);
+    const t = await say(carol.apiKey, "nodes/channels/general", "@builder can you check the release notes?");
+    const work = await callTool(builderKey, "context_my_work", {}); // no declared agent: the identity owns the handle
+    expect(work.isError, work.text).toBe(false);
+    expect(JSON.stringify(work.data)).toContain(t.id);
+    // …and the channel is readable to it (a member of the nest).
+    const read = await callTool(builderKey, "context_channel_read", { channel: "general", thread: t.id });
+    expect(read.isError, read.text).toBe(false);
+  });
+
   it("AP-4 a conversation without the agent is NotFound to its key, and it can't post there", async () => {
     const dm = await startConversation(alice.apiKey, [bob.email]);
     const t = await say(alice.apiKey, dm, "private between people");
@@ -416,5 +428,17 @@ describe("AP-10: let go revokes; hiring again reuses the identity", () => {
     expect(r.status).toBe(409);
     const { resolveNestAccess } = await import("../src/shared/access.js");
     expect((await resolveNestAccess(nestId, squat.userId)).permission).toBe("none");
+    // Added as an ordinary collaborator, the person is visible like any person.
+    const add = await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: squat.email, permission: "read" }, owner.apiKey);
+    expect(add.status, JSON.stringify(add.data)).toBeLessThan(300);
+    const { listNestPeople } = await import("../src/nests/people-service.js");
+    expect((await listNestPeople(nestId)).map((p: any) => p.email.toLowerCase())).toContain(squat.email.toLowerCase());
+  });
+
+  it("an agent can't wear a person's name", async () => {
+    const r = await hire(owner, { kind: "key", handle: "mimic", name: "Bob" });
+    expect(r.status).toBe(400);
+    const r2 = await hire(owner, { kind: "key", handle: "mimic", name: bob.email });
+    expect(r2.status).toBe(400);
   });
 });

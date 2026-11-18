@@ -86,13 +86,19 @@ export const CATALOG: readonly CatalogEntry[] = [
     kind: "key",
     name: "Key agent",
     description:
-      "An agent that connects over MCP with a key of its own, labelled with its @handle. It finds the threads that tag it in its work queue (context_my_work), reads channels and posts as itself. No URL needed, so it works behind a firewall or on a laptop.",
-    in_channel: "finds its @mentions in its work queue and posts as itself",
-    needs: ["a label (the @handle)", "an MCP client to paste the key into"],
-    permissions: ["a write key scoped to this nest only, acting with the hiring person's own permission"],
+      "An agent with its own identity in this nest, connecting over MCP with its own key. Any member can DM it or @mention it; it reads those conversations and its work queue (context_my_work), and posts as itself. No URL needed, so it works behind a firewall or on a laptop; give it a wake URL (owner or admin) to wake it on each DM and @mention.",
+    in_channel: "is reached by a DM or an @mention and posts as itself",
+    needs: ["an @handle", "an MCP client to paste the key into"],
+    permissions: [
+      "an editor of this nest only, under its own identity (not a person, not a seat, can't sign in)",
+      "reads the conversations it is in; never approves or rejects a review",
+    ],
     cost: "none on this server; the agent pays for its own model",
     hire_by: "writer",
-    config_fields: [],
+    config_fields: [
+      { name: "name", required: false, description: "Its display name (default: the handle)." },
+      { name: "url", required: false, description: "A public https URL to wake it on each DM and @mention (owner or admin)." },
+    ],
     manage: "api-keys",
   },
 ];

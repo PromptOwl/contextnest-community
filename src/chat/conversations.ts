@@ -19,8 +19,9 @@
  * access guard hides the node from listings, and the nest middleware answers
  * the same 404 on the thread routes.
  *
- * An agent member reads with the key it runs on: the person behind that key
- * must be a member (containers.ts). In a DM, every message by someone else
+ * An agent member reads with the key it runs on: a hired agent's own key
+ * (its principal, agents/principals.ts) is a member through its tag; any
+ * other key only through the person behind it (containers.ts). In a DM, every message by someone else
  * is put in front of the agent as if it had been @mentioned
  * (`indexAgentMembers`: a mention row, so My Work and the `agent.dm` wake-up
  * see it); in a group, only an explicit @mention reaches it.
@@ -38,6 +39,7 @@ import { readChannelDoc } from "../channels/channel-node.js";
 import { normHandle } from "../channels/message-meta.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { emitChatEvent } from "./events.js";
+import { agentPrincipalOf, parseAgentPrincipalEmail } from "../agents/principals.js";
 import {
   addAgentMember,
   addPersonMember,
@@ -50,6 +52,8 @@ import {
   CONVERSATION_TAG,
   isContainerMember,
   isConversationDoc,
+  isConversationId,
+  memberContainers,
   memberKeyOf,
   memberViews,
   newConversationId,
@@ -106,7 +110,8 @@ export async function conversationPostRefusal(nestId: string, nodeId: string, us
 }
 
 function titleOf(members: MemberView[], me: string): string {
-  const others = members.filter((m) => !(m.kind === "person" && m.email === me)).map((m) => (m.kind === "person" ? m.name : `@${m.handle}`));
+  const selfHandle = parseAgentPrincipalEmail(me)?.handle;
+  const others = members.filter((m) => !(m.kind === "person" && m.email === me) && !(m.kind === "agent" && m.handle === selfHandle)).map((m) => (m.kind === "person" ? m.name : `@${m.handle}`));
   return others.join(", ") || "Just you";
 }
 
@@ -153,7 +158,11 @@ export async function findOrCreateConversation(caller: Caller, rawMembers: unkno
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Nest not found");
   const { people, agents } = await resolveMemberSpecs(caller.nestId, rawMembers);
   const me = caller.userEmail.toLowerCase();
-  if (!people.some((p) => p.email === me)) people.push({ email: me, userId: caller.userId, name: null });
+  // A hired agent starting a conversation is in it as itself: its tag.
+  const self = await agentPrincipalOf(caller.userId);
+  if (self) {
+    if (!agents.includes(self.handle)) agents.push(self.handle);
+  } else if (!people.some((p) => p.email === me)) people.push({ email: me, userId: caller.userId, name: null });
   if (people.length + agents.length < 2) throw new ValidationError("A conversation needs at least one other member.");
   const key = memberKeyOf(
     people.map((p) => p.email),
@@ -204,11 +213,8 @@ async function displayNamesOf(emails: string[]): Promise<Map<string, string>> {
 /** The conversations this caller is a member of, latest activity first. */
 export async function listConversations(caller: Caller): Promise<{ conversations: ConversationView[] }> {
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Nest not found");
-  const mine = (await getDb().all(
-    "SELECT target FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document' AND target LIKE 'nodes/conversations/%'",
-    [caller.nestId, caller.userId],
-  )) as Array<{ target: string }>;
-  const ids = new Set(mine.map((r) => r.target));
+  // People by their grants, a hired agent by its tag (containers.ts).
+  const ids = new Set([...(await memberContainers(caller.nestId, caller.userId))].filter(isConversationId));
   const docs = (await conversationDocs(caller.nestId)).filter((d) => ids.has(d.id));
   const stats = await channelStats(caller, docs.map((d) => d.id));
   const refusal = await nestRefusal(caller.nestId, caller.userId);

@@ -5,9 +5,10 @@
  *
  *   GET    /hire/catalog                      → { catalog: [{ kind, name, …, available, reason }] }  (members)
  *   GET    /hire                              → { hired: [{ kind, handle, hired_by, hired_at, status, … }] }  (members)
- *   POST   /hire { kind, handle?, config?, channels?, announce? } → 201 { hired, created: true, secret? | api_key?, announced }
+ *   POST   /hire { kind, handle?, name?, config?, channels?, announce? } → 201 { hired, created: true, secret? | api_key?, announced }
  *                                               200 { hired, created: false, announced: [] } when it already exists
  *   DELETE /hire/:kind/:handle                → { deleted: true }
+ *   GET    /hire/me                           → { agent, handle, name, nest, owner, … }  (who am I, for an agent's key)
  *
  *   GET    /agents/recommendations            → { recommendations: [...] }   (members; at most 5)
  *   POST   /agents/recommendations/:id/dismiss → { dismissed: id }           (the caller's own mark)
@@ -21,7 +22,7 @@ import { resolveCallerEmail } from "../governance/access-guard.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { messageClient } from "../channels/message-meta.js";
 import { ValidationError } from "../shared/errors.js";
-import { hireAgent, hireCatalog, letAgentGo, listHiredAgents, type HireCaller } from "./service.js";
+import { agentIdentity, hireAgent, hireCatalog, letAgentGo, listHiredAgents, type HireCaller } from "./service.js";
 import { dismissRecommendation, listRecommendations } from "./recommend.js";
 
 export const hireRoutes = new Hono<AuthEnv>();
@@ -50,6 +51,7 @@ async function jsonObject(c: any): Promise<Record<string, unknown>> {
 
 hireRoutes.get("/catalog", async (c) => c.json(await hireCatalog(await caller(c))));
 hireRoutes.get("/", async (c) => c.json(await listHiredAgents(await caller(c))));
+hireRoutes.get("/me", async (c) => c.json(await agentIdentity({ ...(await caller(c)), apiKeyId: (c.get("apiKeyId") as string | undefined) ?? null })));
 
 hireRoutes.post("/", async (c) => {
   const body = await jsonObject(c);
@@ -59,7 +61,7 @@ hireRoutes.post("/", async (c) => {
     // kept beside it, never shown as an agent (message-meta.ts), as the
     // annotation route does.
     { ...who, client: messageClient(attributeRequest(c, body.client), body.client, c.get("apiKeyLabel")) },
-    { kind: body.kind, handle: body.handle, config: body.config, channels: body.channels, announce: body.announce },
+    { kind: body.kind, handle: body.handle, name: body.name, config: body.config, channels: body.channels, announce: body.announce },
   );
   return c.json(result, result.created ? 201 : 200);
 });

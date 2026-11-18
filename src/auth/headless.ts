@@ -3,6 +3,7 @@ import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { generateApiKey, getKeyPrefix, hashApiKey } from "./keys.js";
 import { parseSharedTeams } from "../governance/teams-service.js";
+import { isAgentPrincipalEmail } from "../agents/principals.js";
 
 /**
  * Headless publishing (CU-wdqcq0314u): a private nest handed out as API-only
@@ -136,12 +137,14 @@ export async function isServiceUser(userId: string | null | undefined): Promise<
 export async function isHeadlessIdentity(userId: string | null | undefined): Promise<boolean> {
   if (!userId) return false;
   const row = (await getDb().get(
-    `SELECT u.is_service,
+    `SELECT u.is_service, u.email,
             (SELECT 1 FROM system_accounts sa WHERE sa.user_id = u.id) AS is_system
        FROM users u WHERE u.id = ?`,
     [userId],
-  )) as { is_service: number | null; is_system: number | null } | undefined;
-  return !!row?.is_service && !row?.is_system;
+  )) as { is_service: number | null; is_system: number | null; email: string | null } | undefined;
+  // An agent principal (agents/principals.ts) is not a reader either: it
+  // works inside its one nest as an editor, through its collaborator row.
+  return !!row?.is_service && !row?.is_system && !isAgentPrincipalEmail(row?.email);
 }
 
 /** Number of real people on this server/** Number of real people on this server — every account except access-key

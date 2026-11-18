@@ -5,6 +5,7 @@
  *   context_hire_catalog          GET /hire/catalog
  *   context_hire_agent            POST /hire (action "hire", default) · DELETE /hire/:kind/:handle (action "let_go")
  *   context_hired_agents          GET /hire
+ *   context_agent_identity        GET /hire/me (who am I, who owns me — for an agent's own key)
  *   context_agent_recommendations GET /agents/recommendations (action "list", default) · POST …/:id/dismiss ("dismiss")
  *
  * Each calls the same service function its REST route calls and returns that
@@ -21,7 +22,7 @@
  */
 import { config } from "../config.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
-import { hireAgent, hireCatalog, letAgentGo, listHiredAgents, type HireCaller, type HiredAgentView } from "../hire/service.js";
+import { agentIdentity, hireAgent, hireCatalog, letAgentGo, listHiredAgents, type AgentIdentityView, type HireCaller, type HiredAgentView } from "../hire/service.js";
 import { dismissRecommendation, listRecommendations, type Recommendation } from "../hire/recommend.js";
 import type { CatalogView } from "../hire/catalog.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -43,14 +44,16 @@ export const HIRE_TOOL_DEFINITIONS = [
       'Hire an agent for this nest in one step (action "hire", default), or let one go (action "let_go"). `kind` is hootie | watcher | webhook | key (see context_hire_catalog). ' +
       "`handle` is the agent's @name (not needed for hootie). `config.url` is the runner's public https URL for a webhook. `channels` are channel names: the ones a watcher reads, " +
       "and where `announce: true` posts one welcome line as you. Hiring creates the existing thing underneath — the metacognition agent, the agent webhook (its signing `secret` returned once), " +
-      "the nest-scoped key (`api_key` returned once) — under that feature's own gate (owner/admin for hootie, watcher and webhook; a writer for a key). Hiring what exists returns it with `created: false` and no secret.",
+      "the key agent's own identity (an agent principal: not a person, not a seat, an editor of this nest only) and its nest-scoped key (`api_key` returned once) — under that feature's own gate (owner/admin for hootie, watcher and webhook; a writer for a key). " +
+      "A key agent may take `config.url` to add its wake webhook in the same hire (owner/admin), and `name` for its display name. Any member can then DM or @mention it, and it reads that conversation with its own key. Hiring what exists returns it with `created: false` and no secret.",
     inputSchema: {
       type: "object" as const,
       properties: {
         action: { type: "string", description: 'One of "hire" (default) or "let_go".' },
         kind: { type: "string", description: "hootie | watcher | webhook | key." },
         handle: { type: "string", description: "The agent's @handle: 1–63 lowercase letters, digits, dots, dashes or underscores. Not used for hootie." },
-        config: { type: "object", description: "Per kind: webhook needs { url } (public https). Others take nothing." },
+        name: { type: "string", description: "key: the agent's display name (default: its handle)." },
+        config: { type: "object", description: "Per kind: webhook needs { url } (public https); key may take { url } to add its wake webhook too (owner/admin). Others take nothing." },
         channels: { type: "array", items: { type: "string" }, description: "Channel names: the ones a watcher reads ([] = the whole nest), and where the announcement is posted." },
         announce: { type: "boolean", description: 'Post "Hired @handle: …" in each channel, as you. Default false.' },
       },
@@ -62,6 +65,13 @@ export const HIRE_TOOL_DEFINITIONS = [
     description:
       "Lists the agents hired for this nest: kind, @handle, who hired it, when, and a status — active, failing (a webhook whose last delivery failed), no_key (needs a model key on the server) or off (its switch is off). " +
       "Derived from the agents that exist (Hootie, metacognition agents, agent webhooks, key agents), so it is always current.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_agent_identity",
+    description:
+      "Who am I, as an agent: for a hired agent's own key, its @handle, display name, address, nest, owner (the person who hired it), when it was hired, whether it has a wake webhook, and what it may do. " +
+      "`legacy: true` means the key is a person's key labelled with the handle (hired before agents had their own identity). A person's credential answers `agent: false`.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -137,6 +147,18 @@ function hiredText(hired: HiredAgentView[]): string {
     .join("\n")}`;
 }
 
+function identityText(v: AgentIdentityView): string {
+  if (!v.agent) return `Not an agent. ${v.detail ?? ""}`.trim();
+  return [
+    `You are @${v.handle} (${v.name}) in ${v.nest?.name ?? v.nest?.id}${v.legacy ? ", running on a person's key (legacy)" : ""}.`,
+    v.owner ? `Owned by ${v.owner.name ? `${v.owner.name} <${v.owner.email}>` : v.owner.email}, who hired you on ${v.hired_at}.` : "",
+    v.webhook ? "You have a wake webhook: DMs and @mentions wake you." : "No wake webhook: find what tags you with context_my_work.",
+    ...(v.can ?? []).map((c) => `- ${c}`),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function recommendationsText(recs: Recommendation[]): string {
   if (recs.length === 0) return "No recommendations right now.";
   return `# Recommendations (${recs.length})\n\n${recs
@@ -157,6 +179,10 @@ export async function runHireTool(toolName: string, args: Record<string, any>, c
     if (toolName === "context_hired_agents") {
       const data = await listHiredAgents(caller);
       return { text: hiredText(data.hired), data };
+    }
+    if (toolName === "context_agent_identity") {
+      const data = await agentIdentity({ ...caller, apiKeyId: ctx.apiKeyId ?? null });
+      return { text: identityText(data), data };
     }
     if (toolName === "context_agent_recommendations") {
       const action = String(args.action ?? "list").toLowerCase();
@@ -181,12 +207,14 @@ export async function runHireTool(toolName: string, args: Record<string, any>, c
     if (action !== "hire") return toolError(`Unknown action "${action}" — use hire or let_go.`, "VALIDATION_FAILED");
     const data = await hireAgent(
       { ...caller, client: messageClient(ctx.client, args.client, ctx.apiKeyLabel) },
-      { kind: args.kind, handle: args.handle, config: args.config, channels: args.channels, announce: args.announce },
+      { kind: args.kind, handle: args.handle, name: args.name, config: args.config, channels: args.channels, announce: args.announce },
     );
     const lines = [
       data.created ? `Hired @${data.hired.handle} (${data.hired.kind}).` : `@${data.hired.handle} (${data.hired.kind}) was already hired; nothing changed.`,
       data.secret ? `Signing secret (shown once, give it to the runner): ${data.secret}` : "",
       data.api_key ? `API key (shown once, paste it into the agent's MCP client): ${data.api_key}` : "",
+      data.hired.principal ? `@${data.hired.handle} has its own identity (${data.hired.principal.email}); any member can DM or @mention it.` : "",
+      data.wake_error ? `The wake webhook was not added: ${data.wake_error}` : "",
       data.announced.length ? `Announced in ${data.announced.map((a) => `#${a.channel}`).join(", ")}.` : "",
     ].filter(Boolean);
     return { text: lines.join("\n"), data };
