@@ -135,6 +135,8 @@ const DESTRUCTIVE = [
   // the watch setting replaces which agent watches a channel and runs it.
   "context_correct",
   "context_channel_watch",
+  // Agent profiles (team chat C7): a description replaces the earlier one.
+  "context_agents",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -185,6 +187,8 @@ const OPEN_WORLD = [
   "context_remember",
   "context_correct",
   "context_channel_watch",
+  // Ask the nest (team chat C7): the question and retrieved text go to the model provider.
+  "context_ask_nest",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -244,7 +248,9 @@ async function allDefinedNames(): Promise<string[]> {
   const { MESSAGE_TOOL_DEFINITIONS } = await import("../src/mcp/message-tools.js");
   const { CHAT_TOOL_DEFINITIONS } = await import("../src/mcp/chat-tools.js");
   const { MEMORY_TOOL_DEFINITIONS } = await import("../src/mcp/memory-tools.js");
+  const { NEST_AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/nest-agent-tools.js");
   const all = [
+    ...NEST_AGENT_TOOL_DEFINITIONS,
     ...CHANNEL_TOOL_DEFINITIONS,
     ...MESSAGE_TOOL_DEFINITIONS,
     ...CHAT_TOOL_DEFINITIONS,

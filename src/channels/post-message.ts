@@ -96,6 +96,13 @@ export async function fanOutPostedMessage(params: {
     console.warn("[memory] links not recorded", nestId, thread.id, err?.message ?? err),
   );
   await watchPostedMessage({ nestId, nodeId, threadId: thread.id, body }).catch(() => {});
+  // "@hootie …" in a channel (C7, PO-1198): the nest answers in the thread, as
+  // this person, in the background. Channels only — DMs to Hootie are deferred
+  // (C2 conversations). The answer it posts never comes back through here.
+  if (channel && !conversation && commentId) {
+    const { triggerHootieForMessage } = await import("../agents/ask-nest.js");
+    triggerHootieForMessage({ nestId, nodeId, threadId: thread.id, commentId, body, authorEmail, authorUserId: params.authorUserId, baseUrl });
+  }
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 

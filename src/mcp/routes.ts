@@ -36,6 +36,7 @@ import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
 import { MESSAGE_TOOL_DEFINITIONS } from "./message-tools.js";
 import { MEMORY_CHANNEL_TOOLS, MEMORY_TOOL_DEFINITIONS } from "./memory-tools.js";
+import { NEST_AGENT_TOOL_DEFINITIONS } from "./nest-agent-tools.js";
 import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -86,6 +87,8 @@ function nestToolDefinitions() {
     // Team chat C2 (PO-1197): conversations, membership, preferences,
     // presence — the same switch (TEAM_CHAT_ENABLED, alias above).
     ...(config.TEAM_CHAT_ENABLED ? CHAT_TOOL_DEFINITIONS : []),
+    // The nest in the conversation (team chat C7, PO-1198): the channels switch.
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? NEST_AGENT_TOOL_DEFINITIONS : []),
     // My Work (PO-1180): the caller's queue, mentions included. Not behind the
     // channels switch — document-comment mentions work without channels.
     ...MY_WORK_TOOL_DEFINITIONS,

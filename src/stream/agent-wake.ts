@@ -72,6 +72,7 @@ import { senderFor } from "../notify/outbound-log.js";
 import { guardedFetch } from "../metacognition/net.js";
 import { justWritten, MENTION_EXCERPT_MAX } from "../mentions/mention-index.js";
 import { isPublicAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
+import { isReservedHandle } from "../agents/reserved.js";
 import { displayNames, namedActor, normHandle, writerHandles } from "../channels/message-meta.js";
 
 export const AGENT_WAKE_EVENT = "agent.mention";
@@ -130,6 +131,9 @@ export function setAgentWakeBackoff(ms: readonly number[] | null): void {
  * old row can't hand back a private target).
  */
 export async function agentWakeTarget(nestId: string, handle: string): Promise<AgentWebhookTarget | null> {
+  // A reserved handle (hootie, nest, …) has no runner, whatever a row from
+  // before the rule says (team chat C7, src/agents/reserved.ts).
+  if (isReservedHandle(handle)) return null;
   const target = await resolver(nestId, handle).catch((err) => {
     console.error("[agent-wake] resolver failed", nestId, handle, err);
     return null;

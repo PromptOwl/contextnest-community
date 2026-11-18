@@ -124,6 +124,7 @@ export const HISTORICAL_MIGRATIONS = [
   "096_stream_marks",
   "097_channel_message_actions",
   "098_team_chat_c2",
+  "099_agent_profiles",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1534,6 +1535,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS chat_enabled INTEGER NOT NULL DEFAULT 1;
   `);
+
+  // Migration 099 parity: agent profiles — an admin-set description per
+  // agent handle (team chat C7, PO-1198).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_profiles (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      description TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, handle)
+    );
+  `);
+
+  await db.run("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')", []);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
