@@ -463,6 +463,64 @@ const NEST_WRITE_SCOPES: Array<{
 ];
 
 /**
+ * A reviewer clears a queue one decision at a time, and every decision drops
+ * the same five groups of reads: the document listings, the review queue,
+ * external edits, the feed and My Work. Five quick approvals refetched all of
+ * them five times inside a few seconds, which is a lot of requests for the
+ * server to answer and an easy way to trip a request-rate limit.
+ *
+ * Verdicts now share a refetch. The first one after a quiet spell drops its
+ * keys at once, exactly as before, so a single approval still updates the
+ * screen straight away. Any that follow inside the window are folded together
+ * and dropped once when it ends.
+ */
+export const VERDICT_REFETCH_WINDOW_MS = 2500;
+const VERDICT_PATH = /^\/nodes\/.+\/(?:approve|reject)(?:\/|$)/;
+const queuedVerdictDrops = new Map<
+  string,
+  { qc: QueryClient; queryKey: readonly unknown[] }
+>();
+let verdictTimer: ReturnType<typeof setTimeout> | null = null;
+let lastVerdictDropAt = 0;
+
+function runVerdictDrops(): void {
+  verdictTimer = null;
+  lastVerdictDropAt = Date.now();
+  const batch = [...queuedVerdictDrops.values()];
+  queuedVerdictDrops.clear();
+  for (const { qc, queryKey } of batch) void qc.invalidateQueries({ queryKey });
+}
+
+function dropForVerdict(
+  qc: QueryClient,
+  queryKeys: ReadonlyArray<readonly unknown[]>,
+): void {
+  const sinceLast = Date.now() - lastVerdictDropAt;
+  if (!verdictTimer && sinceLast >= VERDICT_REFETCH_WINDOW_MS) {
+    lastVerdictDropAt = Date.now();
+    for (const queryKey of queryKeys) void qc.invalidateQueries({ queryKey });
+    return;
+  }
+  for (const queryKey of queryKeys) {
+    queuedVerdictDrops.set(JSON.stringify(queryKey), { qc, queryKey });
+  }
+  if (!verdictTimer) {
+    verdictTimer = setTimeout(
+      runVerdictDrops,
+      Math.max(0, VERDICT_REFETCH_WINDOW_MS - sinceLast),
+    );
+  }
+}
+
+/** Test hook: forget any queued verdict drops and start a fresh window. */
+export function resetVerdictDrops(): void {
+  if (verdictTimer) clearTimeout(verdictTimer);
+  verdictTimer = null;
+  queuedVerdictDrops.clear();
+  lastVerdictDropAt = 0;
+}
+
+/**
  * Which cached reads a mutation to `path` could have changed.
  *
  * Derived from the request path rather than registered per endpoint, so a new
@@ -481,7 +539,9 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
     for (const scope of NEST_WRITE_SCOPES) {
       const m = rest.match(scope.match);
       if (!m) continue;
-      for (const key of scope.affects(nest, m)) drop(key);
+      const affected = scope.affects(nest, m);
+      if (VERDICT_PATH.test(rest)) dropForVerdict(qc, affected);
+      else for (const key of affected) drop(key);
       return;
     }
     // Unrecognised write (including PATCH/DELETE of the nest itself): assume
@@ -544,6 +604,8 @@ export function setChannelsOn(on: boolean): void {
   if (on === channelsOn) return;
   channelsOn = on;
   void activeClient?.invalidateQueries({ queryKey: keys.nests });
+  // Cross-nest search sits outside keys.nests.
+  void activeClient?.invalidateQueries({ queryKey: keys.search });
 }
 
 /**

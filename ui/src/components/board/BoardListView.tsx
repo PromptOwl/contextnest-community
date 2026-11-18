@@ -48,6 +48,7 @@ import * as api from "../../lib/api";
 import { UNCATEGORIZED, namespaceKey, type BoardColumn, type BoardNode, type DimensionKind } from "../../lib/board-dimensions";
 import {
   formatDue,
+  inDoneFolder,
   isPickedDue,
   localToday,
   moveNeedsReview,
@@ -365,7 +366,7 @@ export function BoardListView({
           <span className="text-muted-foreground/50">—</span>
         );
       case "due":
-        return n.due && !n.completed_at ? (
+        return n.due && !n.completed_at && !inDoneFolder(n.id, doneTags) ? (
           <DueChip due={n.due} today={today} editable={false} onChange={() => {}} />
         ) : n.due ? (
           <span className="text-xs text-muted-foreground/70 tabular-nums" title={`Due ${n.due}`}>

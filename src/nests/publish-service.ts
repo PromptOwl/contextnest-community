@@ -32,6 +32,7 @@ import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { getApprovedVersion } from "../governance/version-service.js";
+import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 
 export type PublishMode = "public" | "email" | "code" | "invite";
 
@@ -45,11 +46,20 @@ export interface PublishRow {
   comments_enabled: number; // 0 | 1
   watermark: number; // 0 | 1 — stamp the viewer's email across the page
   no_download: number; // 0 | 1 — discourage print/copy
+  /** 0 | 1 — show the "Make your own nest" strip on this link's page (PO-1365).
+   *  1 by default. A white-label nest (hide_powered_by) never shows it. */
+  show_invite: number;
   created_by: string;
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;
 }
+
+/** The refusals the REST routes (publish-routes.ts) and the MCP tools
+ *  (mcp/public-link-tools.ts) both give, so the two say the same thing. */
+export const PUBLISH_FORBIDDEN =
+  "Only a nest admin, the nest owner, or the server admin can publish documents.";
+export const PUBLISH_NOT_FOUND = "Publish not found";
 
 const MODES: readonly PublishMode[] = ["public", "email", "code", "invite"];
 const LINK_TTL_SECONDS = 60 * 60; // magic link valid 1h
@@ -100,6 +110,7 @@ export function toPublishResponse(row: PublishRow) {
     comments_enabled: row.comments_enabled === 1,
     watermark: row.watermark === 1,
     no_download: row.no_download === 1,
+    show_invite: row.show_invite !== 0,
     created_at: row.created_at,
     expires_at: row.expires_at,
     revoked_at: row.revoked_at,
@@ -115,6 +126,8 @@ export async function createPublish(params: {
   commentsEnabled?: boolean;
   watermark?: boolean;
   noDownload?: boolean;
+  /** Default true. */
+  showInvite?: boolean;
   code?: string | null;
   allowlist?: string[];
   expiresAt?: string | null;
@@ -165,8 +178,8 @@ export async function createPublish(params: {
   await db.run(
     `INSERT INTO publish
        (id, nest_id, node_id, slug, access_mode, code_hash, comments_enabled,
-        watermark, no_download, created_by, created_at, expires_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        watermark, no_download, show_invite, created_by, created_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     [
       id,
       nestId,
@@ -177,6 +190,7 @@ export async function createPublish(params: {
       params.commentsEnabled ? 1 : 0,
       params.watermark ? 1 : 0,
       params.noDownload ? 1 : 0,
+      params.showInvite === false ? 0 : 1,
       createdBy,
       created,
       params.expiresAt ?? null,
@@ -198,6 +212,82 @@ export async function createPublish(params: {
   const row = await getPublishBySlug(slug);
   if (!row) throw new ValidationError("failed to create publish");
   return row;
+}
+
+/** What a caller may ask for when publishing — the REST body, and the MCP
+ *  tool's arguments under the same names. */
+export interface PublishRequest {
+  node_id?: string;
+  access_mode?: string;
+  comments_enabled?: boolean;
+  watermark?: boolean;
+  no_download?: boolean;
+  /** Show the "Make your own nest" strip on the page. Default true. */
+  show_invite?: boolean;
+  code?: string | null;
+  allowlist?: string[];
+  expires_at?: string | null;
+}
+
+/**
+ * Publish one document and hand back its link: everything POST
+ * /nests/:id/publications does after its permission check, so the REST route
+ * and the MCP tool (context_public_link_create) cannot drift apart. The caller
+ * has already established that `userId` may publish in this nest.
+ */
+export async function publishDocumentLink(input: {
+  nestId: string;
+  userId: string;
+  baseUrl: string;
+  request: PublishRequest;
+}): Promise<{ row: PublishRow; link: string }> {
+  const { nestId } = input;
+  // A JSON body of literal `null` must be a 400, not a TypeError 500.
+  const body: PublishRequest = input.request ?? {};
+  // Same rule as PATCH and MCP: a string "false" must not leave the strip on.
+  if (body.show_invite !== undefined && typeof body.show_invite !== "boolean") {
+    throw new ValidationError("show_invite must be true or false");
+  }
+  const mode = (body.access_mode ?? "public") as PublishMode;
+  // An email or invite link is opened ONLY by clicking a mailed magic link, so
+  // without a mail transport it is a link nobody — not even the person who was
+  // invited — can ever open. Refuse it rather than hand back a dead link.
+  if ((mode === "email" || mode === "invite") && !isEmailConfigured()) {
+    throw new ValidationError(
+      "Email and invite links need email set up on this server (SMTP or AWS SES, plus NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
+    );
+  }
+  const row = await createPublish({
+    nestId,
+    nodeId: (body.node_id ?? "").trim(),
+    mode,
+    commentsEnabled: !!body.comments_enabled,
+    watermark: !!body.watermark,
+    noDownload: !!body.no_download,
+    showInvite: body.show_invite !== false,
+    code: body.code ?? null,
+    allowlist: Array.isArray(body.allowlist) ? body.allowlist : [],
+    expiresAt: body.expires_at ?? null,
+    createdBy: input.userId,
+  });
+  const link = `${input.baseUrl}/p/${row.slug}`;
+
+  // Invite mode is useless without the invitation: an allow-listed reader who
+  // never receives the link has no way to reach the document. Fire-and-forget,
+  // like every other notification here — a dead SMTP config must not fail the
+  // publish (the link still works for anyone who has it).
+  if (mode === "invite") {
+    for (const email of await listAllowlist(row.id)) {
+      void sendEmailToRecipient(email, {
+        status: "shared",
+        docTitle: "A document has been shared with you",
+        path: "PromptOwl · ContextNest",
+        permission: "view",
+        link,
+      }, { nestId });
+    }
+  }
+  return { row, link };
 }
 
 /**
@@ -230,6 +320,29 @@ export async function listPublish(nestId: string): Promise<PublishRow[]> {
     "SELECT * FROM publish WHERE nest_id = ? ORDER BY created_at DESC",
     [nestId],
   )) as PublishRow[];
+}
+
+/**
+ * Change a link's own settings without changing its URL. Only `show_invite`
+ * today: the "Make your own nest" strip is the one thing an owner needs to
+ * take off a page that is already in someone's inbox. Returns the updated
+ * row, or undefined when the nest has no such link or it was revoked. The
+ * REST route and the MCP tool both call this.
+ */
+export async function updatePublish(
+  nestId: string,
+  id: string,
+  patch: { show_invite?: unknown },
+): Promise<PublishRow | undefined> {
+  if (typeof patch.show_invite !== "boolean") {
+    throw new ValidationError("show_invite must be true or false");
+  }
+  // A revoked link is gone, as it is for revoke: changing it is "not found".
+  const res = await getDb().run(
+    "UPDATE publish SET show_invite = ? WHERE id = ? AND nest_id = ? AND revoked_at IS NULL",
+    [patch.show_invite ? 1 : 0, id, nestId],
+  );
+  return res.changes > 0 ? getPublishById(nestId, id) : undefined;
 }
 
 /** Revoke (soft) — the link stops working immediately. Returns false if the

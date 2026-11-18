@@ -6,5 +6,5 @@ export const meta: PageMeta = {
   label: "API keys",
   icon: KeyRound,
   order: 11,
-  group: "workspace",
+  group: "settings",
 };

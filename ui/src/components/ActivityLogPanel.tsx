@@ -28,6 +28,7 @@ export function ActivityLogPanel({
   label,
   onClose,
   onOpenNode,
+  embedded = false,
 }: {
   nestId: string;
   scope: api.ActivityLogScope;
@@ -36,6 +37,8 @@ export function ActivityLogPanel({
   onClose: () => void;
   /** Folder / nest logs link each row to its document. */
   onOpenNode?: (nodeId: string) => void;
+  /** Render inline (the nest's Activity tab) instead of as a side drawer. */
+  embedded?: boolean;
 }) {
   const [items, setItems] = useState<api.ActivityLogItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -96,8 +99,12 @@ export function ActivityLogPanel({
 
   return (
     <div
-      className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l bg-background shadow-xl"
-      role="dialog"
+      className={
+        embedded
+          ? "flex w-full flex-col rounded-md border bg-background"
+          : "fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l bg-background shadow-xl"
+      }
+      role={embedded ? "region" : "dialog"}
       aria-label={`Activity for ${label}`}
       data-testid="activity-log-panel"
     >
@@ -118,9 +125,11 @@ export function ActivityLogPanel({
         >
           <RefreshCw className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close" data-testid="activity-log-close">
-          <X className="h-4 w-4" />
-        </Button>
+        {!embedded && (
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close" data-testid="activity-log-close">
+            <X className="h-4 w-4" />
+          </Button>
+        )}
       </div>
 
       <div className="flex gap-2 border-b px-4 py-2">
@@ -158,7 +167,7 @@ export function ActivityLogPanel({
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-2">
+      <div className={embedded ? "px-4 py-2" : "flex-1 overflow-y-auto px-4 py-2"}>
         {error && (
           <div className="rounded border border-destructive/40 p-2 text-sm text-destructive" role="alert">
             {error}

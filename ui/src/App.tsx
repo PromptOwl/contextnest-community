@@ -21,7 +21,9 @@ import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { UpdateBadge } from "./components/UpdateBadge";
-import { InboxBell } from "./components/InboxBell";
+import { TopBarTools } from "./components/TopBarTools";
+import { HeaderRibbon } from "./components/HeaderRibbon";
+import { ribbonTarget, type RibbonKey } from "./lib/header-ribbon";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
@@ -30,7 +32,8 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { clearParkedDeepLink, deepLinkToOpenOnReturn, parkDeepLink, takeParkedDeepLink } from "./lib/deep-link-return";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
@@ -39,7 +42,9 @@ import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
 import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
-import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { appPageIdFromPath, appPath, appRail, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { useAdministersNest } from "./lib/administers-nest";
+import { SettingsShell } from "./components/SettingsShell";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
@@ -50,7 +55,7 @@ import {
 import hootieIcon from "./assets/hootie.svg";
 import { ReaderBrandFooter } from "./components/ReaderBrandFooter";
 import { brandingToCssVars, isBranded, type NestBranding } from "./lib/branding";
-import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
+import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound, Settings } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
@@ -95,6 +100,8 @@ type View =
       tab?: string;
       /** Where the header bell was clicked from — the page offers Back to it. */
       returnTo?: View;
+      /** My Work opens with this change already open beside the list. */
+      openReview?: { nestId: string; nodeId: string };
     }
   | {
       page: "nest";
@@ -114,6 +121,11 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Open this change in the Review tab's side pane on arrival. Used with
+       *  tab: "review". The pane itself owns ?review= once it is open. */
+      initialReview?: string;
+      /** Stamp from the top bar's New document button. NestView opens its dialog on a new value. */
+      newDocRequest?: number;
       /** Open the nest settings dialog on arrival (a document's "turn on
        *  self-approve" link). Not mirrored to the URL. */
       openSettings?: boolean;
@@ -275,12 +287,18 @@ export default function App() {
     mcpOauthEnabled,
     docStreamEnabled,
     agentStreamEnabled,
+    surfacesEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // Does the person administer any nest (the Control room, po-1186 CR2)?
+  // Only asked while Surfaces is on; unknown counts as yes here so a
+  // /control-room link isn't bounced before the nest list arrives — the rail
+  // (DocumentSidebar) waits for the answer instead.
+  const administersNest = useAdministersNest(authenticated && surfacesEnabled && !isAdmin);
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest: administersNest ?? true };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -298,6 +316,17 @@ export default function App() {
   // The view a queue page sits on, for a document opened from it to return to.
   const viewRef = useRef(view);
   viewRef.current = view;
+  // The nest you last had open. The top bar is the same on every screen, so its
+  // nest actions (Instructions, New document) use this when none is open.
+  const lastNestRef = useRef<{ nestId: string; nestName: string; isOwner: boolean; isAnonOwned: boolean } | null>(null);
+  if ("nestId" in view && view.nestId) {
+    lastNestRef.current = {
+      nestId: view.nestId,
+      nestName: (view as any).nestName ?? "",
+      isOwner: !!(view as any).isOwner,
+      isAnonOwned: !!(view as any).isAnonOwned,
+    };
+  }
   // The node key last written to history (see `nodeKey` below) — null both
   // before the URL-sync effect has run at all and whenever the current view
   // isn't looking at a node, so in either case the next node it lands on
@@ -437,8 +466,14 @@ export default function App() {
   // it) or on the dashboard (across every nest). Anywhere else the shortcut
   // used to flip the flag with nothing mounted to show it, so the panel sprang
   // open on the next nest you entered — hence the reset on leaving too.
+  // Every nest-scoped screen (board, graph, definitions, structure, workflows)
+  // searches its nest too — the top bar is quick actions and does not change
+  // from one view of a nest to the next.
   const canQuickOpen =
-    view.page === "nest" || view.page === "document" || view.page === "dashboard";
+    view.page === "nest" ||
+    view.page === "document" ||
+    view.page === "dashboard" ||
+    isNestScoped(view);
   useEffect(() => {
     if (!canQuickOpen) {
       setShowQuickOpen(false);
@@ -820,6 +855,59 @@ export default function App() {
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
 
+  // A deep link followed while signed out (PO-1391). A private nest does not
+  // resolve for a stranger, so the probe ends "unreachable", the effect above
+  // drops the link from the address bar and the sign-in form shows. When the
+  // person then signs in, put the link back and probe again as them: they land
+  // on the nest or document they were sent, not on Home (the nest list or the
+  // first-run welcome screen) or a "no access" page. Declared after the URL
+  // sync so its address is the one left standing. The helper only returns the
+  // address this page was opened on; the parked one is checked again on take.
+  const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
+  const wasSignedInRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = authenticated;
+    const link = deepLinkToRetryAfterSignIn({
+      probeStatus: deepLinkProbe.status,
+      entryLink: entryLinkRef.current,
+      wasSignedIn,
+      signedIn: authenticated,
+    });
+    // A sign-in that left the page (PromptOwl, Google, single sign-on) comes
+    // back to Home on a fresh load: open the link parked before leaving.
+    const parked =
+      !link &&
+      deepLinkToOpenOnReturn({
+        sessionKnown: true,
+        signedIn: authenticated,
+        firstLook: wasSignedIn !== true,
+        probeStatus: deepLinkProbe.status,
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+        ? takeParkedDeepLink()
+        : null;
+    const open = link ?? parked;
+    if (!open) return;
+    // Once: a second sign-in in this tab (another account) starts from Home.
+    entryLinkRef.current = null;
+    clearParkedDeepLink();
+    window.history.replaceState(window.history.state, "", open);
+    setDeepLinkProbe({ status: "loading" });
+    // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
+  }, [authenticated, loading]);
+
+  // Park the link while the sign-in form is up, so it also survives a sign-in
+  // that leaves the page. Only for a signed-out visitor whose link did not
+  // resolve: a signed-in person's dead link is not something to come back to.
+  useEffect(() => {
+    if (loading || authenticated || authMode !== "key") return;
+    if (deepLinkProbe.status !== "unreachable") return;
+    parkDeepLink(entryLinkRef.current);
+  }, [loading, authenticated, authMode, deepLinkProbe.status]);
+
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the
   // rendered page disagreeing. Entries without a `view`-shaped state (a fresh
@@ -966,11 +1054,15 @@ export default function App() {
           : view.page === "document" ? "Document"
           : view.page === "nest-trace" ? "Trace"
           : nestPageForView(view.page)?.label ?? "";
+      // On the nest's own tabs the title right below names the nest, so the
+      // breadcrumb does not repeat it. Board, Graph, Document and the other
+      // nest views have no title row, so they keep it.
+      if (view.page === "nest") return [home, { label: leaf }];
       return [home, nest, { label: leaf }];
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled, surfacesEnabled]);
 
   // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
   const pageTabTitle = tabTitle(crumbs);
@@ -978,6 +1070,30 @@ export default function App() {
   useEffect(() => {
     if (!brandedReader) document.title = pageTabTitle;
   }, [pageTabTitle, brandedReader]);
+
+  // The header ribbon. My Work and My Drafts are workspace pages. Browse and
+  // Instructions open a tab of the nest that is open right now, so they carry
+  // that nest's identity rather than whichever nest the app opened last.
+  // The nest a nest action (Instructions, New document) applies to when no nest
+  // is open: the last one you had open, else your first.
+  const resolveTargetNest = useCallback(async () => {
+    if (lastNestRef.current) return lastNestRef.current;
+    const list = await qc.fetchQuery(reads.nestList()).catch(() => null);
+    const n: any = list?.nests?.[0];
+    return n
+      ? { nestId: String(n.id), nestName: String(n.name ?? n.id), isOwner: !!n.is_owner, isAnonOwned: false }
+      : null;
+  }, [qc]);
+  const ribbonGo = useCallback((key: RibbonKey) => {
+    const current = viewRef.current;
+    const target = ribbonTarget(key);
+    setView({
+      page: "dashboard",
+      tab: target.tab,
+      // Back from My Work returns to where the ribbon was clicked.
+      returnTo: current.page === "dashboard" && current.tab === target.tab ? current.returnTo : current,
+    });
+  }, [setView]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -996,6 +1112,13 @@ export default function App() {
           initialThreadId: opts?.thread,
           returnTo: viewRef.current,
         }),
+      openReviewPane: (nestId, _nestName, nodeId) =>
+        setView({
+          page: "dashboard",
+          tab: "my-work",
+          openReview: { nestId, nodeId },
+          returnTo: viewRef.current,
+        }),
       // A channel mention in My Work: in-app, straight to the thread. The
       // nest read is cached, and says whether the caller owns the nest.
       openChannel: (nestId, nestName, channel, thread) => {
@@ -1008,21 +1131,55 @@ export default function App() {
         }
         void qc
           .fetchQuery(reads.nest(nestId))
-          .then((meta) => meta.permission === "owner")
-          .catch(() => false)
-          .then((isOwner) =>
-            setView({ page: "channels", nestId, nestName, isOwner, isAnonOwned: false, channel, thread }),
-          );
+          .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
+          .catch(() => ({ isOwner: false, isAnonOwned: false }))
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
       },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
     [setView, qc],
   );
   const dashReturnTo = view.page === "dashboard" ? view.returnTo : undefined;
+  const dashOpenReview = view.page === "dashboard" ? view.openReview : undefined;
   const dashboardNav = useMemo<AppNav>(
-    () => (dashReturnTo ? { ...appNav, goBack: () => setView(dashReturnTo) } : appNav),
-    [appNav, dashReturnTo, setView],
+    () => ({
+      ...appNav,
+      ...(dashReturnTo ? { goBack: () => setView(dashReturnTo) } : {}),
+      initialReview: dashOpenReview ?? null,
+    }),
+    [appNav, dashReturnTo, dashOpenReview, setView],
   );
+
+  // The nest trace is the Activity tab's "API and agent calls" view now.
+  useEffect(() => {
+    if (view.page !== "nest-trace") return;
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set("seg", "calls");
+      window.history.replaceState(window.history.state, "", u);
+    } catch {
+      /* the tab still opens on its default view */
+    }
+    setView({
+      page: "nest",
+      nestId: view.nestId,
+      nestName: view.nestName,
+      isOwner: view.isOwner,
+      isAnonOwned: view.isAnonOwned,
+      tab: "activity",
+    });
+  }, [view, setView]);
+
+  // The review queue is My Work now. A link to a nest's Review tab (an old
+  // bookmark, an email, a Slack message) lands there with the change open.
+  useEffect(() => {
+    if (view.page !== "nest" || view.tab !== "review") return;
+    setView({
+      page: "dashboard",
+      tab: "my-work",
+      ...(view.initialReview ? { openReview: { nestId: view.nestId, nodeId: view.initialReview } } : {}),
+    });
+  }, [view, setView]);
 
   // Back out of the nest entirely. Shared by all five nest-scoped pages —
   // their back arrows used to return to the nest page, but the view switcher
@@ -1235,12 +1392,12 @@ export default function App() {
       {showQuickOpen && canQuickOpen && (
         <QuickOpen
           nestId={
-            view.page === "nest" || view.page === "document"
+            view.page === "nest" || view.page === "document" || isNestScoped(view)
               ? view.nestId
               : undefined
           }
           nestName={
-            view.page === "nest" || view.page === "document"
+            view.page === "nest" || view.page === "document" || isNestScoped(view)
               ? view.nestName
               : undefined
           }
@@ -1321,12 +1478,36 @@ export default function App() {
     (authenticated || authMode !== "key") &&
     (inNest || view.page === "dashboard" || view.page === "docs");
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
+  // The account menu lives in two places that never show together: the header
+  // (phones, or while the sidebar is hidden) and the foot of the left column.
+  const renderUserMenu = (inSidebar: boolean) =>
+    adminStatus?.me ? (
+      <UserMenu
+        me={adminStatus.me}
+        isAdmin={isAdmin}
+        inSidebar={inSidebar}
+        onShortcuts={() => setShowShortcuts(true)}
+        onAccount={() => setView({ page: "dashboard", tab: "account" })}
+        onSettings={
+          appRail(pageCaps).groups.find((g) => g.id === "settings")?.pages[0]
+            ? () => {
+                const first = appRail(pageCaps).groups.find((g) => g.id === "settings")!.pages[0];
+                setView({ page: "dashboard", tab: first.id });
+              }
+            : undefined
+        }
+        onHelp={() => setView({ page: "dashboard", tab: "guide" })}
+        onLogout={requestLogout}
+      />
+    ) : null;
+
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
   // Beside the sidebar the shell fills its flex column: `w-full`, and no
   // `mx-auto` — auto margins on a flex-column item shrink it to its content.
-  // Without a sidebar the old centred page width applies.
-  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
+  // Without a sidebar the old centred page width applies; `w-full` keeps it
+  // full width now that the shell column is a flex column too (PO-1168).
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto w-full`;
   // Reader branding (CU-wdqcq02ptm): only for a caller in reader mode, and
   // only when the nest has any. Otherwise every value below is inert and the
   // shell renders exactly as before.
@@ -1379,13 +1560,6 @@ export default function App() {
                   logoUrl={logoUrl ?? hootieIcon}
                   nestId={nestOf(cur)?.nestId ?? null}
                   nodeId={cur.page === "document" ? cur.nodeId : null}
-                  activeView={
-                    cur.page === "nest"
-                      ? cur.tab === "review"
-                        ? "review"
-                        : "overview"
-                      : nestPageForView(cur.page)?.id ?? null
-                  }
                   onCollapse={() =>
                     docSidebarDrawer
                       ? setDocSidebarDrawer(false)
@@ -1393,7 +1567,10 @@ export default function App() {
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
                   dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, pageCaps).id : null}
-                  onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
+                  onOpenDashboardTab={(tab) => {
+                    if (tab === "my-work") window.dispatchEvent(new Event("my-work:home"));
+                    setView({ page: "dashboard", tab });
+                  }}
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -1404,18 +1581,23 @@ export default function App() {
                       tab: "documents",
                     })
                   }
-                  onOpenView={(t, v) =>
-                    setView({
-                      page: v.page,
-                      nestId: t.nestId,
-                      nestName: t.nestName,
-                      isOwner: t.isOwner,
-                      isAnonOwned: t.isAnonOwned,
-                      readerMode,
-                      ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
-                    } as View)
+                  footer={
+                    <>
+                      {view.page !== "docs" && (
+                        <button
+                          type="button"
+                          onClick={() => setView({ page: "docs" })}
+                          title="API, MCP & CLI docs for agents"
+                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-foreground/80 hover:bg-muted hover:text-foreground"
+                          data-testid="document-sidebar-docs"
+                        >
+                          <BookOpen className="h-4 w-4 shrink-0" />
+                          Docs
+                        </button>
+                      )}
+                      {renderUserMenu(true)}
+                    </>
                   }
-                  onConnect={() => setShowConnect(true)}
                   onOpenDocument={(t) => {
                     if (
                       cur.page === "document" &&
@@ -1453,7 +1635,9 @@ export default function App() {
         })()}
         </>
       )}
-      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
+      {/* A full-height column, so the footer's mt-auto pins the version line to
+          the bottom of a short page (PO-1168). */}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : "flex min-h-screen flex-col"}>
       {/* Header */}
       {/* `contents`: a sticky child only sticks within its parent's box, and
           <header> is exactly one row tall — so the row below must have the
@@ -1472,7 +1656,7 @@ export default function App() {
         <div className={`${shellWidth} h-16 px-4 flex items-center justify-between gap-2`}>
           {/* min-w-0 so the breadcrumb truncates on a phone instead of
               pushing the account row past the window edge. */}
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
           {/* The sidebar toggle lives in the app header so it exists on every
               page that has a sidebar: always on a phone (the rail is a drawer
               there), on a desktop only once the rail has been hidden. */}
@@ -1551,32 +1735,110 @@ export default function App() {
           )}
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
-            {/* The ONE search entry point, on every page the palette works on
-                — the Dashboard used to carry its own field-styled button, so
-                the same feature looked like two (CU-wdqcq012uv). What differs
-                between pages is scope, and the palette states that itself. */}
-            {canQuickOpen && (
-              <button
-                onClick={() => setShowQuickOpen(true)}
-                title={
-                  view.page === "dashboard"
-                    ? "Search nests and documents (⌘K)"
-                    : "Search this nest (⌘K)"
+          {/* The ONE search entry point, on every page the palette works on,
+              just before My Work. The Dashboard used to carry its own
+              field-styled button, so the same feature looked like two
+              (CU-wdqcq012uv). What differs
+              between pages is scope, and the palette states that itself. */}
+          {canQuickOpen && (
+            <button
+              onClick={() => setShowQuickOpen(true)}
+              title={
+                view.page === "dashboard"
+                  ? "Search nests and documents (⌘K)"
+                  : "Search this nest (⌘K)"
+              }
+              className={`flex shrink-0 items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-52 2xl:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors`}
+              aria-label="Search"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4 shrink-0" />
+              <span className="hidden sm:inline flex-1 text-left truncate">
+                {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
+              </span>
+              <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                ⌘K
+              </kbd>
+            </button>
+          )}
+          {withSidebar && adminStatus?.me && !readerMode && (
+            <HeaderRibbon
+              view={{
+                page: view.page,
+                tab: "tab" in view ? view.tab : undefined,
+                nestId: "nestId" in view ? view.nestId : undefined,
+                readerMode,
+              }}
+              nestName={"nestName" in view ? view.nestName : lastNestRef.current?.nestName}
+              onGo={ribbonGo}
+            />
+          )}
+
+          {withSidebar && adminStatus?.me && !readerMode && (
+            <div className="hidden md:block">
+              <TopBarTools
+                nestId={"nestId" in view ? view.nestId : undefined}
+                isOwner={"isOwner" in view ? !!view.isOwner : false}
+                activeView={
+                  view.page === "nest"
+                    ? view.tab === "review" || view.tab === "external-edits"
+                      ? view.tab
+                      : "overview"
+                    : view.page === "document"
+                      ? null
+                      : nestPageForView(view.page)?.id ?? null
                 }
-                className="flex items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
-                aria-label="Search"
-                data-testid="global-search-trigger"
-              >
-                <Search className="h-4 w-4 shrink-0" />
-                <span className="hidden sm:inline flex-1 text-left truncate">
-                  {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
-                </span>
-                <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
-                  ⌘K
-                </kbd>
-              </button>
-            )}
+                currentNodeId={view.page === "document" ? view.nodeId : null}
+                onOpen={(v) => {
+                  const cur = viewRef.current;
+                  if (!("nestId" in cur)) return;
+                  setView({
+                    page: v.page,
+                    nestId: cur.nestId,
+                    nestName: cur.nestName,
+                    isOwner: cur.isOwner,
+                    isAnonOwned: cur.isAnonOwned,
+                    readerMode,
+                    ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
+                  } as View);
+                }}
+                onOpenNode={(nodeId) => {
+                  const cur = viewRef.current;
+                  if (!("nestId" in cur)) return;
+                  setView({
+                    page: "document",
+                    nestId: cur.nestId,
+                    nestName: cur.nestName,
+                    nodeId,
+                    isOwner: cur.isOwner,
+                    isAnonOwned: cur.isAnonOwned,
+                  });
+                }}
+                onPickNest={(n) => appNav.openNest(n.id, n.name, n.isOwner, false)}
+                onNewDocument={() => {
+                  void (async () => {
+                    const cur = viewRef.current;
+                    const t = "nestId" in cur ? cur : await resolveTargetNest();
+                    if (!t) return;
+                    setView({
+                      page: "nest",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      tab: "documents",
+                      newDocRequest: Date.now(),
+                    });
+                  })();
+                }}
+                onConnect={() =>
+                  "nestId" in view ? setShowConnect(true) : setView({ page: "docs" })
+                }
+              />
+            </div>
+          )}
+
+          <div className="flex shrink-0 items-center gap-2">
             {/* Mode indicator — only when not logged-in (logged-in
                 users see open-mode context inside the dropdown) */}
             {authMode === "open" && !adminStatus?.me && (
@@ -1597,6 +1859,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="sm"
+                className={showSidebar ? "md:hidden" : undefined}
                 onClick={() => setView({ page: "docs" })}
                 title="API, MCP & CLI docs for agents"
                 aria-label="Docs"
@@ -1611,28 +1874,8 @@ export default function App() {
                 actions, so they moved to the nest view switcher below — which
                 also keeps them reachable from each other. */}
 
-            {adminStatus?.me && (
-              <InboxBell
-                onOpen={() =>
-                  setView({
-                    page: "dashboard",
-                    tab: "my-work",
-                    // Keep the page the bell was clicked on, for My Work's Back (CU-wdqcq067ud).
-                    returnTo: view.page === "dashboard" && view.tab === "my-work" ? view.returnTo : view,
-                  })
-                }
-                onOpenDoc={appNav.openReview}
-                onOpenNest={(id, name) => appNav.openNest(id, name, false, false)}
-              />
-            )}
             {adminStatus?.me ? (
-              <UserMenu
-                me={adminStatus.me}
-                isAdmin={isAdmin}
-                onShortcuts={() => setShowShortcuts(true)}
-                onAccount={() => setView({ page: "dashboard", tab: "account" })}
-                onLogout={requestLogout}
-              />
+              <div className={showSidebar ? "md:hidden" : undefined}>{renderUserMenu(false)}</div>
             ) : (
               <Button
                 variant="outline"
@@ -1770,12 +2013,30 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const Page = visibleAppPage(view.tab, pageCaps).Component;
+          const current = visibleAppPage(view.tab, pageCaps);
+          const Page = current.Component;
+          const settingsPages = appRail(pageCaps).groups.find((g) => g.id === "settings")?.pages ?? [];
+          const body = (
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <Page />
+            </Suspense>
+          );
           return (
             <AppNavProvider value={dashboardNav}>
-              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-                <Page />
-              </Suspense>
+              {current.group === "settings" ? (
+                <SettingsShell
+                  pages={settingsPages}
+                  active={current.id}
+                  onOpen={(id) => {
+                    if (id === "my-work") window.dispatchEvent(new Event("my-work:home"));
+                    setView({ page: "dashboard", tab: id });
+                  }}
+                >
+                  {body}
+                </SettingsShell>
+              ) : (
+                body
+              )}
             </AppNavProvider>
           );
         })()}
@@ -1792,6 +2053,8 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialReview={view.initialReview}
+            newDocRequest={view.newDocRequest}
             initialSettings={view.openSettings}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
@@ -1928,6 +2191,7 @@ export default function App() {
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
+              onOpenReviewPane={() => appNav.openReviewPane(doc.nestId, doc.nestName, doc.nodeId)}
               onOpenNestSettings={() => openNest({ openSettings: true })}
               onSaved={(_id, info) => {
                 // New doc → the nest; a published draft → where it was opened
@@ -2066,9 +2330,9 @@ export default function App() {
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
         readerBrand ? (
-          <ReaderBrandFooter branding={readerBrand} className={shellWidth} />
+          <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
-        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} mt-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
           {isAdmin && <UpdateBadge />}
         </footer>
@@ -2115,14 +2379,22 @@ interface UserMenuProps {
   isAdmin: boolean;
   onShortcuts: () => void;
   onAccount: () => void;
+  /** Opens Workspace settings; absent when this person has no settings page. */
+  onSettings?: () => void;
+  onHelp: () => void;
   onLogout: () => void;
+  /** At the foot of the left column: a full-width row, menu opening upward. */
+  inSidebar?: boolean;
 }
 
 function UserMenu({
+  inSidebar = false,
   me,
   isAdmin,
   onShortcuts,
   onAccount,
+  onSettings,
+  onHelp,
   onLogout,
 }: UserMenuProps) {
   const displayName = me.name?.trim() || me.email;
@@ -2134,19 +2406,29 @@ function UserMenu({
         <Button
           variant="ghost"
           size="sm"
-          className="group h-9 gap-2 px-2"
+          className={inSidebar ? "group h-10 w-full justify-start gap-2 px-2" : "group h-9 gap-2 px-2"}
           data-testid="user-menu-trigger"
         >
           <Avatar className="h-[1.8rem] w-[1.8rem] rounded-sm shrink-0">
             <AvatarFallback className="rounded-sm">{initial}</AvatarFallback>
           </Avatar>
-          <span className="hidden sm:inline max-w-[140px] truncate text-sm font-medium">
+          <span
+            className={
+              inSidebar
+                ? "min-w-0 flex-1 truncate text-left text-sm font-medium"
+                : "hidden sm:inline max-w-[140px] truncate text-sm font-medium"
+            }
+          >
             {displayName}
           </span>
-          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+          <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground ${inSidebar ? "rotate-180" : ""}`} />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-56">
+      <DropdownMenuContent
+        align={inSidebar ? "start" : "end"}
+        side={inSidebar ? "top" : "bottom"}
+        className="min-w-56"
+      >
         <div className="flex items-center gap-2 p-2">
           <Avatar className="h-8 w-8 rounded-sm shrink-0">
             <AvatarFallback className="rounded-sm">{initial}</AvatarFallback>
@@ -2169,7 +2451,8 @@ function UserMenu({
             </div>
           </div>
         </div>
-        {/* Pages live in the rail (grouped); the menu is identity only. */}
+        {/* Everything that is about you or the server lives here, not in the
+            sidebar: the sidebar is nests. */}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={onAccount}
@@ -2178,6 +2461,25 @@ function UserMenu({
         >
           <UserRound className="h-3.5 w-3.5 mr-2" />
           Account
+        </DropdownMenuItem>
+        {onSettings && (
+          <DropdownMenuItem
+            onSelect={onSettings}
+            className="cursor-pointer"
+            data-testid="user-menu-settings"
+          >
+            <Settings className="h-3.5 w-3.5 mr-2" />
+            Workspace settings
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onHelp}
+          className="cursor-pointer"
+          data-testid="user-menu-help"
+        >
+          <BookOpen className="h-3.5 w-3.5 mr-2" />
+          How it works
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
           <Keyboard className="h-3.5 w-3.5 mr-2" />

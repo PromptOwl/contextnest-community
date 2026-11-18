@@ -189,6 +189,10 @@ export async function serverConnectInstructions(
   const lines = [
     "Each nest has operating instructions (CONTEXT.md). Before working in a nest, read them: " +
       `connect to ${baseUrl}/nests/<nest-id>/mcp and call context_init (nest_index lists the ids).`,
+    // Two things agents got wrong without being told (PO-1336).
+    "When a person asks for a link, give them the web app address these tools return (\"web\" in nest_index, the web link in a document result) — " +
+      `${baseUrl}/nest/<nest-id> or ${baseUrl}/nest/<nest-id>?doc=<node id, URL-encoded> — never an API or MCP URL, which does not open in a browser.`,
+    'To post an HTML page, call context_create with type "artifact" and the raw HTML document as content, with no markdown code fence around it.',
   ];
   const block = renderStandingInstructions(sections, {
     heading: "Standing instructions",

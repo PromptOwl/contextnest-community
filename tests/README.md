@@ -5,14 +5,14 @@ End-to-end browser tests for the ContextNest Community server, built on the same
 ## Layout
 
 ```
-playwright.config.js          Test-run chain, projects, reporters
+playwright.config.js          Projects, reporters (suites are discovered)
 tests/
 ├── env.template              Copy into tests/.env/.local (or .dev) and fill in
 ├── .env/                     Environment files (gitignored)
 ├── TEST_IDS.md               data-testid reference
 ├── fixtures/                 Static test files (uploads etc.)
 ├── features/                 Spec files, one folder per functional area
-│   ├── auth/
+│   ├── auth/                 (optional suite.json per folder, see below)
 │   └── global-cleanup/       Orphan sweeper + always-run teardown
 └── src/
     ├── lib/                  base_test (fixtures), roles, entity_registry,
@@ -76,7 +76,23 @@ Reports land in `tests/test-results/` (HTML report at `tests/test-results/html/i
 - **setup-auth** logs each configured role in through the UI once and stores the session (`cnst_session` cookie) in `tests/src/cookies_storage/<alias>.json`. Later runs reuse the stored session while the cookie is valid.
 - **Role fixtures** (`primary_user`, `secondary_user`) from `tests/src/lib/base_test.js` open a pre-authenticated context lazily: `await primary_user.initialize()` then `primary_user.page` / `primary_user.nestsPage` etc.
 - **Entity registry**: every entity a test creates must be named with `commonFunction.generateEntityName()` (AUTO_ prefix) and registered via `registerEntity('nests', { id, name })`. The teardown deletes registered entities through the REST API; the pre-run **orphan sweeper** deletes stale registry entries and any AUTO_ nests left by crashed runs.
-- **Test chain**: `testRun` in `playwright.config.js` defines file order, parallel/serial mode and independence. Add a new suite by dropping a spec under `tests/features/<area>/` and adding an entry to `testRun`.
+- **Test chain**: the suites are discovered from `tests/features/` (`tests/src/helper/setup/suite_discovery.js`). Every folder is a suite and every `*.spec.js` in it is one entry in the run.
+
+## Adding a suite
+
+Add a folder under `tests/features/<area>/` with its spec. That is all: the spec joins the full run, and `npx playwright test --project=<area>` runs it alone. Do not edit `playwright.config.js`.
+
+A suite runs serial and independent of the other suites. If yours differs, put a `suite.json` next to the spec:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `"mode": "parallel"` | `"serial"` | The tests in each file run at the same time. |
+| `"independent": false` | `true` | Wait for the previous suite and stop if it failed. |
+| `"enabled": false` | `true` | Leave the suite out of the full run. |
+| `"standalone": false` | `true` | No `--project=<area>` shortcut. |
+| `"baseURL": "https://…"` | the run's | Run against another server. |
+
+`global-cleanup/` is not a suite: it holds the orphan sweep and the teardown, which the config wires up by hand.
 
 ## Writing tests
 
@@ -85,6 +101,48 @@ Reports land in `tests/test-results/` (HTML report at `tests/test-results/html/i
 - Number test cases (`TC-0xx`) and keep titles behavior-focused.
 - Never hardcode credentials — everything comes from `tests/.env/`.
 
+## Running against your own build
+
+`tests/e2e-server/start.mjs` starts this checkout's build on localhost with a fresh database, so the suite tests your code and not a deployed server. It needs no secrets.
+
+```bash
+npm run build
+
+# The two accounts are created on the fresh server. Pick any values.
+export TEST_ACCOUNT1_ALIAS=primary_user  TEST_ACCOUNT1_USER=e2e-admin@example.com   TEST_ACCOUNT1_PW='E2e-local-Admin-1!'
+export TEST_ACCOUNT2_ALIAS=secondary_user TEST_ACCOUNT2_USER=e2e-member@example.com TEST_ACCOUNT2_PW='E2e-local-Member-1!'
+
+node tests/e2e-server/start.mjs &          # server on http://localhost:3838
+node tests/e2e-server/start.mjs wait       # returns once it is seeded
+
+BASE_URL=http://localhost:3838 npx playwright test --project=test-suite
+```
+
+What the launcher sets up:
+
+- The built server (`node dist/index.js`) on a fresh SQLite data folder in the system temp folder, in key auth mode, with the feature switches on (`tests/e2e-server/lib.mjs`).
+- The first account as the server admin and the second as an ordinary member, plus three `qa-…@example.com` people in the directory for the collaborator and steward suites.
+- The welcome screen closed for both accounts. Someone who owns no nest gets it in place of the nest list, and the second account owns none on a fresh server.
+- Idle connections kept open for two minutes (`tests/e2e-server/keep-alive.mjs`). Node's default is five seconds, and an API call that reuses a connection just as the server closes it fails with `ECONNRESET`.
+- A license answer served on `127.0.0.1:4010`, so the server runs as a licensed enterprise server without calling PromptOwl. This is for tests only.
+
+Every launch is a new server, so a session saved by an earlier run is no longer valid and every API call answers 401 "Your session has expired". Delete `tests/src/cookies_storage/*.json` before the next run.
+
+Set `E2E_SERVER_CMD="node --import tsx src/index.ts"` to run from source without building the server (the UI still needs `npm run build:ui`). `E2E_SERVER_PORT`, `E2E_LICENSE_PORT` and `E2E_DATA_ROOT` override the ports and the data folder.
+
 ## CI
 
-`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.
+Two workflows run the suite, against two different servers:
+
+- `.github/workflows/e2e-pr-build.yml` ("e2e (PR build)") runs on every pull request. It builds the PR, starts it with `tests/e2e-server/start.mjs` and runs the suite against it. It tests the PR's own code, needs no secrets, and runs for every PR at once. Every `CN_EXPECT_*` is set to 1 there, so a spec that skips when "the server under test does not ship this yet" fails instead.
+- `.github/workflows/contextnest-community-tests.yml` ("e2e") runs the same suite against the deployed dev server (nest-dev, or `vars.TEST_URL`), with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). It does not run on pull requests: it tests what is deployed, so a failure there says nothing about a PR. It runs on a push to `development` or `main`, after the dev deploy workflow ("Deploy dev (Cloud Run)") succeeds, and by hand from the Actions tab. One run uses the server at a time (`tests/scripts/e2e-turnstile.mjs`); the others wait their turn.
+
+Both upload the HTML report and traces as a workflow artifact.
+
+### Specs and the deployed server
+
+The deployed server is long-lived, shared, and often behind `development`. A spec has to hold on both servers:
+
+- **A feature the server may not have yet:** ask the server, skip with a reason when it is missing, and fail instead when the feature's `CN_EXPECT_*` is 1 (the PR build). Ask for something only that feature answers. `/health` carrying a flag is not enough when the feature shipped in parts: the Control room dashboard specs ask for the dashboard's own read (`GET /rollups?by=reason`).
+- **A page that differs by deployment kind:** nest-dev is a shared deployment with teams on (`/health`: `shared_deployment`), the PR build is a single-organization server. Read `/health` and expect the layout of the server under test, as the collaborators suite does for the add control and the visibility options.
+- **Stubbed navigation:** answer a stubbed navigation with a page, not a `302`. Chromium does not finish the request that follows a stubbed redirect on an https server, so it works on localhost and hangs on the deployed one.

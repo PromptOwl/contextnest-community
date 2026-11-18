@@ -6,6 +6,6 @@ export const meta: PageMeta = {
   label: "Teammates",
   icon: Users,
   order: 20,
-  group: "admin",
+  group: "settings",
   visible: ({ isAdmin }) => isAdmin,
 };

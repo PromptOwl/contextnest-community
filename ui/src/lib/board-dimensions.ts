@@ -19,6 +19,7 @@ import {
   fieldValueForMove,
   type FieldDefinition,
 } from "./custom-fields";
+import { prettyFolder } from "../components/FolderTree";
 
 /** The bucket for nodes that don't carry a value for the active dimension. */
 export const UNCATEGORIZED = "__uncategorized__";
@@ -505,7 +506,8 @@ function labelFor(key: string, config: BoardConfig): string {
   // since the heading is rendered with CSS `capitalize`.
   if (config.dimension === "status")
     return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
-  if (config.dimension === "folder") return folderColumnLabel(key);
+  // Same folder names as the Documents tree (PO-1188).
+  if (config.dimension === "folder") return folderColumnLabel(key.split("/").map(prettyFolder).join("/"));
   return key;
 }
 
@@ -619,9 +621,11 @@ export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
   emptyFolders: string[] = [],
+  /** Nodes the columns come from — the unfiltered set, so a filter hides cards, never columns. */
+  columnNodes: BoardNode[] = nodes,
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
   const hidden = new Set(config.hiddenColumns ?? []);
-  const columns = buildColumns(nodes, config, emptyFolders);
+  const columns = buildColumns(columnNodes, config, emptyFolders);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {

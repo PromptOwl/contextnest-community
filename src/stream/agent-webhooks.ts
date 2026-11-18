@@ -8,7 +8,7 @@
  * resolver in agent-wake.ts (`setAgentWebhookResolver`) — this table then
  * only answers for nests that never moved over.
  *
- * Storage: `agent_webhooks` (migration 086). The URL and the signing secret
+ * Storage: `agent_webhooks` (migration 095). The URL and the signing secret
  * are both credentials — a runner URL often carries its own token, and the
  * secret is what proves a POST came from this server — so both are stored
  * encrypted (shared/secret-box) and neither is ever echoed back: a list shows
@@ -22,6 +22,7 @@
  * refused where the socket opens.
  */
 import { randomBytes } from "node:crypto";
+import { isBroadcastName } from "../channels/broadcast.js";
 import { isIP } from "node:net";
 import { getDb } from "../db/client.js";
 import { decryptSecret, encryptSecret } from "../shared/secret-box.js";
@@ -35,6 +36,7 @@ import { isPrivateAddress } from "../metacognition/net.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { AppError } from "../shared/errors.js";
 import { lastDeliveries, sendAgentTestEvent, type DeliveryView } from "./agent-wake.js";
+import { isReservedHandle, RESERVED_HANDLES } from "../agents/reserved.js";
 
 /** An agent handle as typed after "@": lowercase letters, digits, dot, dash,
  *  underscore. No "@" inside, so an email-shaped name (a person) never
@@ -48,23 +50,35 @@ export function parseAgentHandle(raw: unknown): string {
       "handle is an agent's @name: 1–63 characters, lowercase letters, digits, dots, dashes or underscores.",
     );
   }
+  // The nest's own assistant and the broadcast words (C7, src/agents/reserved.ts).
+  if (isReservedHandle(h)) {
+    throw new ValidationError(`"${h}" is a reserved handle (${[...RESERVED_HANDLES].join(", ")}) and can't be an agent's name.`);
+  }
+  // `@channel` / `@here` reach the nest's people (channels/broadcast.ts) and
+  // never wake an agent, so a target under either name could never fire.
+  if (isBroadcastName(h)) {
+    throw new ValidationError(`"${h}" is reserved for reaching everyone in a channel; it can't be an agent's handle.`);
+  }
   return h;
+}
+
+/**
+ * Public https only: the connector fence, plus the agent fence's extra ranges
+ * (carrier-grade NAT) for an address literal. Checked at save and at dispatch.
+ */
+export function isPublicAgentWebhookUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return isSafeConnectorUrl(url) && !(isIP(host) !== 0 && isPrivateAddress(host));
+  } catch {
+    return false;
+  }
 }
 
 /** A target URL that may be saved: public https only (AC-ST-05). */
 export function parseAgentWebhookUrl(raw: unknown): string {
   const url = typeof raw === "string" ? raw.trim() : "";
-  // The connector fence, plus the agent fence's extra ranges (carrier-grade
-  // NAT) for an address literal — the same set the connect-time guard
-  // refuses, so a target that could never be delivered is refused up front.
-  let literalPrivate = false;
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    literalPrivate = isIP(host) !== 0 && isPrivateAddress(host);
-  } catch {
-    /* not a URL — isSafeConnectorUrl refuses it below */
-  }
-  if (!url || url.length > 2048 || !isSafeConnectorUrl(url) || literalPrivate) {
+  if (!url || url.length > 2048 || !isPublicAgentWebhookUrl(url)) {
     throw new ValidationError(
       "url must be a public https:// URL — loopback, private, link-local and metadata addresses are refused. " +
         "To test a runner on your own machine, expose it through a public tunnel (for example cloudflared or ngrok) and save the tunnel's https:// URL.",
@@ -172,10 +186,12 @@ export async function putAgentWebhook(
   const existing = (await db.get("SELECT * FROM agent_webhooks WHERE nest_id = ? AND handle = ?", [nestId, handle])) as
     | Row
     | undefined;
-  const keepUrl = !!existing && (input.url === undefined || input.url === null || input.url === "");
+  // A rotate of an existing handle may omit the URL: the stored one stays.
+  const keepUrl = !!existing && input.rotate === true && (input.url === undefined || input.url === null || input.url === "");
   const url = keepUrl ? null : parseAgentWebhookUrl(input.url);
   let secret: string | undefined;
   if (!existing) {
+    if (!url) throw new ValidationError("url is required");
     secret = mintSecret();
     await db.run(
       `INSERT INTO agent_webhooks (nest_id, handle, url_enc, secret_enc, created_by, created_at, updated_at)

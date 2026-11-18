@@ -83,6 +83,19 @@ export function rulesFromDraft(d: Draft): api.TaskRules {
   };
 }
 
+/** Why the draft can't be saved, in plain words — caught before Save so the
+ *  server's message, which names internal settings, never shows (PO-1234).
+ *  Mirrors the prefix rule in src/nodes/task-rules.ts. */
+export function draftProblem(d: Draft): string | null {
+  const prefix = d.prefix.trim().toUpperCase();
+  if (d.numbering && !prefix) return "Pick a prefix (2–6 letters or digits) before saving with numbering on.";
+  if (prefix && !/^[A-Z][A-Z0-9]{1,5}$/.test(prefix)) return "A prefix is 2–6 letters or digits and starts with a letter.";
+  // The box takes digits only, so this is 0 or past the cap (PO-1217).
+  const start = d.startAt.trim();
+  if (start && (Number(start) < 1 || Number(start) > 999_999_999)) return "Start at must be a number from 1 to 999999999.";
+  return null;
+}
+
 export function TaskNumberingCard({ nestId, canManage }: { nestId: string; canManage: boolean }) {
   const qc = useQueryClient();
   const q = useQuery(reads.settings(nestId));
@@ -149,6 +162,7 @@ export function TaskNumberingCard({ nestId, canManage }: { nestId: string; canMa
     edit({ priorities: rows });
   };
   const usingDefaults = draft.priorities.length === 0;
+  const problem = draftProblem(draft);
   const names = draft.rows.map((r) => r.name.trim()).filter(Boolean);
 
   return (
@@ -188,9 +202,7 @@ export function TaskNumberingCard({ nestId, canManage }: { nestId: string; canMa
             <Input aria-label="Start at" className="w-28" placeholder="1" inputMode="numeric" value={draft.startAt} disabled={!canManage} onChange={(e) => edit({ startAt: e.target.value.replace(/\D/g, "") })} />
           </label>
         </div>
-        {draft.numbering && !draft.prefix.trim() && (
-          <p className="text-xs text-destructive">Pick a prefix (2–6 letters or digits) before saving with numbering on.</p>
-        )}
+        {problem && <p className="text-xs text-destructive">{problem}</p>}
 
         <div className="space-y-2">
           <div className="text-sm font-medium">Surfaces</div>
@@ -288,7 +300,7 @@ export function TaskNumberingCard({ nestId, canManage }: { nestId: string; canMa
 
         {canManage && (
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => void save()} disabled={busy || !dirty}>{busy ? "Saving…" : "Save"}</Button>
+            <Button onClick={() => void save()} disabled={busy || !dirty || !!problem}>{busy ? "Saving…" : "Save"}</Button>
             <Button variant="outline" onClick={() => void backfill()} disabled={dirty || !draft.numbering || !draft.prefix.trim()}>
               Number existing tasks
             </Button>

@@ -25,6 +25,7 @@ import {
   resolveMention,
 } from "../shared/mentions.js";
 import { buildDocContext } from "./title-resolver.js";
+import { filterMentionRecipients } from "../chat/preferences.js";
 import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
@@ -111,7 +112,13 @@ async function resolveRecipients(params: {
       allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
     })),
   );
-  return checked.filter((c) => c.allowed).map((c) => c.r);
+  // Team chat C2 (PO-1197): someone who muted this channel or conversation
+  // (level "none") is not pinged; a document comment is never filtered.
+  return filterMentionRecipients(
+    nestId,
+    nodeId,
+    checked.filter((c) => c.allowed).map((c) => c.r),
+  );
 }
 
 /**
@@ -369,6 +376,14 @@ export async function notifyMentions(params: {
   }
 }
 
+const COMMENT_MENTION_TEXT = "mentioned you in a comment on";
+
+/** A comment's "mentioned you" inbox row, not a document-body one (PO-1180:
+ *  My Work's Mentions section carries the former, so the inbox drops it). */
+export function isCommentMentionNotice(n: { kind: string; message?: string | null }): boolean {
+  return n.kind === "mention" && !!n.message?.includes(COMMENT_MENTION_TEXT);
+}
+
 /**
  * Drop a notification for everyone named in a comment.
  *
@@ -395,16 +410,20 @@ async function commentMentionFanOut(params: {
   body: string;
   actorEmail: string;
   baseUrl?: string;
+  /** Notify only these of the body's @names (an edit: the names it added,
+   *  PO-1196). Unset: every name. */
+  onlyNames?: string[];
 }): Promise<Recipient[]> {
   const { nestId, nodeId, body, actorEmail, baseUrl } = params;
   try {
-    const names = extractMentions(body || "");
+    const only = params.onlyNames ? new Set(params.onlyNames.map((n) => n.toLowerCase())) : null;
+    const names = extractMentions(body || "").filter((n) => !only || only.has(n.toLowerCase()));
     const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
     if (recipients.length === 0) return [];
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
-    const message = `${await personLabel(actorEmail)} mentioned you in a comment on "${ctx.label}"`;
+    const message = `${await personLabel(actorEmail)} ${COMMENT_MENTION_TEXT} "${ctx.label}"`;
     await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,
@@ -592,6 +611,8 @@ export async function notifyComment(params: {
    * AC-UX-14).
    */
   channel?: boolean;
+  /** Notify only these @names (an edit's newly added ones; PO-1196). */
+  onlyNames?: string[];
 }): Promise<{ mentioned: number; participants: number; followers: number }> {
   const mentioned = await commentMentionFanOut(params);
   const reached = mentioned.map((r) => r.email);

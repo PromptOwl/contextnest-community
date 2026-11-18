@@ -25,12 +25,26 @@ import { resolveUserRoles } from "../governance/stewardship-service.js";
 import { listNotifications } from "../governance/notify-service.js";
 import { canDecideAccessRequests, listAccessRequests } from "../governance/access-request-service.js";
 import { listAssignedTo } from "../nodes/assigned-service.js";
-import { listOpenMentions, mentionedNodeKeys } from "../mentions/mention-index.js";
+import { listOpenMentions } from "../mentions/mention-index.js";
+import { isCommentMentionNotice } from "../governance/mention-notify.js";
+import { SAVED_PAGE_DEFAULT, listSaved, type SavedList } from "../channels/saved.js";
+import { config } from "../config.js";
 import { ValidationError } from "../shared/errors.js";
+import { chatUnreadSummary } from "../chat/unread.js";
 
-/** The sections of My Work, in the order an agent reads them. */
-export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications"] as const;
+/** The sections of My Work, in the order an agent reads them. `saved` (the
+ *  caller's saved channel messages, PO-1196) exists only while
+ *  EXPERIMENTAL_AGENT_STREAM is on; `chat` (the team chat unread summary,
+ *  C2 PO-1197) only while TEAM_CHAT_ENABLED is on. */
+export const MY_WORK_SECTIONS = ["mentions", "items", "assigned", "waiting", "notifications", "saved", "chat"] as const;
 export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
+
+/** The sections that exist right now (the switches decide `saved` and `chat`). */
+export function availableMyWorkSections(): MyWorkSection[] {
+  return MY_WORK_SECTIONS.filter(
+    (s) => (s !== "saved" || config.EXPERIMENTAL_AGENT_STREAM) && (s !== "chat" || config.TEAM_CHAT_ENABLED),
+  );
+}
 
 /** `sections` from a query string ("mentions,items") or an MCP argument
  *  (["mentions", "items"]); null when none was given. */
@@ -38,11 +52,12 @@ export function parseMyWorkSections(raw: unknown): MyWorkSection[] | null {
   if (raw === undefined || raw === null || raw === "") return null;
   const list = Array.isArray(raw) ? raw : String(raw).split(",");
   const out: MyWorkSection[] = [];
+  const available = availableMyWorkSections();
   for (const item of list) {
     const s = String(item ?? "").trim().toLowerCase();
     if (!s) continue;
-    if (!(MY_WORK_SECTIONS as readonly string[]).includes(s)) {
-      throw new ValidationError(`sections takes any of: ${MY_WORK_SECTIONS.join(", ")}.`);
+    if (!(available as readonly string[]).includes(s)) {
+      throw new ValidationError(`sections takes any of: ${available.join(", ")}.`);
     }
     if (!out.includes(s as MyWorkSection)) out.push(s as MyWorkSection);
   }
@@ -161,6 +176,8 @@ export async function buildMyWork(params: {
     requested_by: r.requestedBy,
     requested_at: r.requestedAt,
     priority: r.priority,
+    // The version under review, so an approve dialog names the right one.
+    version: r.version,
     // Filed by an agent run (migration 060): the inbox links to its trace.
     run_id: r.runId ?? null,
   });
@@ -296,22 +313,6 @@ export async function buildMyWork(params: {
     ...myAccessAsks.map(toAccessItem),
   );
   waiting.sort(byNewest);
-  // Watcher notifications (HITL tags) ride along so the inbox is one call.
-  // Scoped to the visible nests only for a nest-scoped credential; the REST
-  // inbox keeps listing every unread row, as it always has. A comment
-  // "mentioned you" row is dropped when the Mentions section below carries
-  // that same mention (PO-1180) — one event, counted once in the badge.
-  const mentionedNodes = !want("notifications")
-    ? new Set<string>()
-    : await mentionedNodeKeys(userId, [...nestName.keys()]).catch((err) => {
-        console.error("[me/work] mention keys failed", err);
-        return new Set<string>();
-      });
-  const notifications = (want("notifications") ? await listNotifications(me, { unreadOnly: true, limit: 50 }) : []).filter(
-    (n: { nest_id: string; kind: string; node_id?: string | null; subject_id?: string | null }) =>
-      (!onlyNestId || n.nest_id === onlyNestId) &&
-      !(n.kind === "mention" && mentionedNodes.has(`${n.nest_id}\u0000${n.node_id ?? n.subject_id ?? ""}`)),
-  );
   // `total` from getReviewQueue counts every PENDING REVIEW across every
   // nest the caller can see — full stop, regardless of who requested it or
   // whether the caller can approve it. But items/waiting only ever surface
@@ -370,28 +371,85 @@ export async function buildMyWork(params: {
   // (PO-1180), across the same visible nests, access-checked per node. Paged
   // on their own cursor; the whole filtered list is counted, so the badge
   // and mentions_pagination.total are exactly what the pages can show.
-  const allMentions = !want("mentions")
-    ? []
-    : await listOpenMentions({ userId, email: me, nestNames: nestName, actingAs: params.actingAs ?? null }).catch((err) => {
+  const none = { items: [], total: 0, nodeKeys: new Set<string>() };
+  const {
+    items: mentions,
+    total: mentionsTotal,
+    nodeKeys: mentionNodes,
+  } = !want("mentions")
+    ? none
+    : await listOpenMentions({
+        userId,
+        email: me,
+        nestNames: nestName,
+        actingAs: params.actingAs ?? null,
+        offset: mentionsOffset,
+        limit: mentionsLimit,
+      }).catch((err) => {
         console.error("[me/work] mentions list failed", err);
-        return [];
+        return none;
       });
-  const mentions = allMentions.slice(mentionsOffset, mentionsOffset + mentionsLimit);
+  // Watcher notifications (HITL tags) ride along so the inbox is one call.
+  // Scoped to the visible nests only for a nest-scoped credential; the REST
+  // inbox keeps listing every unread row, as it always has. A comment
+  // "mentioned you" row is dropped only while the Mentions section shows an
+  // open mention on that node (PO-1180); document-body mentions always stay.
+  const notifications = (want("notifications") ? await listNotifications(me, { unreadOnly: true, limit: 50 }) : []).filter(
+    (n: { nest_id: string; kind: string; message?: string | null; node_id?: string | null; subject_id?: string | null }) =>
+      (!onlyNestId || n.nest_id === onlyNestId) &&
+      !(isCommentMentionNotice(n) && mentionNodes.has(`${n.nest_id}\u0000${n.node_id ?? n.subject_id ?? ""}`)),
+  );
+  // Saved channel messages (PO-1196): the caller's own list, newest saved
+  // first, over the same visible nests; only while channels are on.
+  const saved: SavedList | null =
+    want("saved") && config.EXPERIMENTAL_AGENT_STREAM
+      ? await listSaved({ userId, email: me, nestNames: nestName, limit: params.sectionLimit ?? SAVED_PAGE_DEFAULT, offset: 0 }).catch((err) => {
+          console.error("[me/work] saved list failed", err);
+          return { saved: [], pagination: { total: 0, limit: SAVED_PAGE_DEFAULT, offset: 0, has_more: false } };
+        })
+      : null;
   // The badge's share (CU-wdqcq0658p): the same total minus what waits on
   // others — the caller's own pending reviews and the requests they filed.
   // Plus every open mention (all pages), each counted once.
   const waitingOnMeTotal =
     reviewTotal + requestsShown - myReviewsTotal -
     waiting.filter((i) => i.type === "deletion" || i.type === "access").length +
-    allMentions.length;
+    mentionsTotal;
+  // Reviews filed as urgent that this caller can decide. Counted in SQL for
+  // the same reason the totals above are: the page of items may be one row.
+  // Overdue and urgent tasks come from `assigned`, which is not paged, so the
+  // client counts those in the viewer's own calendar day. Your own urgent
+  // submissions wait on others, so they are taken off.
+  const [{ total: urgentApprovable }, { total: urgentMine }] = !wantQueue
+    ? [{ total: 0 }, { total: 0 }]
+    : await Promise.all([
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", limit: 1 }),
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", requestedByEmail: me, limit: 1 }),
+      ]);
+  const urgentReviewsTotal = urgentApprovable - urgentMine;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
+  // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
+  const chat =
+    config.TEAM_CHAT_ENABLED && want("chat")
+      ? await chatUnreadSummary({
+          userId,
+          email: me,
+          onlyNestId,
+          actingAs: params.actingAs ?? null,
+        }).catch((err) => {
+          console.error("[my-work] chat unread failed", err);
+          return undefined;
+        })
+      : undefined;
   const full = {
+    ...(chat ? { chat } : {}),
     items: cap(items),
     waiting: cap(waiting),
     notifications: cap(notifications),
     assigned: cap(assigned),
     mentions,
     waiting_on_me_total: waitingOnMeTotal,
+    urgent_reviews_total: urgentReviewsTotal,
     pagination: {
       total: reviewTotal + requestsShown,
       limit,
@@ -399,11 +457,13 @@ export async function buildMyWork(params: {
       has_more: offset + requests.length < total,
     },
     mentions_pagination: {
-      total: allMentions.length,
+      total: mentionsTotal,
       limit: mentionsLimit,
       offset: mentionsOffset,
-      has_more: mentionsOffset + mentions.length < allMentions.length,
+      has_more: mentionsOffset + mentions.length < mentionsTotal,
     },
+    // Absent while channels are off: the section does not exist then.
+    ...(saved ? { saved: saved.saved, saved_pagination: saved.pagination } : {}),
   };
   if (!sections) return full as Partial<typeof full>;
   // Only what was asked for. The totals span sections, so they ride only on
@@ -412,6 +472,7 @@ export async function buildMyWork(params: {
   for (const s of sections) (out as Record<string, unknown>)[s] = full[s];
   if (wantQueue) out.pagination = full.pagination;
   if (want("mentions")) out.mentions_pagination = full.mentions_pagination;
+  if (saved) out.saved_pagination = saved.pagination;
   return out;
 }
 

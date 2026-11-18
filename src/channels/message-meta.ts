@@ -28,6 +28,9 @@ import { listNestPeople, findDirectoryPerson, type NestPerson } from "../nests/p
 import { extractMentions, resolveMention } from "../shared/mentions.js";
 import { deserializeClient, parseClientMetadata, type ClientMetadata } from "../shared/client-metadata.js";
 import { resolveActorLabel, type ActorLabel } from "./actor-label.js";
+import { HOOTIE_HANDLE, isReservedHandle, SERVER_CLIENT_KEYS } from "../agents/reserved.js";
+import { effectiveHootieBrand } from "../hootie/brand.js";
+import { isBroadcastName } from "./broadcast.js";
 
 // ─── Display names ──────────────────────────────────────────────────────
 
@@ -52,6 +55,19 @@ export async function namedActor(
   client: ClientMetadata | undefined,
   names: Map<string, string>,
 ): Promise<{ actor: ActorLabel; name: string }> {
+  // Hootie's answer in a thread (C7, src/agents/ask-nest.ts): authored by the
+  // agent, attributed to nobody's write — the person it answered FOR is named,
+  // not credited. Only the server sets `model_answer` (messageClient strips it
+  // from every caller-supplied client).
+  if ((client as Record<string, unknown> | undefined)?.model_answer === true) {
+    const asker = String((client as Record<string, unknown>).for ?? "");
+    const askerName = names.get(asker.toLowerCase()) ?? asker;
+    const brand = effectiveHootieBrand().name;
+    return {
+      actor: { human: askerName, agent: HOOTIE_HANDLE, label: `${brand}, for ${askerName}` },
+      name: brand,
+    };
+  }
   const actor = await resolveActorLabel({ email, client });
   const name = names.get(String(email ?? "").toLowerCase()) ?? email;
   // Only when the seam answered with the email: an identity layer that already
@@ -79,6 +95,7 @@ export function messageClient(
   supplied: unknown,
   keyLabel: string | null | undefined,
 ): ClientMetadata | undefined {
+  merged = callerSafeClient(merged);
   if (!merged?.agent || !keyLabel) return merged;
   let declared: string | undefined;
   try {
@@ -90,6 +107,25 @@ export function messageClient(
   if (!String(keyLabel).startsWith(merged.agent)) return merged; // the handshake's name, or the server's own
   const { agent, ...rest } = merged;
   return { ...rest, key_label: agent } as ClientMetadata;
+}
+
+/**
+ * What a CALLER may put in a message's stored attribution (C7, PO-1198): no
+ * key the server reserves for its own marks (`model_answer`, `proposal`,
+ * `handoff`, … — src/agents/reserved.ts), and no reserved agent handle. A
+ * person declaring `client.agent: "hootie"` is stored as themselves; a
+ * client carrying `model_answer: true` is stored without it. Nothing is
+ * refused: the message is theirs, only the claim is dropped.
+ */
+export function callerSafeClient(client: ClientMetadata | undefined): ClientMetadata | undefined {
+  if (!client) return client;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(client as Record<string, unknown>)) {
+    if (SERVER_CLIENT_KEYS.has(k)) continue;
+    if (k === "agent" && isReservedHandle(v)) continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length ? (out as ClientMetadata) : undefined;
 }
 
 /** The handles a message's writer answers to: the declared agent and the key
@@ -122,29 +158,34 @@ export interface KnownAgent {
  * every declared agent label seen on a message in the nest's channels. Never
  * a target, never a key label.
  */
-export async function knownAgents(nestId: string): Promise<KnownAgent[]> {
+export async function knownAgents(nestId: string, only?: Set<string>): Promise<KnownAgent[]> {
   const db = getDb();
-  const [hooks, seen] = await Promise.all([
-    db.all("SELECT handle FROM agent_webhooks WHERE nest_id = ? ORDER BY handle", [nestId]) as Promise<Array<{ handle: string }>>,
-    db.all(
+  const hooks = (await db.all("SELECT handle FROM agent_webhooks WHERE nest_id = ? ORDER BY handle", [nestId])) as Array<{
+    handle: string;
+  }>;
+  // Handles with a target first, then declared labels newest first, so a
+  // burst of made-up labels (anyone who can post can declare one) can't push
+  // a real handle out of the list.
+  const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
+  // `only`: the names a body actually uses — skip the label scan once all are hooks.
+  if (!only || [...only].some((h) => !handles.has(h))) {
+    const seen = (await db.all(
       `SELECT c.client_json FROM annotation_comments c
          JOIN annotation_threads t ON t.id = c.thread_id
         WHERE t.nest_id = ? AND t.node_id LIKE 'nodes/channels/%' AND c.client_json LIKE '%"agent"%'
         ORDER BY c.created_at DESC
         LIMIT ${SEEN_SCAN}`,
       [nestId],
-    ) as Promise<Array<{ client_json: string | null }>>,
-  ]);
-  // Handles with a target first, then declared labels newest first, so a
-  // burst of made-up labels (anyone who can post can declare one) can't push
-  // a real handle out of the list.
-  const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
-  for (const r of seen) {
-    const h = normHandle(deserializeClient(r.client_json)?.agent);
-    if (AGENT_HANDLE_RE.test(h)) handles.add(h);
+    )) as Array<{ client_json: string | null }>;
+    for (const r of seen) {
+      const h = normHandle(deserializeClient(r.client_json)?.agent);
+      if (AGENT_HANDLE_RE.test(h)) handles.add(h);
+    }
   }
+  // A reserved handle is never an agent (C7): Hootie answers through ask-nest.
+  for (const h of [...handles]) if (isReservedHandle(h)) handles.delete(h);
   const { agentWakeTarget } = await import("../stream/agent-wake.js");
-  const list = [...handles].filter(Boolean).slice(0, MAX_KNOWN_AGENTS).sort();
+  const list = [...handles].filter((h) => h && (!only || only.has(h))).slice(0, MAX_KNOWN_AGENTS).sort();
   return Promise.all(list.map(async (handle) => ({ handle, wakeable: (await agentWakeTarget(nestId, handle)) !== null })));
 }
 
@@ -156,20 +197,29 @@ const MAX_NAMES_PER_BODY = 50;
 export type MentionRef =
   | { name: string; kind: "person"; display_name: string }
   | { name: string; kind: "agent"; wakeable: boolean }
+  /** `@channel` / `@here` in a channel: everyone added to the nest (PO-1196). */
+  | { name: string; kind: "everyone" }
   | { name: string; kind: "nobody" };
 
 export interface ResolvedMention {
   name: string;
   person?: NestPerson;
   agent?: KnownAgent;
+  everyone?: true;
 }
 
 /**
  * Resolve every `@name` in each body, in order of appearance. Loads the
  * roster once, and the known agents only when some name is not a person;
- * bodies with no mention cost nothing.
+ * bodies with no mention cost nothing. With `broadcast` (a channel message),
+ * `@channel` and `@here` are everyone, ahead of a person who happens to be
+ * called that.
  */
-export async function resolveBodyMentions(nestId: string, bodies: string[]): Promise<ResolvedMention[][]> {
+export async function resolveBodyMentions(
+  nestId: string,
+  bodies: string[],
+  opts: { broadcast?: boolean } = {},
+): Promise<ResolvedMention[][]> {
   // Each name costs a lookup; nobody tags this many people in one message.
   const names = bodies.map((b) => extractMentions(b || "").slice(0, MAX_NAMES_PER_BODY));
   if (names.every((n) => n.length === 0)) return names.map(() => []);
@@ -183,12 +233,20 @@ export async function resolveBodyMentions(nestId: string, bodies: string[]): Pro
   for (const list of names) {
     const row: ResolvedMention[] = [];
     for (const name of list) {
+      if (opts.broadcast && isBroadcastName(name)) {
+        row.push({ name, everyone: true });
+        continue;
+      }
       const person = people.get(name.toLowerCase());
       if (person) {
         row.push({ name, person });
         continue;
       }
-      agents ??= new Map((await knownAgents(nestId)).map((a) => [a.handle, a]));
+      agents ??= new Map(
+        (await knownAgents(nestId, new Set(names.flat().filter((n) => !people.get(n.toLowerCase())).map(normHandle)))).map(
+          (a) => [a.handle, a],
+        ),
+      );
       const agent = agents.get(normHandle(name));
       row.push(agent ? { name, agent } : { name });
     }
@@ -198,12 +256,13 @@ export async function resolveBodyMentions(nestId: string, bodies: string[]): Pro
 }
 
 export function toMentionRef(m: ResolvedMention): MentionRef {
+  if (m.everyone) return { name: m.name, kind: "everyone" };
   if (m.person) return { name: m.name, kind: "person", display_name: m.person.name?.trim() || m.person.email };
   if (m.agent) return { name: m.name, kind: "agent", wakeable: m.agent.wakeable };
   return { name: m.name, kind: "nobody" };
 }
 
 /** `mentions` for each body, as a timeline shows them. */
-export async function bodyMentions(nestId: string, bodies: string[]): Promise<MentionRef[][]> {
-  return (await resolveBodyMentions(nestId, bodies)).map((row) => row.map(toMentionRef));
+export async function bodyMentions(nestId: string, bodies: string[], opts: { broadcast?: boolean } = {}): Promise<MentionRef[][]> {
+  return (await resolveBodyMentions(nestId, bodies, opts)).map((row) => row.map(toMentionRef));
 }

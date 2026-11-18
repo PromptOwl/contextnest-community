@@ -66,13 +66,13 @@ import { config } from "../config.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { resolveActorLabel } from "../channels/actor-label.js";
 import { isChannelNode } from "../channels/channel-node.js";
-import { isSafeConnectorUrl } from "../notify/dispatch.js";
+import { isConversationId } from "../chat/containers.js";
 import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webhook.js";
 import { senderFor } from "../notify/outbound-log.js";
-import { guardedFetch, isPrivateAddress } from "../metacognition/net.js";
-import { isIP } from "node:net";
+import { guardedFetch } from "../metacognition/net.js";
 import { justWritten, MENTION_EXCERPT_MAX } from "../mentions/mention-index.js";
-import { storedAgentWebhook } from "./agent-webhooks.js";
+import { isPublicAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
+import { isReservedHandle } from "../agents/reserved.js";
 import { displayNames, namedActor, normHandle, writerHandles } from "../channels/message-meta.js";
 
 export const AGENT_WAKE_EVENT = "agent.mention";
@@ -131,12 +131,15 @@ export function setAgentWakeBackoff(ms: readonly number[] | null): void {
  * old row can't hand back a private target).
  */
 export async function agentWakeTarget(nestId: string, handle: string): Promise<AgentWebhookTarget | null> {
+  // A reserved handle (hootie, nest, …) has no runner, whatever a row from
+  // before the rule says (team chat C7, src/agents/reserved.ts).
+  if (isReservedHandle(handle)) return null;
   const target = await resolver(nestId, handle).catch((err) => {
     console.error("[agent-wake] resolver failed", nestId, handle, err);
     return null;
   });
   if (!target?.url || !target.secret) return null;
-  if (!isSafeConnectorUrl(target.url) || privateLiteral(target.url)) return null;
+  if (!isPublicAgentWebhookUrl(target.url)) return null;
   return target;
 }
 
@@ -180,15 +183,8 @@ export function wakeIdempotencyKey(nestId: string, commentId: string, handle: st
   return createHash("sha256").update(`agent-wake:v1:${nestId}:${commentId}:${handle}`).digest("hex").slice(0, 40);
 }
 
-function privateLiteral(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    return isIP(host) !== 0 && isPrivateAddress(host);
-  } catch {
-    return true;
-  }
-}
-
+// ponytail: count-then-insert isn't atomic, so parallel posts can overshoot the
+// limits by a few. Soft fence; use a conditional INSERT … SELECT if it must be exact.
 async function overLimit(nestId: string, threadId: string, handle: string): Promise<boolean> {
   const db = getDb();
   const now = Date.now();
@@ -307,7 +303,10 @@ async function deliver(params: {
       { nestId, ...(nodeId ? { nodeId } : {}), channel: "webhook", ...senderFor(params.sender) },
       { rawBody: body, headers, fetchImpl: (u, init) => transport(u, init) },
     ).catch((err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-    if (last.ok || attempts > retries.length) break;
+    // A 4xx other than 408/429 is the runner refusing the event: retrying won't change it.
+    const status = Number(/responded (\d{3})/.exec(last.error ?? "")?.[1] ?? 0);
+    const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
+    if (last.ok || permanent || attempts > retries.length) break;
     await db
       .run("UPDATE agent_wake_deliveries SET attempts = ?, error = ? WHERE idempotency_key = ?", [attempts, (last.error ?? "failed").slice(0, 500), key])
       .catch(() => {});
@@ -435,6 +434,8 @@ export async function wakeMentionedAgents(params: {
         delivery_id: deliveryId,
         nest: { id: nestId, name: nestName },
         channel,
+        // A direct or group conversation (C2): read it with context_conversation_read.
+        conversation: isConversationId(nodeId) ? nodeId : null,
         node_id: nodeId,
         thread_id: threadId,
         message_id: commentId,
@@ -447,7 +448,9 @@ export async function wakeMentionedAgents(params: {
         ...(sameNest ? { author_email: msg.author, excerpt: excerptOf(msg.body) } : {}),
         read: channel
           ? { tool: "context_channel_read", arguments: { channel, thread: threadId } }
-          : { tool: "context_comments", arguments: { id: nodeId, thread: threadId } },
+          : isConversationId(nodeId)
+            ? { tool: "context_conversation_read", arguments: { conversation: nodeId, thread: threadId } }
+            : { tool: "context_comments", arguments: { id: nodeId, thread: threadId } },
       });
       outcomes.set(handle, "sent");
       void deliver({
@@ -495,7 +498,7 @@ export async function sendAgentTestEvent(nestId: string, handle: string, actorEm
   // nothing goes to an address that is not public.
   const refused = (await sealedNest(nestId))
     ? SEALED_REASON
-    : !isSafeConnectorUrl(raw.url) || privateLiteral(raw.url)
+    : !isPublicAgentWebhookUrl(raw.url)
       ? NOT_PUBLIC_REASON
       : null;
   if (refused) {

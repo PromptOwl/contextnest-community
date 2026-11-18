@@ -17,6 +17,9 @@ describe("activity log helpers (CU-wdqcq03aw2)", () => {
     expect(activityAction({ ...base, id: "3", type: "retrieved" })).toBe("Pulled into a search / answer");
     expect(activityAction({ ...base, id: "4", type: "read", detail: "context_get" })).toBe("Read (context_get)");
     expect(activityAction({ ...base, id: "5", type: "exported", nodeId: null })).toBe("Exported the whole nest");
+    expect(activityAction({ ...base, id: "6", type: "exported", nodeId: null, detail: "decision ledger export failed (csv)" })).toBe(
+      "Exported: decision ledger export failed (csv)",
+    );
   });
 
   it("names the version a change sealed or a read was served, never an export's", () => {

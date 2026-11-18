@@ -16,6 +16,11 @@ describe("NestView tab slugs", () => {
     expect(NEST_TAB_LABELS.instructions).toBe("Instructions");
   });
 
+  it("sends old ?tab=fields links to Settings, and keeps ?tab=activity", () => {
+    expect(nestTabFromParam("fields")).toBe("settings");
+    expect(nestTabFromParam("activity")).toBe("activity");
+  });
+
   it("drops an unknown ?tab=", () => {
     expect(nestTabFromParam("nope")).toBeUndefined();
     expect(nestTabFromParam(null)).toBeUndefined();

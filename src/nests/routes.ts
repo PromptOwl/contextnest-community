@@ -3,6 +3,7 @@ import { backfillTicketNumbers } from "../nodes/ticket-backfill.js";
 import { syncTicketCounters } from "../nodes/ticket-numbers.js";
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isNestMember } from "../channels/channel-service.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
@@ -79,6 +80,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { parseStoredBranding } from "../shared/branding.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
+import { nestChatEnabled } from "../chat/settings.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -653,17 +655,18 @@ nestRoutes.get("/:nestId", async (c) => {
   // every org reader needs (on a shared server org readers span customers).
   const shown = withParsedBranding(nest) as Record<string, unknown> | null;
   if (shown && permission !== "owner" && permission !== "admin") delete shown.org_domains;
+  const member = await isNestMember(nestId, userId);
   return c.json({
     nest: shown,
     permission,
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
     grant_only,
-    // A person added to the nest — owner, admin, a collaborator at any level,
-    // a steward, a team-share member — as opposed to someone who reaches it
-    // only through its visibility or a document share. Channels (agent team
-    // stream) are for members: a client shows them when this is true.
-    member: !grant_only && !access.isPublicReader && (access.permission !== "none" || permission === "owner"),
+    // A person added to the nest (channelAccess's rule); a client shows channels when true.
+    member,
+    // Team chat (C2, PO-1197) is on for this caller here: the server switch,
+    // the nest's own setting, and they are a member. Off → no chat UI at all.
+    chat: member && (await nestChatEnabled(nestId)),
     // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
     // drafts for review — their permission stays 'read'.
     org_contributor:

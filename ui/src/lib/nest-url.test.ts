@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { documentLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./nest-url";
+import { deepLinkToRetryAfterSignIn, documentLink, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./nest-url";
 
 describe("nest-url", () => {
   it("reads the nest id from the /nest/<id> path", () => {
@@ -69,5 +69,42 @@ describe("documentLink", () => {
     const url = new URL(documentLink("http://localhost:3000", "a b", "nodes/x y"));
     expect(nestIdFromLocation({ pathname: url.pathname, search: url.search })).toBe("a b");
     expect(new URLSearchParams(url.search).get("doc")).toBe("nodes/x y");
+  });
+});
+
+/**
+ * PO-1391: a deep link wins over whatever Home would show (the nest list or
+ * the first-run welcome screen), also for the person who followed it signed
+ * out and signed in on the way.
+ */
+describe("a deep link followed while signed out", () => {
+  const link = "/nest/abc-123?doc=nodes%2Fpricing";
+
+  it("Given a page opened on a nest or document link, Then the link is remembered whole", () => {
+    expect(entryDeepLink({ pathname: "/nest/abc-123", search: "?doc=nodes%2Fpricing", hash: "" })).toBe(link);
+    expect(entryDeepLink({ pathname: "/nest/abc-123/board", search: "", hash: "#x" })).toBe("/nest/abc-123/board#x");
+    expect(entryDeepLink({ pathname: "/", search: "?nest=abc-123", hash: "" })).toBe("/?nest=abc-123");
+  });
+
+  it("Given a page opened anywhere else, Then there is no link to remember", () => {
+    expect(entryDeepLink({ pathname: "/", search: "", hash: "" })).toBeNull();
+    expect(entryDeepLink({ pathname: "/my-work", search: "?doc=x", hash: "" })).toBeNull();
+  });
+
+  it("Given the link did not open while signed out, When the person signs in, Then it is opened again", () => {
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "unreachable", entryLink: link, wasSignedIn: false, signedIn: true })).toBe(link);
+  });
+
+  it("does nothing while the person is still signed out, or was signed in all along", () => {
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "unreachable", entryLink: link, wasSignedIn: false, signedIn: false })).toBeNull();
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "unreachable", entryLink: link, wasSignedIn: true, signedIn: true })).toBeNull();
+    // Sign-in state not known yet (the session is still being read).
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "unreachable", entryLink: link, wasSignedIn: null, signedIn: true })).toBeNull();
+  });
+
+  it("does nothing when the link already opened, or there was none", () => {
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "ok", entryLink: link, wasSignedIn: false, signedIn: true })).toBeNull();
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "missing", entryLink: link, wasSignedIn: false, signedIn: true })).toBeNull();
+    expect(deepLinkToRetryAfterSignIn({ probeStatus: "unreachable", entryLink: null, wasSignedIn: false, signedIn: true })).toBeNull();
   });
 });

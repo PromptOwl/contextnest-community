@@ -4,7 +4,7 @@
  * "Dont remake what we already have as a backend": a hire CREATES THE
  * EXISTING THING through the existing service, under the existing gate —
  *
- *   hootie   → a per-nest hire row (migration 092 `hired_agents`; Hootie is a
+ *   hootie   → a per-nest hire row (migration 100 `hired_agents`; Hootie is a
  *              server switch with no per-nest row today, so this is the one
  *              row this module owns);
  *   watcher  → an agent document (nodes/service createNode) configured as a

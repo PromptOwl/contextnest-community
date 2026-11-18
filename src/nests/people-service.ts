@@ -21,7 +21,7 @@ export interface NestPerson {
   email: string;
   name: string | null;
   /** Highest-precedence path this person has in: owner beats grant.
-   *  `directory` = not on the nest at all; offered only via withDirectory. */
+   *  `directory` = not on the nest at all; found only by a typed name (findDirectoryPerson). */
   source: "owner" | "collaborator" | "team" | "steward" | "grant" | "directory";
   /** Their user id, or null for a steward invited by email who never signed up. */
   userId: string | null;
@@ -124,32 +124,6 @@ export async function canSeeRoster(
   if (people.some((p) => p.email.toLowerCase() === me)) return true;
   const access = await resolveNestAccess(nestId, userId);
   return permissionLevel(access.permission) >= permissionLevel("write");
-}
-
-/**
- * The roster, widened to every account when the operator has said this
- * server's users are one company (PEOPLE_SUGGEST_ALL_USERS). Off by default —
- * the same multi-tenant reason as /people/suggest. A directory person
- * @mentioned is added to the nest first (see mention-notify), so offering
- * them is offering an invite, not a dead tag.
- */
-export async function withDirectory(roster: NestPerson[]): Promise<NestPerson[]> {
-  if (!config.PEOPLE_SUGGEST_ALL_USERS) return roster;
-  const seen = new Set(roster.map((p) => p.email.toLowerCase()));
-  // ponytail: capped like /people/suggest; past the cap a typed email still
-  // resolves via findDirectoryPerson. Server-side ?q= if a picker needs more.
-  const rows = (await getDb().all(
-    // Access-key identities (CU-wdqcq0314u) are not people — never offered.
-    "SELECT id, email, name FROM users WHERE id != ? AND COALESCE(is_service, 0) = 0 ORDER BY email LIMIT ?",
-    [ANON_USER_ID, SUGGEST_FETCH],
-  )) as Array<{ id: string; email: string; name: string | null }>;
-  const extra: NestPerson[] = [];
-  for (const r of rows) {
-    const email = (r.email || "").trim();
-    if (!email || seen.has(email.toLowerCase())) continue;
-    extra.push({ email, name: r.name ?? null, userId: r.id, source: "directory" });
-  }
-  return [...roster, ...extra];
 }
 
 /**
