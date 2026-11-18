@@ -80,6 +80,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { parseStoredBranding } from "../shared/branding.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
+import { nestChatEnabled } from "../chat/settings.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -654,6 +655,7 @@ nestRoutes.get("/:nestId", async (c) => {
   // every org reader needs (on a shared server org readers span customers).
   const shown = withParsedBranding(nest) as Record<string, unknown> | null;
   if (shown && permission !== "owner" && permission !== "admin") delete shown.org_domains;
+  const member = await isNestMember(nestId, userId);
   return c.json({
     nest: shown,
     permission,
@@ -661,7 +663,10 @@ nestRoutes.get("/:nestId", async (c) => {
     myStewards,
     grant_only,
     // A person added to the nest (channelAccess's rule); a client shows channels when true.
-    member: await isNestMember(nestId, userId),
+    member,
+    // Team chat (C2, PO-1197) is on for this caller here: the server switch,
+    // the nest's own setting, and they are a member. Off → no chat UI at all.
+    chat: member && (await nestChatEnabled(nestId)),
     // CU-wdqcq05rz6: this caller may suggest documents and edits here, as
     // drafts for review — their permission stays 'read'.
     org_contributor:

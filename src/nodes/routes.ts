@@ -718,6 +718,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     // The version in the response is the one served (the live draft, or the
     // reconstructed latest approved version when there is pending drift).
     versions: { [node.id]: response.version },
+    hops: { [node.id]: { hop: 0 } },
+    sizes: { [node.id]: Buffer.byteLength(node.body || "", "utf8") },
   });
   const publicReader = await isPublicReader(nestId, userId);
 

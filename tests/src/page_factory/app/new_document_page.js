@@ -3,7 +3,7 @@
  *
  * Page under test: the document editor (ui/src/components/DocumentEditor.tsx)
  * opened for a new document from the nest page (ui/src/components/NestView.tsx):
- * the header's New Document button, a folder row's "New document in <folder>"
+ * the top bar's New document button (blank option), a folder row's "New document in <folder>"
  * on the Overview (ui/src/components/nest/OverviewTab.tsx) and "New here" in a
  * folder opened in the Documents tab (ui/src/components/nest/DocumentsTab.tsx).
  *
@@ -28,7 +28,7 @@ class NewDocumentPage {
     // ── App header + nest page ────────────────────────────────────────────
     this.breadcrumb = page.getByTestId('header-breadcrumb');
     // Exact: the empty Overview offers a "New document" card of its own.
-    this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true }).first();
+    this.newDocumentButton = this.page.getByTestId('top-bar-new-document');
     this.selectedTab = page.getByRole('tab', { selected: true }).first();
     this.contents = page.getByRole('navigation', { name: 'Contents' });
     this.newHereButton = this.main.getByRole('button', { name: 'New here' });
@@ -75,6 +75,7 @@ class NewDocumentPage {
   async openNewDocument() {
     this._log('Opening a new document');
     await this.newDocumentButton.click();
+    await this.page.getByTestId('new-document-blank').click();
     await this.titleInput.waitFor({ state: 'visible' });
   }
 

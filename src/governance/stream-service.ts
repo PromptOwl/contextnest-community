@@ -41,7 +41,7 @@ import { ensureNodeIndex } from "../nodes/node-index.js";
 import { normalizeTag } from "./tag-index-service.js";
 import { canUserApproveMany } from "./stewardship-service.js";
 import { deserializeClient } from "../shared/client-metadata.js";
-import { AUTO_PUBLISH_NOTE_PREFIX } from "../nodes/service.js";
+import { isAutoPublishStamp } from "../nodes/service.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export type StreamKind = "created" | "updated" | "published" | "approved" | "rejected";
@@ -189,7 +189,7 @@ export function summarize(body: string, title?: string): string {
  * unindexed scan over the filtered rows, bounded by the since-window and the
  * nest scope; revisit with a stored flag if node_versions grows large.
  */
-const AGENT_SQL = `(v.client_json LIKE '%"agent":"%' AND v.client_json NOT LIKE '%"agent":""%')`;
+export const AGENT_SQL = `(v.client_json LIKE '%"agent":"%' AND v.client_json NOT LIKE '%"agent":""%')`;
 
 /** A stored client block as a post shows it: `agent` is a name, so a
  *  non-string one (the schema allows any scalar) is dropped, not shown as
@@ -544,11 +544,13 @@ export async function getDocStream(params: {
 }
 
 /** A change note a person (or their agent) wrote. The server's own
- *  "Auto-published on create/edit (<reason>)" stamp (AUTO_PUBLISH_NOTE_PREFIX) says
- *  nothing about the change, so a post shows no note for it. */
-function personNote(raw: string | null): string | null {
+ *  "Auto-published on create/edit (<reason>)" stamp says nothing about the
+ *  change, so a post shows no note for it. The whole stamp is matched
+ *  (isAutoPublishStamp), not its prefix: a person's note that merely starts
+ *  "Auto-published on " is shown. */
+export function personNote(raw: string | null): string | null {
   const note = raw?.trim();
-  if (!note || note.startsWith(AUTO_PUBLISH_NOTE_PREFIX)) return null;
+  if (!note || isAutoPublishStamp(note)) return null;
   return note;
 }
 

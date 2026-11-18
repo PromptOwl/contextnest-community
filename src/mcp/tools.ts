@@ -134,7 +134,8 @@ import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import * as uploads from "../nodes/upload-service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
-import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
+import { directHits, flushAccessLog, recordNodeAccess, type AccessAction } from "../governance/access-log.js";
+import { describePull, describeStep, getPull, listPulls, pullViewer } from "../governance/pull-log-service.js";
 import {
   clientToolField,
   mergeClient,
@@ -148,8 +149,17 @@ import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { PUBLIC_LINK_TOOL_DEFINITIONS, PUBLIC_LINK_TOOL_NAMES, isPublicLinkTool, runPublicLinkTool } from "./public-link-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
+import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
 import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
 import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMessageTool, runMessageTool } from "./message-tools.js";
+import { messageHitsForDocumentSearch } from "../channels/message-search.js";
+import { isMemoryTool, runMemoryTool } from "./memory-tools.js";
+import { isNestAgentTool, runNestAgentTool } from "./nest-agent-tools.js";
+import { dropReservedAgent } from "../agents/reserved.js";
+import { isHireTool, runHireTool } from "./hire-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -158,7 +168,8 @@ import { actingAgentHandle, markMentionDone } from "../mentions/mention-index.js
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
-import { streamToolEnabled, streamToolResult } from "./stream-tool.js";
+import { StreamToolInput, streamToolEnabled, streamToolResult } from "./stream-tool.js";
+import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -447,6 +458,9 @@ export interface McpToolContext {
    * call by handleToolCall.
    */
   servedVersions?: Map<string, number>;
+  /** Bytes of each document body handed over during this call, filled in
+   *  next to servedVersions — the size the pull replay shows (po-1252). */
+  servedBytes?: Map<string, number>;
   /** Capability of the credential driving this call. 'read' (a read-only key)
    *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
    *  when unset (cookie sessions, unscoped legacy keys, open mode). */
@@ -497,20 +511,41 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_comments",
   // Channels (PO-1179, experimental): reading a timeline or thread.
   "context_channel_read",
+  // Team chat C2 (PO-1197): the read actions; the write actions of the same
+  // tools are refused inside (chat-tools.ts), and a read-only key is offered
+  // a read-only view of each (CHAT_READ_KEY_TOOL_VIEWS).
+  ...CHAT_READ_TOOL_NAMES,
   // …and listing them (PO-1190, AC-AX-06). The tool also creates and
   // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
   // readKeyToolView) and runChannelTool refuses every other action.
   "context_channels",
+  // Agent profiles (team chat C7): a read; setting a description is refused
+  // for a read-only key inside the tool.
+  "context_agents",
+  // Channel messages (PO-1196): the permalink lookup and search read only;
+  // context_message (react, edit, …) writes and is not here.
+  "context_message_read",
+  "context_channel_search",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
   "context_stream",
   // My Work (PO-1180): the caller's own queue, read-only.
   "context_my_work",
+  // Hire (PO-1201): the catalog, the hired list, and the recommendations
+  // list (a read-only key is offered a list-only view; dismiss is refused).
+  "context_hire_catalog",
+  "context_hired_agents",
+  "context_agent_recommendations",
   "context_versions",
+  "context_pull_log",
   "context_deletion_queue",
   "context_unsynced_list",
   "context_relations",
+  // Memory snowball (team chat C6, PO-1199): the decision ledger and the
+  // channel knowledge view are reads (members only, checked in the service).
+  "context_decisions",
+  "context_channel_knowledge",
   "context_boards",
   "context_board_items",
   "context_fields",
@@ -581,6 +616,9 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_metacognition_configure",
   "context_metacognition_run",
   "context_metacognition_remove",
+  // The channel watcher (team chat C6, PO-1199) is the metacognition agent
+  // with a channel trigger: setting and running it is owner/admin too.
+  "context_channel_watch",
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
@@ -1588,18 +1626,8 @@ export const TOOL_DEFINITIONS = [
     name: "context_stream",
     description:
       "Read the document stream: recent versions, newest first — who changed what (the person, and the agent they wrote through), the change note, an excerpt, open comment count, and whether you may review it. Reply to a post with context_comment (its id), approve or reject one in review with context_approve / context_reject. Pass `since` (the newest `at` you have seen) to get only what is new.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
-        source: { type: "string", enum: ["agent", "human"], description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
-        author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
-        tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
-        type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },
-        limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
-        offset: { type: "number", description: "Skip this many posts (paging)." },
-      },
-    },
+    // Generated from the shared zod schema: no inline literal (lint:mcp-schemas).
+    inputSchema: mcpInputSchema(StreamToolInput),
   },
   {
     name: "context_submit_review",
@@ -1663,6 +1691,20 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["note"],
+    },
+  },
+  {
+    name: "context_pull_log",
+    description:
+      "Lists the context pull log: each retrieval made in this nest (context_get, context_search, context_query, context_resolve, REST search / query / context, Hootie), newest first, with the documents it handed over in order — version served, size, and where the server walked the graph, the hop and the document each was reached from. Pass `pull_id` for one pull's full trace. Who pulled (the person and the agent) is shown only to callers with write access or above. Use it to see what context an agent actually got.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        pull_id: { type: "string", description: "One pull's id (from a listing) — returns that pull's trace" },
+        limit: { type: "number", description: "Pulls per page, 1-50 (default 20)" },
+        before: { type: "string", description: "The `nextBefore` cursor from the previous page" },
+        agent: { type: "string", description: "Only pulls made through this agent (case-insensitive)" },
+      },
     },
   },
   {
@@ -1889,6 +1931,16 @@ async function resolveLlmBody(
   node: ContextNode,
   gate?: BatchedBodyGate,
 ): Promise<string | null> {
+  const body = await resolveLlmBodyGated(ctx, node, gate);
+  if (body !== null) ctx.servedBytes?.set(node.id, Buffer.byteLength(body, "utf8"));
+  return body;
+}
+
+async function resolveLlmBodyGated(
+  ctx: McpToolContext,
+  node: ContextNode,
+  gate?: BatchedBodyGate,
+): Promise<string | null> {
   // Enforce the SAME per-node access gate as the REST retrieval path. This was
   // missing here — MCP callers bypassed canUserAccess and could read every
   // approved node's body regardless of document/tag/steward scope. Route through
@@ -2047,6 +2099,7 @@ async function resolveOwnDraft(
     return null;
   }
   ctx.servedVersions?.set(node.id, current);
+  ctx.servedBytes?.set(node.id, Buffer.byteLength(node.body || "", "utf8"));
   return {
     body: node.body || "",
     version: current,
@@ -2063,6 +2116,9 @@ const ACCESS_BY_TOOL: Record<string, AccessAction> = {
   context_query: "retrieve",
   context_search: "retrieve",
 };
+
+/** Read tools whose every document is a direct hit (hop 0) for the pull replay. */
+const DIRECT_HIT_TOOLS = new Set(["context_get", "context_search"]);
 
 function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
   const action = ACCESS_BY_TOOL[toolName];
@@ -2092,6 +2148,11 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     userEmail: ctx.userEmail,
     client: ctx.client,
     ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
+    ...(ctx.servedBytes?.size ? { sizes: Object.fromEntries(ctx.servedBytes) } : {}),
+    // A get or a search hands over direct hits (an allowlist, so a tool that
+    // walks the graph is never recorded as "matched"). context_query walks in
+    // the engine, which reports no per-document hop — left unknown.
+    ...(DIRECT_HIT_TOOLS.has(toolName) ? { hops: directHits(ids) } : {}),
     detail: toolName,
   });
 }
@@ -2116,7 +2177,10 @@ export async function handleToolCall(
   // never a partial write.
   let client: ClientMetadata | undefined;
   try {
-    client = mergeClient(ctx.client, parseClientMetadata(args.client));
+    // The caller's own `client` may not claim a reserved agent handle (team
+    // chat C7); the transport's part was cleaned by attributeRequest, and a
+    // server-internal caller (Hootie's reads) keeps its own attribution.
+    client = mergeClient(ctx.client, dropReservedAgent(parseClientMetadata(args.client)));
   } catch (err) {
     void logTraceEvent({
       kind: "mcp",
@@ -2129,7 +2193,7 @@ export async function handleToolCall(
     });
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
-  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map() };
+  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map(), servedBytes: new Map() };
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
@@ -2998,10 +3062,23 @@ async function runTool(
         accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
       }
       const count = accessible.length;
+      // Channel messages that match (PO-1196): the same matcher over the
+      // channels this member can read; [] while channels are off.
+      const messageHits = await messageHitsForDocumentSearch(
+        { userId, userEmail },
+        new Map([[nestId, nestId]]),
+        query,
+        limit,
+      );
+      const messagesText = messageHits?.length
+        ? `\n\nChannel messages matching "${query}" (${messageHits.length}):\n${messageHits
+            .map((m) => `- **${m.actor.label}** in #${m.channel} (${m.created_at}) [thread ${m.thread_id}; message ${m.message_id}]: ${m.excerpt}`)
+            .join("\n")}`
+        : "";
       if (count === 0)
         return {
-          text: `No nodes matched search: "${query}"`,
-          data: { results: [], count },
+          text: `No nodes matched search: "${query}"${messagesText}`,
+          data: { results: [], count, ...(messageHits ? { messages: messageHits } : {}) },
         };
       // Bodies stay gated exactly as before: under stewardship the LLM only
       // ever sees the approved version, and a hit with no approved version
@@ -3031,14 +3108,15 @@ async function runTool(
           ? ` (showing the first ${page.length}; pass \`limit\` for more)`
           : "";
       return {
-        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${webLinkPatternProse(ctx)}`,
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${messagesText}${webLinkPatternProse(ctx)}`,
         // `count` is everything found (like REST); `results` is the page.
         // Bodies are the gated ones the prose is built from. No `score`:
         // this is a term-containment filter with title-first ordering, not
-        // a ranked search.
+        // a ranked search. `messages` are the channel hits (PO-1196).
         data: {
           results: page.map(({ node: n, body }) => summarizeNode(n, body)),
           count,
+          ...(messageHits ? { messages: messageHits } : {}),
         },
       };
     }
@@ -3413,12 +3491,14 @@ async function runTool(
       let total = 0;
       const resolved: string[] = [];
       const handed: string[] = [];
+      const handedBytes: Record<string, number> = {};
       for (const { node: n, body } of resolvedBodies) {
         if (body === null) continue; // not visible / no approved version yet
         const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
         handed.push(n.id);
+        handedBytes[n.id] = Buffer.byteLength(entry, "utf8");
         total += entry.length;
       }
       recordNodeAccess({
@@ -3429,6 +3509,7 @@ async function runTool(
         userId: ctx.userId,
         userEmail,
         client: ctx.client,
+        sizes: handedBytes,
         detail: "context_resolve",
       });
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
@@ -3580,6 +3661,11 @@ async function runTool(
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
+      // A channel or a conversation while the nest's chat is off (C2): the
+      // same answer REST gives, not found.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) {
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
       if (oneThread) {
         const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
         if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
@@ -3696,6 +3782,16 @@ async function runTool(
         const t = await getThread(threadId);
         if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
       }
+      // A direct or group conversation (team chat C2) has no document: a
+      // virtual node, so the same read, posting and thread checks run on it.
+      if (!node && config.TEAM_CHAT_ENABLED && !args.channel && !args.title) {
+        let cid = conversationIdOf(args.id);
+        if (!cid && !args.id && threadId) {
+          const t = await getThread(threadId);
+          if (t && t.nestId === nestId && isConversationId(t.nodeId)) cid = t.nodeId;
+        }
+        if (cid) node = { id: cid, frontmatter: { title: "Conversation" } } as unknown as ContextNode;
+      }
       const named = args.channel || args.title || args.id;
       const notFound = async () =>
         toolError(
@@ -3713,15 +3809,17 @@ async function runTool(
         // title — otherwise the refusal confirms what the caller guessed.
         return notFound();
       }
+      // A channel or a conversation while the nest's chat is off (C2): not found, as on REST.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) return notFound();
       const label = node.frontmatter.title || node.id;
 
       // A channel takes posts — and resolves — from people added to the nest
       // only; the same rule the REST comment routes apply.
-      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail);
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail, isResolve ? undefined : body);
       if (channelRefusal) {
         return toolError(
           channelRefusal.error,
-          channelRefusal.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+          channelRefusal.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
         );
       }
 
@@ -4052,6 +4150,44 @@ async function runTool(
           : `Rows updated in **${node.frontmatter.title}** — ${a.appended} added, ${a.updated} updated, ${a.deleted} deleted; v${r.version}, ${r.state}${r.review_id ? `, review ${r.review_id}` : ""}${r.review_error ? ` (review not submitted: ${r.review_error})` : ""}`,
         data: r,
       };
+    }
+
+    case "context_pull_log": {
+      // Read model over the access log (po-1252) — the same service and the
+      // same who-sees-whom rule as GET /nests/:id/pulls.
+      const viewer = await pullViewer(nestId, userId, userEmail, { readOnlyKey: ctx.capability === "read" });
+      await flushAccessLog(nestId);
+      if (args.pull_id !== undefined) {
+        if (typeof args.pull_id !== "string" || !args.pull_id.trim()) {
+          return toolError("pull_id must be a non-empty string", "VALIDATION_FAILED");
+        }
+        const pull = await getPull({ nestId, viewer, pullId: args.pull_id.trim() });
+        if (!pull) return toolError(`No pull "${args.pull_id}" here that you can see.`, "DOCUMENT_NOT_FOUND");
+        return {
+          text: [describePull(pull), "", ...pull.steps.map(describeStep)].join("\n"),
+          data: { pull },
+        };
+      }
+      if (args.agent !== undefined && (typeof args.agent !== "string" || args.agent.length > 200)) {
+        return toolError("agent must be a string of at most 200 characters", "VALIDATION_FAILED");
+      }
+      if (args.before !== undefined && typeof args.before !== "string") {
+        return toolError("before must be the nextBefore string from a previous page", "VALIDATION_FAILED");
+      }
+      const page = await listPulls({
+        nestId,
+        viewer,
+        limit: args.limit === undefined ? undefined : Number(args.limit),
+        before: args.before,
+        agent: args.agent,
+      });
+      const lines = page.pulls.map(describePull);
+      const head = !page.accessLogEnabled
+        ? "The access log is off for this nest, so no new pulls are recorded."
+        : page.pulls.length
+          ? `${page.pulls.length} pull(s), newest first${page.hasMore ? ` (more: pass before="${page.nextBefore}")` : ""}:`
+          : "No pulls recorded yet.";
+      return { text: [head, ...lines].join("\n"), data: page as unknown as Record<string, unknown> };
     }
 
     case "context_task_log": {
@@ -5290,6 +5426,14 @@ async function runTool(
       if (isChannelTool(toolName)) {
         return runChannelTool(toolName, args, ctx);
       }
+      // Channel messages (PO-1196): same switch, re-checked in runMessageTool.
+      if (isMessageTool(toolName)) {
+        return runMessageTool(toolName, args, ctx);
+      }
+      // Team chat C2 (PO-1197): registered while TEAM_CHAT_ENABLED is on.
+      if (isChatTool(toolName)) {
+        return runChatTool(toolName, args, ctx);
+      }
       // My Work (PO-1180): always registered (mcp/routes.ts).
       if (isMyWorkTool(toolName)) {
         return runMyWorkTool(toolName, args, ctx);
@@ -5300,6 +5444,21 @@ async function runTool(
       }
       if (isPublicLinkTool(toolName)) {
         return runPublicLinkTool(toolName, args, ctx);
+      }
+      // Memory snowball (team chat C6): remember / correct / decisions always;
+      // the channel tools re-check the switch.
+      if (isMemoryTool(toolName)) {
+        return runMemoryTool(toolName, args, ctx);
+      }
+      // The nest in the conversation (team chat C7): registered with the
+      // channel tools (mcp/routes.ts); runNestAgentTool re-checks the switch.
+      if (isNestAgentTool(toolName)) {
+        return runNestAgentTool(toolName, args, ctx);
+      }
+      // Hire agents and recommendations (PO-1201): registered while
+      // EXPERIMENTAL_AGENT_STREAM is on; runHireTool re-checks the switch.
+      if (isHireTool(toolName)) {
+        return runHireTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

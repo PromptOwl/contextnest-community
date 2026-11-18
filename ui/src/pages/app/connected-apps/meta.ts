@@ -6,7 +6,7 @@ export const meta: PageMeta = {
   label: "Connected apps",
   icon: Plug,
   order: 12,
-  group: "workspace",
+  group: "settings",
   // Only agents that signed in through MCP OAuth appear here.
   visible: ({ mcpOauthEnabled }) => !!mcpOauthEnabled,
 };

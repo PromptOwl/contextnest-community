@@ -323,6 +323,10 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
   it("refuses a board name that matches several boards, and takes the id", async () => {
     const twin = await jsonRequest(app, "POST", `/nests/${nestId}/boards`, { name: "Sprint board", private: true }, owner.apiKey);
     const twinId = twin.data.board.id;
+    // The API numbers a taken name now (PO-1244); a duplicate from before that
+    // still exists in old data, so make one directly.
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("UPDATE boards SET name = ? WHERE id = ?", ["Sprint board", twinId]);
     try {
       const byName = await mcp(owner.apiKey, "context_board_items", { board: "sprint board" });
       expect(byName.isError).toBe(true);

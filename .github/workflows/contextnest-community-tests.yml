@@ -20,6 +20,9 @@
 #   vars.TEST_ACCOUNT2_METHOD    auth instead of the login form (default: manual)
 #   vars.TEST_URL                target server URL (defaults to the QA Cloud Run
 #                                alias https://nest-dev.promptowl.ai)
+#   vars.CN_EXPECT_STREAM_FEED   "1" once the target serves the stream feed with
+#                                EXPERIMENTAL_DOC_STREAM on: the CN-ST suite then
+#                                fails instead of skipping (see tests/env.template)
 
 name: ContextNest Community Tests
 
@@ -134,6 +137,7 @@ jobs:
           TEST_ACCOUNT2_METHOD: ${{ vars.TEST_ACCOUNT2_METHOD }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
           BASE_URL: ${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
+          CN_EXPECT_STREAM_FEED: ${{ vars.CN_EXPECT_STREAM_FEED }}
           ENVIRONMENT_NAME: ${{ github.event.inputs.environment || 'dev' }}
         run: |
           echo "🔐 Using test account credentials for E2E tests"

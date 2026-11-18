@@ -41,14 +41,14 @@ import {
   compactTime,
   initialsOf,
   mergeStreamPages,
-  newPostCount,
-  pollDelay,
   postAction,
   postIdentity,
   toggleFacet,
   type StreamFacetKey,
   type StreamFilters,
   type StreamSource,
+  reviewedPatch,
+  startNewPostsPoll,
 } from "../lib/doc-stream";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -118,37 +118,26 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
   // no posts, no review verdicts, no version reads. A hidden tab skips its
   // turn; a failed poll backs off (pollDelay) instead of retrying every 30 s.
   const newest = items[0]?.at;
+  // The poll reads the shown posts through a ref: a reply or an approve
+  // patches `items`, and that must not restart the 30 s timer (po-1375).
+  const shown = useRef(items);
+  shown.current = items;
   useEffect(() => {
     if (!newest) return;
-    let stop = false;
-    let failures = 0;
-    let timer: number | undefined;
-    const schedule = () => {
-      if (!stop) timer = window.setTimeout(() => void tick(), pollDelay(failures));
-    };
-    const tick = async () => {
-      if (document.visibilityState === "visible") {
-        try {
-          const p = await api.getDocStream(
+    return startNewPostsPoll({
+      newest,
+      shown: () => shown.current,
+      count: async () =>
+        (
+          await api.getDocStream(
             { ...filters, source, since: newest, limit: 1, facets: false, items: false },
             pinnedNestId,
-          );
-          failures = 0;
-          if (!stop) setFresh(newPostCount(items, newest, p.total));
-        } catch (e) {
-          // A failed poll leaves the pill as it was and waits longer next time.
-          failures++;
-          console.warn("[stream] new-posts poll failed", e);
-        }
-      }
-      schedule();
-    };
-    schedule();
-    return () => {
-      stop = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [newest, items, filters, source, pinnedNestId]);
+          )
+        ).total,
+      onFresh: setFresh,
+      onError: (e) => console.warn("[stream] new-posts poll failed", e),
+    });
+  }, [newest, filters, source, pinnedNestId]);
 
   const showFresh = () => {
     top.current?.scrollIntoView({ block: "start", behavior: "smooth" });
@@ -343,9 +332,9 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
                   ),
                 )
               }
-              onReviewed={(status) =>
+              onReviewed={(verdict) =>
                 // Say what just happened, as the server will on the next read.
-                patch(item.id, (i) => ({ ...i, status, kind: status === "rejected" ? "rejected" : "approved", review: null }))
+                patch(item.id, (i) => reviewedPatch(i, verdict))
               }
             />
           ))}
@@ -433,7 +422,7 @@ export function StreamPost({
   onToggleReplies: () => void;
   onOpen: (item: api.StreamItem, threadId?: string) => void;
   onCommented: () => void;
-  onReviewed: (status: string) => void;
+  onReviewed: (verdict: "approved" | "rejected") => void;
 }) {
   const { name, agent } = postIdentity(item);
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
@@ -455,7 +444,7 @@ export function StreamPost({
     try {
       await api.approveNode(item.nestId, item.nodeId);
       toast.success(`Approved "${item.title}"`);
-      onReviewed("published");
+      onReviewed("approved");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't approve.");
     } finally {
