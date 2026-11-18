@@ -11,9 +11,10 @@
  * What you get:
  *   - published docs in governed/ and tasks assigned to you across stages,
  *     some overdue, some done
- *   - a second user, demo-agent@example.com, who files five changes for your
- *     review: two Grok signals, two Claude tasks (one short, one without a listener) and an
- *     edit to a published doc, each carrying agent, session and listener
+ *   - a second user, demo-agent@example.com, who files nine changes for your
+ *     review: two Grok signals, two Claude tasks, three new documents, and edits
+ *     to two published docs (one by an agent, one by a person). Agent changes
+ *     carry agent, session and listener
  *
  * The agent is a real second account because a person can't approve their own
  * change (separation of duties).
@@ -84,7 +85,7 @@ const playbook = await make({
   tags: ["#playbook"],
   content: "# Objection handling\n\nLead with the audit trail. Every change is versioned and attributable.\n",
 });
-await make({
+const northwind = await make({
   title: "Competitor profile: Northwind Labs",
   folder: "governed",
   type: "document",
@@ -208,8 +209,64 @@ const d1 = await make(
 );
 await submit(d1.id, "Second signal from the same sweep.");
 
+// More document approvals: new pages, an edit by a person (no agent), and an
+// urgent one, so the queue has a mix to sort and review.
+const d2 = await make(
+  {
+    title: "Competitor profile: Tidewater",
+    folder: "governed",
+    type: "document",
+    tags: ["#competitor"],
+    content:
+      "# Tidewater\n\n## Positioning\n\nSells compliance reporting to mid-size banks. Leads with dashboards, not audit trails.\n\n## Objection handling\n\nAsk what the dashboard shows when an agent changes a record at 2 a.m.\n",
+    client: { agent: "claude", session_id: "s-31d8", listener },
+  },
+  agentKey,
+);
+await submit(d2.id, "New profile from this week's research. Dated facts are in signals.");
+
+const d3 = await make(
+  {
+    title: "Why audit trails beat promises",
+    folder: "open/content/blog",
+    type: "document",
+    tags: ["#content", "#stage:draft"],
+    content:
+      "# Why audit trails beat promises\n\nA vendor can promise an agent behaves. A log shows what it touched.\n\n## What to ask for\n\n1. Who changed the record\n2. Which agent, in which session\n3. Who approved it, and when\n",
+    client: { agent: "claude", session_id: "s-31d8", listener },
+  },
+  agentKey,
+);
+await submit(d3.id, "First draft for the content calendar. Needs your voice pass.");
+
+const d4 = await make(
+  {
+    title: "Partner pricing and referral terms",
+    folder: "governed",
+    type: "document",
+    tags: ["#partner"],
+    content:
+      "# Partner pricing and referral terms\n\nReferral fee is paid on closed deals only. Wording is with legal and not final.\n",
+    client: { agent: "grok", session_id: "s-77b0", listener },
+  },
+  agentKey,
+);
+await submit(d4.id, "Needed before Friday's partner call.", "urgent");
+
+// A person's edit, not an agent's: no client block, so the pane shows who and when only.
+await must(
+  "PATCH",
+  `${N}/nodes/${northwind.id}`,
+  {
+    content:
+      "# Northwind Labs\n\nPositioning and objection handling live here. Dated facts go in signals.\n\n## Where they win\n\nStrong in regulated support teams. Weak on version history.\n",
+  },
+  agentKey,
+);
+await submit(northwind.id, "Added where they win, from the call notes.");
+
 console.log(`
 Done. Open ${BASE}, pick "${nest.name}", then go to My Work and the nest's Review tab.
-Expect 5 changes waiting on you, 6 open tasks and 2 finished ones.
+Expect 9 changes waiting on you (5 documents, 2 tasks, 2 signals), 6 open tasks and 2 finished ones.
 Agent login for the other side: ${AGENT_EMAIL} / ${AGENT_PASSWORD}
 `);
