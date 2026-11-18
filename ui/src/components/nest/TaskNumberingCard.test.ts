@@ -74,4 +74,9 @@ describe("draftProblem", () => {
     expect(draftProblem({ ...base, prefix: "1QA" })).toMatch(/starts with a letter/);
     expect(draftProblem(base)).toBeNull();
   });
+  it("refuses Start at 0 in plain words (PO-1217)", () => {
+    expect(draftProblem({ ...base, startAt: "0" })).toBe("Start at must be a number from 1 to 999999999.");
+    expect(draftProblem({ ...base, startAt: "1000000000" })).toMatch(/Start at/);
+    expect(draftProblem({ ...base, startAt: "500" })).toBeNull();
+  });
 });

@@ -90,6 +90,9 @@ export function draftProblem(d: Draft): string | null {
   const prefix = d.prefix.trim().toUpperCase();
   if (d.numbering && !prefix) return "Pick a prefix (2–6 letters or digits) before saving with numbering on.";
   if (prefix && !/^[A-Z][A-Z0-9]{1,5}$/.test(prefix)) return "A prefix is 2–6 letters or digits and starts with a letter.";
+  // The box takes digits only, so this is 0 or past the cap (PO-1217).
+  const start = d.startAt.trim();
+  if (start && (Number(start) < 1 || Number(start) > 999_999_999)) return "Start at must be a number from 1 to 999999999.";
   return null;
 }
 
