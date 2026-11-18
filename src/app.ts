@@ -225,7 +225,7 @@ import {
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "./auth/license-copy.js";
 import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
-import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, licensedReadsAllowed, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
@@ -2561,7 +2561,7 @@ export function createApp(): Hono<AuthEnv> {
       );
     }
     const userId = c.get("userId");
-    if (!getCurrentLicense()?.valid) {
+    if (!(await licensedReadsAllowed())) {
       const denial = await readOnlyDenial(userId);
       if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
     }
@@ -3123,6 +3123,8 @@ export function createApp(): Hono<AuthEnv> {
       const isAgentActivityPath =
         parts[1] === "agent-activity" &&
         (parts.length === 2 || (parts.length === 3 && parts[2] === "undo"));
+      // Server-level MCP twins of these reads are gated by
+      // SERVER_LICENSED_READ_TOOLS (src/mcp/server-routes.ts): keep in step.
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -3164,7 +3166,7 @@ export function createApp(): Hono<AuthEnv> {
       const isPushRelease = path.includes("/pending-pushes");
       const needsLicense =
         !isPushRelease && (c.req.method !== "GET" || isGovernance);
-      if (needsLicense && !getCurrentLicense()?.valid) {
+      if (needsLicense && !(await licensedReadsAllowed())) {
         const denial = await readOnlyDenial(userId);
         if (denial) return deny(503, denial.error, denial.extra);
       }

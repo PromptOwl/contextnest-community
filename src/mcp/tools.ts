@@ -167,7 +167,8 @@ import { actingAgentHandle, markMentionDone } from "../mentions/mention-index.js
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
-import { streamToolEnabled, streamToolResult } from "./stream-tool.js";
+import { StreamToolInput, streamToolEnabled, streamToolResult } from "./stream-tool.js";
+import { mcpInputSchema } from "../workflow/agent-event-schema.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -1620,18 +1621,8 @@ export const TOOL_DEFINITIONS = [
     name: "context_stream",
     description:
       "Read the document stream: recent versions, newest first — who changed what (the person, and the agent they wrote through), the change note, an excerpt, open comment count, and whether you may review it. Reply to a post with context_comment (its id), approve or reject one in review with context_approve / context_reject. Pass `since` (the newest `at` you have seen) to get only what is new.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
-        source: { type: "string", enum: ["agent", "human"], description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
-        author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
-        tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
-        type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },
-        limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
-        offset: { type: "number", description: "Skip this many posts (paging)." },
-      },
-    },
+    // Generated from the shared zod schema: no inline literal (lint:mcp-schemas).
+    inputSchema: mcpInputSchema(StreamToolInput),
   },
   {
     name: "context_submit_review",
