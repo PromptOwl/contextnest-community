@@ -191,6 +191,7 @@ const TABS: {
       "provider_keys",
       "anthropic_base_url",
       "anthropic_api_key",
+      "model_fallback_promptowl",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -2565,6 +2566,29 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         Keep current key
                       </button>
                     )}
+                  </div>
+                  {/* po-1419: when an own key fails (out of credit, refused,
+                      rate-limited, down) the call is retried once on
+                      PromptOwl's gateway, on credits. Off for servers that
+                      must keep content off PromptOwl. */}
+                  <div className="flex items-start justify-between gap-4 border-t pt-4">
+                    <div className="space-y-1">
+                      <Label htmlFor="model-fallback-promptowl">Fall back to PromptOwl's gateway</Label>
+                      <p className="text-xs text-muted-foreground">
+                        When this gateway or a nest's own key fails (out of credit, key refused,
+                        rate-limited, or down), the call is retried once on PromptOwl's gateway and
+                        metered in credits. Your key never goes to PromptOwl. Turn this off if nest
+                        content must not leave your network.
+                        {settings?.model_fallback_available === false &&
+                          " This licence has no PromptOwl gateway, so there is nothing to fall back to."}
+                      </p>
+                    </div>
+                    <Switch
+                      id="model-fallback-promptowl"
+                      checked={draft.model_fallback_promptowl !== false}
+                      onCheckedChange={(v) => set({ model_fallback_promptowl: v })}
+                      data-testid="settings-model-fallback"
+                    />
                   </div>
                 </CardContent>
               </Card>

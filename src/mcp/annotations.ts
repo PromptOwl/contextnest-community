@@ -189,6 +189,9 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_links_list: read("List identity links", "Lists identity links."),
   context_surfaces_link_reviews_list: read("List link reviews", "Lists pending link reviews."),
   context_surfaces_settings_get: read("View Surfaces settings", "Returns the Surfaces settings."),
+  // The model route (po-1419): a server setting.
+  context_model_route_get: read("View model route", "Returns whether a failing own model key falls back to PromptOwl's gateway."),
+  context_model_route_update: overwrite("Set model fallback", "Overwrites the server's fallback setting; turning it on lets model calls reach PromptOwl's gateway when an own key fails."),
   context_surfaces_windows_list: read("View judgement log", "Returns the verdict log."),
   context_surfaces_proposals_list: read("List Surfaces proposals", "Lists proposals."),
   context_surfaces_my_pending: read("View my pending proposals", "Lists the caller's pending proposals."),

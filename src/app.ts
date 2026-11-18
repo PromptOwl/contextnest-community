@@ -207,6 +207,7 @@ import {
   getPendingRejections,
   getEntitlement,
   getOwnGateway,
+  getModelGateway,
   setOwnProviderKey,
   validateLicense,
   OWN_KEY_PROVIDERS,
@@ -1081,6 +1082,11 @@ export function createApp(): Hono<AuthEnv> {
       : null,
     // Which key Hootie's calls use: own (the server's gateway) or promptowl (credits).
     model_source: resolveModelCredential()?.source ?? null,
+    // po-1419: an own key that fails (billing, auth, rate limit, outage) is
+    // retried once on PromptOwl's gateway. Default on; it acts only when the
+    // licence has a gateway (model_fallback_available).
+    model_fallback_promptowl: config.MODEL_FALLBACK_PROMPTOWL,
+    model_fallback_available: !!getModelGateway(),
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
     // Surfaces (Slack → nest). The buffer key is write-only: presence only.
@@ -1443,6 +1449,11 @@ export function createApp(): Hono<AuthEnv> {
         name: "HOOTIE_ENABLED",
         value: body.hootie_enabled ? "true" : "false",
       });
+    }
+    if ("model_fallback_promptowl" in body) {
+      if (typeof body.model_fallback_promptowl !== "boolean") addError("model_fallback_promptowl", "Must be true or false.");
+      // Both states written, so the choice beats a deploy env of either value.
+      else pending.push({ name: "MODEL_FALLBACK_PROMPTOWL", value: body.model_fallback_promptowl ? "true" : "false" });
     }
     if ("hootie_model" in body) {
       const v = String(body.hootie_model ?? "").trim();

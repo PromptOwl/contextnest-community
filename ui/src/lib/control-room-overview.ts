@@ -71,7 +71,7 @@ export interface LedgerEntry {
   at: string;
   nest: { id: string; label: string };
   agent: { node_id: string | null; name: string | null; source: string };
-  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null } | null;
+  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null; model_fallback?: string | null } | null;
   verdict: { code: string | null; reason_code: string | null; kinds: string[] | null; message_count: number | null };
   decision: { verdict: string | null; reason_code: string | null; confidence: number | null; summary?: string | null; evidence?: Array<{ kind: string; ref: string }> | null } | null;
   proposal: { id: string | null; title?: string | null; state: string | null; edited: boolean; counts: Record<string, number> } | null;
@@ -474,12 +474,19 @@ export function whatCell(e: LedgerEntry): { title: string; sub: string | null; r
   if (code === "error") return { title: "Run failed", sub: reasonLabel(e.verdict.reason_code), redacted: false };
   const title = rowTitle(e);
   if (code === "no_op" || !title) {
-    const sub = msgs != null ? `${msgs} ${msgs === 1 ? "message" : "messages"} reviewed · no text kept` : e.decision?.summary ?? null;
+    const base = msgs != null ? `${msgs} ${msgs === 1 ? "message" : "messages"} reviewed · no text kept` : e.decision?.summary ?? null;
+    const sub = [base, fallbackLine(e)].filter(Boolean).join(" · ") || null;
     return { title: reasonLabel(e.decision?.reason_code ?? e.verdict.reason_code), sub, redacted: false };
   }
   const kind = e.verdict.kinds?.[0]?.replace(/_/g, " ");
   const tail = msgs != null ? `${msgs} ${msgs === 1 ? "message" : "messages"}` : null;
-  return { title, sub: [kind, tail].filter(Boolean).join(" · ") || null, redacted: false };
+  return { title, sub: [kind, tail, fallbackLine(e)].filter(Boolean).join(" · ") || null, redacted: false };
+}
+
+/** po-1419: a run the own key couldn't answer, answered on PromptOwl's gateway. */
+export function fallbackLine(e: LedgerEntry): string | null {
+  const code = e.run?.model_fallback;
+  return code ? `answered via PromptOwl gateway (fallback: ${code})` : null;
 }
 
 /** The ledger's "Source" cell. */

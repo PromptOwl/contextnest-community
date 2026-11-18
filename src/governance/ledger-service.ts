@@ -603,6 +603,12 @@ function proposalState(r: { n_prop: unknown; n_app: unknown; n_edit: unknown; n_
   return "pending";
 }
 
+/** A run trace's fallback reason code (po-1419), when the run fell back. */
+function fallbackCodeOf(trace: Record<string, unknown> | null): string | null {
+  const route = trace?.model_route as { fallback?: unknown } | undefined;
+  return typeof route?.fallback === "string" && /^model_[a-z_]{1,30}$/.test(route.fallback) ? route.fallback : null;
+}
+
 /** One ledger row, serialised and redacted for this viewer. */
 function serialise(
   r: LedgerRow,
@@ -624,6 +630,9 @@ function serialise(
           outcome: r.run_status ? outcomeOf(r.run_status, trace as any) : null,
           cost_usd: costMicros / 1_000_000,
           external_ref: r.external_ref,
+          // po-1419: the run answered on PromptOwl's gateway after the own key
+          // failed; the reason code only (never the error's text).
+          model_fallback: fallbackCodeOf(trace),
         }
       : null,
     verdict: {

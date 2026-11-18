@@ -10,6 +10,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
+import { isBillingError } from "../shared/model-route.js";
 
 export interface ModelTurn {
   role: "user" | "assistant";
@@ -132,7 +133,9 @@ export async function* streamRound(params: RoundParams): AsyncGenerator<string, 
   try {
     return confirm(yield* answer(client, params, true, state));
   } catch (err) {
-    if (state.started || (err as { status?: number })?.status !== 400) throw err;
+    // An out-of-credit 400 is about the account, not the tuning: it goes up
+    // as itself, for the route's fallback (po-1419) or the person's message.
+    if (state.started || (err as { status?: number })?.status !== 400 || isBillingError(err)) throw err;
     console.log(`[hootie] model=${params.model} rejected the tuned request (400); retrying bare`);
     const bareState = { started: false };
     let result: RoundResult;
@@ -148,7 +151,7 @@ export async function* streamRound(params: RoundParams): AsyncGenerator<string, 
 
 /** A bare request with tools refused before any output → ToolsRejectedError. */
 function toolRejection(err: unknown, params: RoundParams, key: string, started: boolean): unknown {
-  if (!params.tools?.length || started || (err as { status?: number })?.status !== 400) return err;
+  if (!params.tools?.length || started || (err as { status?: number })?.status !== 400 || isBillingError(err)) return err;
   console.log(`[hootie] ${key} refused a request with tools (400); answering without`);
   // Only a first round says the model refuses tools: a later one already took
   // them, so its 400 is about the tool history, not tools.

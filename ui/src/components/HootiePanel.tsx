@@ -85,6 +85,8 @@ interface Message {
   failed?: boolean;
   /** Assistant only: answered without tools, and why. */
   answerOnly?: HootieAnswerOnly | null;
+  /** Assistant only: answered on PromptOwl's gateway after the own key failed (po-1419). */
+  fallbackNote?: string | null;
 }
 
 interface NestOption {
@@ -308,6 +310,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
               cited: d.cited,
               mention: d.mention,
               answerOnly: d.answer_only ?? null,
+              fallbackNote: d.model_fallback?.note ?? null,
               pending: false,
               status: undefined,
             });
@@ -816,6 +819,12 @@ export function AnswerBubble({
       )}
       {message.mention && (
         <MentionOutcome name={name} outcome={message.mention} nestId={nestId} onOpenNode={onOpenNode} />
+      )}
+      {/* po-1419: quiet, not an error: the answer is good, it came another way. */}
+      {message.fallbackNote && (
+        <p className="mt-1 text-[11px] text-muted-foreground" data-testid="hootie-fallback-note">
+          {message.fallbackNote}
+        </p>
       )}
     </div>
   );

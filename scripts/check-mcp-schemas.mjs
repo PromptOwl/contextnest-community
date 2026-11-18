@@ -131,7 +131,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   131->132 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
 //   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
-const BASELINE = 132;
+//   132->134 context_model_route_get, context_model_route_update (po-1419, src/mcp/model-route-tools.ts) — twins of the
+//   model_fallback_promptowl field on GET/PATCH /admin/settings; whether a failing own model key falls back to PromptOwl's
+//   licence gateway is server state (a server setting and the licence's gateway) the engine does not model, so no engine
+//   op exists. Community-only exception, same maintainer decision 2026-10-24.
+const BASELINE = 134;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

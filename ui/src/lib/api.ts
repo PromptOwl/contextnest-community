@@ -488,6 +488,10 @@ export interface AdminSettings {
   anthropic_api_key?: string | null;
   /** Which key Hootie's calls use: own (the server's gateway) or promptowl (credits). */
   model_source?: "own" | "promptowl" | null;
+  /** po-1419: a failing own key falls back to PromptOwl's gateway (default on). */
+  model_fallback_promptowl?: boolean;
+  /** Whether the licence has a PromptOwl gateway to fall back to (read-only). */
+  model_fallback_available?: boolean;
   /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
   provider_keys?: Record<string, string | null>;
 }
@@ -4805,6 +4809,8 @@ export async function chatWithHootie(
       mention: HootieMention | null;
       answer_only?: HootieAnswerOnly | null;
       trail?: { searches: number; reads: number; broadened: boolean };
+      /** po-1419: answered on PromptOwl's gateway after the own key failed. */
+      model_fallback?: { reason: string; note: string } | null;
     }) => void;
     error?: (message: string) => void;
   },

@@ -69,6 +69,7 @@ const READ_ONLY = [
   "context_surfaces_links_list",
   "context_surfaces_link_reviews_list",
   "context_surfaces_settings_get",
+  "context_model_route_get",
   "context_surfaces_windows_list",
   "context_surfaces_proposals_list",
   "context_surfaces_my_pending",
@@ -89,6 +90,8 @@ const READ_ONLY = [
 
 /** Can overwrite or remove something that already exists. */
 const DESTRUCTIVE = [
+  // po-1419: overwrites the server's fallback setting.
+  "context_model_route_update",
   "context_public_link_update",
   "context_public_link_revoke",
   "context_instructions_update",

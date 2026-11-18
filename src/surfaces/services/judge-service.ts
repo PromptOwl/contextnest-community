@@ -32,6 +32,7 @@ import { createTurn } from "../../metacognition/model.js";
 import { TOOLS, runTool, defang, attr, metacognitionHoldFor, type ToolContext } from "../../metacognition/tools.js";
 import { McpPool } from "../../metacognition/mcp-client.js";
 import { resolveModelCredential, resolveGatewayModel, hootieModel } from "../../shared/model-credential.js";
+import { ModelRoute, type ModelRouteTrace } from "../../shared/model-route.js";
 import { resolveNestPermission, permissionLevel } from "../../shared/access.js";
 import { storedEnvValues } from "../../workflow/env-routes.js";
 import { listNodesForCaller, derivedNodeId } from "../../nodes/service.js";
@@ -210,7 +211,7 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
       // final attempt's: the first attempt's spend is settled on the nest's
       // budget but, as before, not added to the window.
       if (ended && progress.nestId && progress.agentNode) {
-        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure).catch(() => undefined);
+        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure, progress.route?.fallback ?? null).catch(() => undefined);
       }
       if (ended && failure.code === "model_billing" && progress.nestId) {
         await alertModelBilling(progress.nestId, w.binding_id).catch(() => undefined);
@@ -227,6 +228,8 @@ interface JudgeProgress {
   agentNode: string | null;
   model: string | null;
   cost: number;
+  /** The window's model route: set once there is a credential (po-1419). */
+  route?: ModelRoute;
 }
 
 async function ownerOf(email: string): Promise<{ userId: string; email: string } | null> {
@@ -383,7 +386,8 @@ const charsOf = (v: unknown) => Buffer.byteLength(typeof v === "string" ? v : JS
  * capped and budgeted, and the next turn's input projected BEFORE it is sent
  * so cumulative input never exceeds what was reserved.
  */
-async function runJudge(ctx: ToolContext, model: string, credential: any, system: string, user: string, folders: string[]): Promise<RunResult> {
+async function runJudge(ctx: ToolContext, route: ModelRoute, system: string, user: string, folders: string[]): Promise<RunResult> {
+  const { credential, model } = route;
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: user }];
   const usage: Usage4 = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const tools = judgeTools();
@@ -397,6 +401,7 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
       if (spentIn + projected > MAX_INPUT_TOKENS || usage.output >= MAX_OUTPUT_TOKENS) break;
       const res = await createTurn({
         credential,
+        route,
         request: { model, system, messages, tools, max_tokens: Math.max(256, MAX_OUTPUT_TOKENS - usage.output), temperature: 0 } as any,
         signal: ctx.signal,
       });
@@ -524,6 +529,11 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   }
   const model = await resolveGatewayModel(credential, config.SURFACES_JUDGE_MODEL || listener.config.model || hootieModel(credential));
   progress.model = model;
+  // One route for the window (both attempts of a forced one): an own key
+  // that fails for billing, auth, rate limit or an outage is asked again on
+  // PromptOwl's gateway, and the run trace says so (po-1419).
+  const route = new ModelRoute(credential, model);
+  progress.route = route;
   progress.stage = "nest";
   const nv = await nestView(binding.nest_id, owner.userId, { folders, thesisNodeId });
   progress.stage = "setup";
@@ -593,7 +603,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       let run: RunResult;
       progress.stage = "model";
       try {
-        run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders);
+        run = await runJudge(ctx, route, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders);
       } catch (err) {
         // Settle what was actually spent, never 0 (round 2, L1).
         const u = err instanceof JudgeRunError ? err.usage : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -621,7 +631,10 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   } finally {
     clearTimeout(timer);
   }
-  await recordRun(binding.nest_id, listener.node_id, model, cost, verdict, w.id);
+  await recordRun(binding.nest_id, listener.node_id, model, cost, verdict, w.id, null, route.fallback);
+  // Answered, but the own key is still out of credit: the admins hear it the
+  // way they would have without the fallback (daily, counts only).
+  if (route.fallback?.fallback === "model_billing") await alertModelBilling(binding.nest_id, binding.id).catch(() => undefined);
   progress.stage = "commit";
   if (!verdict) {
     await end({ status: "judged", verdict: "error_schema", reason_code: null, model, cost_micros: cost });
@@ -762,6 +775,7 @@ async function recordRun(
   v: Verdict | null,
   windowId: string,
   failure: JudgeFailure | null = null,
+  fallback: ModelRouteTrace | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
   const runId = `run_${uuid()}`;
@@ -778,6 +792,7 @@ async function recordRun(
         error_name: failure.name,
         http_status: failure.status,
         ...(failure.code === "model_timeout" ? { timeout: true } : {}),
+        ...(fallback ? { model_route: fallback } : {}),
         items: 0,
       }
     : {
@@ -787,6 +802,8 @@ async function recordRun(
         est_cost_usd: Math.round(cost) / 1_000_000,
         verdict: v?.verdict ?? "error_schema",
         items: v?.items.length ?? 0,
+        // po-1419: "answered via PromptOwl gateway (fallback: model_billing)".
+        ...(fallback ? { model_route: fallback } : {}),
       };
   try {
     await getDb().run(

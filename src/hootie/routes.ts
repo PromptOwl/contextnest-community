@@ -38,6 +38,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { isChannelNode } from "../channels/channel-service.js";
 import { config } from "../config.js";
 import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
+import { ModelRoute, type ModelRouteTrace } from "../shared/model-route.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
@@ -153,6 +154,10 @@ hootieRoutes.post("/chat", async (c) => {
   const credential = own?.credential ?? baseCredential;
   const callModel = own?.model ?? gatewayModel;
   console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
+  // The turn's route: an own key that fails for billing, auth, rate limit or
+  // an outage is asked again on PromptOwl's gateway (po-1419). An own-provider
+  // call falls back to the team model it was renamed from.
+  const route = new ModelRoute(credential, callModel, own ? { fallbackModel: gatewayModel } : {});
 
   let body: ChatBody;
   try {
@@ -374,6 +379,7 @@ hootieRoutes.post("/chat", async (c) => {
         apiKey: credential.apiKey,
         model: callModel,
         baseUrl: credential.baseUrl,
+        route,
         system: promptFor(canSearch),
         turns,
         tools: canSearch ? tools : [],
@@ -468,7 +474,7 @@ hootieRoutes.post("/chat", async (c) => {
         const text =
           err instanceof ModelRefusedError
             ? err.message
-            : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
+            : describeModelError(err, { model: hootieModel(route.credential), gateway: !!route.credential.baseUrl });
         console.error("[hootie] model call failed", nestId, err);
         await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
         return;
@@ -509,6 +515,9 @@ hootieRoutes.post("/chat", async (c) => {
         answer_only: answerOnly,
         // What Hootie looked at beyond the first retrieval.
         trail: { searches: turn.used.search, reads: turn.used.read, broadened },
+        // po-1419: answered on PromptOwl's gateway because the own key
+        // failed. A quiet note in the answer's meta, not an error.
+        model_fallback: route.fallback ? fallbackMeta(route.fallback) : null,
       }),
     });
     } finally {
@@ -779,4 +788,16 @@ async function deliverMentions(params: {
     thread_id: threadId,
     notified,
   };
+}
+
+/** What the panel shows under an answer that came from the fallback (po-1419). */
+const FALLBACK_WHY: Record<ModelRouteTrace["fallback"], string> = {
+  model_billing: "the server's model key is out of credit",
+  model_auth: "the server's model key was refused",
+  model_rate_limited: "the server's model key is rate-limited",
+  model_timeout: "the server's model gateway timed out",
+  model_error: "the server's model gateway is unavailable",
+};
+export function fallbackMeta(f: ModelRouteTrace): { reason: ModelRouteTrace["fallback"]; note: string } {
+  return { reason: f.fallback, note: `Answered via PromptOwl's gateway (${FALLBACK_WHY[f.fallback]}).` };
 }

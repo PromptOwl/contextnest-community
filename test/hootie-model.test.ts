@@ -176,7 +176,7 @@ describe("streamRound — tools (ticket B)", () => {
   });
 
   it("a 400 that isn't about tools (it fails without them too) is not remembered as tool-less", async () => {
-    alwaysFail = { status: 400, message: "Your credit balance is too low to access the Anthropic API." };
+    alwaysFail = { status: 400, message: "messages: text content blocks must be non-empty" };
     const { streamRound, ToolsRejectedError } = await load();
     await expect(
       round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] })),
@@ -189,6 +189,25 @@ describe("streamRound — tools (ticket B)", () => {
     await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
     expect(calls).toHaveLength(1);
     expect(calls[0].params.tools).toEqual([searchTool]);
+  });
+});
+
+describe("streamRound — an out-of-credit 400 (po-1419)", () => {
+  it("goes up as itself after one call: not a tuning retry, not a tools refusal, nothing remembered", async () => {
+    alwaysFail = { status: 400, message: "Your credit balance is too low to access the Anthropic API." };
+    const { streamRound, ToolsRejectedError } = await load();
+    const err = await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] })).catch((e) => e);
+    expect(err).not.toBeInstanceOf(ToolsRejectedError);
+    expect(err).toMatchObject({ status: 400 });
+    // One call: the billing 400 is not retried bare on the same account.
+    expect(calls).toHaveLength(1);
+    alwaysFail = null;
+    calls = [];
+    // Neither tool-less nor plain: the next request is the tuned one, with tools.
+    await round(streamRound({ ...base, messages: base.turns, model: "claude-opus-5", tools: [searchTool] }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params.tools).toEqual([searchTool]);
+    expect(calls[0].params.thinking).toEqual({ type: "adaptive" });
   });
 });
 
