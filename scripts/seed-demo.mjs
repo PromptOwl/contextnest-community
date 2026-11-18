@@ -95,12 +95,12 @@ const northwind = await make({
 });
 
 const tasks = [
-  ["Schedule intro call with Tidewater", "stage:doing", day(-2), "urgent"],
-  ["Send Northwind outreach touch two", "stage:doing", day(1), "high"],
-  ["Confirm Brightline registration", "stage:backlog", day(2), "medium"],
-  ["Update outreach log with last week's replies", "stage:backlog", day(3), "low"],
-  ["Finalize referral fee wording with legal", "stage:review", day(6), "high"],
-  ["Record partner demo walkthrough", "stage:backlog", day(10), "medium"],
+  ["Schedule intro call with Tidewater", "stage:in-process", day(-2), "urgent"],
+  ["Send Northwind outreach touch two", "stage:in-process", day(1), "high"],
+  ["Confirm Brightline registration", "stage:prioritized", day(2), "medium"],
+  ["Update outreach log with last week's replies", "stage:prioritized", day(3), "low"],
+  ["Finalize referral fee wording with legal", "stage:in-review", day(6), "high"],
+  ["Record partner demo walkthrough", "stage:prioritized", day(10), "medium"],
   ["Publish the weekly sync", "stage:done", day(-3), "medium"],
   ["Archive the October campaign board", "stage:done", day(-8), "low"],
 ];
@@ -154,7 +154,7 @@ const t1 = await make(
     title: "Draft Summit Ridge co-marketing one-pager",
     folder: "projects/tasks",
     type: "task",
-    tags: ["#task", "#stage:backlog", "#agent-claude"],
+    tags: ["#task", "#stage:prioritized", "#agent-claude"],
     assignee: me,
     due: day(5),
     priority: "high",
@@ -171,7 +171,7 @@ const t2 = await make(
     title: "Quarterly partner health check",
     folder: "projects/tasks",
     type: "task",
-    tags: ["#task", "#stage:backlog", "#agent-claude"],
+    tags: ["#task", "#stage:prioritized", "#agent-claude"],
     assignee: me,
     due: day(12),
     priority: "medium",
