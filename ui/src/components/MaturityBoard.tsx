@@ -86,6 +86,7 @@ import {
   matchesBlockedFilter,
   matchesTitleFilter,
   moveNeedsReview,
+  inDoneFolder,
   openBlockers,
   subItemsByParent,
   timestampsTooltip,
@@ -1603,7 +1604,7 @@ function MaturityBoardInner({
       <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${laneKey !== undefined ? "min-h-12" : ""}`}>
         {cards.map((n, i) => {
           const kids = subItems.get(n.id) ?? [];
-          const completed = !!n.completed_at;
+          const completed = !!n.completed_at || inDoneFolder(n.id, doneTags);
           const shownTags = cardTags(n.tags);
           return (
             <div key={n.id}>
