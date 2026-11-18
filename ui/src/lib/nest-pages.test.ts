@@ -34,9 +34,18 @@ describe("nest page registry", () => {
     const base = { isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled: true };
     expect(visibleNestPages(base).map((p) => p.id)).not.toContain("channels");
     expect(visibleNestPages({ ...base, agentStreamEnabled: false }).map((p) => p.id)).not.toContain("channels");
-    expect(visibleNestPages({ ...base, agentStreamEnabled: true }).map((p) => p.id)).toContain("channels");
+    expect(visibleNestPages({ ...base, agentStreamEnabled: true, isMember: true }).map((p) => p.id)).toContain("channels");
     expect(
-      visibleNestPages({ ...base, agentStreamEnabled: true, isReadOnly: true, canEditDocs: false }).map((p) => p.id),
+      visibleNestPages({ ...base, agentStreamEnabled: true, isMember: true, isReadOnly: true, canEditDocs: false }).map((p) => p.id),
     ).toContain("channels");
+  });
+
+  it("AC-UX-15 lists Channels only for a person added to the nest, never for a share-only or public reader", () => {
+    const base = { isReadOnly: true, isReaderView: false, canEditDocs: false, workflowPlaneEnabled: true, agentStreamEnabled: true };
+    expect(visibleNestPages({ ...base, isMember: true }).map((p) => p.id)).toContain("channels");
+    expect(visibleNestPages({ ...base, isMember: false }).map((p) => p.id)).not.toContain("channels");
+    // Not known yet (the nest read is still loading): stay hidden rather than flash.
+    expect(visibleNestPages(base).map((p) => p.id)).not.toContain("channels");
+    expect(visibleNestPages({ ...base, isMember: true, agentStreamEnabled: false }).map((p) => p.id)).not.toContain("channels");
   });
 });

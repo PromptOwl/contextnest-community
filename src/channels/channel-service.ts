@@ -55,6 +55,10 @@ import { isMetaFile } from "../nodes/meta-files.js";
 import type { ActorLabel } from "./actor-label.js";
 import { cardsText, resolveMessageCards, type ArtifactCard } from "../stream/artifact-cards.js";
 import { promotedFromThreads, type PromotedRef } from "../stream/promote.js";
+import { knowledgeCounts } from "../memory/knowledge.js";
+import { relatedNodesForThreads, relatedNodesText, type RelatedNode } from "../memory/links.js";
+import { watchedChannels } from "../memory/watcher.js";
+import { recommendationCountsForChannels } from "../hire/recommend.js";
 import {
   ARCHIVED_TAG,
   CHANNEL_FOLDER,
@@ -69,6 +73,14 @@ import {
   tagsOf,
 } from "./channel-node.js";
 import { bodyMentions, displayNames, knownAgents, namedActor, type KnownAgent, type MentionRef } from "./message-meta.js";
+import { messageExtras, type MessageExtras } from "./message-extras.js";
+import { broadcastRefusal } from "./broadcast.js";
+// Team chat harness C2 (PO-1197): private channels, conversations, live events.
+import { emitChatEvent } from "../chat/events.js";
+import { isConversationId, isPrivateChannel, isContainerMember, memberContainers, privateContainerIds, PRIVATE_TAG } from "../chat/containers.js";
+import { conversationPostRefusal } from "../chat/conversations.js";
+import { recordChannelCreator } from "../chat/members.js";
+import { proposalStatuses } from "../agents/proposals.js";
 
 export { ARCHIVED_TAG, CHANNEL_FOLDER, CHANNEL_TAG, isChannelDoc, isChannelId, isChannelNode } from "./channel-node.js";
 
@@ -94,6 +106,9 @@ const marks = (xs: unknown[]) => xs.map(() => "?").join(", ");
  * "nodes/channels/ops" — → its slug, or a ValidationError. One spelling rule
  * for reading and for posting (AC-AX-03).
  */
+/** Names that are routes under /channels, not channels (PO-1196). */
+const RESERVED_CHANNEL_NAMES = new Set(["search"]);
+
 export function parseChannelName(raw: unknown): string {
   if (typeof raw !== "string") throw new ValidationError("name is required — the channel's name, e.g. \"ops\".");
   const name = raw
@@ -113,6 +128,9 @@ export function parseChannelName(raw: unknown): string {
   if (isMetaFile(name)) {
     throw new ValidationError(`"${name}" is reserved for a file the vault generates; pick another channel name.`);
   }
+  if (RESERVED_CHANNEL_NAMES.has(name)) {
+    throw new ValidationError(`"${name}" is reserved; pick another channel name.`);
+  }
   return name;
 }
 
@@ -122,7 +140,7 @@ export function channelIdFor(name: string): string {
 
 // ─── Access ─────────────────────────────────────────────────────────────
 
-interface Caller {
+export interface Caller {
   nestId: string;
   userId: string;
   userEmail: string;
@@ -131,7 +149,7 @@ interface Caller {
   crossNest?: boolean;
 }
 
-export type PostRefusal = { status: 403 | 409; error: string };
+export type PostRefusal = { status: 400 | 403 | 409 | 429; error: string };
 
 const NOT_A_MEMBER =
   "Posting in a channel is for people added to this nest. Ask the nest's owner to add you as a collaborator.";
@@ -187,15 +205,31 @@ export async function channelPostRefusal(
   nodeId: string,
   userId: string,
   userEmail: string,
+  /** The message about to be written: an `@channel` / `@here` in it is
+   *  refused here, before anything is stored, when the nest is too big to
+   *  broadcast to (PO-1196, channels/broadcast.ts). */
+  body?: string,
 ): Promise<PostRefusal | null> {
-  if (!isChannelId(nodeId)) return null;
-  const node = await readChannelDoc(nestId, nodeId);
-  if (!node) {
-    // Unreadable, but known to be a channel: closed, not open (channel-node.ts).
-    return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
+  // A conversation (C2) is a container with its own member list.
+  if (isConversationId(nodeId)) {
+    const refusal = await conversationPostRefusal(nestId, nodeId, userId, userEmail);
+    if (refusal) return refusal;
+  } else {
+    if (!isChannelId(nodeId)) return null;
+    const node = await readChannelDoc(nestId, nodeId);
+    if (!node) {
+      // Unreadable, but known to be a channel: closed, not open (channel-node.ts).
+      return (await isChannelNode(nestId, nodeId)) ? { status: 409, error: "This channel can't be read right now." } : null;
+    }
+    if (!isChannelDoc(node)) return null;
+    const refusal = (await channelAccess({ nestId, userId, userEmail }, node)).post;
+    if (refusal) return refusal;
   }
-  if (!isChannelDoc(node)) return null;
-  return (await channelAccess({ nestId, userId, userEmail }, node)).post;
+  if (typeof body === "string") {
+    const broadcast = await broadcastRefusal(nestId, nodeId, body, userId);
+    if (broadcast) return { status: broadcast.status, error: broadcast.error };
+  }
+  return null;
 }
 
 // ─── Views ──────────────────────────────────────────────────────────────
@@ -221,6 +255,19 @@ export interface ChannelView {
    *  a composer. */
   can_post: boolean;
   post_refusal: string | null;
+  /** A private channel: readable by its member list only (C2, PO-1197). */
+  private: boolean;
+  /** This caller is on the channel's member list (joined, invited, or its
+   *  creator). Always true for a readable private channel. */
+  member: boolean;
+  /** Nodes this channel produced that the caller can read (team chat C6):
+   *  promoted, remembered, corrected, proposed. See GET …/knowledge. */
+  knowledge_count: number;
+  /** A metacognition agent watches this channel (team chat C6). */
+  watched: boolean;
+  /** Open agent recommendations that point at this channel (PO-1201), for a
+   *  quiet badge. Only the list carries a count; a single read says 0. */
+  recommendations_count: number;
 }
 
 interface Stats {
@@ -232,7 +279,7 @@ interface Stats {
 
 /** Post counts, latest activity and this caller's unread, for many channels
  *  in ONE query (the channel list is what a visible tab re-reads). */
-async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<string, Stats>> {
+export async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<string, Stats>> {
   const out = new Map<string, Stats>();
   for (const ids of chunks(nodeIds)) {
     const rows = (await getDb().all(
@@ -240,7 +287,7 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
               CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
               MAX(t.created_at) AS last_at,
               MAX(c.created_at) AS last_activity_at,
-              CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
+              CAST(SUM(CASE WHEN LOWER(c.author) <> ? AND c.deleted_at IS NULL AND (r.at IS NULL OR c.created_at > r.at) THEN 1 ELSE 0 END) AS INTEGER) AS unread
          FROM annotation_threads t
          JOIN annotation_comments c ON c.thread_id = t.id
          LEFT JOIN stream_marks r
@@ -261,7 +308,12 @@ async function channelStats(caller: Caller, nodeIds: string[]): Promise<Map<stri
   return out;
 }
 
-function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal | null): ChannelView {
+function toView(
+  node: ContextNode,
+  stats: Stats | undefined,
+  post: PostRefusal | null,
+  flags: { private: boolean; member: boolean } = { private: false, member: false },
+): ChannelView {
   const name = channelNameOf(node.id)!;
   return {
     id: node.id,
@@ -276,7 +328,32 @@ function toView(node: ContextNode, stats: Stats | undefined, post: PostRefusal |
     unread: stats?.unread ?? 0,
     can_post: !post,
     post_refusal: post?.error ?? null,
+    private: flags.private,
+    member: flags.member,
+    knowledge_count: 0,
+    watched: false,
+    recommendations_count: 0,
   };
+}
+
+/** The C2 membership flags for one channel, as this caller sees them. */
+async function channelFlags(caller: Caller, nodeId: string): Promise<{ private: boolean; member: boolean }> {
+  const [priv, member] = await Promise.all([isPrivateChannel(caller.nestId, nodeId), isContainerMember(caller.nestId, nodeId, caller.userId)]);
+  return { private: priv, member };
+}
+
+/** Fill the memory-snowball fields of channel views (team chat C6, PO-1199). */
+async function withKnowledge(caller: Caller, views: ChannelView[]): Promise<ChannelView[]> {
+  if (views.length === 0) return views;
+  const [counts, watched] = await Promise.all([
+    knowledgeCounts(caller, views.map((v) => v.id)).catch(() => new Map<string, number>()),
+    watchedChannels(caller.nestId).catch(() => new Set<string>()),
+  ]);
+  for (const v of views) {
+    v.knowledge_count = counts.get(v.id) ?? 0;
+    v.watched = watched.has(v.name);
+  }
+  return views;
 }
 
 /** The channel by name, if it exists and the caller may read it; NotFound
@@ -296,7 +373,8 @@ export async function getReadableChannel(
   const access = await channelAccess(caller, node);
   if (!access.read) throw new NotFoundError("Channel not found");
   const stats = await channelStats(caller, [node.id]);
-  return { node, view: toView(node, stats.get(node.id), access.post) };
+  const [view] = await withKnowledge(caller, [toView(node, stats.get(node.id), access.post, await channelFlags(caller, node.id))]);
+  return { node, view };
 }
 
 // ─── List / create / archive / mark read ────────────────────────────────
@@ -312,7 +390,7 @@ export interface ChannelList {
 
 export async function listChannels(
   caller: Caller,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; recommendations?: boolean } = {},
 ): Promise<ChannelList> {
   const { storage } = await engineCache.get(caller.nestId);
   const docs = (await storage.discoverDocuments()).filter(isChannelDoc);
@@ -323,8 +401,27 @@ export async function listChannels(
   // The posting rule is the same for every channel but its archived tag, so
   // the nest-level half is resolved once.
   const refusal = await nestPostRefusal(caller.nestId, caller.userId);
-  const all = readable.map((d) => toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal));
+  // Private channels and the caller's memberships, two queries for the list (C2).
+  const [priv, mine] = await Promise.all([privateContainerIds(caller.nestId), memberContainers(caller.nestId, caller.userId)]);
+  const all = await withKnowledge(
+    caller,
+    readable.map((d) =>
+    toView(d, stats.get(d.id), hasTag(d, ARCHIVED_TAG) ? CHANNEL_ARCHIVED : refusal, { private: priv.has(d.id), member: mine.has(d.id) }),
+    ),
+  );
   const live = all.filter((c) => !c.archived);
+  // The recommendations badge (PO-1201): rule-based, over the channels this
+  // caller can read; never fails the list.
+  // `recommendations: false` is for the recommendations read itself, which
+  // computes them once over this list rather than twice.
+  if (opts.recommendations !== false && live.length > 0) {
+    try {
+      const counts = await recommendationCountsForChannels(caller, live.map((c) => ({ id: c.id, name: c.name })));
+      for (const c of live) c.recommendations_count = counts.get(c.name) ?? 0;
+    } catch (err) {
+      console.error("[channels] recommendations badge", caller.nestId, err);
+    }
+  }
   const most = live
     .filter((c) => c.last_activity_at)
     .sort((a, b) => (a.last_activity_at! < b.last_activity_at! ? 1 : -1))[0];
@@ -337,11 +434,14 @@ export async function listChannels(
 
 export async function createChannel(
   caller: Caller & { client?: ClientMetadata },
-  input: { name: unknown; purpose?: unknown },
+  input: { name: unknown; purpose?: unknown; private?: unknown },
 ): Promise<{ channel: ChannelView }> {
   const name = parseChannelName(input.name);
   if (input.purpose !== undefined && input.purpose !== null && typeof input.purpose !== "string") {
     throw new ValidationError("purpose must be a string");
+  }
+  if (input.private !== undefined && input.private !== null && typeof input.private !== "boolean") {
+    throw new ValidationError("private must be a boolean");
   }
   const purpose = String(input.purpose ?? "").trim();
   if (purpose.length > MAX_PURPOSE_LENGTH) {
@@ -364,11 +464,16 @@ export async function createChannel(
       // is, so it reads sensibly in ctx / context_get.
       content: purpose || `Channel #${name}.`,
       type: "document",
-      tags: [`#${CHANNEL_TAG}`],
+      // A private channel (C2) carries #private: its shares are its members.
+      tags: [`#${CHANNEL_TAG}`, ...(input.private === true ? [`#${PRIVATE_TAG}`] : [])],
       ...(caller.client ? { client: caller.client } : {}),
     },
     caller.userEmail,
   );
+  // The creator joins their channel (C2): a read share on the node. A private
+  // one is theirs alone until they invite someone.
+  await recordChannelCreator(caller.nestId, id, caller);
+  emitChatEvent(caller.nestId, { type: "channel.created", conversation: id, name, private: input.private === true });
   return { channel: (await getReadableChannel(caller, name)).view };
 }
 
@@ -394,6 +499,7 @@ export async function setChannelArchived(
       },
       caller.userEmail,
     );
+    emitChatEvent(caller.nestId, { type: "channel.archived", conversation: node.id, name: view.name, archived });
   }
   return { channel: (await getReadableChannel(caller, view.name)).view };
 }
@@ -412,6 +518,7 @@ export async function markChannelRead(caller: Caller, rawName: unknown): Promise
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = excluded.at`,
     [caller.userId, caller.nestId, node.id],
   );
+  emitChatEvent(caller.nestId, { type: "read.marked", conversation: node.id }, { only: caller.userId });
   return { channel: (await getReadableChannel(caller, view.name)).view };
 }
 
@@ -442,12 +549,65 @@ export interface ChannelMessage {
   /** The artifacts the message links, resolved for THIS reader (PO-1181):
    *  a card for what they can read, `{ link, resolved: false }` for the rest. */
   cards: ArtifactCard[];
-  /** Every `@name` in the body, in order: a person, a known agent, or nobody
-   *  — so a client can style what landed and what didn't. */
+  /** Every `@name` in the body, in order: a person, a known agent, everyone
+   *  (`@channel` / `@here`), or nobody — so a client can style what landed
+   *  and what didn't. */
   mentions: MentionRef[];
+  /** Reactions on it, as this reader sees them (PO-1196). */
+  reactions: MessageExtras["reactions"];
+  pinned: boolean;
+  /** The READER saved it. */
+  saved: boolean;
+  /** The in-app permalink: `/nest/<id>/channels?channel=&thread=&message=`. */
+  url: string;
+  edited_at: string | null;
+  /** A tombstone: the body is "", reactions, pins and saves are gone, the
+   *  place in the thread is kept. */
+  deleted: boolean;
+  deleted_at: string | null;
+  deleted_by: MessageExtras["deleted_by"];
+  // ── The nest in the conversation (C7, PO-1198; src/agents) ──
+  /** True when the body is text a model wrote (a Hootie answer or a proposal
+   *  card): render it with the untrusted-text renderer (links as plain text,
+   *  chips only for `citations`). Never set on a person's message. */
+  model_answer?: true;
+  /** The login Hootie answered FOR (the asker); only with `model_answer`. */
+  asked_by?: string;
+  /** The nodes the server verified the answer cites; only with `model_answer`. */
+  citations?: Array<{ id: string; title: string }>;
+  /** A proposal card: a write Hootie wanted to make, waiting for a writer. */
+  proposal?: Record<string, unknown>;
+  /** The outcome of a proposal (approved / rejected), posted by the decider. */
+  proposal_outcome?: Record<string, unknown>;
+  /** A handoff: this message hands the thread to a person or an agent. */
+  handoff?: Record<string, unknown>;
+  /** An accept / done on a handoff, posted by whoever took it. */
+  handoff_update?: Record<string, unknown>;
+}
+
+/** The C7 marks a message's stored attribution carries, as the timeline shows
+ *  them. Only the server writes these keys (message-meta callerSafeClient). */
+export function conversationMarks(client: Record<string, unknown> | undefined): Partial<ChannelMessage> {
+  if (!client) return {};
+  const out: Partial<ChannelMessage> = {};
+  if (client.model_answer === true) {
+    out.model_answer = true;
+    if (typeof client.for === "string") out.asked_by = client.for;
+    out.citations = Array.isArray(client.citations)
+      ? client.citations.filter((c): c is { id: string; title: string } => !!c && typeof c === "object" && typeof (c as any).id === "string")
+      : [];
+  }
+  for (const key of ["proposal", "proposal_outcome", "handoff", "handoff_update"] as const) {
+    const v = client[key];
+    if (v && typeof v === "object" && !Array.isArray(v)) out[key] = v as Record<string, unknown>;
+  }
+  return out;
 }
 
 export interface ChannelPost extends ChannelMessage {
+  /** The id of the message that opened the thread (`id` is the thread's):
+   *  what the message routes — react, edit, pin, save — take for a post. */
+  message_id: string;
   /** The thread id — pass it as `thread` to read or reply to the thread. */
   status: "open" | "resolved";
   reply_count: number;
@@ -456,6 +616,9 @@ export interface ChannelPost extends ChannelMessage {
   last_activity_at: string;
   /** Nodes this thread was promoted to that the reader can open. */
   promoted: PromotedRef[];
+  /** Nodes this thread touched — mentioned, promoted, remembered, corrected,
+   *  proposed — that the reader can open (team chat C6, PO-1199). */
+  related_nodes: RelatedNode[];
 }
 
 /** A message in a "what is new since" read: flat, oldest first. */
@@ -472,14 +635,22 @@ interface ThreadRow {
   status: "open" | "resolved";
 }
 
-interface CommentRow {
+export interface CommentRow {
   id: string;
   thread_id: string;
   author: string;
   body: string;
   created_at: string;
   client_json: string | null;
+  edited_at: string | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  deleted_reason: string | null;
 }
+
+/** The message columns every read selects (`c` = annotation_comments). */
+export const MESSAGE_COLUMNS =
+  "c.id, c.thread_id, c.author, c.body, c.created_at, c.client_json, c.edited_at, c.deleted_at, c.deleted_by, c.deleted_reason";
 
 function parseLimit(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
@@ -496,8 +667,6 @@ function parseOffset(raw: unknown): number {
   return Math.floor(n);
 }
 
-const COMMENT_COLS = "id, thread_id, author, body, created_at, client_json";
-
 /** Each thread's opening comment, plus its reply count and last reply time —
  *  one grouped query, never every reply of every post on the page. */
 async function openingsFor(
@@ -507,7 +676,7 @@ async function openingsFor(
   const db = getDb();
   for (const ids of chunks(threadIds)) {
     const firsts = (await db.all(
-      `SELECT ${COMMENT_COLS} FROM annotation_comments c
+      `SELECT ${MESSAGE_COLUMNS} FROM annotation_comments c
         WHERE c.thread_id IN (${marks(ids)})
           AND NOT EXISTS (SELECT 1 FROM annotation_comments e
                            WHERE e.thread_id = c.thread_id
@@ -533,52 +702,106 @@ async function openingsFor(
  * Rows → messages, in one pass per concern: display names, the actor seam,
  * which @names resolved, and the reader's artifact cards. Same order out as in.
  */
-async function toMessages(caller: Caller, rows: CommentRow[]): Promise<ChannelMessage[]> {
+async function toMessages(caller: Caller, channelName: string, rows: CommentRow[]): Promise<ChannelMessage[]> {
   if (rows.length === 0) return [];
-  const bodies = rows.map((r) => r.body);
-  const [names, mentions, cards] = await Promise.all([
-    displayNames(rows.map((r) => r.author)),
-    bodyMentions(caller.nestId, bodies),
+  // A tombstone has no text to resolve names or cards from.
+  const bodies = rows.map((r) => (r.deleted_at ? "" : r.body));
+  const clients = rows.map((r) => deserializeClient(r.client_json) as Record<string, unknown> | undefined);
+  // A Hootie answer names the person it answered FOR; their display name is
+  // needed too (C7). A card's status is read live from its review request.
+  const askedFor = clients.map((c) => (c?.model_answer === true && typeof c.for === "string" ? c.for : "")).filter(Boolean);
+  const reviewIds = clients.map((c) => String((c?.proposal as { review_id?: unknown } | undefined)?.review_id ?? "")).filter(Boolean);
+  const [names, mentions, cards, extras, statuses] = await Promise.all([
+    displayNames([...rows.map((r) => r.author), ...askedFor]),
+    bodyMentions(caller.nestId, bodies, { broadcast: true }),
     resolveMessageCards(caller, bodies),
+    messageExtras(caller, channelName, rows),
+    proposalStatuses(caller.nestId, reviewIds),
   ]);
   return Promise.all(
     rows.map(async (row, i) => {
-      const { actor, name } = await namedActor(row.author, deserializeClient(row.client_json), names);
+      const client = clients[i] as ClientMetadata | undefined;
+      const { actor, name } = await namedActor(row.author, client, names);
+      // A tombstone keeps no model text, citations or card.
+      const marks = conversationMarks(row.deleted_at ? undefined : (client as Record<string, unknown> | undefined));
+      const live = marks.proposal && statuses.get(String(marks.proposal.review_id ?? ""));
+      if (marks.proposal && live) marks.proposal = { ...marks.proposal, status: live.status, decided_by: live.decided_by, decided_at: live.decided_at };
       return {
         id: row.id,
         author: row.author,
         author_name: name,
         actor,
-        body: row.body,
+        body: bodies[i],
         created_at: row.created_at,
         cards: cards[i],
-        mentions: mentions[i],
+        // Model text names nobody: an @name in an answer is not a mention
+        // (nothing was notified or woken for it), so it isn't styled as one.
+        mentions: marks.model_answer ? [] : mentions[i],
+        ...marks,
+        ...extras.get(row.id)!,
       };
     }),
   );
 }
 
+/**
+ * Message rows of ONE channel → flat messages with their thread and whether
+ * each is a reply (the thread's opening message is not). For the reads that
+ * start from a message rather than a thread: pins, saved items, search, the
+ * permalink lookup (PO-1196).
+ */
+export async function messagesFromRows(caller: Caller, channelName: string, rows: CommentRow[]): Promise<ChannelNewMessage[]> {
+  if (rows.length === 0) return [];
+  const firsts = await firstMessageIds([...new Set(rows.map((r) => r.thread_id))]);
+  const messages = await toMessages(caller, channelName, rows);
+  return messages.map((m, i) => ({ ...m, thread_id: rows[i].thread_id, reply: firsts.get(rows[i].thread_id) !== m.id }));
+}
+
+/** Thread id → the id of the message that opened it. */
+export async function firstMessageIds(threadIds: string[]): Promise<Map<string, string>> {
+  const firsts = new Map<string, string>();
+  if (threadIds.length === 0) return firsts;
+  // Only each thread's opening row (same rule as openingsFor), never every reply.
+  for (const ids of chunks(threadIds)) {
+    for (const r of (await getDb().all(
+      `SELECT c.thread_id, c.id FROM annotation_comments c
+        WHERE c.thread_id IN (${marks(ids)})
+          AND NOT EXISTS (SELECT 1 FROM annotation_comments e
+                           WHERE e.thread_id = c.thread_id
+                             AND (e.created_at < c.created_at OR (e.created_at = c.created_at AND e.id < c.id)))`,
+      ids,
+    )) as Array<{ thread_id: string; id: string }>) {
+      firsts.set(r.thread_id, r.id);
+    }
+  }
+  return firsts;
+}
+
 /** Threads → posts (the opening message of each, plus its thread's counts). */
-async function toPosts(caller: Caller, threads: ThreadRow[]): Promise<ChannelPost[]> {
+async function toPosts(caller: Caller, hostNodeId: string, channelName: string, threads: ThreadRow[]): Promise<ChannelPost[]> {
   const openings = await openingsFor(threads.map((t) => t.id));
   // A thread is created with its opening message in one transaction, so a
   // thread without one does not occur; skip rather than invent a message.
   const kept = threads.filter((t) => openings.get(t.id)?.first);
   const firsts = kept.map((t) => openings.get(t.id)!.first!);
-  const messages = await toMessages(caller, firsts);
+  const messages = await toMessages(caller, channelName, firsts);
   const promoted = await promotedFromThreads(caller, kept.map((t) => t.id));
+  const related = await relatedNodesForThreads(caller, hostNodeId, kept.map((t) => t.id)).catch(() => new Map<string, RelatedNode[]>());
   return kept.map((t, i) => {
     const o = openings.get(t.id)!;
     return {
       ...messages[i],
-      // The post IS the thread: its id is what `thread` takes everywhere.
+      // The post IS the thread: its id is what `thread` takes everywhere;
+      // its opening message keeps its own id for the message routes.
       id: t.id,
+      message_id: firsts[i].id,
       created_at: t.created_at,
       status: t.status,
       reply_count: o.replies,
       last_reply_at: o.lastReplyAt,
       last_activity_at: o.lastReplyAt ?? t.created_at,
       promoted: promoted.get(t.id) ?? [],
+      related_nodes: related.get(t.id) ?? [],
     };
   });
 }
@@ -598,7 +821,7 @@ export type ChannelTimeline =
       /** Pass as `since` next time to get only what was written after this read. */
       next_since: string;
     }
-  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: Pagination } }
+  | { channel: ChannelView; thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: Pagination; related_nodes: RelatedNode[] } }
   | {
       channel: ChannelView;
       /** Posts and replies written after `since`, oldest first. */
@@ -651,8 +874,11 @@ async function sinceCursor(nestId: string, nodeId: string, raw: string): Promise
 export async function readChannel(
   caller: Caller,
   input: { channel: unknown; thread?: unknown; since?: unknown; limit?: unknown; offset?: unknown },
+  /** An already-resolved container (a conversation, C2): the same read over
+   *  its threads, with `view` returned as `channel`. */
+  container?: { node: { id: string }; view: ChannelView },
 ): Promise<ChannelTimeline> {
-  const { node, view } = await getReadableChannel(caller, input.channel);
+  const { node, view } = container ?? (await getReadableChannel(caller, input.channel));
   const db = getDb();
   const limit = parseLimit(input.limit);
 
@@ -668,20 +894,21 @@ export async function readChannel(
       )) as ThreadRow | undefined)
       : undefined;
     if (!row) throw new NotFoundError("Thread not found in this channel");
-    const [post] = await toPosts(caller, [row]);
+    const [post] = await toPosts(caller, node.id, view.name, [row]);
     if (!post) throw new NotFoundError("Thread not found in this channel");
     // Replies are the comments after the opening one, paged like the timeline.
     const rows = (await db.all(
-      `SELECT ${COMMENT_COLS} FROM annotation_comments WHERE thread_id = ?
-        ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`,
+      `SELECT ${MESSAGE_COLUMNS} FROM annotation_comments c WHERE c.thread_id = ?
+        ORDER BY c.created_at ASC, c.id ASC LIMIT ? OFFSET ?`,
       [row.id, limit, offset + 1],
     )) as CommentRow[];
-    const replies = await toMessages(caller, rows);
+    const replies = await toMessages(caller, view.name, rows);
     return {
       channel: view,
       thread: {
         post,
         replies,
+        related_nodes: post.related_nodes,
         pagination: { total: post.reply_count, limit, offset, has_more: offset + replies.length < post.reply_count },
       },
     };
@@ -691,7 +918,7 @@ export async function readChannel(
     const raw = String(input.since).trim();
     const cursor = await sinceCursor(caller.nestId, node.id, raw);
     const rows = (await db.all(
-      `SELECT c.id, c.thread_id, c.author, c.body, c.created_at, c.client_json
+      `SELECT ${MESSAGE_COLUMNS}
          FROM annotation_comments c
          JOIN annotation_threads t ON t.id = c.thread_id
         WHERE t.nest_id = ? AND t.node_id = ?
@@ -706,12 +933,7 @@ export async function readChannel(
     // is the txn start, so a long txn can still land behind; use a sequence if so.
     const page = rows.slice(0, limit);
     if (page.length === 0) return { channel: view, messages: [], has_more: false, next_since: raw };
-    const openings = await openingsFor([...new Set(page.map((r) => r.thread_id))]);
-    const messages = (await toMessages(caller, page)).map((m, i) => ({
-      ...m,
-      thread_id: page[i].thread_id,
-      reply: openings.get(page[i].thread_id)?.first?.id !== m.id,
-    }));
+    const messages = await messagesFromRows(caller, view.name, page);
     return { channel: view, messages, has_more: rows.length > limit, next_since: page[page.length - 1].id };
   }
 
@@ -732,7 +954,7 @@ export async function readChannel(
       LIMIT ? OFFSET ?`,
     [caller.nestId, node.id, limit, offset],
   )) as ThreadRow[];
-  const posts = await toPosts(caller, threads);
+  const posts = await toPosts(caller, node.id, view.name, threads);
   const newest = (await db.get(
     `SELECT c.id FROM annotation_comments c
        JOIN annotation_threads t ON t.id = c.thread_id
@@ -755,6 +977,17 @@ function missedText(mentions: MentionRef[]): string {
   return missed.length ? ` [matched nobody: ${missed.join(", ")}]` : "";
 }
 
+/** The body as a tool shows it: a tombstone says so, and edits and
+ *  reactions are noted after the text (PO-1196). */
+export function messageText(m: ChannelMessage): string {
+  if (m.deleted) return `_(message deleted by its ${m.deleted_by === "moderator" ? "moderator" : "author"})_`;
+  const marks: string[] = [];
+  if (m.edited_at) marks.push("edited");
+  if (m.pinned) marks.push("pinned");
+  if (m.reactions.length) marks.push(m.reactions.map((r) => `${r.emoji} ${r.count}`).join(" "));
+  return `${m.body}${marks.length ? ` [${marks.join("; ")}]` : ""}`;
+}
+
 /** Plain-text rendering of a read, for an agent over MCP. */
 export function timelineText(t: ChannelTimeline): string {
   const head = `# ${t.channel.title}${t.channel.archived ? " (archived)" : ""}${
@@ -765,22 +998,22 @@ export function timelineText(t: ChannelTimeline): string {
     const { post, replies, pagination: pg } = t.thread;
     const lines = [
       `## Thread ${post.id} (${post.status})`,
-      `- **${post.actor.label}** (${post.created_at}): ${post.body}${missedText(post.mentions)}${cardsText(post.cards)}`,
+      `- **${post.actor.label}** (${post.created_at}) [message ${post.message_id}]: ${messageText(post)}${missedText(post.mentions)}${cardsText(post.cards)}`,
       ...replies.map(
-        (r) => `  - **${r.actor.label}** (${r.created_at}): ${r.body}${missedText(r.mentions)}${cardsText(r.cards, "    ")}`,
+        (r) => `  - **${r.actor.label}** (${r.created_at}) [message ${r.id}]: ${messageText(r)}${missedText(r.mentions)}${cardsText(r.cards, "    ")}`,
       ),
     ];
     const promoted = post.promoted.length
       ? `\n\nPromoted to: ${post.promoted.map((p) => `${p.kind} "${p.title}" (${p.node_id})`).join("; ")}.`
       : "";
     const more = pg.has_more ? `\n\nMore replies: pass offset ${pg.offset + replies.length}.` : "";
-    return `${head}\n\n${lines.join("\n")}${promoted}${more}\n\nReply with context_comment { channel: "${name}", thread: "${post.id}", body }.`;
+    return `${head}\n\n${lines.join("\n")}${promoted}${relatedNodesText(post.related_nodes)}${more}\n\nReply with context_comment { channel: "${name}", thread: "${post.id}", body }. Keep something from it with context_remember { thread: "${post.id}" }.`;
   }
   if ("messages" in t) {
     if (t.messages.length === 0) return `${head}\n\nNothing new. Pass since: "${t.next_since}" again later.`;
     const lines = t.messages.map(
       (m) =>
-        `- [thread ${m.thread_id}${m.reply ? ", reply" : ""}] **${m.actor.label}** (${m.created_at}): ${m.body}${missedText(m.mentions)}${cardsText(m.cards)}`,
+        `- [thread ${m.thread_id}${m.reply ? ", reply" : ""}; message ${m.id}] **${m.actor.label}** (${m.created_at}): ${messageText(m)}${missedText(m.mentions)}${cardsText(m.cards)}`,
     );
     return `${head}\n\n${t.messages.length} new message(s), oldest first:\n${lines.join("\n")}\n\n${
       t.has_more ? "More waiting. " : ""
@@ -791,7 +1024,7 @@ export function timelineText(t: ChannelTimeline): string {
   }
   const lines = t.posts.map(
     (p) =>
-      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${p.body}${
+      `- [${p.id}] **${p.actor.label}** (${p.created_at}): ${messageText(p)}${
         p.reply_count ? ` — ${p.reply_count} repl${p.reply_count === 1 ? "y" : "ies"}, last ${p.last_activity_at}` : ""
       }${p.status === "resolved" ? " [resolved]" : ""}${p.promoted.length ? " [promoted]" : ""}${missedText(p.mentions)}${cardsText(p.cards)}`,
   );

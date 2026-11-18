@@ -23,6 +23,11 @@ describe("NestView tab slugs", () => {
     expect(NEST_TAB_LABELS.instructions).toBe("Instructions");
   });
 
+  it("sends old ?tab=fields links to Settings, and keeps ?tab=activity", () => {
+    expect(nestTabFromParam("fields")).toBe("settings");
+    expect(nestTabFromParam("activity")).toBe("activity");
+  });
+
   it("drops an unknown ?tab=", () => {
     expect(nestTabFromParam("nope")).toBeUndefined();
     expect(nestTabFromParam(null)).toBeUndefined();
@@ -40,12 +45,12 @@ describe("AC-NH-01: no Overview tab", () => {
     expect(DEFAULT_NEST_TAB).toBe("documents");
   });
 
-  it("Given ?tab=fields, then it still resolves (the ⋯ menu opens Fields)", () => {
-    expect(nestTabFromParam("fields")).toBe("fields");
+  it("Given ?tab=fields, then it opens Settings, where Fields live (the ⋯ menu also opens them)", () => {
+    expect(nestTabFromParam("fields")).toBe("settings");
   });
 });
 
-describe("AC-NH-01/06: ?tab=fields opens the Fields dialog over Documents", () => {
+describe("AC-NH-01/06: a change to the fields tab opens the Fields dialog over Documents", () => {
   it("Given ?tab=fields, then Documents is the tab and the Fields dialog is open", () => {
     expect(nestTabOpening("fields")).toEqual({ tab: "documents", fieldsOpen: true });
   });

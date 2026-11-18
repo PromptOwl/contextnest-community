@@ -3,10 +3,10 @@
  *
  * Page under test: the document editor (ui/src/components/DocumentEditor.tsx)
  * opened for a new document from the nest page (ui/src/components/NestView.tsx):
- * the header's New Document button, a folder row's "New document in <folder>"
- * in the Documents tree, and "New here" in a folder opened in the Documents
- * tab (ui/src/components/nest/DocumentsTab.tsx). Documents is the nest's home
- * (po-1213): there is no Overview tab.
+ * the top bar's New document button (blank option), a folder row's "New
+ * document in <folder>" in the Documents tree, and "New here" in a folder
+ * opened in the Documents tab (ui/src/components/nest/DocumentsTab.tsx).
+ * Documents is the nest's home (po-1213): there is no Overview tab.
  *
  * A new document needs a title and content before its save button enables.
  * The button reads Publish when the save goes live, and Save draft when the
@@ -29,8 +29,7 @@ class NewDocumentPage {
 
     // ── App header + nest page ────────────────────────────────────────────
     this.breadcrumb = page.getByTestId('header-breadcrumb');
-    // Exact: an empty nest offers a "New document" card of its own.
-    this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true }).first();
+    this.newDocumentButton = this.page.getByTestId('top-bar-new-document');
     this.selectedTab = page.getByRole('tab', { selected: true }).first();
     // The summary line above the Documents list ("2 documents · 1 folder").
     this.facts = page.getByTestId('nest-home-facts');
@@ -78,6 +77,7 @@ class NewDocumentPage {
   async openNewDocument() {
     this._log('Opening a new document');
     await this.newDocumentButton.click();
+    await this.page.getByTestId('new-document-blank').click();
     await this.titleInput.waitFor({ state: 'visible' });
   }
 

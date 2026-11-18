@@ -149,3 +149,36 @@ describe("boards", () => {
     expect(Number(row.n)).toBe(0);
   });
 });
+
+// PO-1244: a board name is unique among the boards a person can see.
+describe("board names are unique per nest", () => {
+  // The suite above deletes its nest; this one needs a live one.
+  beforeAll(async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Names" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: writer.email, permission: "write" }, owner.apiKey);
+  });
+
+  it("create numbers a taken name instead of saving a duplicate", async () => {
+    const a = await req(owner, "POST", "", { name: "Roadmap" });
+    const b = await req(writer, "POST", "", { name: "roadmap" });
+    expect(a.data.board.name).toBe("Roadmap");
+    expect(b.status).toBe(201);
+    expect(b.data.board.name).toBe("roadmap 2");
+  });
+
+  it("rename onto a taken name is refused with a clear message", async () => {
+    const c = await req(owner, "POST", "", { name: "Release" });
+    const r = await req(owner, "PATCH", `/${c.data.board.id}`, { name: "ROADMAP" });
+    expect(r.status).toBe(409);
+    expect(r.data.error).toMatch(/A board named "ROADMAP" already exists/);
+  });
+
+  it("someone else's private board doesn't block the name; sharing it then does", async () => {
+    const hidden = await req(writer, "POST", "", { name: "Secret plan", private: true });
+    const open = await req(owner, "POST", "", { name: "Secret plan" });
+    expect(open.data.board.name).toBe("Secret plan");
+    const share = await req(writer, "PATCH", `/${hidden.data.board.id}`, { private: false });
+    expect(share.status).toBe(409);
+  });
+});

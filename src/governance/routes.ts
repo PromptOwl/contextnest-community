@@ -787,7 +787,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   // version comes from review_requests — that is what the row's "approved by X"
   // hint and the reviewer's reason render from.
   const resolutions = (await getDb().all(
-    `SELECT version, status, resolved_by, resolution_note
+    `SELECT version, status, resolved_by, resolution_note, resolution_kind
        FROM review_requests
       WHERE nest_id = ? AND node_id = ?
         AND status IN ('approved', 'rejected')
@@ -799,10 +799,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     status: string;
     resolved_by: string;
     resolution_note: string | null;
+    resolution_kind: string | null;
   }>;
   const byVersion = new Map<
     number,
-    { status: string; resolvedBy: string; resolutionNote?: string }
+    { status: string; resolvedBy: string; resolutionNote?: string; resolutionKind?: string }
   >();
   for (const r of resolutions) {
     if (!byVersion.has(r.version)) {
@@ -810,6 +811,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
         status: r.status,
         resolvedBy: r.resolved_by,
         resolutionNote: r.resolution_note?.trim() || undefined,
+        resolutionKind: r.status === "rejected" ? (r.resolution_kind === "reject" ? "reject" : "changes") : undefined,
       });
     }
   }
@@ -822,6 +824,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
             resolvedBy: r.resolvedBy,
             resolutionStatus: r.status,
             resolutionNote: r.resolutionNote,
+            resolutionKind: r.resolutionKind,
           }
         : {};
       try {
@@ -1464,10 +1467,13 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string; client?: unknown }>();
+  const body = await c.req.json<{ note?: string; kind?: string; client?: unknown }>();
 
   if (!body.note) {
     throw new ValidationError("Rejection note is required");
+  }
+  if (body.kind !== undefined && body.kind !== "changes" && body.kind !== "reject") {
+    throw new ValidationError('kind must be "changes" or "reject"');
   }
 
   const userEmail = await getUserEmail(c);
@@ -1484,6 +1490,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
       nodeId,
       rejectedBy: userEmail,
       note: body.note,
+      kind: body.kind as "changes" | "reject" | undefined,
       baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ review: request });

@@ -14,6 +14,7 @@ export const meta: PageMeta = {
   label: "Control room",
   icon: Gauge,
   order: 13,
-  group: "workspace",
+  // A top-level page, so it stays in the rail with the other work pages.
+  group: "work",
   visible: ({ isAdmin, surfacesEnabled, administersNest }) => !!surfacesEnabled && (isAdmin || !!administersNest),
 };

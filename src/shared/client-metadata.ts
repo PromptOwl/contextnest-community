@@ -20,6 +20,7 @@ import {
 import type { Context } from "hono";
 import { z } from "zod";
 import { ValidationError } from "./errors.js";
+import { dropReservedAgent } from "../agents/reserved.js";
 
 export type { ClientMetadata } from "@promptowl/contextnest-engine/api";
 
@@ -166,10 +167,12 @@ export function attributeRequest(
   supplied: unknown,
   connection?: ClientMetadata,
 ): ClientMetadata | undefined {
-  const client = mergeClient(
+  // A reserved agent handle (hootie, nest, …) is nobody's to claim on any
+  // write (team chat C7, src/agents/reserved.ts).
+  const client = dropReservedAgent(mergeClient(
     derivedClient(c, connection),
     parseClientMetadata(supplied),
-  );
+  ));
   if (client) c.set("clientMetadata", client);
   return client;
 }

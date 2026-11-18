@@ -83,6 +83,8 @@ import {
 import { isPublicReader } from "../shared/access.js";
 import { isHeadlessIdentity } from "../auth/headless.js";
 import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
+import { isConversationDoc } from "../chat/containers.js";
+import { normalizeTag as normalizeChatTag } from "../governance/tag-index-service.js";
 import {
   listUserGrants,
   grantRoleForNode,
@@ -261,9 +263,46 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /** The change note the server writes when it publishes a write itself
- *  ("Auto-published on create (<reason>)"). The document stream reads the
- *  prefix to tell this stamp from a note a person wrote (po-1214). */
+ *  ("Auto-published on create (<reason>)"). Both stamp sites build it with
+ *  autoPublishNote, and the document stream tells it from a note a person
+ *  wrote with isAutoPublishStamp (po-1214, po-1375). */
 export const AUTO_PUBLISH_NOTE_PREFIX = "Auto-published on ";
+
+/** Every reason autoPublishReason gives. A reason must not contain "(", ")"
+ *  or a newline: isAutoPublishStamp matches the stamp by that shape
+ *  (tested over this list). */
+export const AUTO_PUBLISH_REASONS = {
+  ungoverned: "no stewards configured",
+  task: "task — board work skips review",
+  creatorReviews: "creator is the document's reviewer",
+  primeOnly: "prime-only review, document is not prime",
+  selfApprove: "owner/admin self-approve",
+} as const;
+
+export function autoPublishNote(on: "create" | "edit", reason: string): string {
+  return `${AUTO_PUBLISH_NOTE_PREFIX}${on} (${reason})`;
+}
+
+/**
+ * Is this change note the server's own stamp? The whole note must have the
+ * stamp's shape — "Auto-published on create|edit (<reason>)" and nothing
+ * after it — not just the prefix, so a person's "Auto-published on Tuesday
+ * after the sync" stays theirs. The reason is not matched against today's
+ * list: stamps stored before the reasons were reworded ("no stewards",
+ * 2026-07) are stamps too. The version row's author cannot tell the two
+ * apart: the stamp is stored under the editor's own email.
+ *
+ * Accepted false positive: a person's note shaped exactly like a stamp
+ * ("Auto-published on edit (see ticket)") is hidden too. That is the price
+ * of still recognising stamps whose reason wording has since changed.
+ */
+// A literal, so no regex metacharacter can slip in from the prefix. If
+// AUTO_PUBLISH_NOTE_PREFIX changes, the reason-list test (every
+// autoPublishNote must read as a stamp) fails until this is updated too.
+const AUTO_PUBLISH_STAMP = /^Auto-published on (create|edit) \([^()\n]+\)$/;
+export function isAutoPublishStamp(note: string): boolean {
+  return AUTO_PUBLISH_STAMP.test(note.trim());
+}
 
 /**
  * The id `createNode` will derive for a title in `folder` (the nest root by
@@ -1933,6 +1972,12 @@ export interface WriteOptions {
    */
   expectHead?: number;
   /**
+   * The chat services (src/chat) changing a container's membership tags
+   * (#private, agent:<handle>) on a channel or conversation node. Anyone
+   * else editing those tags is refused: they are the node's access rule.
+   */
+  chatMembership?: boolean;
+  /**
    * Never publish this write, whatever the nest's posture (ungoverned,
    * prime-only, self-approve, creator-reviews): it lands as a draft for a
    * reviewer. A metacognition agent's proposals use it — an agent's change is
@@ -2037,23 +2082,23 @@ async function autoPublishReason(
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
   // already looked this up passes it in — create is a hot path.
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
-  if (!governed) return "no stewards configured";
+  if (!governed) return AUTO_PUBLISH_REASONS.ungoverned;
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
   // Board work moves column many times a day; gating every drag behind a
   // reviewer would make a project board unusable. Prime still wins (above):
   // a steward who flags a task prime has asked for review on purpose.
-  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
+  if (doc.type === TASK_NODE_TYPE) return AUTO_PUBLISH_REASONS.task;
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
   // through the queue.
-  if (opts.creatorReviews) return "creator is the document's reviewer";
+  if (opts.creatorReviews) return AUTO_PUBLISH_REASONS.creatorReviews;
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
-    return "prime-only review, document is not prime";
+    return AUTO_PUBLISH_REASONS.primeOnly;
   }
   return (await actorAutoPublishes(nestId, userEmail))
-    ? "owner/admin self-approve"
+    ? AUTO_PUBLISH_REASONS.selfApprove
     : null;
 }
 
@@ -2181,7 +2226,10 @@ function enforceTaskTagRules(
   const priorTicket = ticketTagOf(priorTags);
   const nextTicket = ticketTagOf(tags);
   if (priorTicket) {
-    if (nextTicket && nextTicket !== priorTicket) {
+    // Any other ticket: tag, not just the first — an added one beside the
+    // number must be refused, not silently dropped (PO-1218).
+    const other = tags.some((t) => tagNamespace(bareTag(t)) === TICKET_NAMESPACE && bareTag(t) !== priorTicket);
+    if (other) {
       throw new ValidationError(
         `This task is ${priorTicket.slice(TICKET_NAMESPACE.length + 1).toUpperCase()}. Ticket numbers are assigned once and can't be changed.`,
       );
@@ -2411,7 +2459,7 @@ async function createNodeOnce(
       publishNote =
         publishReason === null
           ? undefined
-          : `${AUTO_PUBLISH_NOTE_PREFIX}create (${publishReason})`;
+          : autoPublishNote("create", publishReason);
       published = publishReason !== null;
 
       // Write — and publish, when the gate allows — through the engine's
@@ -2997,6 +3045,11 @@ function normalizeDescription(value: unknown): string {
  * here — the one choke point REST and MCP share — with the way that works.
  */
 function channelRetireRefusal(node: { id: string; frontmatter?: { tags?: unknown } | null }, doing: string): ConflictError | null {
+  // A conversation (team chat C2) is a node whose threads are its messages
+  // and whose shares are its members: the same rule, no archive to offer.
+  if (isConversationDoc(node)) {
+    return new ConflictError(`${node.id} is a conversation, so ${doing} would lose its messages. Leave it instead (POST /nests/:id/conversations/<id>/leave).`);
+  }
   if (!isChannelDoc(node)) return null;
   const name = node.id.split("/").pop();
   return new ConflictError(
@@ -3107,6 +3160,20 @@ export async function updateNode(
         if (!hasTag({ frontmatter: { tags: nextTags } }, CHANNEL_TAG)) {
           const refusal = channelRetireRefusal(node, "removing its #channel tag");
           if (refusal) throw refusal;
+        }
+        // A container's membership tags (team chat C2) are its access rule:
+        // #private and agent:<handle> change through the chat routes only
+        // (make private/public: owner/admin; invite: members and writers).
+        if (!opts.chatMembership && (isChannelDoc(node) || isConversationDoc(node))) {
+          const gated = (tags: string[]) =>
+            new Set(tags.map(normalizeChatTag).filter((t) => t === "private" || t.startsWith("agent:")));
+          const before = gated(priorTags);
+          const after = gated(nextTags);
+          if (before.size !== after.size || [...before].some((t) => !after.has(t))) {
+            throw new ConflictError(
+              `${node.id} is a chat container: its #private and agent:<handle> tags are its member list and change through the chat routes (POST …/channels/:name/private, …/members), not by editing tags.`,
+            );
+          }
         }
         if (node.frontmatter.type === TASK_NODE_TYPE) {
           nextTags = enforceTaskTagRules(
@@ -3455,7 +3522,7 @@ export async function updateNode(
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
-          patch.changeNote || `${AUTO_PUBLISH_NOTE_PREFIX}edit (${publishReason})`;
+          patch.changeNote || autoPublishNote("edit", publishReason);
         let publishedVersion: number;
         if (patch.pdf) {
           const staged = await stagePdfImport(
@@ -3623,6 +3690,10 @@ export const NODE_KEYED_TABLES = [
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
   ["node_pins", "node_id"],
+  // Reactions on a channel message (PO-1196, migration 097) are keyed to the
+  // channel node; a channel can't be moved or deleted through the document
+  // routes today (archive is the way), but the rule is the same as the pins'.
+  ["message_reactions", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

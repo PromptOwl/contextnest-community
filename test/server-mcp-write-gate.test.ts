@@ -47,7 +47,7 @@ async function callServerTool(
 
 // Open mode so no auth fixtures are needed — the write gate sits before any
 // permission/nest resolution, so no nest has to exist for it to fire.
-async function buildApp(licenseMock?: () => Record<string, unknown>) {
+async function buildApp(licenseMock?: () => Record<string, unknown>, people = FREE_TIER_MAX_USERS + 1) {
   process.env.AUTH_MODE = "open";
   vi.resetModules();
   if (licenseMock) {
@@ -65,7 +65,7 @@ async function buildApp(licenseMock?: () => Record<string, unknown>) {
   await dbClient.resetDb();
   await dbClient.initDb();
   // Past the Free tier, so the unlicensed gate closes.
-  await seedPeople(FREE_TIER_MAX_USERS + 1);
+  await seedPeople(people);
   const { createApp } = await import("../src/app.js");
   return createApp();
 }
@@ -132,5 +132,128 @@ describe("server-level /mcp write gate — suspended", () => {
       2,
     );
     expect(out).toContain("suspended by PromptOwl");
+  });
+});
+
+// po-1375: the version-history reads REST licenses (GET /me/stream and
+// GET …/versions answer 503 through readOnlyDenial when the license is not
+// valid and the server is past the Free tier) are licensed on the
+// server-level /mcp too. The per-nest /nests/:id/mcp already sits behind the
+// nest gate.
+describe("server-level /mcp licensed reads — unlicensed, past the Free tier", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp();
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("refuses context_stream across nests with the license message, like GET /me/stream's 503", async () => {
+    const out = await callServerTool(app, "context_stream", {}, 10);
+    expect(out).toContain("no valid PromptOwl license");
+  });
+
+  it("refuses context_stream for one nest the same way", async () => {
+    const out = await callServerTool(app, "context_stream", { nest: "whatever" }, 11);
+    expect(out).toContain("no valid PromptOwl license");
+  });
+
+  it("refuses context_versions, like GET …/versions", async () => {
+    const out = await callServerTool(app, "context_versions", { nest: "whatever", title: "T" }, 12);
+    expect(out).toContain("no valid PromptOwl license");
+  });
+
+  it("every gated tool's REST twin is refused the same way (503), so the two lists stay in step", async () => {
+    const { SERVER_LICENSED_READ_TOOLS } = await import("../src/mcp/server-routes.js");
+    const nest = (await (await app.request("/nests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Gated" }) })).json()).nest?.id;
+    // A gated MCP tool must name the REST read it mirrors here; a new one fails until it does.
+    const restTwin: Record<string, string> = {
+      context_stream: "/me/stream",
+      context_versions: `/nests/${nest ?? "x"}/nodes/nodes/any/versions`,
+    };
+    expect([...SERVER_LICENSED_READ_TOOLS].sort()).toEqual(Object.keys(restTwin).sort());
+    for (const [tool, path] of Object.entries(restTwin)) {
+      const res = await app.request(path);
+      expect(res.status, `${tool} → GET ${path}`).toBe(503);
+    }
+  });
+});
+
+describe("server-level /mcp licensed reads — unlicensed and suspended", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp(() => ({
+      getCurrentLicense: () => ({ valid: false, tier: "none" }),
+      isSuspended: () => true,
+      getSuspensionReason: () => "tos",
+    }));
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("words the refusal for a read, not a write", async () => {
+    const out = await callServerTool(app, "context_versions", { nest: "whatever", title: "T" }, 40);
+    expect(out).toContain("suspended by PromptOwl; version history is unavailable");
+    expect(out).toContain("tos");
+    expect(out).not.toContain("writes are blocked");
+  });
+});
+
+describe("server-level /mcp licensed reads — licensed", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp(() => ({
+      getCurrentLicense: () => ({ valid: true, tier: "test" }),
+      isSuspended: () => false,
+    }));
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("still serves context_stream", async () => {
+    const out = await callServerTool(app, "context_stream", {}, 20);
+    expect(out).not.toContain("license");
+    expect(out).toMatch(/stream is empty|# Stream/);
+  });
+});
+
+describe("server-level /mcp licensed reads — unlicensed, within the Free tier", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await buildApp(undefined, 1); // real module, no license, one person
+  });
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    env.cleanup();
+  });
+
+  it("serves context_stream, as GET /me/stream answers 200 (licensedReadsAllowed: writes are allowed)", async () => {
+    const { licensedReadsAllowed } = await import("../src/auth/free-tier.js");
+    expect(await licensedReadsAllowed()).toBe(true);
+    const out = await callServerTool(app, "context_stream", {}, 30);
+    expect(out).not.toContain("license");
+    expect(out).toMatch(/stream is empty|# Stream/);
   });
 });

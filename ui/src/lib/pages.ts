@@ -22,11 +22,12 @@ export interface PageBadge {
   tone?: "primary" | "muted";
 }
 
-/** Sidebar groups, in rail order. Ungrouped pages (Nests) sit above them. */
+/** Page groups. "work" is the header ribbon (and the phone drawer); "settings"
+ *  and "help" are reached from the account menu, settings through a page with
+ *  its own left nav. Ungrouped pages (Nests) are the app's home. */
 export const PAGE_GROUPS = [
   { id: "work", label: "Work" },
-  { id: "workspace", label: "Workspace" },
-  { id: "admin", label: "Admin" },
+  { id: "settings", label: "Workspace settings" },
   { id: "help", label: "Help" },
 ] as const;
 export type PageGroupId = (typeof PAGE_GROUPS)[number]["id"];

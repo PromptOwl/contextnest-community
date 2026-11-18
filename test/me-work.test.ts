@@ -285,3 +285,27 @@ it("a review verdict notification carries the document it is about", async () =>
   // Resolved in the same read: the inbox navigates on it, no nest list needed.
   expect(verdict.nest_name).toBe("Verdict Nest");
 });
+
+it("urgent_reviews_total counts urgent reviews the caller can decide, not the caller's own", async () => {
+  const { data } = await jsonRequest(app, "POST", "/nests", { name: "Urgent Nest" }, alice.apiKey);
+  const nestId = data.nest.id;
+  await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: true }, alice.apiKey);
+  const nestPath = join(env.dataDir, "nests", nestId);
+  mkdirSync(nestPath, { recursive: true });
+  writeFileSync(
+    join(nestPath, "stewards.yaml"),
+    `version: 1\nnest:\n  - email: ${alice.email}, role: reviewer, can_approve: true\n` +
+      `  - email: ${bob.email}, role: reviewer, can_approve: true\n`,
+  );
+  await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, alice.apiKey);
+  await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: bob.email, permission: "write" }, alice.apiKey);
+  const before = {
+    alice: (await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey)).data.urgent_reviews_total,
+    bob: (await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey)).data.urgent_reviews_total,
+  };
+  await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "hot", content: "# hot" }, alice.apiKey);
+  const sub = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/nodes/hot/submit-review`, { priority: "urgent" }, alice.apiKey);
+  expect(sub.status, JSON.stringify(sub.data)).toBeLessThan(300);
+  expect((await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey)).data.urgent_reviews_total).toBe(before.bob + 1);
+  expect((await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey)).data.urgent_reviews_total).toBe(before.alice);
+});

@@ -6,7 +6,7 @@
  * icons, Trello's overdue-red due chip, Jira/ClickUp's avatar quick-filter.
  */
 import { saveOutcome } from "./save-outcome";
-import type { BoardNode } from "./board-dimensions";
+import { folderOf, type BoardNode } from "./board-dimensions";
 
 export const PRIORITIES = ["urgent", "high", "medium", "low"] as const;
 export type Priority = (typeof PRIORITIES)[number];
@@ -33,6 +33,15 @@ export function dueState(due: string, today: string): DueState {
   if (due === today) return "today";
   const days = (Date.parse(due) - Date.parse(today)) / 86_400_000;
   return days <= 2 ? "soon" : "later";
+}
+
+/** A task filed in a folder named like one of the nest's done tags
+ *  (`projects/done` with the default `done`) reads as done, so its due date
+ *  isn't flagged overdue (PO-1241). The server stamps completion from done
+ *  tags only; this covers the folder-board "Done" column. */
+export function inDoneFolder(id: string, doneTags: readonly string[]): boolean {
+  const leaf = folderOf(id).split("/").pop()?.toLowerCase();
+  return !!leaf && doneTags.some((t) => t.replace(/^#/, "").split(":").pop()?.toLowerCase() === leaf);
 }
 
 /** Today as YYYY-MM-DD in the viewer's local zone. */

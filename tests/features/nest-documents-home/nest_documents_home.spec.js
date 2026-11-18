@@ -127,18 +127,15 @@ test.describe('Nest documents home', () => {
     await expect(page.fieldsDialog).toBeVisible(WRITE);
   });
 
-  test('CN-NH-005: Verify that an old ?tab=fields link opens the Fields dialog over Documents', async ({
+  test('CN-NH-005: Verify that an old ?tab=fields link opens the Settings tab, where Fields live', async ({
     primary_user,
     commonFunction,
   }) => {
     const { nest, page } = await arrange(primary_user, commonFunction, 'nesthome-fields-link');
     await page.page.goto(`/nest/${nest.id}?tab=fields`);
-    await expect(page.fieldsDialog).toBeVisible(WRITE);
-    // A modal hides the page behind it from the accessibility tree, so the
-    // tab is checked once the dialog closes: it was open over Documents.
-    await page.page.keyboard.press('Escape');
+    await expect(page.tab('Settings')).toHaveAttribute('aria-selected', 'true', WRITE);
+    await expect(page.page.getByRole('heading', { name: 'Fields and task rules' })).toBeVisible();
     await expect(page.fieldsDialog).toBeHidden();
-    await expect(page.tab('Documents')).toHaveAttribute('aria-selected', 'true');
   });
 
   test('CN-NH-006: Verify that at phone width the page does not scroll sideways and the feed names the editor', async ({

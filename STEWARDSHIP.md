@@ -46,7 +46,7 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 
 1. **Author** creates or edits a doc. In governed mode it saves as a **draft**.
 2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc — and in their **My Work** page across nests. Until someone acts the author can withdraw it back to draft.
-3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note. A reviewer who can also edit may instead click **Edit**, fix the document and **Save & approve**: the fix becomes its own version under the reviewer's name, the submission still belongs to the author (so the author still can't approve it themselves), and the author is notified. Not offered on prime documents — prime means every change is seen by two people.
+3. A **Reviewer steward** opens **My Work** — the one review queue across nests, with who sent the change, a "What changed" summary and a decision bar — and clicks **Approve**, **Request changes** (send it back; the author is expected to revise) or **Reject** (decline it for good). Both need a note, and the history records which one happened. A bulk bar approves a whole selection at once and names what it will approve. A reviewer who can also edit may instead click **Edit**, fix the document and **Save & approve**: the fix becomes its own version under the reviewer's name, the submission still belongs to the author (so the author still can't approve it themselves), and the author is notified. Not offered on prime documents — prime means every change is seen by two people.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
 ### Auto-publish owner & admin edits (`allow_self_approve`)
@@ -182,6 +182,12 @@ In key mode, when stewardship is enabled on a nest:
 - A non-steward gets an empty list or a 403 on the node they asked for
 - The nest **owner** and any resolved **steward (any role)** can read; **super admins** bypass the check
 
+The same read gate covers governance around a document: the activity log, comments, task logs, watchers, pending external edits and the deletion queue answer only for documents the caller can read. Someone who reaches a nest only because it is public or org-visible sees entries for approved documents only, and never a pending external edit (text nobody approved).
+
+**External edits** (changes made on disk) take the same authority as approving a version of that document: on a governed nest whoever may approve it, on an ungoverned nest whoever may edit it. Everyone else gets `403`.
+
+**Channels** (team chat) are members-only: only people added to the nest read or post in them. A visitor to a public nest sees no channel, and the docs site leaves channel nodes out. A private channel is visible only to its members.
+
 ## Structure rules — who edits them
 
 A nest's structure rules (folders, node types, name formats, templates; see `API.md → Structure rules`) are a nest setting, not a stewardship role:
@@ -242,6 +248,7 @@ Key points:
 - Sharing a team whose members carry a governance role (viewer/editor) **enables stewardship** on the nest — same effect as assigning an individual steward. An `admin`-only team is collaborator-style and doesn't.
 - Removing a member, deleting the team, or unsharing it **revokes access immediately** — there are no per-user rows to clean up.
 - Managing a team is gated by your role on it: editor/admin members (and the owner) can add people, capped to their own level; admins can also change roles and remove members; only the owner can delete the team.
+- **Teams follow the deployment kind.** On a server that hosts several organizations (`SHARED_DEPLOYMENT=true`), "Share with a team…" replaces Organization visibility, since there "Organization" would reach every organization on the server (a nest that is already org keeps it). You see only the teams you own or are on, and may share a team you are editor or above on. On a single-organization server every team is listed, and a nest admin may share any team. Agents do the same with `context_nest_teams`.
 
 ### Importing a team from PromptOwl
 
