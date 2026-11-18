@@ -3,14 +3,14 @@
  * labels. Some are permission or feature gated inside NestView, which falls
  * back to Documents when one isn't shown (e.g. `stream` while the experimental
  * document stream is off). Fields live in Settings; the header's ⋯ menu also
- * opens them as a dialog over Documents (po-1213).
+ * opens them as a dialog over Documents (po-1213). Stewards folded into
+ * Collaborators, so it has no tab of its own.
  */
 export const NEST_TAB_LABELS: Record<string, string> = {
   documents: "Documents",
   instructions: "Instructions",
   review: "Review queue",
   "external-edits": "External edits",
-  stewards: "Stewards",
   collaborators: "Collaborators",
   settings: "Settings",
   activity: "Activity",
@@ -23,8 +23,13 @@ export const NEST_TABS: string[] = Object.keys(NEST_TAB_LABELS);
 export const DEFAULT_NEST_TAB = "documents";
 
 /** Retired slugs that old links still carry → the tab that replaced them.
- *  Overview merged into Documents (po-1213); Fields moved into Settings. */
-const RETIRED_TABS: Record<string, string> = { overview: DEFAULT_NEST_TAB, fields: "settings" };
+ *  Overview merged into Documents (po-1213); Stewards into Collaborators;
+ *  Fields moved into Settings. */
+const RETIRED_TABS: Record<string, string> = {
+  overview: DEFAULT_NEST_TAB,
+  stewards: "collaborators",
+  fields: "settings",
+};
 
 /** The tab a ?tab= value opens, or undefined for an unknown slug. */
 export function nestTabFromParam(raw: string | null | undefined): string | undefined {

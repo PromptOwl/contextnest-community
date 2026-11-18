@@ -921,13 +921,15 @@ export function NestView({
   // nest they only read, Review Queue while read-only). Radix would render an
   // empty content area against a value with no trigger, so fall back to
   // Documents once the permission flags have resolved.
+  // Stewards live in the Collaborators tab, so the steward roster is why that
+  // tab shows for someone who can govern but not share.
+  const showStewards = stewardshipEnabled && canManageGovernance;
   const tabVisible: Record<string, boolean> = {
     documents: true,
     instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
     "external-edits": !isReadOnly,
-    stewards: stewardshipEnabled && canManageGovernance,
-    collaborators: canManage || collabCanWrite,
+    collaborators: canManage || collabCanWrite || showStewards,
     settings: !grantOnly,
     activity: canManageGovernance,
     // Experimental document stream, pinned to this nest.
@@ -1743,17 +1745,15 @@ export function NestView({
                 )}
               </TabsTrigger>
             )}
-            {/* Steward roster is admin-only (list + manage), and hidden when
-              the admin is viewing a real user's nest. */}
-            {stewardshipEnabled && canManageGovernance && (
-              <TabsTrigger value="stewards" className={NEST_TAB}>Stewards</TabsTrigger>
-            )}
             {/* Collaborators — plain access sharing, independent of
-              stewardship. Owner/admin manage the full roster; write
-              collaborators can invite (escalation-capped server-side), so
-              they see the tab too. The roster controls cap themselves by the
-              caller's permission (see CollaboratorManager). */}
-            {(canManage || collabCanWrite) && (
+              stewardship, with the steward roster below it. Owner/admin manage
+              the full roster; write collaborators can invite
+              (escalation-capped server-side), so they see the tab too. The
+              roster controls cap themselves by the caller's permission (see
+              CollaboratorManager). The steward roster is admin-only (list +
+              manage), and hidden when the admin is viewing a real user's
+              nest. */}
+            {(canManage || collabCanWrite || showStewards) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
             {/* Settings: fields (readable by everyone on the nest — they explain
@@ -1916,21 +1916,6 @@ export function NestView({
           </Suspense>
         </TabsContent>
 
-        {stewardshipEnabled && canManageGovernance && (
-          <TabsContent value="stewards" className="space-y-4">
-            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-              <StewardsTab
-                nestId={nestId}
-                canManage={canManageGovernance && !caps.isReadOnly}
-                currentUserEmail={currentEmail}
-                onAssign={() => setShowAssignSteward(true)}
-                onRemove={setRemoveStewardId}
-                onEditRole={setEditingSteward}
-              />
-            </Suspense>
-          </TabsContent>
-        )}
-
         {!grantOnly && (
           <TabsContent value="instructions" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -2040,8 +2025,8 @@ export function NestView({
           </TabsContent>
         )}
 
-        {(canManage || collabCanWrite) && (
-          <TabsContent value="collaborators" className="space-y-4">
+        {(canManage || collabCanWrite || showStewards) && (
+          <TabsContent value="collaborators" className="space-y-6">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
               <CollaboratorsTab
                 nestId={nestId}
@@ -2053,8 +2038,27 @@ export function NestView({
                 callerPermission={permission ?? undefined}
                 onOpenSettings={() => setShowSettings(true)}
                 onChanged={fetchData}
+                showAccess={canManage || collabCanWrite}
               />
             </Suspense>
+            {/* Who governs what. Same roster the Stewards tab used to hold,
+                kept apart from access because sharing a nest does not make
+                anyone a steward. */}
+            {showStewards && (
+              <section aria-labelledby="nest-stewards-heading" className="space-y-4" data-testid="nest-stewards-section">
+                <h2 id="nest-stewards-heading" className="sr-only">Stewards</h2>
+                <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                  <StewardsTab
+                    nestId={nestId}
+                    canManage={canManageGovernance && !caps.isReadOnly}
+                    currentUserEmail={currentEmail}
+                    onAssign={() => setShowAssignSteward(true)}
+                    onRemove={setRemoveStewardId}
+                    onEditRole={setEditingSteward}
+                  />
+                </Suspense>
+              </section>
+            )}
           </TabsContent>
         )}
       </Tabs>

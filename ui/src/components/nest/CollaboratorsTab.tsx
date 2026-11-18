@@ -1,7 +1,9 @@
 /**
  * Collaborators tab — who can access the nest. The roster and the
  * visibility control fetch for themselves (CollaboratorManager,
- * NestVisibilityControl); this is the tab's chrome around them.
+ * NestVisibilityControl); this is the tab's chrome around them. NestView puts
+ * the steward roster under it, so the copy below points down the page, not
+ * to another tab.
  */
 import { useState } from "react";
 import { toast } from "sonner";
@@ -22,6 +24,9 @@ interface Props {
   onOpenSettings: () => void;
   /** Access changed — the nest page re-reads its caps. */
   onChanged: () => void;
+  /** Show the access card. False for someone who reaches this tab only to
+   *  manage stewards (they can't share the nest). */
+  showAccess?: boolean;
 }
 
 export function CollaboratorsTab({
@@ -34,10 +39,12 @@ export function CollaboratorsTab({
   callerPermission,
   onOpenSettings,
   onChanged,
+  showAccess = true,
 }: Props) {
   // Bumped by the visibility picker's "Share with a team…" to open the
   // add control on Team.
   const [teamRequest, setTeamRequest] = useState(0);
+  if (!showAccess) return null;
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -55,8 +62,8 @@ export function CollaboratorsTab({
             does not make anyone a steward.
             {stewardshipEnabled ? (
               canManageGovernance
-                ? " Use the Reviewer switch to let someone approve documents across the nest; narrower stewards (a tag or one document) are on the Stewards tab."
-                : " Stewards are assigned on the Stewards tab."
+                ? " Use the Reviewer switch to let someone approve documents across the nest; narrower stewards (a tag or one document) are under Stewards, below."
+                : " Stewards are assigned by a nest owner or admin."
             ) : canManageGovernance ? (
               // Naming the setting without a way to reach it left the reader
               // hunting through a menu (CU-wdqcq01e75). Only owner/admin can

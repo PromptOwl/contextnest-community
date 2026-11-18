@@ -190,8 +190,8 @@ export const keys = {
   /** My open mentions on their own (the chat sidebar, PO-1200); under
    *  myWorkAll so a reply or Mark done refreshes it with the rest. */
   myMentions: () => [...keys.myWorkAll(), "mentions"] as const,
-  myWork: (limit?: number, offset?: number, mentionsOffset?: number) =>
-    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
+  myWork: (limit?: number, offset?: number, mentionsOffset?: number, doneTasks?: boolean) =>
+    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null, doneTasks ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
     [...keys.me, "drafts", limit ?? null, offset ?? null, q ?? null, sort ?? null] as const,
 
@@ -1263,9 +1263,9 @@ export const reads = {
       queryFn: () => api.getMyMentions({ limit: 50 }),
       staleTime: 0,
     }),
-  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number }) =>
+  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number; doneTasks?: boolean }) =>
     queryOptions({
-      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset),
+      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset, opts?.doneTasks),
       queryFn: () => api.getMyWork(opts),
       staleTime: STALE.governance,
     }),
