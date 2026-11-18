@@ -121,7 +121,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   the comment-thread store, the review queue and the metacognition agent are Community-only, so the engine
 //   has no operation to import a descriptor from.
 //   125->128 team chat C7 (PO-1198, src/mcp/nest-agent-tools.ts): context_ask_nest, context_agents, context_handoff —
-//   twins of POST /nests/:id/ask, /agents, /threads/:id/handoff + /handoffs/:id/{accept,done}; Community-only
+//   twins of POST /nests/:id/ask, /agent-profiles, /threads/:id/handoff + /handoffs/:id/{accept,done}; Community-only
 //   (the comment-thread store, agent webhooks, Hootie) and experimental (EXPERIMENTAL_AGENT_STREAM), so the engine
 //   has no operation to import a descriptor from. Proposals ride the existing context_approve / context_reject.
 const BASELINE = 128;

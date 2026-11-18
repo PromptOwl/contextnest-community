@@ -4,9 +4,9 @@
  * every route here while it is off).
  *
  *   POST /ask { channel | thread, question, post? }   → { answer, cited, proposals, posted, trail }
- *   GET  /agents                                       → { agents }
- *   GET  /agents/:handle                               → { agent }          (did / knows / wake)
- *   PATCH /agents/:handle { description }              → { agent }          (owner/admin)
+ *   GET  /agent-profiles → { agents }
+ *   GET  /agent-profiles/:handle → { agent } (did / knows / wake)
+ *   PATCH /agent-profiles/:handle { description } → { agent } (owner/admin)
  *   POST /threads/:threadId/handoff { to, note? }      → 201 { handoff, message, mentions }
  *   POST /handoffs/:messageId/accept | /done { note? } → { handoff, message }
  *
@@ -18,7 +18,7 @@
  * Tiers (app.ts): /ask, /handoff, /accept and /done are member actions (a
  * read-only collaborator may), so they are not bumped to the write tier; a
  * read-only API key is still refused /ask (it spends model credits, as the
- * chat route) and every other POST (capability gate). PATCH /agents is write
+ * chat route) and every other POST (capability gate). PATCH /agent-profiles is write
  * tier and the handler asks for owner/admin.
  */
 import { Hono } from "hono";
@@ -60,9 +60,9 @@ agentRoutes.post("/ask", async (c) => {
   }
 });
 
-agentRoutes.get("/agents", async (c) => c.json(await listAgents(await caller(c))));
-agentRoutes.get("/agents/:handle", async (c) => c.json(await getAgent(await caller(c), c.req.param("handle"))));
-agentRoutes.patch("/agents/:handle", async (c) => {
+agentRoutes.get("/agent-profiles", async (c) => c.json(await listAgents(await caller(c))));
+agentRoutes.get("/agent-profiles/:handle", async (c) => c.json(await getAgent(await caller(c), c.req.param("handle"))));
+agentRoutes.patch("/agent-profiles/:handle", async (c) => {
   const body = await jsonObject(c);
   return c.json(await setAgentDescription(await caller(c), c.req.param("handle"), body.description));
 });

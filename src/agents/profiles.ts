@@ -32,7 +32,7 @@ import { isNestMember } from "../channels/channel-service.js";
 import { isChannelDoc } from "../channels/channel-node.js";
 import { engineCache } from "../nodes/engine.js";
 import { knownAgents, normHandle, writerHandles } from "../channels/message-meta.js";
-import { agentWakeTarget, lastDeliveries, type DeliveryView } from "../stream/agent-wake.js";
+import { lastDeliveries, type DeliveryView } from "../stream/agent-wake.js";
 import { effectiveHootieBrand } from "../hootie/brand.js";
 import { HOOTIE_HANDLE, isReservedHandle } from "./reserved.js";
 
@@ -121,20 +121,20 @@ async function readableChannels(caller: Caller): Promise<Set<string>> {
   return new Set((await filterAccessible(caller.nestId, caller.userId, caller.userEmail, channels)).map((d) => d.id));
 }
 
-async function summaries(caller: Caller, readable?: Set<string>): Promise<Map<string, AgentSummary>> {
+async function summaries(caller: Caller, readable?: Set<string>, acts?: Map<string, Row[]>): Promise<Map<string, AgentSummary>> {
   const { nestId } = caller;
-  const [known, hooks, deliveries, acts, descs, ok] = await Promise.all([
+  const [known, hooks, deliveries, byHandle, descs, ok] = await Promise.all([
     knownAgents(nestId),
     getDb().all("SELECT handle, created_by FROM agent_webhooks WHERE nest_id = ?", [nestId]) as Promise<Array<{ handle: string; created_by: string }>>,
     lastDeliveries(nestId),
-    activity(nestId),
+    acts ?? activity(nestId),
     descriptions(nestId),
     readable ?? readableChannels(caller),
   ]);
   const hookBy = new Map(hooks.map((h) => [normHandle(h.handle), h.created_by]));
   const out = new Map<string, AgentSummary>();
   const summary = (handle: string, kind: AgentSummary["kind"], wakeable: boolean): AgentSummary => {
-    const rows = (acts.get(handle) ?? []).filter((r) => ok.has(r.node_id));
+    const rows = (byHandle.get(handle) ?? []).filter((r) => ok.has(r.node_id));
     const newest = rows[0];
     return {
       handle,
@@ -161,15 +161,15 @@ export async function listAgents(caller: Caller): Promise<{ agents: AgentSummary
 export async function getAgent(caller: Caller, rawHandle: unknown): Promise<{ agent: AgentProfile }> {
   if (!(await isNestMember(caller.nestId, caller.userId))) throw new NotFoundError("Not found");
   const handle = normHandle(rawHandle);
-  const readable = await readableChannels(caller);
-  const all = await summaries(caller, readable);
+  const [readable, acts] = await Promise.all([readableChannels(caller), activity(caller.nestId)]);
+  const all = await summaries(caller, readable, acts);
   const base = all.get(handle);
   if (!base) throw new NotFoundError("Agent not found");
   const { nestId } = caller;
   const db = getDb();
 
   // Did: messages, in channels this caller can read.
-  const rows = (await activity(nestId)).get(handle) ?? [];
+  const rows = acts.get(handle) ?? [];
   const messages = rows
     .filter((r) => readable.has(r.node_id))
     .slice(0, MAX_DID)
@@ -256,11 +256,6 @@ export async function setAgentDescription(caller: Caller, rawHandle: unknown, ra
     );
   }
   return { agent: (await summaries(caller)).get(handle)! };
-}
-
-/** The agent's wake-up status, for a profile the caller may already hold. */
-export async function wakeStatus(nestId: string, handle: string): Promise<boolean> {
-  return (await agentWakeTarget(nestId, handle)) !== null;
 }
 
 /** Plain text for an agent list, for an MCP tool. */

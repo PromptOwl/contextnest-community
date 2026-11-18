@@ -179,11 +179,10 @@ export async function knownAgents(nestId: string, only?: Set<string>): Promise<K
     )) as Array<{ client_json: string | null }>;
     for (const r of seen) {
       const h = normHandle(deserializeClient(r.client_json)?.agent);
-      // A reserved handle is never an agent someone declared (C7): Hootie's own
-      // answers carry `agent: "hootie"` and are addressed through ask-nest.
-      if (AGENT_HANDLE_RE.test(h) && !isReservedHandle(h)) handles.add(h);
+      if (AGENT_HANDLE_RE.test(h)) handles.add(h);
     }
   }
+  // A reserved handle is never an agent (C7): Hootie answers through ask-nest.
   for (const h of [...handles]) if (isReservedHandle(h)) handles.delete(h);
   const { agentWakeTarget } = await import("../stream/agent-wake.js");
   const list = [...handles].filter((h) => h && (!only || only.has(h))).slice(0, MAX_KNOWN_AGENTS).sort();

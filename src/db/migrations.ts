@@ -2769,11 +2769,10 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("098_team_chat_c2");
   }
 
-  // 091: agent profiles (team chat C7, PO-1198). The one stored thing about
+  // 099: agent profiles (team chat C7, PO-1198). The one stored thing about
   //   an agent: a description a nest owner or admin wrote. Everything else a
   //   profile shows is a query over what the server already keeps (webhooks,
-  //   message attribution, review requests, node versions). 088–090 are
-  //   taken by the parallel C1, C2 and C6 slices.
+  //   message attribution, review requests, node versions).
   if (!hasMigration("099_agent_profiles")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_profiles (

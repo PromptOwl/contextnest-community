@@ -414,8 +414,8 @@ describe("AC-C7-04: off means off", () => {
     process.env.EXPERIMENTAL_AGENT_STREAM = "false";
     for (const [method, path, body] of [
       ["POST", `/nests/${nestId}/ask`, { channel: "general", question: "hi" }],
-      ["GET", `/nests/${nestId}/agents`, undefined],
-      ["GET", `/nests/${nestId}/agents/hootie`, undefined],
+      ["GET", `/nests/${nestId}/agent-profiles`, undefined],
+      ["GET", `/nests/${nestId}/agent-profiles/hootie`, undefined],
       ["POST", `/nests/${nestId}/threads/x/handoff`, { to: "grok" }],
       ["POST", `/nests/${nestId}/handoffs/x/accept`, {}],
     ] as const) {
@@ -642,8 +642,8 @@ describe("AC-C7-08: agent profiles — what an agent is, did and knows", () => {
     expect(m.status).toBe(201);
   });
 
-  it("AC-C7-08 GET /agents lists hootie, webhook agents and declared agents with kind and presence", async () => {
-    const r = await jsonRequest(app, "GET", `/nests/${nestId}/agents`, undefined, rita.apiKey);
+  it("AC-C7-08 GET /agent-profiles lists hootie, webhook agents and declared agents with kind and presence", async () => {
+    const r = await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles`, undefined, rita.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     const by = new Map(r.data.agents.map((a: any) => [a.handle, a]));
     expect(by.get("hootie")).toEqual(expect.objectContaining({ kind: "hootie", wake: { wakeable: false, last_delivery: null } }));
@@ -654,8 +654,8 @@ describe("AC-C7-08: agent profiles — what an agent is, did and knows", () => {
     for (const a of r.data.agents) expect(a).not.toHaveProperty("url");
   });
 
-  it("AC-C7-08 GET /agents/:handle shows what it did and knows, bounded and readable by the caller", async () => {
-    const r = await jsonRequest(app, "GET", `/nests/${nestId}/agents/hootie`, undefined, rita.apiKey);
+  it("AC-C7-08 GET /agent-profiles/:handle shows what it did and knows, bounded and readable by the caller", async () => {
+    const r = await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles/hootie`, undefined, rita.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     expect(r.data.agent.handle).toBe("hootie");
     expect(r.data.agent.did.messages.length).toBeGreaterThan(0);
@@ -666,25 +666,25 @@ describe("AC-C7-08: agent profiles — what an agent is, did and knows", () => {
     // Knows: the task the owner approved from Hootie's proposal.
     expect(r.data.agent.knows.map((n: any) => n.id)).toEqual(expect.arrayContaining([expect.stringMatching(/^nodes\/tasks\//)]));
     expect(r.data.agent.knows.length).toBeLessThanOrEqual(50);
-    const g = await jsonRequest(app, "GET", `/nests/${nestId}/agents/grok`, undefined, rita.apiKey);
+    const g = await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles/grok`, undefined, rita.apiKey);
     expect(g.status).toBe(200);
     expect(g.data.agent.did.messages[0].excerpt).toContain("grok here");
     expect(g.data.agent.wake).toEqual(expect.objectContaining({ wakeable: true }));
   });
 
   it("AC-C7-08 a non-member and an unknown handle are 404; a stranger can't read a profile", async () => {
-    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agents`, undefined, stranger.apiKey)).status).toBe(404);
-    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agents/grok`, undefined, stranger.apiKey)).status).toBe(404);
-    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agents/nobody-here`, undefined, owner.apiKey)).status).toBe(404);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles`, undefined, stranger.apiKey)).status).toBe(404);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles/grok`, undefined, stranger.apiKey)).status).toBe(404);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/agent-profiles/nobody-here`, undefined, owner.apiKey)).status).toBe(404);
   });
 
   it("AC-C7-08 an owner sets a description; a member can't; MCP context_agents is the twin", async () => {
-    const no = await jsonRequest(app, "PATCH", `/nests/${nestId}/agents/grok`, { description: "mine" }, alice.apiKey);
+    const no = await jsonRequest(app, "PATCH", `/nests/${nestId}/agent-profiles/grok`, { description: "mine" }, alice.apiKey);
     expect(no.status).toBe(403);
-    const ok = await jsonRequest(app, "PATCH", `/nests/${nestId}/agents/grok`, { description: "Release notes agent" }, owner.apiKey);
+    const ok = await jsonRequest(app, "PATCH", `/nests/${nestId}/agent-profiles/grok`, { description: "Release notes agent" }, owner.apiKey);
     expect(ok.status, JSON.stringify(ok.data)).toBe(200);
     expect(ok.data.agent.description).toBe("Release notes agent");
-    const long = await jsonRequest(app, "PATCH", `/nests/${nestId}/agents/grok`, { description: "x".repeat(501) }, owner.apiKey);
+    const long = await jsonRequest(app, "PATCH", `/nests/${nestId}/agent-profiles/grok`, { description: "x".repeat(501) }, owner.apiKey);
     expect(long.status).toBe(400);
     const list = await callTool(rita.apiKey, "context_agents", {});
     expect(list.isError, list.text).toBe(false);
@@ -962,6 +962,33 @@ describe("SEC-C7 (round 2): what the independent review found", () => {
     expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
     const view = await thread(alice, t.id);
     expect(view.replies.filter((m: any) => m.handoff_update).length).toBe(1);
+  });
+
+  it("SEC-C7-13 a nest runs at most MAX_INFLIGHT_PER_NEST turns at once; the next ask is 429 and spends no budget", async () => {
+    const { CHAT_BUDGET } = await import("../src/hootie/routes.js");
+    const rl = await import("../src/shared/rate-limit.js");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    beforeRound = () => gate;
+    const held = Array.from({ length: ask.MAX_INFLIGHT_PER_NEST }, () =>
+      jsonRequest(app, "POST", `/nests/${nestId}/ask`, { channel: "general", question: "hold" }, alice.apiKey),
+    );
+    try {
+      await vi.waitFor(() => expect(modelRounds.length).toBe(ask.MAX_INFLIGHT_PER_NEST));
+      // The owner has exactly one question of budget left.
+      rl.clear(`hootie:${owner.userId}`);
+      for (let i = 0; i < CHAT_BUDGET.max - 1; i++) rl.tryConsume(`hootie:${owner.userId}`, CHAT_BUDGET);
+      const busy = await jsonRequest(app, "POST", `/nests/${nestId}/ask`, { channel: "general", question: "one more" }, owner.apiKey);
+      expect(busy.status).toBe(429);
+      expect(busy.data.error).not.toMatch(/too many questions/i);
+      expect(rl.tryConsume(`hootie:${owner.userId}`, CHAT_BUDGET)).toBe(true);
+    } finally {
+      beforeRound = null;
+      release();
+    }
+    expect((await Promise.all(held)).map((r) => r.status)).toEqual(Array(ask.MAX_INFLIGHT_PER_NEST).fill(200));
+    rl.clear(`hootie:${owner.userId}`);
+    rl.clear(`hootie:${alice.userId}`);
   });
 });
 

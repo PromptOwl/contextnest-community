@@ -705,7 +705,8 @@ async function toMessages(caller: Caller, channelName: string, rows: CommentRow[
     rows.map(async (row, i) => {
       const client = clients[i] as ClientMetadata | undefined;
       const { actor, name } = await namedActor(row.author, client, names);
-      const marks = conversationMarks(client as Record<string, unknown> | undefined);
+      // A tombstone keeps no model text, citations or card.
+      const marks = conversationMarks(row.deleted_at ? undefined : (client as Record<string, unknown> | undefined));
       const live = marks.proposal && statuses.get(String(marks.proposal.review_id ?? ""));
       if (marks.proposal && live) marks.proposal = { ...marks.proposal, status: live.status, decided_by: live.decided_by, decided_at: live.decided_at };
       return {

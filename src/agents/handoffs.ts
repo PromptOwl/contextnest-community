@@ -194,10 +194,6 @@ export async function updateHandoff(
   const now = new Date().toISOString();
   const ownClient = callerSafeClient(caller.client);
   const body = `Handoff ${status === "accepted" ? "accepted" : "done"}${note ? `: ${note}` : ""}`;
-  const thread = await addComment(caller.nestId, row.node_id, row.thread_id, caller.userEmail, body, {
-    ...(ownClient ?? {}),
-    handoff_update: { handoff_id: messageId, status, note },
-  } as unknown as ClientMetadata);
   handoff.status = status;
   handoff.updated_by = caller.userEmail;
   handoff.updated_at = now;
@@ -207,6 +203,11 @@ export async function updateHandoff(
     row.client_json,
   ]);
   if (!written.changes) throw new ConflictError("This handoff changed while you were taking it; read the thread again.");
+  // The update message only once the status move won (no orphan on a 409).
+  const thread = await addComment(caller.nestId, row.node_id, row.thread_id, caller.userEmail, body, {
+    ...(ownClient ?? {}),
+    handoff_update: { handoff_id: messageId, status, note },
+  } as unknown as ClientMetadata);
   await syncAnnotationsNode(caller.nestId, row.node_id, caller.userEmail).catch(() => {});
   const update = justWritten(thread, caller.userEmail) ?? "";
   return { handoff: viewOf(row.node_id, row.thread_id, messageId, row.created_at, handoff), message: { id: update, thread_id: row.thread_id } };

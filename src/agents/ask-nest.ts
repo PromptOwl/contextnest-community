@@ -36,16 +36,14 @@
  * HOOTIE_ENABLED off, or no model credential → a mention posts nothing and
  * the ask routes answer 404 / 503 `no_api_key`, as the chat route does.
  *
- * A DM to Hootie (C2's conversations) is the same turn with the conversation
- * node in place of the channel node: `nodeId` is any node that holds comment
- * threads the asker may read.
+ * Channels only for now; a DM to Hootie (C2's conversations) is deferred.
  */
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import { resolveModelCredential, hootieModel, resolveGatewayModel, ownModelRoute } from "../shared/model-credential.js";
-import { resolveContext, type ContextNodeSummary, type ContextResult } from "../nodes/context-service.js";
+import { resolveContext, type ContextNodeSummary } from "../nodes/context-service.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { canOpenNode } from "../governance/mention-notify.js";
@@ -53,7 +51,7 @@ import { addComment, createThread, syncAnnotationsNode } from "../annotations/se
 import { extractMentions, stripMentions } from "../shared/mentions.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { getNest } from "../nests/service.js";
-import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { deserializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { citedNodes } from "../hootie/citations.js";
@@ -63,14 +61,12 @@ import { canStillAsk } from "../hootie/access.js";
 import { hootieTools } from "../hootie/tools.js";
 import { TurnContext, stoppedLine, turnDeadline } from "../hootie/turn.js";
 import { buildSystemPrompt, CHAT_BUDGET } from "../hootie/routes.js";
-import { inertAnswer, INERT_MAX_CHARS } from "../hootie/inert.js";
+import { inertAnswer } from "../hootie/inert.js";
 import { describeModelError, ModelRefusedError, ToolsRejectedError } from "../hootie/model.js";
 import { effectiveHootieBrand } from "../hootie/brand.js";
-import { isChannelNode } from "../channels/channel-node.js";
-import { channelNameOf } from "../channels/channel-node.js";
+import { channelNameOf, isChannelNode } from "../channels/channel-node.js";
 import { channelPostRefusal, getReadableChannel, isNestMember } from "../channels/channel-service.js";
 import { displayNames, namedActor } from "../channels/message-meta.js";
-import { ConflictError, ForbiddenError } from "../shared/errors.js";
 import { readableTime } from "../stream/promote.js";
 import { justWritten } from "../mentions/mention-index.js";
 import { HOOTIE_ALIASES, HOOTIE_HANDLE } from "./reserved.js";
@@ -256,8 +252,7 @@ async function runTurn(caller: AskCaller, question: string, conversation: string
 
   const gathered = new Gathered();
   const turn = new TurnContext({ nestId, turnId: randomUUID(), caller: { userId, email: userEmail }, userText: question });
-  let first: ContextResult | null = null;
-  first = await resolveContext({ nestId, userId, baseUrl, client: HOOTIE_CLIENT, body: { prompt: question, max_tokens: CONTEXT_BUDGET } });
+  const first = await resolveContext({ nestId, userId, baseUrl, client: HOOTIE_CLIENT, body: { prompt: question, max_tokens: CONTEXT_BUDGET } });
   gathered.take(first);
   for (const n of gathered.nodes) turn.allowNode(n.id, n.title);
 
@@ -380,13 +375,16 @@ const inFlightByNest = new Map<string, number>();
 
 /** Reserve a slot for a turn in this nest, or false when the nest or the
  *  server already has as many turns running as it may. */
+let running = 0;
 function reserveSlot(nestId: string): boolean {
   const here = inFlightByNest.get(nestId) ?? 0;
-  if (here >= MAX_INFLIGHT_PER_NEST || inFlight.size >= MAX_INFLIGHT_TOTAL) return false;
+  if (here >= MAX_INFLIGHT_PER_NEST || running >= MAX_INFLIGHT_TOTAL) return false;
   inFlightByNest.set(nestId, here + 1);
+  running++;
   return true;
 }
 function releaseSlot(nestId: string): void {
+  running--;
   const here = (inFlightByNest.get(nestId) ?? 1) - 1;
   if (here <= 0) inFlightByNest.delete(nestId);
   else inFlightByNest.set(nestId, here);
@@ -402,16 +400,12 @@ export function abortNestAsks(): void {
   for (const c of inFlight.values()) c.abort();
 }
 
-function track<T>(nestId: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+/** Track a background turn for settle/abort; the slot is the caller's. */
+function track<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const cancel = new AbortController();
   const p = run(cancel.signal);
   inFlight.set(p, cancel);
-  void p
-    .finally(() => {
-      inFlight.delete(p);
-      releaseSlot(nestId);
-    })
-    .catch(() => {});
+  void p.finally(() => inFlight.delete(p)).catch(() => {});
   return p;
 }
 
@@ -436,11 +430,13 @@ export async function askNest(caller: AskCaller, input: AskInput): Promise<AskRe
     const refusal = await channelPostRefusal(caller.nestId, place.nodeId, caller.userId, caller.userEmail);
     if (refusal) throw refusal.status === 409 ? new ConflictError(refusal.error) : new ForbiddenError(refusal.error);
   }
+  // Slot first: a BUSY refusal doesn't spend the asker's budget.
+  if (!reserveSlot(caller.nestId)) throw new AppError(429, BUSY);
   if (!tryConsume(`hootie:${caller.userId}`, CHAT_BUDGET)) {
+    releaseSlot(caller.nestId);
     throw new AppError(429, "Too many questions in a short time — give it a few minutes.");
   }
-  if (!reserveSlot(caller.nestId)) throw new AppError(429, BUSY);
-  return track(caller.nestId, (signal) => answerAndMaybePost(caller, place, question, null, input.post === true, signal));
+  return track((signal) => answerAndMaybePost(caller, place, question, null, input.post === true, signal).finally(() => releaseSlot(caller.nestId)));
 }
 
 async function answerAndMaybePost(
@@ -537,11 +533,8 @@ export function triggerHootieForMessage(params: {
   const caller: AskCaller = { nestId, userId: authorUserId, userEmail: authorEmail, baseUrl: params.baseUrl ?? config.PUBLIC_BASE_URL ?? "" };
   const place: Place = { nodeId, channel: channelNameOf(nodeId), threadId };
   const refuse = (reason: string) => postHootieMessage({ nestId, nodeId, threadId, askedBy: authorEmail, body: couldNotAnswer(reason) });
-  if (!reserveSlot(nestId)) {
-    void refuse(BUSY).catch(() => {});
-    return;
-  }
-  void track(nestId, async (signal) => {
+  void track(async (signal) => {
+    let reserved = false;
     try {
       // Asked as a member who can read this channel, now: the post route
       // checked it a moment ago, and the turn re-checks on every round.
@@ -553,6 +546,12 @@ export function triggerHootieForMessage(params: {
       // review r2 F1).
       const row = (await getDb().get("SELECT client_json FROM annotation_comments WHERE id = ?", [commentId])) as { client_json: string | null } | undefined;
       if (!row || deserializeClient(row.client_json)?.agent) return;
+      // BUSY only after the checks above: an agent's or a stranger's @hootie
+      // never gets a reply, busy or not.
+      if (!(reserved = reserveSlot(nestId))) {
+        await refuse(BUSY);
+        return;
+      }
       const question = questionOf(body);
       if (!question) {
         await refuse("ask me a question after @hootie.");
@@ -572,6 +571,8 @@ export function triggerHootieForMessage(params: {
       console.error("[ask-nest] turn failed", nestId, threadId, err);
       const reason = err instanceof AppError ? err.message : "something went wrong.";
       await postHootieMessage({ nestId, nodeId, threadId, askedBy: authorEmail, body: couldNotAnswer(reason) }).catch(() => {});
+    } finally {
+      if (reserved) releaseSlot(nestId);
     }
   });
 }
@@ -601,4 +602,3 @@ export function askText(r: AskResult): string {
   return lines.join("\n");
 }
 
-export { INERT_MAX_CHARS as HOOTIE_ANSWER_MAX_CHARS };

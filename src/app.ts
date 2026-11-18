@@ -2989,7 +2989,7 @@ export function createApp(): Hono<AuthEnv> {
     // stays (it works on document threads too).
     const isConversationRoute =
       parts[1] === "ask" ||
-      parts[1] === "agents" ||
+      parts[1] === "agent-profiles" ||
       parts[1] === "handoffs" ||
       (parts[1] === "threads" && parts.length === 4 && parts[3] === "handoff");
     if (isConversationRoute && !config.EXPERIMENTAL_AGENT_STREAM) {
