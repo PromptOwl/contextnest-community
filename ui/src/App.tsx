@@ -681,6 +681,13 @@ export default function App() {
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
           tab: nestTabFromParam(params.get("tab")),
+          // ?tab=review&review=<node> → the change to open. The Review tab is
+          // My Work since #582, and the redirect below reads this, so a shared
+          // or bookmarked review link opened in a fresh page keeps its change
+          // (PO-1404).
+          ...(nestTabFromParam(params.get("tab")) === "review" && params.get("review")
+            ? { initialReview: params.get("review")! }
+            : {}),
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
