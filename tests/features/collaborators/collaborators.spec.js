@@ -4,7 +4,9 @@
  * Page under test: the nest page's Collaborators tab
  * (ui/src/components/nest/CollaboratorsTab.tsx) — what each role sees and can
  * do, adding, changing and removing people, sharing with a team, the
- * visibility control and API-only access keys.
+ * visibility control and API-only access keys. Since #582 the role checks
+ * reach New document and Publish in the app top bar, and the nest's Delete on
+ * its Settings tab (Danger zone), not the removed ⋯ menu.
  *
  * Conventions
  * -----------
@@ -230,7 +232,8 @@ test.describe('Collaborators', () => {
     await editor.newDocument.gotoNest(owner.nest.id);
     await editor.newDocument.openNewDocument();
     await editor.newDocument.fillDocument(title, 'Written by the editor.');
-    await editor.newDocument.publishButton.click();
+    // Publish sits in the app top bar since #582, outside <main>.
+    await editor.page.publishButton.click();
     await expect
       .poll(async () => (await owner.api.listNodes(owner.nest.id)).some((n) => n.title === title), WRITE)
       .toBe(true);
@@ -310,10 +313,10 @@ test.describe('Collaborators', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'collab-admin-delete');
     const admin = await share(owner, secondary_user, 'admin');
 
-    // The nest menu's Delete only asks an owner for removal.
-    await admin.page.gotoNest(owner.nest.id);
-    await admin.page.moreActions.click();
-    await admin.page.page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    // Settings → Danger zone (the ⋯ menu's Delete until #582) only asks an
+    // owner for removal.
+    await admin.page.startDeleteFromSettings(owner.nest.id);
+    await expect(admin.page.settingsDelete).toHaveText(/Request deletion/);
     await expect(admin.page.requestRemovalDialog).toBeVisible();
     await expect(admin.page.deleteNestDialog).toHaveCount(0);
     await admin.page.page.keyboard.press('Escape');

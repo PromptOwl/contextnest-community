@@ -2,7 +2,7 @@
  * Message Log Test Suite — CN-MSG-001 … CN-MSG-029
  *
  * Page under test: ui/src/components/MessageLogPage.tsx (route `/messages`,
- * rail → Admin → Message log), over REST GET /admin/messages,
+ * Workspace settings → Message log), over REST GET /admin/messages,
  * /admin/messages/:id and /admin/messages/views.
  *
  * Conventions
@@ -806,7 +806,7 @@ test.describe('Message log', () => {
     await ss.openTab('Basic');
     const card = ss.card('Message log');
     await expect(card).toContainText(
-      'Every email, Slack and Teams post, webhook, inbox notification and agent comment this server sends is logged for superadmins (Admin → Message log). Passwords, sign-in links, keys and webhook URLs are redacted before storage.'
+      'Every email, Slack and Teams post, webhook, inbox notification and agent comment this server sends is logged for superadmins (Workspace settings → Message log). Passwords, sign-in links, keys and webhook URLs are redacted before storage.'
     );
     await expect(card).toContainText('How long to keep messages. 0 keeps them forever. Who viewed the log is kept for a year regardless.');
     await expect(card).toContainText('Off keeps only who, when, where and whether it was delivered — no second copy of what people wrote.');

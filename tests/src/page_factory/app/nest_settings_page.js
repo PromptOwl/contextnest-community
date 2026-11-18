@@ -2,7 +2,10 @@
  * Nest Settings Page Object Model
  *
  * Page under test: the Nest settings dialog (ui/src/components/NestSettingsModal.tsx),
- * opened from "Nest settings" in the nest's ⋯ menu. It holds the governance
+ * opened from "Edit review settings" (`nest-settings-governance`) under
+ * "Review and access" on the nest's Settings tab (`nest-settings-tab`,
+ * ui/src/components/NestView.tsx). Before #582 it was "Nest settings" in the
+ * nest header's ⋯ menu, which #582 removed. It holds the governance
  * settings — Stewardship & Approval Workflow, Auto-publish owner & admin
  * edits, Review prime documents only (with Prime tags), Always-include tags,
  * Creators review their own documents, Review SLA (hours), Record what people
@@ -15,7 +18,9 @@
  * "Can approve:"; and the nest page's "Agent writes awaiting confirmation"
  * banner with its "Confirm write to this nest" dialog.
  *
- * Owners and nest admins open the dialog; a few switches are owner-only
+ * Owners and nest admins get the button (not on an archived nest, and not
+ * Editors or Viewers, who still get the Settings tab for its fields); a few
+ * switches are owner-only
  * (stewardship off, read recording off) or superadmin-only (agent writes).
  */
 
@@ -33,8 +38,12 @@ class NestSettingsPage {
 
     // ── Nest page ──────────────────────────────────────────────────────────
     this.tabs = page.getByRole('tab');
-    this.nestMenu = page.getByTitle('More actions').first();
-    this.nestSettingsItem = page.getByRole('menuitem', { name: 'Nest settings', exact: true });
+    // Settings tab (ui/src/components/NestView.tsx): the nest's own settings.
+    this.settingsTab = page.getByTestId('nest-settings-tab');
+    this.governanceButton = page.getByTestId('nest-settings-governance');
+    this.readerButton = page.getByTestId('nest-settings-reader');
+    this.deleteButton = page.getByTestId('nest-settings-delete');
+    this.structureButton = this.main.getByRole('button', { name: 'Structure rules', exact: true });
 
     // ── Nest settings dialog ───────────────────────────────────────────────
     this.dialog = page.getByRole('dialog').filter({ hasText: 'Settings:' });
@@ -98,8 +107,9 @@ class NestSettingsPage {
   // ── Navigation ─────────────────────────────────────────────────────────────
 
   /**
-   * Open the nest page and wait for its tabs and its settings. The ⋯ menu
-   * depends on the settings read that lands after the page first draws.
+   * Open the nest page and wait for its tabs and its settings. What the
+   * Settings tab offers depends on the settings read that lands after the
+   * page first draws.
    */
   async gotoNest(nestId) {
     this._log(`Opening nest ${nestId}`);
@@ -123,42 +133,49 @@ class NestSettingsPage {
     await this.page.getByText('Loading document...').waitFor({ state: 'hidden' }).catch(() => {});
   }
 
-  // ── Nest ⋯ menu ────────────────────────────────────────────────────────────
+  // ── Settings tab ───────────────────────────────────────────────────────────
 
-  /** Open the nest's ⋯ menu. The header can re-render as the nest loads, so retry. */
-  async openNestMenu() {
-    for (let i = 0; i < 4; i++) {
-      await this.nestMenu.click();
-      if (await this.page.getByRole('menuitem').first().isVisible().catch(() => false)) return;
-      await this.page.waitForTimeout(800);
-    }
-  }
-
-  /** The entries of the nest's ⋯ menu, or [] when the nest offers no menu. */
-  async nestMenuItems(nestId) {
-    await this.gotoNest(nestId);
-    if (!(await this.nestMenu.isVisible())) return [];
-    await this.openNestMenu();
-    const items = (await this.page.getByRole('menuitem').allInnerTexts()).map((t) => t.trim());
-    await this.page.keyboard.press('Escape');
-    return items;
+  /** Click the nest's Settings tab (the nest page must be open). */
+  async openSettingsTab() {
+    this._log('Opening the Settings tab');
+    await this.settingsTab.click();
+    await this.page.getByRole('heading', { name: 'Fields and task rules' }).waitFor({ state: 'visible' });
   }
 
   /**
-   * Open the Nest settings dialog from the nest's ⋯ menu. The dialog takes its
-   * starting values from the nest page's own settings read; opened before that
-   * lands, it shows the defaults (stewardship off). So it is checked against
-   * the saved settings and reopened until it shows them.
+   * The nest-level actions the Settings tab offers this person, by name:
+   * 'Edit review settings', 'Structure rules', 'Reader mode', and 'Delete
+   * nest' or 'Request deletion'. Empty when the nest shows no Settings tab.
+   * (These replace the entries of the ⋯ menu #582 removed; "Nest settings"
+   * there is "Edit review settings" here.)
+   */
+  async settingsActions(nestId) {
+    await this.gotoNest(nestId);
+    if ((await this.settingsTab.count()) === 0) return [];
+    await this.openSettingsTab();
+    const found = [];
+    if (await this.governanceButton.isVisible()) found.push('Edit review settings');
+    if (await this.structureButton.isVisible()) found.push('Structure rules');
+    if (await this.readerButton.isVisible()) found.push('Reader mode');
+    if (await this.deleteButton.isVisible()) found.push((await this.deleteButton.innerText()).trim());
+    return found;
+  }
+
+  /**
+   * Open the Nest settings dialog from Settings → Edit review settings. The
+   * dialog takes its starting values from the nest page's own settings read;
+   * opened before that lands, it shows the defaults (stewardship off). So it
+   * is checked against the saved settings and reopened until it shows them.
    */
   async open(nestId) {
-    this._log('Opening ⋯ → Nest settings');
+    this._log('Opening Settings → Edit review settings');
     await this.gotoNest(nestId);
-    await this.nestMenu.waitFor({ state: 'visible' });
+    await this.openSettingsTab();
+    await this.governanceButton.waitFor({ state: 'visible' });
     const res = await this.page.request.get(`/nests/${nestId}/settings`);
     const savedOn = String(Boolean(((await res.json().catch(() => ({}))) ?? {}).stewardship_enabled));
     for (let attempt = 0; attempt < 5; attempt++) {
-      await this.openNestMenu();
-      await this.nestSettingsItem.click();
+      await this.governanceButton.click();
       await this.dialog.waitFor({ state: 'visible' });
       if ((await this.switchFor('Stewardship & Approval Workflow').getAttribute('aria-checked')) === savedOn) return;
       await this.cancelButton.click();

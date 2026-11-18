@@ -2,14 +2,16 @@
  * Nest Settings Test Suite — CN-NSET-001 … CN-NSET-023
  *
  * Page under test: the Nest settings dialog (ui/src/components/NestSettingsModal.tsx)
- * opened from the nest's ⋯ menu — Stewardship & Approval Workflow,
- * Auto-publish owner & admin edits, Review prime documents only and Prime
- * tags, Always-include tags, Creators review their own documents, Review SLA,
- * Record what people and agents read, Require confirmation for agent writes
+ * opened from the nest's Settings tab → "Edit review settings" (the nest
+ * header's ⋯ menu that held "Nest settings" was removed by #582) —
+ * Stewardship & Approval Workflow, Auto-publish owner & admin edits, Review
+ * prime documents only and Prime tags, Always-include tags, Creators review
+ * their own documents, Review SLA, Record what people and agents read, Require confirmation for agent writes
  * (with "Keys that skip the gate"), and the Systems panel — and where each
  * setting shows up: the document page (status, Publish / Submit for review,
  * "Always include", "Prime document", "Can approve:", Activity), the Stewards
- * and Review Queue tabs, and the "Agent writes awaiting confirmation" banner.
+ * tab, the nest's review view, and the "Agent writes awaiting confirmation"
+ * banner.
  *
  * Conventions
  * -----------
@@ -112,11 +114,12 @@ test.describe('Nest Settings', () => {
 
   // ── Who can open it ────────────────────────────────────────────────────────
 
-  test('CN-NSET-001: Verify that the owner can open Nest settings from the ⋯ menu and sees the default settings, and that extra sections appear only when stewardship is on', async ({ primary_user, commonFunction }) => {
+  test('CN-NSET-001: Verify that the owner can open Nest settings from the Settings tab and sees the default settings, and that extra sections appear only when stewardship is on', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'nset-open');
     const { page, api, nest } = owner;
 
-    expect(await page.nestMenuItems(nest.id)).toContain('Nest settings');
+    // #582 moved "Nest settings" from the ⋯ menu to Settings → Edit review settings.
+    expect(await page.settingsActions(nest.id)).toContain('Edit review settings');
     await page.open(nest.id);
     await expect(page.dialog).toContainText(`Settings: ${nest.name}`);
     await expect(page.switchFor(STEWARDSHIP)).toHaveAttribute('aria-checked', 'false');
@@ -138,13 +141,13 @@ test.describe('Nest Settings', () => {
     for (const permission of ['write', 'read']) {
       const owner = await ownerNest(primary_user, commonFunction, `nset-${permission}`);
       const member = await share(owner, secondary_user, permission);
-      expect(await member.page.nestMenuItems(owner.nest.id)).not.toContain('Nest settings');
+      expect(await member.page.settingsActions(owner.nest.id)).not.toContain('Edit review settings');
     }
 
     const archived = await ownerNest(primary_user, commonFunction, 'nset-archived');
     await archived.api.archiveNest(archived.nest.id);
     cleanups.push(() => archived.api.restoreNest(archived.nest.id));
-    expect(await archived.page.nestMenuItems(archived.nest.id)).not.toContain('Nest settings');
+    expect(await archived.page.settingsActions(archived.nest.id)).not.toContain('Edit review settings');
   });
 
   test("CN-NSET-003: Verify that a nest Admin can open Nest settings, can turn read recording on but not off, and can't change agent-write confirmation", async ({ primary_user, secondary_user, commonFunction }) => {
@@ -154,7 +157,7 @@ test.describe('Nest Settings', () => {
     test.skip(await admin.api.isServerAdmin(), "secondary_user is a server admin here, so it isn't limited like a nest Admin.");
     const ap = admin.page;
 
-    expect(await ap.nestMenuItems(owner.nest.id)).toContain('Nest settings');
+    expect(await ap.settingsActions(owner.nest.id)).toContain('Edit review settings');
     await ap.open(owner.nest.id);
     await expect(ap.switchFor(READ_LOG)).toHaveAttribute('aria-checked', 'false');
     await ap.switchFor(READ_LOG).click();
@@ -286,9 +289,17 @@ test.describe('Nest Settings', () => {
     expect(await api.statusOf(nest.id, waiting.id)).toBe('draft');
     const sp = primary_user.stewardsPage;
     expect(await sp.tabNames(nest.id)).not.toContain('Stewards');
-    await page.page.goto(`/nest/${nest.id}?tab=review`);
-    await expect(page.main.getByText('Stewardship is off', { exact: true })).toBeVisible(WRITE);
-    await expect(page.main.getByText(waiting.title)).toHaveCount(0);
+    // Rewritten for #582: the nest's Review Queue tab (and its "Stewardship
+    // is off" card) is gone — ?tab=review now lands on My Work. So: the
+    // withdrawn review is nowhere in My Work (neither to decide nor "Waiting
+    // on others"), and the nest's Documents tab drops its review cards.
+    const work = primary_user.myWorkPage;
+    await work.goto();
+    await expect(work.workRow(waiting.title)).toHaveCount(0, WRITE);
+    await expect(work.waitingRow(waiting.title)).toHaveCount(0);
+    await page.page.goto(`/nest/${nest.id}?tab=documents`);
+    await expect(page.main.getByText('Total Documents', { exact: true })).toBeVisible(WRITE);
+    await expect(page.page.getByTestId('nest-stat-review')).toHaveCount(0);
 
     // Collaborators and review history are kept.
     expect(await api.collaborator(nest.id, secondaryRole.email)).not.toBeNull();

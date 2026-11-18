@@ -140,9 +140,12 @@ test.describe('Nest archive', () => {
     // The governance tabs are withheld too, and Settings keeps no write
     // action (Delete, review settings).
     await expect(page.tab('Overview')).toBeVisible();
-    for (const tab of ['External Edits', 'Collaborators', 'Activity']) {
+    for (const tab of ['External Edits', 'Collaborators']) {
       await expect(page.tab(tab)).toHaveCount(0);
     }
+    // The Activity log is read-only, so the owner keeps it on an archived
+    // nest — as the ⋯ menu's Activity entry did before #582, now as a tab.
+    await expect(page.tab('Activity')).toBeVisible();
     const actions = await page.settingsActions();
     for (const entry of ['Delete', 'Edit review settings']) {
       expect(actions, `the archived nest's Settings offers no "${entry}"`).not.toContain(entry);
@@ -343,7 +346,10 @@ test.describe('Nest archive', () => {
     await owner.page.openReviewQueue();
     const row = owner.page.requestRow(reason);
     await expect(row).toBeVisible(WRITE);
-    await expect(row).toContainText('Archive nest');
+    // My Work marks the row with its kind, "Archive" (the nest's Review Queue
+    // said "Archive nest" before #582).
+    await expect(owner.page.requestKind(reason)).toHaveText('Archive');
+    await expect(row).toContainText(owner.nest.name);
     await expect(row).toContainText(secondaryRole.email);
 
     await owner.page.rejectRequest(reason, 'Not yet — still in use');

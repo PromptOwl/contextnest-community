@@ -34,6 +34,18 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `document-sidebar-dashboard-<id>` | Rail "work" rows: Stream, Control room; My Work / My Drafts only below md (phone drawer) |
 | `settings-nav` / `settings-nav-<id>` | Workspace settings left nav and its items — `ui/src/components/SettingsShell.tsx` |
 
+## Nest page — Settings tab (`ui/src/components/NestView.tsx`)
+
+Since #582 the nest's own settings and actions live on its Settings tab (the header's ⋯ menu is gone).
+
+| Test ID | Element |
+|---|---|
+| `nest-settings-tab` | The nest's Settings tab trigger (not for grant-only readers) |
+| `nest-settings-governance` | Review and access → "Edit review settings" (opens Nest settings; owner/nest admin, not on an archived nest) |
+| `nest-settings-reader` | Review and access → "Reader mode: On / Off" (opens the Public Docs Reader Mode dialog) |
+| `nest-settings-delete` | Danger zone → "Delete nest" (owner) or "Request deletion" (editor/admin) |
+| `nest-stat-review` | Documents tab → "Your Review Queue" card: pending documents this person may decide |
+
 ## Nests Dashboard (`ui/src/pages/app/nests/page.tsx`)
 
 | Test ID | Element |
