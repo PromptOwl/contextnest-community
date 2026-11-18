@@ -1425,27 +1425,6 @@ export function NestView({
                   title="Click to rename — saved automatically"
                   className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
                 />
-                {/* Same rename the overflow menu used to offer (name + description
-                  dialog), beside the name so it is discoverable; the input itself
-                  still edits inline. !loading: the description only lands with
-                  fetchData, so opening earlier would prefill it empty. */}
-                {!loading && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Flush a pending inline rename first so the dialog primes
-                      // from the latest text instead of racing the debounce.
-                      flushRename();
-                      setShowRename(true);
-                    }}
-                    className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    title="Rename nest"
-                    aria-label="Rename nest"
-                    data-testid="nest-rename"
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </button>
-                )}
               </div>
               {renameError && (
                 <p
@@ -1461,28 +1440,12 @@ export function NestView({
         }
         badges={
           <>
-            {/* Visibility — a three-tier menu for owner/admin (so the switch
-              isn't buried in the Share dialog), a read-only badge for
-              everyone else. Gated on !initialLoad (not `loading`,
+            {/* Visibility — a read-only badge for everyone who can't manage
+              the nest (owner/admin get the menu in the action row). Gated on !initialLoad (not `loading`,
               which flips on every background refetch too — see its
               definition above) so the header never flashes the "private"
               default before the real value lands from fetchData. */}
-            {!initialLoad && (canManage ? (
-              // All three tiers, the acknowledgements and the server's
-              // admins-only caps — the same control as the Collaborators tab
-              // and the document top bar, behind the header's badge button.
-              <NestVisibilityControl
-                nestId={nestId}
-                variant="header"
-                // Team sharing lives on the Collaborators tab, whose add
-                // control opens on Team on a shared deployment.
-                onShareWithTeam={() => setActiveTab("collaborators")}
-                onChanged={fetchData}
-                onError={(m) => {
-                  if (m) toast.error(m);
-                }}
-              />
-            ) : (
+            {!initialLoad && !canManage && (
               visibility !== "private" && (
                 <Badge
                   variant="outline"
@@ -1506,7 +1469,7 @@ export function NestView({
                   {visibility === "public" ? "Public" : "Organization"}
                 </Badge>
               )
-            ))}
+            )}
             {isImported && (
               <Badge
                 variant="outline"
@@ -1553,6 +1516,43 @@ export function NestView({
           </>
         }
       >
+        {/* Rename and visibility, first in the action row (owner/admin).
+            Rename opens the name + description dialog; the name input still
+            edits inline. Visibility: all three tiers, the acknowledgements
+            and the server's admins-only caps. !initialLoad (not `loading`,
+            which flips on every background refetch): the description has
+            landed, the "private" default never flashes, and the row does not
+            jump on a refetch. */}
+        {canManage && !initialLoad && (
+          <button
+            type="button"
+            onClick={() => {
+              // Flush a pending inline rename first so the dialog primes
+              // from the latest text instead of racing the debounce.
+              flushRename();
+              setShowRename(true);
+            }}
+            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="Rename nest"
+            aria-label="Rename nest"
+            data-testid="nest-rename"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+        )}
+        {canManage && !initialLoad && (
+          <NestVisibilityControl
+            nestId={nestId}
+            variant="header"
+            // Team sharing lives on the Collaborators tab, whose add
+            // control opens on Team on a shared deployment.
+            onShareWithTeam={() => setActiveTab("collaborators")}
+            onChanged={fetchData}
+            onError={(m) => {
+              if (m) toast.error(m);
+            }}
+          />
+        )}
         {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}

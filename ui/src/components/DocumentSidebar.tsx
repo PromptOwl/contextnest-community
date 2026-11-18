@@ -65,10 +65,6 @@ interface Props {
   /** New document, optionally inside a folder. Omit when the caller can't
    *  author in this nest. */
   onNewDocument?: (folder?: string) => void;
-  /** Opens search. Sits at the top of the rail, above the nests. */
-  onSearch?: () => void;
-  /** Where search looks: "nests and documents" on the dashboard, else this nest. */
-  searchLabel?: string;
   /** Pinned to the bottom of the rail: Docs and the account menu. */
   footer?: ReactNode;
 }
@@ -103,8 +99,6 @@ export function DocumentSidebar({
   onOpenDashboardTab,
   onNewDocument,
   footer,
-  onSearch,
-  searchLabel = "Search",
 }: Props) {
   // One rail everywhere: the nest list is the same on the dashboard as inside
   // a nest. Only the current nest is unfolded.
@@ -179,20 +173,6 @@ export function DocumentSidebar({
         isSuperadmin={isAdmin && authMode !== "open"}
         onOpen={onOpenDashboardTab}
       />
-      {onSearch && (
-        <button
-          type="button"
-          onClick={onSearch}
-          className="mx-2 mt-3 flex h-8 w-auto items-center gap-2 rounded-md border border-input bg-background px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          title={`${searchLabel} (⌘K)`}
-          aria-label={searchLabel}
-          data-testid="document-sidebar-search"
-        >
-          <Search className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="flex-1 truncate text-left">{searchLabel}…</span>
-          <kbd className="rounded border border-border bg-muted px-1 py-0.5 font-mono text-[10px]">⌘K</kbd>
-        </button>
-      )}
       {/* The nests page (create, import, archive, connect) is one row away
           from every page, in or out of a nest. */}
       <button

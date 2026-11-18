@@ -1565,8 +1565,6 @@ export default function App() {
                       ? setDocSidebarDrawer(false)
                       : setDocSidebarCollapsed(true)
                   }
-                  onSearch={canQuickOpen ? () => setShowQuickOpen(true) : undefined}
-                  searchLabel={cur.page === "dashboard" ? "Search nests and documents" : "Search this nest"}
                   onOpenDashboard={() => setView({ page: "dashboard" })}
                   dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, pageCaps).id : null}
                   onOpenDashboardTab={(tab) => {
@@ -1737,6 +1735,32 @@ export default function App() {
           )}
           </div>
 
+          {/* The ONE search entry point, on every page the palette works on,
+              just before My Work. The Dashboard used to carry its own
+              field-styled button, so the same feature looked like two
+              (CU-wdqcq012uv). What differs
+              between pages is scope, and the palette states that itself. */}
+          {canQuickOpen && (
+            <button
+              onClick={() => setShowQuickOpen(true)}
+              title={
+                view.page === "dashboard"
+                  ? "Search nests and documents (⌘K)"
+                  : "Search this nest (⌘K)"
+              }
+              className={`flex shrink-0 items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-52 2xl:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors`}
+              aria-label="Search"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4 shrink-0" />
+              <span className="hidden sm:inline flex-1 text-left truncate">
+                {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
+              </span>
+              <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                ⌘K
+              </kbd>
+            </button>
+          )}
           {withSidebar && adminStatus?.me && !readerMode && (
             <HeaderRibbon
               view={{
@@ -1815,31 +1839,6 @@ export default function App() {
           )}
 
           <div className="flex shrink-0 items-center gap-2">
-            {/* The ONE search entry point, on every page the palette works on
-                — the Dashboard used to carry its own field-styled button, so
-                the same feature looked like two (CU-wdqcq012uv). What differs
-                between pages is scope, and the palette states that itself. */}
-            {canQuickOpen && (
-              <button
-                onClick={() => setShowQuickOpen(true)}
-                title={
-                  view.page === "dashboard"
-                    ? "Search nests and documents (⌘K)"
-                    : "Search this nest (⌘K)"
-                }
-                className={`${showSidebar ? "md:hidden " : ""}flex items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-52 2xl:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors`}
-                aria-label="Search"
-                data-testid="global-search-trigger"
-              >
-                <Search className="h-4 w-4 shrink-0" />
-                <span className="hidden sm:inline flex-1 text-left truncate">
-                  {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
-                </span>
-                <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
-                  ⌘K
-                </kbd>
-              </button>
-            )}
             {/* Mode indicator — only when not logged-in (logged-in
                 users see open-mode context inside the dropdown) */}
             {authMode === "open" && !adminStatus?.me && (

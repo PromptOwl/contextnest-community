@@ -129,13 +129,13 @@ export function TopBarTools({
             variant="ghost"
             size="sm"
             className={cn(
-              "h-9 gap-1.5 px-2 text-muted-foreground hover:text-accent-foreground lg:px-2.5",
+              "h-9 gap-1.5 px-2 text-sm font-normal text-muted-foreground hover:text-accent-foreground lg:px-2.5",
               viewActive && "bg-accent font-medium text-accent-foreground",
             )}
             aria-label={activeLabel ? `Views, ${activeLabel}` : "Views"}
             data-testid="top-bar-views"
           >
-            <LayoutGrid className="h-4 w-4" aria-hidden />
+            <LayoutGrid className="h-4 w-4 shrink-0" aria-hidden />
             <span className="hidden whitespace-nowrap lg:inline">{activeLabel ?? "Views"}</span>
             <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
           </Button>
@@ -225,13 +225,13 @@ export function TopBarTools({
       <Button
         variant="ghost"
         size="sm"
-        className="h-9 gap-1.5 px-2 text-muted-foreground hover:text-accent-foreground xl:px-2.5"
+        className="h-9 gap-1.5 px-2 text-sm font-normal text-muted-foreground hover:text-accent-foreground xl:px-2.5"
         onClick={onConnect}
         title="Connect a CLI, MCP client or API caller"
         aria-label="Connect"
         data-testid="top-bar-connect"
       >
-        <Plug className="h-4 w-4" aria-hidden />
+        <Plug className="h-4 w-4 shrink-0" aria-hidden />
         <span className="hidden xl:inline">Connect</span>
       </Button>
       {/* Same button on every screen. With no nest open it acts on the one you
@@ -240,13 +240,13 @@ export function TopBarTools({
         <Button
           variant="ghost"
           size="sm"
-          className="h-9 gap-1.5 px-2 text-muted-foreground hover:text-accent-foreground xl:px-2.5"
+          className="h-9 gap-1.5 px-2 text-sm font-normal text-muted-foreground hover:text-accent-foreground xl:px-2.5"
           onClick={onNewDocument}
           title="New document — start blank or import files"
           aria-label="New document"
           data-testid="top-bar-new-document"
         >
-          <Plus className="h-4 w-4" aria-hidden />
+          <Plus className="h-4 w-4 shrink-0" aria-hidden />
           <span className="hidden xl:inline">New document</span>
         </Button>
       )}
