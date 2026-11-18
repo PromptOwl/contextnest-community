@@ -10,13 +10,13 @@
  * What you get:
  *   - published docs in governed/ and tasks assigned to you across stages,
  *     some overdue, some done
- *   - a second user, demo-agent@example.com, who files nine changes for your
+ *   - a second identity, a named system ("Demo Agent"), that files nine changes for your
  *     review: two Grok signals, two Claude tasks, three new documents, and edits
  *     to two published docs (one by an agent, one by a person). Agent changes
  *     carry agent, session and listener
  *
- * The agent is a real second account because a person can't approve their own
- * change (separation of duties).
+ * The agent is a separate account because a person can't approve their own
+ * change (separation of duties). It is a named system, which takes no billable seat.
  */
 const BASE = (process.argv[2] || "http://localhost:3838").replace(/\/$/, "");
 const KEY = process.env.CN_API_KEY;
@@ -29,8 +29,6 @@ if (!ME) {
   console.error("Set CN_EMAIL to the email you sign in with (the tasks are assigned to it), then run again.");
   process.exit(1);
 }
-const AGENT_EMAIL = process.env.CN_AGENT_EMAIL || "demo-agent@example.com";
-const AGENT_PASSWORD = process.env.CN_AGENT_PASSWORD || "demo-agent-pass-1";
 
 async function call(method, path, body, key = KEY, extra = {}) {
   const res = await fetch(BASE + path, {
@@ -58,9 +56,7 @@ async function must(method, path, body, key) {
     const hint =
       res.status === 403 && path === "/nests"
         ? " (Only server admins can create nests: use an admin's key, or set NEST_CREATION=everyone.)"
-        : res.status === 402
-          ? " (This server's plan has no seat for a second editor. The demo agent needs one to file changes.)"
-          : "";
+        : "";
     throw new Error(`${method} ${path} -> ${res.status} ${JSON.stringify(data).slice(0, 300)}${hint}`);
   }
   return data;
@@ -122,21 +118,18 @@ for (const [title, stage, due, priority] of tasks) {
 }
 console.log(`Published ${2 + tasks.length} nodes`);
 
-// 2. A second user to play the agent
-let agentKey;
-{
-  let { res, data } = await call("POST", "/auth/register", { email: AGENT_EMAIL, password: AGENT_PASSWORD, name: "Demo Agent" }, null);
-  if (!res.ok) ({ res, data } = await call("POST", "/auth/login", { email: AGENT_EMAIL, password: AGENT_PASSWORD }, null));
-  if (!res.ok) throw new Error(`Could not register or sign in ${AGENT_EMAIL}: ${JSON.stringify(data)}`);
-  const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
-  const k = await call("POST", "/auth/keys", { label: `demo seed ${Date.now()}` }, null, { Cookie: cookie });
-  agentKey = k.data.api_key;
-  if (!agentKey) throw new Error(`No agent key: ${JSON.stringify(k.data)}`);
-}
-await must("POST", `${N}/collaborators`, { email: AGENT_EMAIL, permission: "write" });
+// 2. A second identity to play the agent. A named system (a service identity)
+// takes no billable seat, so this works on a plan with no spare editor seat,
+// and it is still a different account from you, which separation of duties needs.
+const sys = await must("POST", "/systems", { name: `Demo Agent ${nest.name}`, capability: "write", nest_ids: [nest.id] });
+const agentKey = sys.api_key;
+if (!agentKey) throw new Error(`No agent key: ${JSON.stringify(sys)}`);
 
 // 3. Turn the review gate on, then let the agent file changes
-await must("PATCH", `${N}/settings`, { stewardship_enabled: true });
+// allow_self_approve: as the nest's owner you hold no steward role, and the review
+// inbox only lists changes you are allowed to decide. The agent's changes still
+// need you, because you never review your own.
+await must("PATCH", `${N}/settings`, { stewardship_enabled: true, allow_self_approve: true });
 
 const listener = "Northwind Labs Support workspace";
 const submit = (nodeId, note, priority = "normal") =>
@@ -273,6 +266,6 @@ await submit(northwind.id, "Added where they win, from the call notes.");
 
 console.log(`
 Done. Open ${BASE}, pick "${nest.name}", then go to My Work and the nest's Review tab.
-Expect 9 changes waiting on you (5 documents, 2 tasks, 2 signals), 6 open tasks and 2 finished ones.
-Agent login for the other side: ${AGENT_EMAIL} / ${AGENT_PASSWORD}
+Expect 9 changes waiting on you (5 documents, 2 tasks, 2 signals), 8 open tasks (two are the ones the agent filed) and 2 finished ones.
+The agent is the named system "Demo Agent ${nest.name}" (it goes away with the nest's access).
 `);
