@@ -27,8 +27,9 @@ class ServerSettingsPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail entry (ui/src/components/DocumentSidebar.tsx) ────────────────
-    this.railItem = page.getByTestId('document-sidebar-dashboard-settings');
+    // ── Nav entry: Workspace settings (ui/src/components/SettingsShell.tsx),
+    //    opened from the account menu (SidebarRailPage.openSettings) ─────────
+    this.railItem = page.getByTestId('settings-nav-settings');
 
     // ── Page shell ────────────────────────────────────────────────────────
     this.pageTitle = page.getByTestId('page-title');

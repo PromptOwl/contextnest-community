@@ -1,40 +1,56 @@
 /**
- * Sidebar Rail Page Object Model
+ * Sidebar Rail Page Object Model — the app's navigation since #582
  *
- * Page location: ui/src/components/DocumentSidebar.tsx (AppPagesNav) — the
- * dashboard rail, built from the page registry in ui/src/lib/pages.ts
- * (`appRail(caps)`).
+ * #582 (Review flow) split the old four-group rail (Work / Workspace / Admin /
+ * Help) into three places:
  *
- * The rail has one ungrouped row on top (Nests) and four collapsible groups:
- * Work, Workspace, Admin and Help. Which rows show depends on the caller and
- * the server: Admin rows need a server admin, the Message log a superadmin,
- * Connected apps needs MCP sign-in (`/health` mcp_oauth_enabled) and Stream
- * the experimental document stream (`/health` experimental.doc_stream). The
- * row for the page on screen carries aria-current="page". A group folds on
- * click and is remembered per browser; the rail itself can be hidden with
- * "Hide sidebar" and brought back with the header's "Show sidebar".
+ * - The left rail (ui/src/components/DocumentSidebar.tsx): brand, "Hide
+ *   sidebar", the "work" pages that are not in the header (Stream, Control
+ *   room, when the server shows them), "All nests", the nest list, and the
+ *   footer (Docs, the account menu). My Work and My Drafts are rail rows too,
+ *   but only below the md breakpoint (the phone drawer).
+ * - The header ribbon (ui/src/components/HeaderRibbon.tsx, nav "Workspace"):
+ *   My Work and My Drafts, from tablet width up.
+ * - Workspace settings (ui/src/components/SettingsShell.tsx): a page with its
+ *   own left nav, opened from the account menu's "Settings". It lists Teams
+ *   and API keys for everyone, Connected apps when MCP sign-in is on
+ *   (`/health` mcp_oauth_enabled), Teammates / Server settings / Activity
+ *   trace for admins, and the Message log for superadmins.
+ *
+ * Help ("How it works") is the account menu's "Help". The item for the page
+ * on screen carries aria-current="page". The rail can be hidden with "Hide
+ * sidebar" and brought back with the header's "Show sidebar".
  */
 
 import logger from '../../helper/logger/logger.js';
 
-/** Every rail row the registry can produce, in rail order, with its group and path. */
+/** Rail rows (ui/src/pages/app/<id>/meta.ts, group "work"). */
 export const RAIL_PAGES = [
-  { id: 'nests', label: 'Nests', group: null, path: '/' },
-  { id: 'my-work', label: 'My Work', group: 'work', path: '/my-work' },
-  { id: 'my-drafts', label: 'My Drafts', group: 'work', path: '/my-drafts' },
-  { id: 'stream', label: 'Stream', group: 'work', path: '/stream' },
-  { id: 'teams', label: 'Teams', group: 'workspace', path: '/teams' },
-  { id: 'api-keys', label: 'API keys', group: 'workspace', path: '/api-keys' },
-  { id: 'connected-apps', label: 'Connected apps', group: 'workspace', path: '/connected-apps' },
-  { id: 'teammates', label: 'Teammates', group: 'admin', path: '/teammates' },
-  { id: 'settings', label: 'Server settings', group: 'admin', path: '/settings' },
-  { id: 'trace', label: 'Activity trace', group: 'admin', path: '/trace' },
-  { id: 'messages', label: 'Message log', group: 'admin', path: '/messages' },
-  { id: 'guide', label: 'How it works', group: 'help', path: '/guide' },
+  { id: 'my-work', label: 'My Work', path: '/my-work', phoneOnly: true },
+  { id: 'my-drafts', label: 'My Drafts', path: '/my-drafts', phoneOnly: true },
+  { id: 'stream', label: 'Stream', path: '/stream' },
+  { id: 'control-room', label: 'Control room', path: '/control-room' },
 ];
 
-/** The rail's groups, in order. */
-export const RAIL_GROUPS = ['work', 'workspace', 'admin', 'help'];
+/** Header ribbon items (ui/src/lib/header-ribbon.ts). */
+export const RIBBON_ITEMS = [
+  { id: 'my-work', label: 'My Work', path: '/my-work' },
+  { id: 'my-drafts', label: 'My Drafts', path: '/my-drafts' },
+];
+
+/** Workspace settings pages, in nav order, with who sees them. */
+export const SETTINGS_PAGES = [
+  { id: 'teams', label: 'Teams', path: '/teams', admin: false },
+  { id: 'api-keys', label: 'API keys', path: '/api-keys', admin: false },
+  { id: 'connected-apps', label: 'Connected apps', path: '/connected-apps', admin: false, needs: 'mcp' },
+  { id: 'teammates', label: 'Teammates', path: '/teammates', admin: true },
+  { id: 'settings', label: 'Server settings', path: '/settings', admin: true },
+  { id: 'trace', label: 'Activity trace', path: '/trace', admin: true },
+  { id: 'messages', label: 'Message log', path: '/messages', admin: true, needs: 'superadmin' },
+];
+
+/** The admin-only settings pages every server admin sees. */
+export const ADMIN_SETTINGS_IDS = ['teammates', 'settings', 'trace'];
 
 class SidebarRailPage {
   /**
@@ -47,15 +63,21 @@ class SidebarRailPage {
 
     // ── Rail (ui/src/components/DocumentSidebar.tsx) ──────────────────────
     this.sidebar = page.getByTestId('document-sidebar');
-    this.nav = page.getByTestId('document-sidebar-dashboard');
     this.hideSidebar = page.getByTestId('document-sidebar-collapse');
+    this.allNests = page.getByTestId('document-sidebar-all-nests');
 
-    // ── Header (ui/src/App.tsx) ───────────────────────────────────────────
+    // ── Header (ui/src/App.tsx, HeaderRibbon.tsx) ─────────────────────────
     this.showSidebar = page.getByTestId('nest-sidebar-expand');
+    this.ribbon = page.getByTestId('header-ribbon');
     this.userMenu = page.getByTestId('user-menu-trigger');
+    this.userMenuSettings = page.getByTestId('user-menu-settings');
+    this.userMenuHelp = page.getByTestId('user-menu-help');
+
+    // ── Workspace settings (ui/src/components/SettingsShell.tsx) ──────────
+    this.settingsNav = page.getByTestId('settings-nav');
   }
 
-  /** Open the dashboard and wait for the rail. */
+  /** Open a page and wait for the app shell and the rail. */
   async goto(path = '/') {
     logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Opening ${path} for the sidebar rail`);
     await this.page.goto(path);
@@ -64,44 +86,53 @@ class SidebarRailPage {
 
   async waitLoaded() {
     await this.userMenu.waitFor({ state: 'visible' });
-    await this.nav.waitFor({ state: 'visible' });
+    await this.allNests.waitFor({ state: 'visible' });
   }
 
-  /** A rail row by page id ("my-work", "settings", …). */
+  /** A rail row by page id ("stream", "my-work", …). */
   row(id) {
     return this.page.getByTestId(`document-sidebar-dashboard-${id}`);
   }
 
-  /** A group's header button by group id ("work", "admin", …). */
-  group(id) {
-    return this.page.getByTestId(`document-sidebar-group-${id}`);
+  /** A header ribbon item ("my-work", "my-drafts"). */
+  ribbonItem(id) {
+    return this.page.getByTestId(`header-ribbon-${id}`);
   }
 
-  /** Ids of the rail rows currently rendered, top to bottom. */
-  async rowIds() {
-    return this.nav
-      .locator('[data-testid^="document-sidebar-dashboard-"]')
-      .evaluateAll((els) => els.map((e) => e.dataset.testid.replace('document-sidebar-dashboard-', '')));
+  /** A Workspace settings nav item by page id ("teams", "trace", …). */
+  settingsItem(id) {
+    return this.page.getByTestId(`settings-nav-${id}`);
   }
 
-  /** Ids of the groups currently rendered, top to bottom. */
-  async groupIds() {
-    return this.nav
-      .locator('[data-testid^="document-sidebar-group-"]')
-      .evaluateAll((els) => els.map((e) => e.dataset.testid.replace('document-sidebar-group-', '')));
+  /** Every visible navigation item marked as the current page. */
+  currentItems() {
+    return this.page
+      .locator(
+        '[data-testid^="document-sidebar-"][aria-current="page"], [data-testid^="header-ribbon-"][aria-current="page"], [data-testid^="settings-nav-"][aria-current="page"]'
+      )
+      .filter({ visible: true });
   }
 
-  /** Open a group if it is folded, so its rows can be clicked. */
-  async expandGroup(id) {
-    const header = this.group(id);
-    if ((await header.getAttribute('aria-expanded')) === 'false') await header.click();
+  /** Ids of the Workspace settings nav items, top to bottom. */
+  async settingsIds() {
+    return this.settingsNav
+      .locator('[data-testid^="settings-nav-"]')
+      .evaluateAll((els) => els.map((e) => e.dataset.testid.replace('settings-nav-', '')));
   }
 
-  /** Click a rail row, opening its group first. */
-  async openRow(page) {
-    logger.info(`Opening "${page.label}" from the rail`);
-    if (page.group) await this.expandGroup(page.group);
-    await this.row(page.id).click();
+  /** Account menu → Settings: the Workspace settings page. */
+  async openSettings() {
+    logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Opening Workspace settings from the account menu`);
+    await this.userMenu.click();
+    await this.userMenuSettings.click();
+    await this.settingsNav.waitFor({ state: 'visible' });
+  }
+
+  /** Account menu → Help: How it works. */
+  async openHelp() {
+    logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Opening Help from the account menu`);
+    await this.userMenu.click();
+    await this.userMenuHelp.click();
   }
 }
 

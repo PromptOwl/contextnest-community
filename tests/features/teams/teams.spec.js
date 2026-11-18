@@ -82,6 +82,7 @@ test.describe('Teams', () => {
     if (secondaryRole) await teamsApi.addMember(team.id, secondaryRole.email, 'editor');
 
     await primary_user.nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(teams.railItem).toBeVisible();
     const { teams: listed } = await teams.gotoAndReadTeams(() => teams.railItem.click());
     await expect(teams.railItem).toHaveAttribute('aria-current', 'page');

@@ -30,8 +30,9 @@ class MyWorkPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail entry (ui/src/components/DocumentSidebar.tsx) ────────────────
-    this.railItem = page.getByTestId('document-sidebar-dashboard-my-work');
+    // ── Nav entry: the header ribbon (ui/src/components/HeaderRibbon.tsx),
+    //    from tablet width up; on a phone it is a row in the sidebar drawer ──
+    this.railItem = page.getByTestId('header-ribbon-my-work');
     // The count pill only renders when something is pending.
     this.railBadge = this.railItem.locator('span.rounded-full');
 
@@ -143,9 +144,9 @@ class MyWorkPage {
     return work;
   }
 
-  /** Open My Work from the rail, the way a person gets there. */
+  /** Open My Work from the header ribbon, the way a person gets there. */
   async openFromRail() {
-    logger.info('Opening My Work from the rail');
+    logger.info('Opening My Work from the header ribbon');
     await this.railItem.click();
     await this.pageTitle.filter({ hasText: 'My Work' }).waitFor({ state: 'visible' });
   }

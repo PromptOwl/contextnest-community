@@ -63,7 +63,8 @@ test.describe('Activity trace', () => {
       if (!(await secondary_user.teammatesApi.isServerAdmin())) {
         const { page, nestsPage, activityTracePage: tr } = secondary_user;
         await nestsPage.goto();
-        await expect(page.getByTestId('document-sidebar-dashboard-teams')).toBeVisible();
+        await secondary_user.sidebarRailPage.openSettings();
+        await expect(page.getByTestId('settings-nav-teams')).toBeVisible();
         await expect(tr.railItem).toHaveCount(0);
         await page.goto('/trace');
         await expect(tr.pageTitle).toContainText('Nests');
@@ -77,6 +78,7 @@ test.describe('Activity trace', () => {
     await asAdmin(primary_user);
     const { nestsPage, activityTracePage: tr } = primary_user;
     await nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(tr.railItem).toBeVisible();
     const { query, body } = await tr.gotoAndRead(() => tr.railItem.click());
     await expect(tr.railItem).toHaveAttribute('aria-current', 'page');

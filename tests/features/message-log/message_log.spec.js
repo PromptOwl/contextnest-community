@@ -111,7 +111,8 @@ test.describe('Message log', () => {
       if (!(await secondary_user.teammatesApi.isServerAdmin())) {
         const { page, nestsPage, messageLogPage: ml } = secondary_user;
         await nestsPage.goto();
-        await expect(page.getByTestId('document-sidebar-dashboard-teams')).toBeVisible();
+        await secondary_user.sidebarRailPage.openSettings();
+        await expect(page.getByTestId('settings-nav-teams')).toBeVisible();
         await expect(ml.railItem).toHaveCount(0);
         await page.goto('/messages');
         await expect(ml.pageTitle).toContainText('Nests');
@@ -128,6 +129,7 @@ test.describe('Message log', () => {
     await asAdmin(primary_user);
     const { nestsPage, messageLogPage: ml } = primary_user;
     await nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(ml.railItem).toBeVisible();
     const { query, body } = await ml.gotoAndRead(() => ml.railItem.click());
     await expect(ml.railItem).toHaveAttribute('aria-current', 'page');
@@ -707,6 +709,7 @@ test.describe('Message log', () => {
     const settings = await api.request('GET', '/admin/settings');
     expect(settings.status).toBe(200);
     await primary_user.nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(primary_user.messageLogPage.railItem).toHaveCount(0);
   });
 

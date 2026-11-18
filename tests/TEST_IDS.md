@@ -26,6 +26,13 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `user-menu-trigger` | User menu button (post-login landmark) |
 | `user-menu-account` | User menu → Account item |
 | `user-menu-logout` | User menu → Logout item |
+| `user-menu-settings` | User menu → Settings (opens Workspace settings) |
+| `user-menu-help` | User menu → Help (How it works) |
+| `header-ribbon` | Header "Workspace" ribbon — `ui/src/components/HeaderRibbon.tsx` (md and up) |
+| `header-ribbon-my-work` / `header-ribbon-my-drafts` | Ribbon items; carry the count pill and `aria-current` |
+| `document-sidebar-all-nests` | Rail: All nests (Home) — `ui/src/components/DocumentSidebar.tsx` |
+| `document-sidebar-dashboard-<id>` | Rail "work" rows: Stream, Control room; My Work / My Drafts only below md (phone drawer) |
+| `settings-nav` / `settings-nav-<id>` | Workspace settings left nav and its items — `ui/src/components/SettingsShell.tsx` |
 
 ## Nests Dashboard (`ui/src/pages/app/nests/page.tsx`)
 
@@ -49,7 +56,7 @@ Add a row here whenever you add a `data-testid` to the UI.
 
 | Test ID | Element |
 |---|---|
-| `document-sidebar-dashboard-my-work` | Rail entry for My Work (carries the pending-count badge) — `ui/src/components/DocumentSidebar.tsx` |
+| `header-ribbon-my-work` | Header ribbon entry for My Work (carries the pending-count badge) — `ui/src/components/HeaderRibbon.tsx` |
 | `work-select-all` | Batch bar: select every review checkbox |
 | `work-bulk-approve` | Batch bar: Approve N |
 | `work-bulk-reject` | Batch bar: Reject N |
