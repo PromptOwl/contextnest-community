@@ -2774,6 +2774,27 @@ export function runMigrations(db: Database.Database): void {
     if (!nestCols098.includes("chat_enabled")) db.exec("ALTER TABLE nests ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 1");
     recordMigration("098_team_chat_c2");
   }
+
+  // 099: agent profiles (team chat C7, PO-1198). The one stored thing about
+  //   an agent: a description a nest owner or admin wrote. Everything else a
+  //   profile shows is a query over what the server already keeps (webhooks,
+  //   message attribution, review requests, node versions).
+  if (!hasMigration("099_agent_profiles")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_profiles (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        description TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, handle)
+      );
+    `);
+    // Reserved handles (hootie, nest, channel, here, everyone) can't have a
+    // runner: a row saved before the rule would be woken by every @hootie.
+    db.prepare("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')").run();
+    recordMigration("099_agent_profiles");
+  }
 }
 
 /**

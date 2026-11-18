@@ -103,6 +103,10 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_remember: addOutside("Remember as node", "Creates a node from a message or thread as your own draft (review queue on a governed nest) and replies in the thread. On a nest with a docs site, a published one can change a public page."),
   context_correct: overwriteOutside("Propose a correction", "Drafts a new version of a node with a correction block and submits it for review; replies in the thread. Where your own edit would publish, this publishes."),
   context_channel_watch: overwriteOutside("Watch channel", "Saves which metacognition agent watches a channel and runs it; the agent then proposes drafts for review from the conversation (it never posts)."),
+  // The nest in the conversation (team chat C7, PO-1198).
+  context_ask_nest: addOutside("Ask the nest", "Runs a Hootie turn as the caller: the question, the thread's text and retrieved documents go to the configured model provider (outside); with post, adds messages and files hootie-authored drafts for review — never publishes or edits what exists."),
+  context_agents: overwrite("Agent profiles", "Lists and reads agent profiles (a query over existing data); with a description, replaces the agent's earlier description. A read-only key gets a list/read-only view."),
+  context_handoff: add("Hand off a thread", "Adds a handoff message (which mentions the target, so it notifies or wakes them like any comment) or a status update; nothing is edited or removed."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_message: overwrite("Act on message", "Reacts to, pins or saves a channel message; edit replaces the caller's own text (history kept) and delete leaves a tombstone. Nothing leaves the nest."),
