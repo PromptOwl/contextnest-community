@@ -14,6 +14,7 @@ import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { saveDestination } from "./lib/document-save-nav";
 import { withNestName } from "./lib/nest-name";
+import { useMediaQuery } from "./lib/use-media-query";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { LicenseBanner } from "./components/LicenseNotice";
@@ -386,6 +387,9 @@ export default function App() {
   // Below md the rail is a drawer over the document instead of a column
   // beside it; that open/closed state is transient, never persisted.
   const [docSidebarDrawer, setDocSidebarDrawer] = useState(false);
+  // md breakpoint: at or above it the left column sits beside the page; below
+  // it the column is a drawer that is only on screen while open.
+  const isDesktop = useMediaQuery("(min-width: 768px)");
   useEffect(() => {
     setDocSidebarDrawer(false);
   }, [view]);
@@ -1478,8 +1482,14 @@ export default function App() {
     (authenticated || authMode !== "key") &&
     (inNest || view.page === "dashboard" || view.page === "docs");
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
-  // The account menu lives in two places that never show together: the header
-  // (phones, or while the sidebar is hidden) and the foot of the left column.
+  // The left column is mounted whenever showSidebar is set, but on a phone it
+  // is display:none until the drawer opens.
+  const sidebarOnScreen = showSidebar && (isDesktop || docSidebarDrawer);
+  // The account menu lives in two places that never show together: the foot
+  // of the left column while that column is on screen, the header otherwise
+  // (phones with the drawer closed, or a desktop with the sidebar hidden).
+  // Mount exactly one: a hidden second copy is a second menu in the DOM, and
+  // e2e strict locators on `user-menu-trigger` match both.
   const renderUserMenu = (inSidebar: boolean) =>
     adminStatus?.me ? (
       <UserMenu
@@ -1595,7 +1605,7 @@ export default function App() {
                           Docs
                         </button>
                       )}
-                      {renderUserMenu(true)}
+                      {sidebarOnScreen && renderUserMenu(true)}
                     </>
                   }
                   onOpenDocument={(t) => {
@@ -1875,7 +1885,7 @@ export default function App() {
                 also keeps them reachable from each other. */}
 
             {adminStatus?.me ? (
-              <div className={showSidebar ? "md:hidden" : undefined}>{renderUserMenu(false)}</div>
+              sidebarOnScreen ? null : <div>{renderUserMenu(false)}</div>
             ) : (
               <Button
                 variant="outline"

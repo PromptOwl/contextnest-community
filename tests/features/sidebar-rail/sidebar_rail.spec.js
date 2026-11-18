@@ -1,5 +1,5 @@
 /**
- * Sidebar Rail Test Suite — CN-RAIL-001 … CN-RAIL-008
+ * Sidebar Rail Test Suite — CN-RAIL-001 … CN-RAIL-009
  *
  * Component under test: ui/src/components/DocumentSidebar.tsx (AppPagesNav),
  * fed by the page registry in ui/src/lib/pages.ts (`appRail(caps)`), plus the
@@ -196,5 +196,38 @@ test.describe('Sidebar rail', () => {
     await rail.showSidebar.click();
     await expect(rail.nav).toBeVisible();
     await expect(rail.row('nests')).toBeVisible();
+  });
+
+  test('CN-RAIL-009: exactly one account menu is mounted, in the rail while the rail is on screen and in the header otherwise', async ({ primary_user }) => {
+    await primary_user.initialize();
+    const rail = primary_user.sidebarRailPage;
+    const page = rail.page;
+    const inRail = rail.sidebar.getByTestId('user-menu-trigger');
+    const inHeader = page.getByRole('banner').getByTestId('user-menu-trigger');
+
+    // Desktop, rail shown: the menu is at the foot of the rail, nowhere else.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await rail.goto();
+    await expect(rail.sidebar).toBeVisible();
+    await expect(inRail).toBeVisible();
+    await expect(rail.userMenu).toHaveCount(1);
+
+    // Desktop, rail hidden: the menu moves to the header.
+    await rail.hideSidebar.click();
+    await expect(inHeader).toBeVisible();
+    await expect(rail.userMenu).toHaveCount(1);
+    await rail.showSidebar.click();
+    await expect(inRail).toBeVisible();
+    await expect(rail.userMenu).toHaveCount(1);
+
+    // Phone, drawer closed: the menu is in the header.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(inHeader).toBeVisible();
+    await expect(rail.userMenu).toHaveCount(1);
+
+    // Phone, drawer open: the menu is at the foot of the drawer.
+    await rail.showSidebar.click();
+    await expect(inRail).toBeVisible();
+    await expect(rail.userMenu).toHaveCount(1);
   });
 });
