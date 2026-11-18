@@ -2795,6 +2795,30 @@ export function runMigrations(db: Database.Database): void {
     db.prepare("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')").run();
     recordMigration("099_agent_profiles");
   }
+
+  // 100: hired agents (PO-1201, team chat C10). "Hire" creates the existing
+  //   thing underneath — a metacognition agent, an agent webhook, a nest-scoped
+  //   key — and the hired list is derived from those rows. Hootie is a server
+  //   switch with no per-nest row, so a nest that hired it gets ONE row here;
+  //   A key agent gets a row too, with `ref` = the api_keys id it minted: a
+  //   key agent is one that was HIRED, never a personal key inferred from its
+  //   label (security review). Nothing else is stored. Dismissed
+  //   recommendations are the caller's own `stream_marks` rows (kind
+  //   'recommendation'), no table of their own.
+  if (!hasMigration("100_hired_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS hired_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        hired_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        ref TEXT,
+        PRIMARY KEY (nest_id, kind, handle)
+      );
+    `);
+    recordMigration("100_hired_agents");
+  }
 }
 
 /**

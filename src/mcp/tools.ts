@@ -158,6 +158,7 @@ import { messageHitsForDocumentSearch } from "../channels/message-search.js";
 import { isMemoryTool, runMemoryTool } from "./memory-tools.js";
 import { isNestAgentTool, runNestAgentTool } from "./nest-agent-tools.js";
 import { dropReservedAgent } from "../agents/reserved.js";
+import { isHireTool, runHireTool } from "./hire-tools.js";
 import { channelsHint } from "./channel-tools.js";
 import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
 import { messageClient } from "../channels/message-meta.js";
@@ -527,6 +528,11 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_stream",
   // My Work (PO-1180): the caller's own queue, read-only.
   "context_my_work",
+  // Hire (PO-1201): the catalog, the hired list, and the recommendations
+  // list (a read-only key is offered a list-only view; dismiss is refused).
+  "context_hire_catalog",
+  "context_hired_agents",
+  "context_agent_recommendations",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -5369,6 +5375,11 @@ async function runTool(
       // channel tools (mcp/routes.ts); runNestAgentTool re-checks the switch.
       if (isNestAgentTool(toolName)) {
         return runNestAgentTool(toolName, args, ctx);
+      }
+      // Hire agents and recommendations (PO-1201): registered while
+      // EXPERIMENTAL_AGENT_STREAM is on; runHireTool re-checks the switch.
+      if (isHireTool(toolName)) {
+        return runHireTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

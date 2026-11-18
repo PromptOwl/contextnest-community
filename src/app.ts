@@ -22,6 +22,7 @@ import { nestChatEnabled } from "./chat/settings.js";
 import { conversationIdOf, hiddenContainersFor, isContainerMember, isPrivateContainer } from "./chat/containers.js";
 import { cardRoutes } from "./stream/card-routes.js";
 import { agentWebhookRoutes } from "./stream/agent-webhook-routes.js";
+import { hireRoutes, recommendationRoutes } from "./hire/routes.js";
 import { promoteRoutes } from "./stream/promote-routes.js";
 import { decisionRoutes, memoryChannelRoutes, memoryThreadRoutes } from "./memory/routes.js";
 import { agentRoutes } from "./agents/routes.js";
@@ -365,6 +366,9 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "connectors",
   // Where a nest's agent @mentions are POSTed (PO-1181): automation wiring.
   "agent-webhooks",
+  // Hiring an agent (PO-1201) creates webhooks, keys and metacognition
+  // agents: the same automation wiring.
+  "hire",
   "trace",
   "stewards",
   "archive",
@@ -2995,6 +2999,11 @@ export function createApp(): Hono<AuthEnv> {
     if (isConversationRoute && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
+    // Hire and recommendations (PO-1201) are part of the same harness: off
+    // means off. Exact segments; GET /agents (C7 profiles) is not this.
+    if ((parts[1] === "hire" || (parts[1] === "agents" && parts[2] === "recommendations")) && !config.EXPERIMENTAL_AGENT_STREAM) {
+      return c.json({ error: "Not found" }, 404);
+    }
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
@@ -3469,6 +3478,11 @@ export function createApp(): Hono<AuthEnv> {
       ((parts.length === 2 && parts[1] === "ask") ||
         (parts.length === 4 && parts[1] === "threads" && parts[3] === "handoff") ||
         (parts.length === 4 && parts[1] === "handoffs" && (parts[3] === "accept" || parts[3] === "done")));
+    // Dismissing a recommendation (PO-1201) is the caller's own mark, like a
+    // channel read mark: a read-only member may. The handler checks membership.
+    //   POST /nests/:id/agents/recommendations/:id/dismiss
+    const isRecommendationDismiss =
+      parts.length === 5 && parts[1] === "agents" && parts[2] === "recommendations" && parts[4] === "dismiss" && c.req.method === "POST";
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -3621,6 +3635,7 @@ export function createApp(): Hono<AuthEnv> {
       !isChatAction &&
       !isMemoryAction &&
       !isConversationMemberAction &&
+      !isRecommendationDismiss &&
       !isReadQuery &&
       !isStructureCheck &&
       !isMcpTransport
@@ -3989,6 +4004,11 @@ export function createApp(): Hono<AuthEnv> {
   // wake-up and promote work on document comment threads too.
   nestsApp.route("/:nestId/cards", cardRoutes);
   nestsApp.route("/:nestId/agent-webhooks", agentWebhookRoutes);
+  // Hire agents and recommend them (PO-1201, team chat C10). Mounted before
+  // any /agents/:handle route (C7 profiles) so "recommendations" is never
+  // read as a handle.
+  nestsApp.route("/:nestId/hire", hireRoutes);
+  nestsApp.route("/:nestId/agents/recommendations", recommendationRoutes);
   nestsApp.route("/:nestId/threads", promoteRoutes);
   // Memory snowball (team chat C6, PO-1199): remember this / correct on
   // any thread (document threads too, like promote); the decision ledger;

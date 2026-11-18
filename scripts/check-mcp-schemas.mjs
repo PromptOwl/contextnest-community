@@ -123,7 +123,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   twins of POST /nests/:id/ask, /agent-profiles, /threads/:id/handoff + /handoffs/:id/{accept,done}; Community-only
 //   (the comment-thread store, agent webhooks, Hootie) and experimental (EXPERIMENTAL_AGENT_STREAM), so the engine
 //   has no operation to import a descriptor from. Proposals ride the existing context_approve / context_reject.
-const BASELINE = 127;
+//   127->131 context_hire_catalog, context_hire_agent, context_hired_agents, context_agent_recommendations
+//   (PO-1201, src/mcp/hire-tools.ts) — twins of /nests/:id/hire and /nests/:id/agents/recommendations.
+//   Hiring composes this edition's Hootie switch, metacognition agents, agent webhooks and nest-scoped
+//   keys, and the recommendations read this edition's comment, mention and delivery tables, so the
+//   engine has no operation to import a descriptor from.
+const BASELINE = 131;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
