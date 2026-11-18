@@ -376,6 +376,9 @@ describe("AC-C10-05: a key agent is a nest-scoped write key labelled with the ha
     expect(again.status).toBe(200);
     expect(again.data.created).toBe(false);
     expect(again.data.api_key).toBeUndefined();
+    // One @handle answers to one agent: hiring @muse as another kind is refused.
+    const clash = await hire(owner, { kind: "webhook", handle: "muse", config: { url: "https://runner.example.com/wake" } });
+    expect(clash.status, JSON.stringify(clash.data)).toBe(409);
   });
 
   it("AC-C10-05 a read collaborator may not hire a key agent; a nest-scoped key may not mint another", async () => {
@@ -543,6 +546,8 @@ describe("AC-C10-08: each recommendation rule is a pure function", () => {
       { handle: "grok", channel: "ops", thread_id: "t6", at: ago(1000) },
       { handle: "grok", channel: "ops", thread_id: "t7", at: ago(1000) },
       { handle: "grok", channel: "ops", thread_id: "t8", at: ago(1000) },
+      // A reserved name can never be hired, so it is never recommended.
+      ...["t9", "t10", "t11"].map((thread_id) => ({ handle: "nest", channel: "ops", thread_id, at: ago(1000) })),
     ];
     const out = ruleUnmatchedMentions(mentions, { nestId: N, known: new Set(["grok"]) });
     expect(out.map((r) => r.id)).toEqual(["mention:nobody"]);

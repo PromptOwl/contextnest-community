@@ -29,7 +29,7 @@ import { knownAgents } from "../channels/message-meta.js";
 import { listAgents } from "../metacognition/store.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { inFolders } from "../metacognition/config.js";
-import { HOOTIE_HANDLE, keyAgentRows, memberAccess, watcherHandleOf, type HireCaller } from "./service.js";
+import { HOOTIE_HANDLE, keyAgentRows, memberAccess, watcherHandleOf, type HireCaller, type KeyAgentRow } from "./service.js";
 import {
   MAX_RECOMMENDATIONS,
   FAILING_WINDOW,
@@ -132,12 +132,11 @@ async function unmatchedMentions(nestId: string, channels: ChannelRef[]): Promis
 
 /** Handles that already answer to a name here: webhooks, declared agent
  *  labels, key agents, a hired Hootie, watchers. */
-async function knownHandles(nestId: string): Promise<Set<string>> {
+async function knownHandles(nestId: string, agents: Agents, keys: KeyAgentRow[], hootieHired: boolean): Promise<Set<string>> {
   const known = new Set<string>((await knownAgents(nestId)).map((a) => a.handle));
-  for (const k of await keyAgentRows(nestId)) known.add(k.handle);
-  const hootie = await getDb().get("SELECT 1 AS ok FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId]);
-  if (hootie) known.add(HOOTIE_HANDLE);
-  for (const a of await listAgents(nestId)) {
+  for (const k of keys) known.add(k.handle);
+  if (hootieHired) known.add(HOOTIE_HANDLE);
+  for (const a of agents) {
     const h = watcherHandleOf(a.node_id);
     if (h) known.add(h);
   }
@@ -163,9 +162,11 @@ async function webhookHealth(nestId: string): Promise<Array<{ handle: string; re
 }
 
 /** Is some enabled watcher already reading this channel? */
-async function watchedChannels(nestId: string): Promise<(channel: string) => boolean> {
+type Agents = Awaited<ReturnType<typeof listAgents>>;
+
+function watchedChannels(agents: Agents): (channel: string) => boolean {
   if (!metacognitionEnabled()) return () => true; // nothing to recommend when it can't be hired
-  const scopes = (await listAgents(nestId)).filter((a) => a.enabled).map((a) => a.config.scope?.read ?? []);
+  const scopes = agents.filter((a) => a.enabled).map((a) => a.config.scope?.read ?? []);
   return (channel) => scopes.some((read) => inFolders(`nodes/channels/${channel}/x`, read));
 }
 
@@ -182,16 +183,17 @@ export async function computeRecommendations(caller: HireCaller, channels: Chann
   const adminLike = !(await isSystemUser(caller.userId)) && (config.AUTH_MODE === "open" || access.rawPermission === "owner" || access.rawPermission === "admin");
   const dismissed = await dismissedIds(caller);
   const hootieHired = !!(await getDb().get("SELECT 1 AS ok FROM hired_agents WHERE nest_id = ? AND kind = 'hootie'", [nestId]));
+  const [agents, keyRows] = await Promise.all([listAgents(nestId), keyAgentRows(nestId)]);
 
   const out: Recommendation[] = [];
   if (config.HOOTIE_ENABLED) {
     const q = ruleUnansweredQuestions(await questionThreads(nestId, channels), { now, nestId, hootieHired });
     if (q) out.push(q);
   }
-  out.push(...rulePromoteHotspots(await promotes(caller, channels), { now, nestId, watched: await watchedChannels(nestId) }));
-  out.push(...ruleUnmatchedMentions(await unmatchedMentions(nestId, channels), { nestId, known: await knownHandles(nestId) }));
+  out.push(...rulePromoteHotspots(await promotes(caller, channels), { now, nestId, watched: watchedChannels(agents) }));
+  out.push(...ruleUnmatchedMentions(await unmatchedMentions(nestId, channels), { nestId, known: await knownHandles(nestId, agents, keyRows, hootieHired) }));
   if (adminLike) out.push(...ruleFailingWebhooks(await webhookHealth(nestId), { nestId }));
-  const keys = (await keyAgentRows(nestId)).filter((k) => adminLike || k.user_id === caller.userId);
+  const keys = keyRows.filter((k) => adminLike || k.user_id === caller.userId);
   out.push(...ruleIdleKeys(keys, { now, nestId }));
   return out.filter((r) => !dismissed.has(r.id)).slice(0, MAX_RECOMMENDATIONS);
 }

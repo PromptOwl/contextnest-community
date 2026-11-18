@@ -111,7 +111,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_hire_catalog: read("View agent catalog", "Lists the kinds of agent this server can offer the nest, with availability."),
   context_hired_agents: read("List hired agents", "Lists the nest's hired agents, derived from existing rows."),
   context_agent_recommendations: add("Agent recommendations", "Lists rule-based recommendations; dismiss adds the caller's own mark and removes nothing shared."),
-  context_hire_agent: overwriteOutside("Hire or let go an agent", "Hire creates a metacognition agent, an agent webhook (the server then POSTs to that outside URL) or a nest-scoped key; let_go deletes one of those."),
+  context_hire_agent: overwriteOutside("Hire or release agent", "Hire creates a metacognition agent, an agent webhook (the server then POSTs to that outside URL) or a nest-scoped key; let_go deletes one of those."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_message: overwrite("Act on message", "Reacts to, pins or saves a channel message; edit replaces the caller's own text (history kept) and delete leaves a tombstone. Nothing leaves the nest."),

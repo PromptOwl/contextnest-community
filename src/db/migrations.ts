@@ -2804,8 +2804,7 @@ export function runMigrations(db: Database.Database): void {
   //   key agent is one that was HIRED, never a personal key inferred from its
   //   label (security review). Nothing else is stored. Dismissed
   //   recommendations are the caller's own `stream_marks` rows (kind
-  //   'recommendation'), no table of their own. Numbered after the parallel
-  //   team-chat slices (088–091).
+  //   'recommendation'), no table of their own.
   if (!hasMigration("100_hired_agents")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS hired_agents (

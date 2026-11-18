@@ -12,6 +12,7 @@
  * once (stream_marks, kind 'recommendation') and not see it again until the
  * cause changes.
  */
+import { isReservedHandle } from "../agents/reserved.js";
 
 export type HireKind = "hootie" | "watcher" | "webhook" | "key";
 
@@ -175,7 +176,7 @@ export interface MentionRow {
 export function ruleUnmatchedMentions(mentions: MentionRow[], opts: { nestId: string; known: Set<string> }): Recommendation[] {
   const byHandle = new Map<string, MentionRow[]>();
   for (const m of mentions) {
-    if (opts.known.has(m.handle)) continue;
+    if (opts.known.has(m.handle) || isReservedHandle(m.handle)) continue;
     byHandle.set(m.handle, [...(byHandle.get(m.handle) ?? []), m]);
   }
   const out: Recommendation[] = [];

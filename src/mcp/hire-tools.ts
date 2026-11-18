@@ -17,7 +17,7 @@
  * Inline schemas: hiring is Community-only (it composes this edition's
  * Hootie switch, metacognition, agent webhooks and keys), so the engine has
  * no operation to import a descriptor from (scripts/check-mcp-schemas.mjs
- * baseline raised to 107, documented there).
+ * baseline, documented there).
  */
 import { config } from "../config.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -32,7 +32,7 @@ export const HIRE_TOOL_DEFINITIONS = [
   {
     name: "context_hire_catalog",
     description:
-      "The kinds of agent this server can add to this nest, in plain words: Hootie (answers questions from the nest), a watcher (a metacognition agent reading a channel), " +
+      "Lists the kinds of agent this server can add to this nest, in plain words: Hootie (answers questions from the nest), a watcher (a metacognition agent reading a channel), " +
       "a webhook agent (your own runner, woken by @mentions) and a key agent (connects over MCP with its own key). Each says what it does in a channel, what it needs, " +
       "what it may do, its cost, who may hire it, and `available` with a `reason` when this server or you can't right now. Hire one with context_hire_agent.",
     inputSchema: { type: "object" as const, properties: {} },
@@ -60,14 +60,14 @@ export const HIRE_TOOL_DEFINITIONS = [
   {
     name: "context_hired_agents",
     description:
-      "The agents hired for this nest: kind, @handle, who hired it, when, and a status — active, failing (a webhook whose last delivery failed), no_key (needs a model key on the server) or off (its switch is off). " +
+      "Lists the agents hired for this nest: kind, @handle, who hired it, when, and a status — active, failing (a webhook whose last delivery failed), no_key (needs a model key on the server) or off (its switch is off). " +
       "Derived from the agents that exist (Hootie, metacognition agents, agent webhooks, key agents), so it is always current.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
     name: "context_agent_recommendations",
     description:
-      'Which agents would help this nest, computed from what already happened — never from a model (action "list", default; at most 5): questions nobody answered for a day (hire Hootie), ' +
+      'Recommends agents that would help this nest, computed from what already happened — never from a model (action "list", default; at most 5): questions nobody answered for a day (hire Hootie), ' +
       "a channel that keeps turning threads into decisions or tasks (hire a watcher), an @name people keep tagging that nobody answers to (hire an agent with that handle), a webhook that isn't getting through (fix or replace), " +
       'a key agent silent for a month (let go?). Each carries evidence links and a ready `hire` payload for context_hire_agent. "dismiss" with `id` hides one for you only.',
     inputSchema: {
@@ -91,7 +91,7 @@ export const HIRE_READ_KEY_TOOL_VIEWS: Record<
 > = {
   context_agent_recommendations: {
     description:
-      "Which agents would help this nest, computed from what already happened (at most 5), each with evidence links and a ready hire payload. This key is read-only: it can list, and cannot dismiss or hire.",
+      "Recommends agents that would help this nest, computed from what already happened (at most 5), each with evidence links and a ready hire payload. This key is read-only: it can list, and cannot dismiss or hire.",
     // `action` stays in the schema so a dismiss is answered with the plain
     // refusal rather than silently stripped by the SDK's input validation.
     schema: { type: "object", properties: { action: { type: "string", description: 'Only "list" for this key.' } } },
@@ -133,7 +133,7 @@ function catalogText(catalog: CatalogView[]): string {
 function hiredText(hired: HiredAgentView[]): string {
   if (hired.length === 0) return "No agents hired here yet. See context_hire_catalog.";
   return `# Hired agents (${hired.length})\n\n${hired
-    .map((h) => `- @${h.handle} (${h.kind}) — ${h.status}${h.detail ? `: ${h.detail}` : ""}; hired by ${h.hired_by} on ${h.hired_at}${h.channels.length ? `; watches ${h.channels.map((c) => `#${c}`).join(", ")}` : ""}`)
+    .map((h) => `- @${h.handle} (${h.kind}) — ${h.status}${h.detail ? `: ${h.detail}` : ""}; ${h.hired_by ? `hired by ${h.hired_by} on ` : "hired "}${h.hired_at}${h.channels.length ? `; watches ${h.channels.map((c) => `#${c}`).join(", ")}` : ""}`)
     .join("\n")}`;
 }
 

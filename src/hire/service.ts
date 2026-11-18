@@ -37,16 +37,14 @@
  * own rule: a nest key can't mint keys); an archived nest hires nobody.
  */
 import { v4 as uuid } from "uuid";
-import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { insertOrIgnore } from "../db/sql.js";
 import { config } from "../config.js";
-import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { permissionLevel, resolveNestAccess, type NestAccess } from "../shared/access.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { isSystemUser } from "../auth/systems.js";
 import { insertApiKey, verifyKeyRequest } from "../auth/keys.js";
-import { engineCache } from "../nodes/engine.js";
 import { createNode } from "../nodes/service.js";
 import { createThread } from "../annotations/service.js";
 import { fanOutPostedMessage } from "../channels/post-message.js";
@@ -385,6 +383,9 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
   let secret: string | undefined;
   let apiKey: string | undefined;
   const nestId = caller.nestId;
+  // One @handle answers to one agent: a handle hired as another kind is taken.
+  const taken = (await listHiredAgentsUnchecked(nestId)).hired.find((h) => h.handle === handle && h.kind !== kind);
+  if (taken) throw new ConflictError(`@${handle} is already hired here as a ${taken.kind} agent.`);
 
   if (kind === "hootie") {
     const db = getDb();
@@ -397,15 +398,8 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
     await assertCanManageMetacognition(nestId, caller.userId, access.rawPermission);
     const nodeId = watcherNodeId(handle);
     if (!(await getAgent(nestId, nodeId))) {
-      const { storage } = await engineCache.get(nestId);
-      let exists = true;
+      // The document may exist already: let go keeps it, or a concurrent hire made it.
       try {
-        await storage.readDocument(nodeId);
-      } catch (err) {
-        if (!(err instanceof DocumentNotFoundError)) throw err;
-        exists = false;
-      }
-      if (!exists) {
         await createNode(
           nestId,
           {
@@ -418,6 +412,8 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
           caller.userEmail,
           { notifyMentions: false },
         );
+      } catch (err) {
+        if (!(err instanceof ConflictError)) throw err;
       }
       await configureAgent({
         nestId,
@@ -441,7 +437,7 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
       try {
         const r = await putAgentWebhook(nestId, handle, { url: cfg.url }, caller.userEmail);
         secret = r.secret;
-        created = true;
+        created = !!r.secret;
       } catch (err) {
         // Two admins hiring the same handle at once: the second insert hits
         // the (nest, handle) key — "already hired", not a failure. Decided by
