@@ -49,7 +49,8 @@ import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { messageHitsForDocumentSearch } from "../channels/message-search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { liveVersions, recordNodeAccess } from "../governance/access-log.js";
+import { directHits, flushAccessLog, liveVersions, recordNodeAccess } from "../governance/access-log.js";
+import { getPull, listPulls, pullViewer } from "../governance/pull-log-service.js";
 import { serverRunNodeIds } from "../metacognition/store.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
@@ -252,6 +253,56 @@ queryRoutes.get("/graph", async (c) => {
   return c.json(graph);
 });
 
+/** Pull replay (po-1252): bytes handed over per document. */
+function bodySizes(nodes: Array<{ id: string; body?: string }>): Record<string, number> {
+  return Object.fromEntries(nodes.map((n) => [n.id, Buffer.byteLength(n.body || "", "utf8")]));
+}
+
+// GET /nests/:nestId/pulls?limit=&before=&agent=
+// The context pull log (po-1252): each retrieval call, newest first, as the
+// ordered documents it handed over — what the Graph view replays. A read model
+// over the access log; who may see whom is in pull-log-service.ts. Not on the
+// headless key allowlist (src/auth/headless.ts), so access keys get a 403.
+queryRoutes.get("/pulls", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const agent = c.req.query("agent")?.trim();
+  if (agent && agent.length > 200) throw new ValidationError("agent must be at most 200 characters");
+  // Over 50 is clamped (listPulls), like the MCP tool; anything not a whole
+  // number of pulls, or a cursor that isn't one, is a caller error.
+  const limitRaw = c.req.query("limit");
+  const limit = limitRaw === undefined || limitRaw === "" ? 20 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1) throw new ValidationError("limit must be a whole number of pulls, 1 or more");
+  const before = c.req.query("before") || undefined;
+  if (before !== undefined && !/^\d+$/.test(before)) throw new ValidationError("before must be a nextBefore cursor from a previous page");
+  const viewer = await pullViewer(nestId, userId, await resolveCallerEmail(userId), {
+    readOnlyKey: c.get("keyCapability") === "read",
+  });
+  await flushAccessLog(nestId);
+  return c.json(
+    await listPulls({
+      nestId,
+      viewer,
+      limit,
+      before,
+      agent: agent || undefined,
+    }),
+  );
+});
+
+// GET /nests/:nestId/pulls/:pullId — one pull, same shape as a list item.
+queryRoutes.get("/pulls/:pullId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const viewer = await pullViewer(nestId, userId, await resolveCallerEmail(userId), {
+    readOnlyKey: c.get("keyCapability") === "read",
+  });
+  await flushAccessLog(nestId);
+  const pull = await getPull({ nestId, viewer, pullId: c.req.param("pullId")! });
+  if (!pull) throw new NotFoundError("Pull not found");
+  return c.json({ pull });
+});
+
 // POST /nests/:nestId/context
 // One-call context retrieval for app integrations. Accepts either a
 // natural-language `prompt` (compiled to a selector server-side) or an
@@ -342,6 +393,9 @@ queryRoutes.post("/query", async (c) => {
     userEmail,
     client: readClient(c),
     versions: liveVersions(accessible),
+    // The engine walks the graph but reports no per-document hop, so only
+    // order and size are known (po-1252).
+    sizes: bodySizes(accessible),
     detail: "query",
   });
 
@@ -401,6 +455,8 @@ queryRoutes.get("/search", async (c) => {
     userEmail,
     client: readClient(c),
     versions: liveVersions(accessible),
+    hops: directHits(accessible.map((n) => n.id)),
+    sizes: bodySizes(accessible),
     detail: "search",
   });
 

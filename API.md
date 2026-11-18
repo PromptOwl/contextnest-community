@@ -2616,6 +2616,51 @@ Notes:
 - **Roster gating** — `stewards`/`stewardEdges` are empty for public/anonymous readers and when the nest has stewardship disabled.
 - **Draw cap** — `nodes`/`links` are capped at 150 (highest-degree kept) with `truncated: true` and `totalNodes` set; `signals` are still computed over the full set so the gap numbers stay accurate.
 
+### GET `/nests/:nestId/pulls` (read+)
+The context pull log, for the Graph view's replay (po-1252): each retrieval call made in this nest, newest first, as the documents it handed over in order. A read model over the access log (`node_access_events`, the same rows `GET /activity-log` reads), so it records only while the nest's `access_log_enabled` is on, and is pruned on the same retention window.
+
+Query: `limit` (a whole number from 1; above 50 is read as 50; default 20), `before` (the previous page's `nextBefore`), `agent` (case-insensitive exact). Anything else in `limit` or `before` is a `400`. A page can hold fewer than `limit` pulls, even none, while `hasMore` is `true` (the newest pulls touched only documents the caller can't read): keep paging with `nextBefore`.
+
+```json
+{
+  "pulls": [{
+    "id": "8d5b…",
+    "at": "2026-11-15T21:04:11.120Z",
+    "tool": "context",
+    "surface": "api",
+    "action": "retrieve",
+    "actor": "noor@fernhill.example",
+    "agent": "Support Copilot",
+    "documents": 3,
+    "bytes": 902,
+    "maxHop": 2,
+    "steps": [
+      { "seq": 0, "nodeId": "nodes/returns-policy", "title": "Returns Policy", "version": 3, "hop": 0, "via": null, "bytes": 347 },
+      { "seq": 1, "nodeId": "nodes/warranty-terms", "title": "Warranty Terms", "version": 1, "hop": 1, "via": "nodes/returns-policy", "bytes": 337 },
+      { "seq": 2, "nodeId": "nodes/escalation-matrix", "title": "Escalation Matrix", "version": 2, "hop": 2, "via": "nodes/warranty-terms", "bytes": 218 }
+    ]
+  }],
+  "hasMore": false,
+  "nextBefore": null,
+  "accessLogEnabled": true,
+  "identities": true
+}
+```
+
+Notes:
+- **What is a pull.** One call of: MCP `context_get` / `context_search` / `context_query` / `context_resolve` / `context_table_query`, REST `GET /nodes/:id`, `GET /search`, `POST /query`, `POST /context` (and Hootie, which goes through it), `POST /table-query`. Exports are not pulls. `tool` is the surface's own name for the call.
+- **Steps.** `seq` is the place in the payload. `version` is the version served. `bytes` is the size handed over, on the basis of each surface: the context block for `/context` and Hootie, the `## Title` entry for `context_resolve`, the served document body otherwise (for a search, the body of the hit, not its snippet). `hop` and `via` are recorded where the server walks the link graph itself (`POST /context`, Hootie): `0` for a match, `N` with the document it was reached from for a neighbour. Direct reads and searches are `hop: 0`. The engine's selector walk (`POST /query`, `context_query`, `context_resolve`) reports no per-document hop, so those steps are `hop: null`.
+- **Throttle.** An identical repeated pull (same caller, agent, tool, documents and versions) inside the access log's 10-minute window is recorded once. Any other pull is recorded whole. The query text is never stored (admins read this log), so two different searches that hand over the same documents at the same versions count as one pull: the context they handed over is the same.
+- **Cap.** A pull records its first 50 documents, in payload order. When a call hands over more (a deep `/context` walk, a wide search), the replay shows those 50, and `documents` counts what was recorded.
+- **Volume and retention.** Each recorded pull is up to 50 rows (one per document), so the log grows with how many *different* pulls are made — about 20,000 rows a day for an agent making 1,000 distinct 20-document searches. Rows are pruned on `TRACE_RETENTION_DAYS` (default 14), checked every 500 rows written. An owner can turn the access log off per nest.
+- **Who sees what.** Every step is gated like the other query routes: a document the caller can't read is left out, and a pull with nothing readable isn't listed. `actor` and `agent` are filled only for **write+** callers (`identities: true`, the steward-overlay rule); below that, and for a read-only API key whoever owns it, they are `null` and an `agent` filter matches nothing. A visibility-only (public / org) reader also gets `version: null` and `title: null`. Headless access keys are refused.
+- Rows recorded before this release have no order, size or hops: they are grouped by call and come back with `seq` in insertion order and `bytes`/`hop` `null`. Their id is `legacy-<first row id>`, so it changes when retention prunes that row: a saved link to an older pull can later answer `404`.
+- **Activity log.** `GET /activity-log` reads the same rows, so a document that several different pulls handed over shows once per pull (an identical repeat inside the 10-minute window still shows once).
+- **Paging under concurrent writes.** A page reads a window of rows and drops the oldest pull in it, which the window may have cut. A pull's rows are written together, but on Postgres two pulls written at the same moment can interleave their row ids; a pull caught that way can then come back with fewer steps than it has. `GET /nests/:nestId/pulls/:pullId` always reads the pull whole.
+
+### GET `/nests/:nestId/pulls/:pullId` (read+)
+One pull, same shape and rules as a list item: `{ "pull": { … } }`. `404` when there is no such pull or none of it is readable to the caller.
+
 ### GET `/nests/:nestId/runnables` (read+)
 Orchestrator surface: every **runnable** node (`type` `agent` or `skill`) with its `schedule` and body in one call, so an external scheduler can connect, discover what to run and when, and pull the prompt/skill content. Reuses the same per-caller gating as the node list (`listNodesForCaller`), so stewardship and the public-reader approved-only rule apply — a read-tier orchestrator key only ever sees **approved** agent/skill definitions; unapproved drafts are omitted.
 
@@ -3017,6 +3062,7 @@ The server guarantees **delivery**, not obedience: an outside client (Claude Cod
 - `context_get`, `context_list` and `context_query` return them (structured and in prose) when set.
 - `context_list` filters by `assignee` (`none` = unassigned), `priority` (`none` = unset) and `due_before` (inclusive).
 - `context_task_log` — `{ id | title, note, status?: working|done|blocked, claim? }` — registers what the agent did on a task, attributed to the caller plus the API key and `client.agent` (see `POST …/task-log`). It shows in the task's activity timeline in the UI, e.g. *Claude Code (key ctx CLI (laptop)) on behalf of Misha · working · drafted the hero section*. Also on the server-level `/mcp` endpoint (with `nest`).
+- `context_pull_log` — `{ pull_id?, limit?, before?, agent? }` — the context pull log (`GET /nests/:nestId/pulls`): recorded retrievals, newest first, each with the documents it handed over in order (version, size, hop and via). With `pull_id`, that one pull's trace. Same who-sees-whom rule as the REST route; not available to headless access keys. Also on the server-level `/mcp` endpoint (with `nest`).
 Every write here needs edit access; a read-only collaborator's key gets `UNAUTHORIZED_ACTION`, and a headless access key is refused like any other write.
 
 **Archive.** `context_archive` and `context_unarchive` mirror the REST routes: stewards only, and `context_get` answers not found for an archived node. Prefer archive to `context_delete` when a document may be wanted again.

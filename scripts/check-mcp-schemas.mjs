@@ -128,7 +128,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   Hiring composes this edition's Hootie switch, metacognition agents, agent webhooks and nest-scoped
 //   keys, and the recommendations read this edition's comment, mention and delivery tables, so the
 //   engine has no operation to import a descriptor from.
-const BASELINE = 131;
+//   131->132 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
+//   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
+//   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
+const BASELINE = 132;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

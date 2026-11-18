@@ -55,6 +55,7 @@ const READ_ONLY = [
   "context_my_drafts",
   "context_stream",
   "context_versions",
+  "context_pull_log",
   "context_unsynced_list",
   "context_metacognition_list",
   "context_metacognition_suggest",
