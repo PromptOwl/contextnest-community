@@ -3,13 +3,18 @@
  *
  * Page under test: the document editor (ui/src/components/DocumentEditor.tsx)
  * opened for a new document from the nest page (ui/src/components/NestView.tsx):
- * the top bar's New document button (blank option), a folder row's "New document in <folder>"
- * on the Overview (ui/src/components/nest/OverviewTab.tsx) and "New here" in a
- * folder opened in the Documents tab (ui/src/components/nest/DocumentsTab.tsx).
+ * the top bar's New document button (ui/src/components/TopBarTools.tsx), which
+ * opens the "New document" dialog (Blank document, Files, Upload PDF, Whole
+ * vault); a folder row's "New document in <folder>" on the Overview
+ * (ui/src/components/nest/OverviewTab.tsx); and "New here" in a folder opened
+ * in the Documents tab (ui/src/components/nest/DocumentsTab.tsx).
  *
  * A new document needs a title and content before its save button enables.
  * The button reads Publish when the save goes live, and Save draft when the
- * nest's stewardship holds it for review. Leaving with unsaved changes opens
+ * nest's stewardship holds it for review. Since #582 the edit actions sit in
+ * the app top bar (`document-editor-actions-top`, portalled into
+ * TopBarTools) on md and up, and in a sticky bar at the foot of the editor
+ * (`document-editor-actions-bottom`) on a phone — never inside <main>'s form. Leaving with unsaved changes opens
  * the "Unsaved changes" dialog (Cancel / Discard / Save & leave).
  */
 
@@ -27,8 +32,10 @@ class NewDocumentPage {
 
     // ── App header + nest page ────────────────────────────────────────────
     this.breadcrumb = page.getByTestId('header-breadcrumb');
-    // Exact: the empty Overview offers a "New document" card of its own.
-    this.newDocumentButton = this.page.getByTestId('top-bar-new-document');
+    // Top bar → New document opens the "New document" dialog: a blank page or an import.
+    this.newDocumentButton = page.getByTestId('top-bar-new-document');
+    this.newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
+    this.blankDocumentOption = page.getByTestId('new-document-blank');
     this.selectedTab = page.getByRole('tab', { selected: true }).first();
     this.contents = page.getByRole('navigation', { name: 'Contents' });
     this.newHereButton = this.main.getByRole('button', { name: 'New here' });
@@ -45,8 +52,12 @@ class NewDocumentPage {
     this.markdownButton = this.main.getByRole('button', { name: 'Markdown', exact: true });
     this.richEditorButton = this.main.getByRole('button', { name: 'Rich editor', exact: true });
     this.markdownSource = this.main.locator('textarea').filter({ visible: true }).first();
-    this.publishButton = this.main.getByRole('button', { name: 'Publish', exact: true });
-    this.saveDraftButton = this.main.getByRole('button', { name: 'Save draft', exact: true });
+    // Edit actions: top bar on md and up, sticky foot bar on a phone.
+    this.editActions = page.locator(
+      '[data-testid="document-editor-actions-top"], [data-testid="document-editor-actions-bottom"]'
+    );
+    this.publishButton = this.editActions.getByRole('button', { name: 'Publish', exact: true });
+    this.saveDraftButton = this.editActions.getByRole('button', { name: 'Save draft', exact: true });
     this.backButton = this.main.getByRole('button', { name: 'Back to documents' });
     this.errorAlert = this.main.getByRole('alert');
 
@@ -71,11 +82,12 @@ class NewDocumentPage {
     await this.newDocumentButton.waitFor({ state: 'visible' });
   }
 
-  /** Header → New Document, and wait for the blank editor. */
+  /** Top bar → New document → Blank document, and wait for the blank editor. */
   async openNewDocument() {
     this._log('Opening a new document');
     await this.newDocumentButton.click();
-    await this.page.getByTestId('new-document-blank').click();
+    await this.newDocumentDialog.waitFor({ state: 'visible' });
+    await this.blankDocumentOption.click();
     await this.titleInput.waitFor({ state: 'visible' });
   }
 

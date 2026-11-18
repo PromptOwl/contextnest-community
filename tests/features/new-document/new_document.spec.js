@@ -3,8 +3,10 @@
  *
  * Page under test: the document editor opened for a new document
  * (ui/src/components/DocumentEditor.tsx) from the nest page
- * (ui/src/components/NestView.tsx) — the header's New Document button, the
- * Overview's "New document in <folder>" and the Documents tab's "New here".
+ * (ui/src/components/NestView.tsx) — the top bar's New document button
+ * (ui/src/components/TopBarTools.tsx) → Blank document, the Overview's "New
+ * document in <folder>" and the Documents tab's "New here". Since #582 the
+ * editor's Publish / Save draft sit in the app top bar, not in the page.
  * What the editor creates is read back through the REST API.
  *
  * Conventions
@@ -125,6 +127,12 @@ test.describe('New document', () => {
     await expect(page.publishButton).toBeDisabled();
   });
 
+  // Known app regression since #582 (left failing on purpose; affects 004,
+  // 005, 006 and 018): a new document started from the top bar's New
+  // document lands back in a blank "New document" editor after Publish /
+  // Save draft instead of on the nest. The top bar first moves the nest to
+  // ?tab=documents, so the blank editor gets its own history entry; the
+  // editor's leave-guard cleanup (dropParkedEntries) then goes Back onto it.
   test('CN-CREATE-004: Verify that publishing a new document confirms it, returns to the nest and lists it as Published', async ({
     primary_user,
     commonFunction,

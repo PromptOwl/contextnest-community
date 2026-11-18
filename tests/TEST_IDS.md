@@ -144,3 +144,15 @@ Many more test IDs already exist across `ui/src/` (governance dialogs, document 
 | `graph-pull-hud` | Step readout over the canvas during a replay |
 | `graph-pull-edges` | The edges the replayed pull walked |
 | `graph-node` | A document node on the canvas (`data-node-id`, `data-pulled="true"` when lit) |
+
+## New document and editor actions (`ui/src/components/TopBarTools.tsx`, `NestView.tsx`, `DocumentEditor.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `top-bar-new-document` | Top bar → New document; opens the "New document" dialog on the open nest (hidden where the nest is read-only) |
+| `new-document-blank` | "New document" dialog → Blank document (opens the editor); Files / Upload PDF / Whole vault sit under it |
+| `nest-upload-pdf` | "New document" dialog → Upload PDF |
+| `document-editor-actions-top` | The editor's edit actions (Publish / Save draft / Submit for review) portalled into the top bar, md and up |
+| `document-editor-actions-bottom` | The same actions in a sticky bar at the foot of the editor, below md |
+| `document-editor-save` | The save button (reads Publish or Save draft) |
+| `document-editor-submit` | Submit for review (document bar in view mode, edit actions in edit mode) |
