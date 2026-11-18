@@ -35,6 +35,8 @@ import {
 } from "../../lib/review-pane";
 import { MarkdownEditor } from "../MarkdownEditor";
 import { DiffViewer } from "./DiffViewer";
+import { ReviewProvenance } from "./ReviewProvenance";
+import { ReviewTaskDetails, isTaskLike } from "./ReviewTaskDetails";
 import { summarizeChange } from "./change-summary";
 import { unifiedDiff } from "./diff-util";
 import { rowDiffLines, tableRowDiff } from "../../lib/table-row-diff";
@@ -255,6 +257,15 @@ export function ReviewPane({
         </div>
       )}
 
+      <ReviewProvenance
+        requestedBy={request.requestedBy}
+        requestedAt={request.requestedAt}
+        runId={request.runId}
+        lastEdit={(node as { last_edit?: any } | undefined)?.last_edit ?? null}
+      />
+
+      {isTaskLike(node as any) && <ReviewTaskDetails node={node as any} />}
+
       {changeSummary && (
         <p
           className="rounded-lg border bg-muted/40 px-4 py-2 text-sm"
@@ -316,7 +327,9 @@ export function ReviewPane({
                 </>
               )
             ) : (
+              (tab === "published" ? publishedBody : body)?.trim() ? (
               <MarkdownEditor
+                compact
                 // Remount per document and per tab, or TipTap keeps the
                 // previous body on swap.
                 key={`${nodeId}:${tab}`}
@@ -326,6 +339,12 @@ export function ReviewPane({
                 nestId={nestId}
                 onWikiLinkClick={handleWikiLinkClick}
               />
+              ) : (
+                <p className="p-4 text-sm text-muted-foreground" data-testid="review-pane-empty-body">
+                  This {typeLabel ? typeLabel.toLowerCase() : "document"} has no written description. What you are
+                  approving is in the details above.
+                </p>
+              )
             )}
           </div>
         </div>

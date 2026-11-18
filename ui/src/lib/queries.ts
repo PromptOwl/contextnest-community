@@ -210,6 +210,9 @@ export const keys = {
  * wrong in both directions — a reviewer must never act on a stale queue, while
  * the nest list barely changes between sessions.
  */
+/** How often an open approvals list re-reads on its own. */
+const LIVE_QUEUE_MS = 30_000;
+
 const STALE = {
   /** Structure and configuration the user rarely changes mid-session. */
   reference: 5 * 60_000,
@@ -363,7 +366,7 @@ const NEST_WRITE_SCOPES: Array<{
   // already drops the body — naming one would only risk naming the wrong one.
   {
     match:
-      /^\/nodes\/(.+)\/(?:approve|reject|submit-review|revert|external-edits)(?:\/|$)/,
+      /^\/(?:nodes\/(.+)\/(?:approve(?:-with-edits)?|reject|submit-review|revert|external-edits)|review-queue\/bulk)(?:\/|$)/,
     affects: (n) => [
       keys.nodes(n),
       [...keys.nest(n), "review-queue"],
@@ -517,7 +520,7 @@ const NEST_WRITE_SCOPES: Array<{
  * and dropped once when it ends.
  */
 export const VERDICT_REFETCH_WINDOW_MS = 2500;
-const VERDICT_PATH = /^\/nodes\/.+\/(?:approve|reject)(?:\/|$)/;
+const VERDICT_PATH = /^\/(?:nodes\/.+\/(?:approve(?:-with-edits)?|reject)|review-queue\/bulk)(?:\/|$)/;
 const queuedVerdictDrops = new Map<
   string,
   { qc: QueryClient; queryKey: readonly unknown[] }
@@ -1030,6 +1033,12 @@ export const reads = {
       queryKey: keys.reviewQueue(nestId, status),
       queryFn: () => api.getReviewQueue(nestId, status),
       staleTime: STALE.governance,
+      // Someone else approving (or an agent filing) changes this list without
+      // any action here, so it re-reads on focus and every half minute while
+      // the tab is in view.
+      refetchInterval: LIVE_QUEUE_MS,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always",
     }),
   deletionRequests: (nestId: string, status = "pending") =>
     queryOptions({
@@ -1268,6 +1277,9 @@ export const reads = {
       queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset, opts?.doneTasks),
       queryFn: () => api.getMyWork(opts),
       staleTime: STALE.governance,
+      refetchInterval: LIVE_QUEUE_MS,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always",
     }),
   myDrafts: (opts?: {
     limit?: number;

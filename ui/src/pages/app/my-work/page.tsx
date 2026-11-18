@@ -536,7 +536,7 @@ export default function MyWorkPage() {
                   Loading your work…
                 </div>
               ) : nothingWaitingOnMe(work) ? (
-                <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+                <div className="rounded-lg border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
               ) : listItems.length > 0 ? (
