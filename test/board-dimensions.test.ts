@@ -149,22 +149,22 @@ describe("buildColumns", () => {
       "weird",
     ]);
   });
-  it("labels a folder column with its full path, matching the title", () => {
+  it("labels a folder column with its full path, named like the Documents tree (PO-1188)", () => {
     const cfg: BoardConfig = { dimension: "folder" };
     const cols = buildColumns(
       [
         node({ id: "gtm/architecture/a" }),
-        node({ id: "gtm/deals/b" }),
+        node({ id: "gtm/deal-room/b" }),
       ],
       cfg,
     );
     expect(cols.map((c) => c.label)).toEqual([
-      "gtm/architecture",
-      "gtm/deals",
+      "Gtm/Architecture",
+      "Gtm/Deal Room",
     ]);
     expect(cols.map((c) => c.title)).toEqual([
       "gtm/architecture",
-      "gtm/deals",
+      "gtm/deal-room",
     ]);
   });
   it("shortens a long path from the front but keeps the full path as the title", () => {
@@ -179,8 +179,8 @@ describe("buildColumns", () => {
       cfg,
     );
     expect(cols.map((c) => c.label)).toEqual([
-      "…/nodes/architecture",
-      "…/nodes/gtm/deals",
+      "…/Nodes/Architecture",
+      "…/Nodes/Gtm/Deals",
     ]);
     expect(cols.map((c) => c.title)).toEqual([
       "b006e456-15de/nodes/architecture",
@@ -196,7 +196,7 @@ describe("buildColumns", () => {
       { dimension: "folder", columnOrder: ["gtm"] },
     );
     expect(cols.map((c) => c.key)).toEqual(["gtm", ""]);
-    expect(cols[0]!.label).toBe("gtm");
+    expect(cols[0]!.label).toBe("Gtm");
   });
 
   it("keeps nested folders with the same leaf name distinct", () => {
@@ -207,7 +207,7 @@ describe("buildColumns", () => {
       [node({ id: "a/notes/x" }), node({ id: "b/notes/y" })],
       cfg,
     );
-    expect(cols.map((c) => c.label).sort()).toEqual(["a/notes", "b/notes"]);
+    expect(cols.map((c) => c.label).sort()).toEqual(["A/Notes", "B/Notes"]);
   });
   it("labels a doc at the vault root '(root)'", () => {
     const cfg: BoardConfig = { dimension: "folder" };
@@ -215,7 +215,7 @@ describe("buildColumns", () => {
       [node({ id: "loose-doc" }), node({ id: "gtm/deals/b" })],
       cfg,
     );
-    expect(cols.map((c) => c.label)).toEqual(["(root)", "gtm/deals"]);
+    expect(cols.map((c) => c.label)).toEqual(["(root)", "Gtm/Deals"]);
   });
   it("shows the folder's full path even when it is the only column", () => {
     // A leaf-only label ("folder") loses the nesting entirely and can't be
@@ -223,7 +223,7 @@ describe("buildColumns", () => {
     // vault — the label always carries the full path instead.
     const cfg: BoardConfig = { dimension: "folder" };
     const cols = buildColumns([node({ id: "no/such/folder/a" })], cfg);
-    expect(cols.map((c) => c.label)).toEqual(["no/such/folder"]);
+    expect(cols.map((c) => c.label)).toEqual(["No/Such/Folder"]);
     expect(cols.map((c) => c.title)).toEqual(["no/such/folder"]);
   });
   it("shortens a deeply nested folder's column label but keeps its full path as the title", () => {
@@ -234,7 +234,7 @@ describe("buildColumns", () => {
     const cfg: BoardConfig = { dimension: "folder" };
     const deep = "no/such/very/deeply/nested/folder";
     const cols = buildColumns([node({ id: `${deep}/a` })], cfg);
-    expect(cols[0]!.label).toBe("…/very/deeply/nested/folder");
+    expect(cols[0]!.label).toBe("…/Very/Deeply/Nested/Folder");
     expect(cols[0]!.title).toBe(deep);
   });
 });
@@ -358,6 +358,16 @@ describe("groupByColumn", () => {
     expect(total).toBe(3);
     expect(byColumn["draft"].map((n) => n.id)).toEqual(["a", "b"]);
     expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["c"]);
+  });
+
+  it("keeps a column whose cards a filter removed (PO-1259)", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const task = node({ id: "nodes/a/t", type: "task" });
+    const all = [task, node({ id: "nodes/b/doc" })];
+    const { columns, byColumn } = groupByColumn([task], cfg, [], all);
+    expect(columns.map((c) => c.key)).toEqual(["a", "b"]);
+    expect(byColumn["b"]).toEqual([]);
+    expect(byColumn["a"].map((n) => n.id)).toEqual(["nodes/a/t"]);
   });
 });
 

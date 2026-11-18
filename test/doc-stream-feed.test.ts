@@ -10,6 +10,8 @@
  *   AC-ST-06 live pill: `facets=0` makes the `since` poll cheap
  *   AC-ST-08 MCP parity: `context_stream` (per-nest and server-level)
  *   AC-ST-09 access: nothing for a document the viewer can't open
+ *   AC-ST-11..14 (po-1375): serializer round trip, exact auto-publish stamp,
+ *            every publish reason, zod-generated context_stream schema
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, authed, resetAuthRateLimit } from "./helpers.js";
@@ -339,6 +341,73 @@ describe("doc stream as a feed (po-1214)", () => {
     expect(summarize("Body first.\n# Renewal checklist", "Renewal checklist")).toBe("Body first. Renewal checklist");
   });
 
+  // ── po-1375: the #561 review leftovers ─────────────────────────────────────
+  it("AC-ST-11 (po-1375): Given client blocks written by serializeClient, When stored, Then AGENT_SQL files a string agent as an agent post and everything else as a person's", async () => {
+    const { serializeClient } = await import("../src/shared/client-metadata.js");
+    const { AGENT_SQL } = await import("../src/governance/stream-service.js");
+    const d = await db();
+    const isAgent = async (client: Record<string, unknown> | undefined) => {
+      const stored = serializeClient(client as any);
+      const hit = await d.get(`SELECT 1 AS hit FROM (SELECT ? AS client_json) v WHERE ${AGENT_SQL}`, [stored]);
+      return !!hit;
+    };
+    expect(await isAgent({ agent: "claude-code" })).toBe(true);
+    expect(await isAgent({ session_id: "s-9f2", agent: "claude-code" })).toBe(true);
+    expect(await isAgent({ agent: "claude-code", session_id: "s-9f2", custom: 3 })).toBe(true);
+    expect(await isAgent({ agent: 'say "hi" \\ bot' })).toBe(true);
+    expect(await isAgent({ agent: "代理" })).toBe(true);
+    expect(await isAgent({ session_id: "s-9f2" })).toBe(false);
+    expect(await isAgent({ agent: 5 })).toBe(false);
+    expect(await isAgent({ agent: true })).toBe(false);
+    expect(await isAgent({ agent_version: "2" })).toBe(false);
+    expect(await isAgent({ note: 'said "agent":"x"' })).toBe(false);
+    expect(await isAgent(undefined)).toBe(false);
+  });
+
+  it("AC-ST-12 (po-1375): Given a person's note that starts like the server's stamp, Then the post keeps it; the server's own stamp, old or new, shows no note", async () => {
+    const { personNote } = await import("../src/governance/stream-service.js");
+    const { autoPublishNote } = await import("../src/nodes/service.js");
+    expect(personNote("Auto-published on Tuesday after the sync")).toBe("Auto-published on Tuesday after the sync");
+    expect(personNote("Auto-published on edit (no stewards) and then I fixed the typo")).toBe(
+      "Auto-published on edit (no stewards) and then I fixed the typo",
+    );
+    expect(personNote(autoPublishNote("create", "no stewards configured"))).toBeNull();
+    expect(personNote(autoPublishNote("edit", "owner/admin self-approve"))).toBeNull();
+    expect(personNote(autoPublishNote("edit", "task — board work skips review"))).toBeNull();
+    // Every stamp ever stored (git history of nodes/service.ts) still reads as a stamp,
+    // including the reason reworded in 2026-07.
+    for (const legacy of [
+      "Auto-published on create (no stewards configured)",
+      "Auto-published on edit (no stewards)",
+      "Auto-published on create (owner/admin self-approve)",
+      "Auto-published on edit (owner/admin self-approve)",
+    ]) expect(personNote(legacy), legacy).toBeNull();
+    expect(personNote("  ")).toBeNull();
+    expect(personNote(null)).toBeNull();
+  });
+
+  it("AC-ST-13 (po-1375): Given every reason the server auto-publishes with, Then its create and edit stamps read as stamps (no reason may hold a parenthesis or newline)", async () => {
+    const { autoPublishNote, isAutoPublishStamp, AUTO_PUBLISH_REASONS } = await import("../src/nodes/service.js");
+    const reasons = Object.values(AUTO_PUBLISH_REASONS);
+    expect(reasons.length).toBeGreaterThanOrEqual(5);
+    for (const reason of reasons) {
+      expect(reason, reason).not.toMatch(/[()\n]/);
+      for (const on of ["create", "edit"] as const) expect(isAutoPublishStamp(autoPublishNote(on, reason)), `${on}: ${reason}`).toBe(true);
+    }
+  });
+
+  it("AC-ST-14 (po-1375): Given context_stream, Then its input schema is the one generated from zod (StreamToolInput)", async () => {
+    const { TOOL_DEFINITIONS } = await import("../src/mcp/tools.js");
+    const { StreamToolInput } = await import("../src/mcp/stream-tool.js");
+    const { mcpInputSchema } = await import("../src/workflow/agent-event-schema.js");
+    const tool = (TOOL_DEFINITIONS as any[]).find((t) => t.name === "context_stream");
+    expect(tool.inputSchema).toEqual(mcpInputSchema(StreamToolInput));
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["since", "source", "author", "tag", "type", "limit", "offset"]);
+    expect(tool.inputSchema.properties.source.enum).toEqual(["agent", "human"]);
+    expect(tool.inputSchema.required).toEqual([]);
+    // The baseline itself (111 after the merge with development) is enforced by `npm run lint:mcp-schemas` in CI.
+  });
+
   // Last: it adds a version, which the counts above do not expect.
   it("AC-ST-04: Given a person's write whose client has a key or value containing \"agent\", Then it is still a human post", async () => {
     const doc = await asPerson(app, "POST", `/nests/${nest}/nodes`, {
@@ -374,5 +443,32 @@ describe("doc stream as a feed (po-1214)", () => {
     } finally {
       process.env.EXPERIMENTAL_DOC_STREAM = "true";
     }
+  });
+});
+
+describe("unreadable-version warnings (po-1375)", () => {
+  it("Given a nest with more broken documents than the cap, Then each is warned once, then one summary line, and nothing repeats", async () => {
+    const { unreadableWarning, UNREADABLE_WARN_PER_NEST } = await import("../src/governance/stream-read.js");
+    const nest = `warn-${Date.now()}`;
+    const first: Array<string | null> = [];
+    for (let i = 0; i < UNREADABLE_WARN_PER_NEST + 10; i++) first.push(unreadableWarning(nest, `nodes/d${i}`, 3));
+    const lines = first.filter(Boolean) as string[];
+    expect(lines).toHaveLength(UNREADABLE_WARN_PER_NEST + 1);
+    expect(lines[0]).toBe(`[me/stream] version body unreadable: ${nest}:nodes/d0@3`);
+    expect(lines.at(-1)).toMatch(/more unreadable version bodies/);
+    // A second pass over the same broken nest (every page load) logs nothing.
+    for (let i = 0; i < UNREADABLE_WARN_PER_NEST + 10; i++) expect(unreadableWarning(nest, `nodes/d${i}`, 4)).toBeNull();
+    // Another nest has its own allowance.
+    expect(unreadableWarning(`${nest}-b`, "nodes/d0", 1)).toMatch(/version body unreadable/);
+  });
+
+  it("Given more broken nests than the nest cap, Then the least recently seen nest is forgotten first, not the whole set", async () => {
+    const { unreadableWarning, UNREADABLE_WARN_NESTS } = await import("../src/governance/stream-read.js");
+    const p = `lru-${Date.now()}`;
+    for (let i = 0; i <= UNREADABLE_WARN_NESTS; i++) unreadableWarning(`${p}-${i}`, "nodes/x", 1);
+    // Nest 0 was the oldest when nest N arrived: forgotten, so it warns again.
+    expect(unreadableWarning(`${p}-0`, "nodes/x", 1)).not.toBeNull();
+    // A recent nest is still remembered.
+    expect(unreadableWarning(`${p}-${UNREADABLE_WARN_NESTS}`, "nodes/x", 1)).toBeNull();
   });
 });

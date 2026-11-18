@@ -44,6 +44,8 @@ export interface Version {
    *  has resolved a review. Drives the "approved by …" hint in the row. */
   resolvedBy?: string;
   resolutionStatus?: "approved" | "rejected" | string;
+  /** For a rejected version: "changes" (sent back) or "reject" (declined). */
+  resolutionKind?: "changes" | "reject" | string;
   /** The reviewer's own note on that verdict — the rejection reason, or an
    *  approver's comment. Rendered in the row so it isn't buried behind a click. */
   resolutionNote?: string;
@@ -487,7 +489,9 @@ export function VersionHistory({
                   }`}
                 >
                   {previewVersion.resolutionStatus === "rejected"
-                    ? "Rejected by"
+                    ? previewVersion.resolutionKind === "reject"
+                      ? "Rejected by"
+                      : "Changes requested by"
                     : "Approved by"}{" "}
                   {previewVersion.resolvedBy}: {previewVersion.resolutionNote}
                 </div>
@@ -704,7 +708,9 @@ export function VersionHistory({
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
-                            ? "Rejected by"
+                            ? version.resolutionKind === "reject"
+                              ? "Rejected by"
+                              : "Changes requested by"
                             : "Approved by"}
                           :{" "}
                           <span className="font-medium text-foreground/80">

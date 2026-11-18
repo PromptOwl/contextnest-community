@@ -17,7 +17,7 @@ import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
-import { defaultTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
+import { defaultTaskRules, newNestTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
 
 /**
  * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
@@ -732,8 +732,8 @@ export async function createNest(
   const visibility = userId === ANON_USER_ID ? "public" : "private";
 
   await db.run(
-    "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, userId, trimmed, slug, description || null, visibility],
+    "INSERT INTO nests (id, user_id, name, slug, description, visibility, task_rules) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, userId, trimmed, slug, description || null, visibility, serializeTaskRules(newNestTaskRules(trimmed))],
   );
 
   const path = resolveNestPath(id);

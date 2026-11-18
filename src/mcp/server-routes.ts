@@ -73,7 +73,7 @@ import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
-import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, licensedReadsAllowed, writesAllowed } from "../auth/free-tier.js";
 import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./agent-tools.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
@@ -102,6 +102,28 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_task_log",
   "context_bulk_update",
 ]);
+
+// Server-level reads REST licenses even on GET (the nestsApp gate's
+// isGovernance list and GET /me/stream): version history. The per-nest
+// /nests/:id/mcp is a POST behind that gate already; this route is not.
+// Keep in step with isGovernance in src/app.ts: a server-level tool that
+// serves one of those governance views belongs here.
+export const SERVER_LICENSED_READ_TOOLS = new Set<string>([STREAM_TOOL, "context_versions"]);
+
+/** Why a gated call is refused, worded for who asked: only an admin hears
+ *  the reason (suspension, offline lock, license), like REST's readOnlyDenial. */
+async function readOnlyMessage(userId: string, blocked = "writes are blocked"): Promise<string> {
+  if (!(await canSeeLicenseDetail(userId))) return NEUTRAL_READ_ONLY;
+  if (isSuspended()) {
+    const reason = getSuspensionReason();
+    return `This server is suspended by PromptOwl; ${blocked}${
+      reason ? ` — ${reason}` : ""
+    }. Contact support@promptowl.ai.`;
+  }
+  const offlineSince = getOfflineLock();
+  if (offlineSince) return offlineLockMessage(offlineSince);
+  return FREE_TIER_EXCEEDED_MESSAGE;
+}
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
 // across ALL accessible nests. Tools that need an exact target (get, resolve, comments)
@@ -484,18 +506,14 @@ async function handleServerToolCall(
   // Kill-switch + license gate for writes — parity with per-nest write path
   // (both ask writesAllowed, so the Free tier applies here too).
   if (SERVER_WRITE_TOOLS.has(toolName) && !(await writesAllowed())) {
-    if (!(await canSeeLicenseDetail(userId))) {
-      return NEUTRAL_READ_ONLY;
-    }
-    if (isSuspended()) {
-      const reason = getSuspensionReason();
-      return `This server is suspended by PromptOwl; writes are blocked${
-        reason ? ` — ${reason}` : ""
-      }. Contact support@promptowl.ai.`;
-    }
-    const offlineSince = getOfflineLock();
-    if (offlineSince) return offlineLockMessage(offlineSince);
-    return FREE_TIER_EXCEEDED_MESSAGE;
+    return readOnlyMessage(userId);
+  }
+  // Licensed reads (po-1375): version history is a governance view REST
+  // licenses even on GET — GET /me/stream and GET …/versions answer 503 via
+  // readOnlyDenial when the license is not valid and writes are not allowed
+  // (past the Free tier, suspended, or offline-locked). Same predicate here.
+  if (SERVER_LICENSED_READ_TOOLS.has(toolName) && !(await licensedReadsAllowed())) {
+    return readOnlyMessage(userId, "version history is unavailable");
   }
 
   if (ONBOARDING_TOOL_NAMES.has(toolName)) {
@@ -958,6 +976,9 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_request_access\` (ask for write access when a write is refused),
     \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)
+  - Feed: \`context_stream\` (every document version across your nests, people and agents)
+  - First run: \`context_onboarding\`, \`context_onboarding_update\`, \`context_distill\` (fill a nest from a public site or repo)
+  - Control room (workflow plane on): \`context_agent_ledger_org\`, \`context_agent_rollups_org\`
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions plus the nest's always-include documents — call first), \`context_instructions_history\`, \`context_export\`, \`context_table_query\`, \`context_versions\`
@@ -965,7 +986,13 @@ Streamable HTTP, stateless. Two endpoints:
   - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\` (a document, or \`channel\` to post in a channel), \`context_resolve_comment\`, \`context_promote_thread\` (turn a thread into a decision or task node)
-  - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
+  - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`, \`context_nest_teams\` (list, share, unshare teams)
+  - sharing: \`context_public_link_create\` (name \`access_mode\`), \`context_public_links\`, \`context_public_link_update\`, \`context_public_link_revoke\`
+  - your queue: \`context_my_work\` (reviews, tasks, mentions, saved; \`for_agent\` for threads that tag you), \`context_stream\`
+  - memory: \`context_remember\` (a message or thread becomes a node, reviewed like any draft), \`context_correct\`, \`context_decisions\`
+  - team chat (when \`TEAM_CHAT_ENABLED\` is on): \`context_channels\`, \`context_channel_read\` (\`since\` for only what is new), \`context_message\`, \`context_message_read\`, \`context_channel_search\`, \`context_channel_knowledge\`, \`context_channel_watch\`, \`context_conversations\`, \`context_conversation_read\`, \`context_channel_members\`, \`context_chat_preferences\`, \`context_presence\`
+  - agents in chat (same switch): \`context_ask_nest\`, \`context_agents\`, \`context_handoff\`, \`context_hire_catalog\`, \`context_hire_agent\`, \`context_hired_agents\`, \`context_agent_recommendations\`, \`context_agent_webhooks\`
+  - control room (workflow plane on): \`context_agent_register\`, \`context_agent_run_start\`, \`context_agent_run_step\`, \`context_agent_run_close\`, \`context_agent_ledger\`, \`context_agent_ledger_trace\`, \`context_agent_ledger_export\`, \`context_agent_rollups\`
   - admin: \`context_instructions_update\` (owner/admin: replace CONTEXT.md), \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   - metacognition (owner/admin, when \`FEATURE_METACOGNITION\` is on too; not on

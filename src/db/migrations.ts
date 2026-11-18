@@ -189,6 +189,12 @@ export function runMigrations(db: Database.Database): void {
   if (!nestCols.includes("stewardship_enabled")) {
     db.exec("ALTER TABLE nests ADD COLUMN stewardship_enabled INTEGER NOT NULL DEFAULT 0");
   }
+  // How a reviewer closed a review: "changes" (sent back, expected to return)
+  // or "reject" (declined for good). NULL on older rows, which read as changes.
+  const rrCols = (db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>).map((c) => c.name);
+  if (rrCols.length && !rrCols.includes("resolution_kind")) {
+    db.exec("ALTER TABLE review_requests ADD COLUMN resolution_kind TEXT");
+  }
   // Imported flag — set when a nest was created by importing a folder (its
   // files are copied into <DATA_ROOT>/nests/<id>). Drives the "Imported" badge
   // and flat document discovery (markdown anywhere, not just nodes/).
@@ -2697,6 +2703,144 @@ export function runMigrations(db: Database.Database): void {
       if (!cols.includes("event")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN event TEXT NOT NULL DEFAULT 'agent.mention'");
     }
     recordMigration("096_stream_marks");
+  }
+
+  // 097: what a person or an agent can do to ONE channel message (PO-1196,
+  //   team chat harness C1). Built on what exists:
+  //     node_pins (071) gains `message_id` and `thread_id`: a channel's pinned
+  //       messages are editorial pins (scope 'nest') on the channel node with
+  //       the message set, and a person's saved messages are their personal
+  //       pins (scope 'user') the same way — so the existing pin cascades
+  //       (nest deleted, account removed, person leaves the nest) cover them.
+  //       The two per-scope unique indexes now exclude message rows, which
+  //       get their own.
+  //     annotation_comments gains four nullable columns: `edited_at`, and the
+  //       tombstone `deleted_at` / `deleted_by` (the login) / `deleted_reason`
+  //       ('author' or 'moderation'). A deleted message keeps its row with a
+  //       blank body, so the thread, its replies and the message's place in
+  //       the timeline are kept.
+  //   Two tables where nothing existed:
+  //     message_reactions  one row per (message, emoji, person); `client_json`
+  //                        keeps the agent that reacted, as a message row does.
+  //     message_edits      the body each edit REPLACED (comments have no
+  //                        version chain; node_versions is for nodes), so
+  //                        earlier texts can be read back by members.
+  //   Rows go with their message, thread or nest (ON DELETE CASCADE). Nothing
+  //   to backfill.
+  if (!hasMigration("097_channel_message_actions")) {
+    const pinCols = (
+      db.prepare("PRAGMA table_info(node_pins)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (pinCols.length) {
+      if (!pinCols.includes("message_id")) db.exec("ALTER TABLE node_pins ADD COLUMN message_id TEXT");
+      if (!pinCols.includes("thread_id")) db.exec("ALTER TABLE node_pins ADD COLUMN thread_id TEXT");
+      db.exec(`
+        DROP INDEX IF EXISTS idx_node_pins_editorial;
+        DROP INDEX IF EXISTS idx_node_pins_personal;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+          ON node_pins(nest_id, node_id) WHERE scope = 'nest' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+          ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_editorial
+          ON node_pins(nest_id, message_id) WHERE scope = 'nest' AND message_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_personal
+          ON node_pins(nest_id, message_id, user_id) WHERE scope = 'user' AND message_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_node_pins_message ON node_pins(message_id) WHERE message_id IS NOT NULL;
+      `);
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS message_reactions (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        emoji TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        author TEXT NOT NULL,
+        client_json TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (comment_id, emoji, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_reactions_user ON message_reactions(user_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_edits (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        body TEXT NOT NULL,
+        edited_by TEXT NOT NULL,
+        client_json TEXT,
+        replaced_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
+    `);
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length) {
+      for (const col of ["edited_at", "deleted_at", "deleted_by", "deleted_reason"]) {
+        if (!cols.includes(col)) db.exec(`ALTER TABLE annotation_comments ADD COLUMN ${col} TEXT`);
+      }
+    }
+    recordMigration("097_channel_message_actions");
+  }
+
+  // 098: the team chat harness, slice C2 (PO-1197).
+  //   One column: `nests.chat_enabled` — the nest's own chat switch (owner/
+  //   admin; PATCH /nests/:id/chat/settings), kept like allow_self_approve.
+  //   Everything else C2 adds lives in existing stores: conversations are
+  //   nodes (nodes/conversations/<uuid>), their messages comment threads,
+  //   their members the node's `grants` rows, the private marker a tag in
+  //   `node_tag_index`, notification levels rows in `stream_marks`
+  //   (kind 'notify'); presence and typing are in memory.
+  if (!hasMigration("098_team_chat_c2")) {
+    const nestCols098 = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestCols098.includes("chat_enabled")) db.exec("ALTER TABLE nests ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 1");
+    recordMigration("098_team_chat_c2");
+  }
+
+  // 099: agent profiles (team chat C7, PO-1198). The one stored thing about
+  //   an agent: a description a nest owner or admin wrote. Everything else a
+  //   profile shows is a query over what the server already keeps (webhooks,
+  //   message attribution, review requests, node versions).
+  if (!hasMigration("099_agent_profiles")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_profiles (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        description TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, handle)
+      );
+    `);
+    // Reserved handles (hootie, nest, channel, here, everyone) can't have a
+    // runner: a row saved before the rule would be woken by every @hootie.
+    db.prepare("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')").run();
+    recordMigration("099_agent_profiles");
+  }
+
+  // 100: hired agents (PO-1201, team chat C10). "Hire" creates the existing
+  //   thing underneath — a metacognition agent, an agent webhook, a nest-scoped
+  //   key — and the hired list is derived from those rows. Hootie is a server
+  //   switch with no per-nest row, so a nest that hired it gets ONE row here;
+  //   A key agent gets a row too, with `ref` = the api_keys id it minted: a
+  //   key agent is one that was HIRED, never a personal key inferred from its
+  //   label (security review). Nothing else is stored. Dismissed
+  //   recommendations are the caller's own `stream_marks` rows (kind
+  //   'recommendation'), no table of their own.
+  if (!hasMigration("100_hired_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS hired_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        hired_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        ref TEXT,
+        PRIMARY KEY (nest_id, kind, handle)
+      );
+    `);
+    recordMigration("100_hired_agents");
   }
 }
 

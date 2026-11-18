@@ -131,7 +131,7 @@ export function ActivityTracePage({
         )}
         <PageTitle
           icon={ScrollText}
-          title="Activity trace"
+          title={nestId ? "API and agent calls" : "Activity trace"}
           className="mb-0 flex-1"
           actions={
         <>

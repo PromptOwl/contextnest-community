@@ -132,12 +132,12 @@ describe("scoped activity log (document / folder / nest)", () => {
     resetAccessThrottle();
     const res = await callTool(app, nestId, editor.apiKey, "context_get", {
       id: pricingId,
-      client: { agent: "hootie" },
+      client: { agent: "scribe" },
     });
     expect(res.isError).toBeFalsy();
     const { data } = await nodeLog(pricingId, "&type=read");
     const mcp = data.items.find((i: any) => i.surface === "mcp");
-    expect(mcp).toEqual(expect.objectContaining({ type: "read", actor: "editor@acme.com", agent: "hootie" }));
+    expect(mcp).toEqual(expect.objectContaining({ type: "read", actor: "editor@acme.com", agent: "scribe" }));
   });
 
   it("records a document returned by a search as retrieved", async () => {

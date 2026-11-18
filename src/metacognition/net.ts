@@ -31,7 +31,7 @@ import https from "node:https";
 import dns from "node:dns";
 import { Readable, Transform } from "node:stream";
 import { isIP, type LookupFunction } from "node:net";
-import { isForbiddenConnectorHost, embeddedIPv4 } from "../notify/dispatch.js";
+import { isForbiddenConnectorHost, embeddedIPv4 } from "../notify/host-guard.js";
 import { config } from "../config.js";
 
 export class OutboundBlockedError extends Error {

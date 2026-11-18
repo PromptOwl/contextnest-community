@@ -22,6 +22,7 @@
  * refused where the socket opens.
  */
 import { randomBytes } from "node:crypto";
+import { isBroadcastName } from "../channels/broadcast.js";
 import { isIP } from "node:net";
 import { getDb } from "../db/client.js";
 import { decryptSecret, encryptSecret } from "../shared/secret-box.js";
@@ -35,6 +36,7 @@ import { isPrivateAddress } from "../metacognition/net.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { AppError } from "../shared/errors.js";
 import { lastDeliveries, sendAgentTestEvent, type DeliveryView } from "./agent-wake.js";
+import { isReservedHandle, RESERVED_HANDLES } from "../agents/reserved.js";
 
 /** An agent handle as typed after "@": lowercase letters, digits, dot, dash,
  *  underscore. No "@" inside, so an email-shaped name (a person) never
@@ -47,6 +49,15 @@ export function parseAgentHandle(raw: unknown): string {
     throw new ValidationError(
       "handle is an agent's @name: 1–63 characters, lowercase letters, digits, dots, dashes or underscores.",
     );
+  }
+  // The nest's own assistant and the broadcast words (C7, src/agents/reserved.ts).
+  if (isReservedHandle(h)) {
+    throw new ValidationError(`"${h}" is a reserved handle (${[...RESERVED_HANDLES].join(", ")}) and can't be an agent's name.`);
+  }
+  // `@channel` / `@here` reach the nest's people (channels/broadcast.ts) and
+  // never wake an agent, so a target under either name could never fire.
+  if (isBroadcastName(h)) {
+    throw new ValidationError(`"${h}" is reserved for reaching everyone in a channel; it can't be an agent's handle.`);
   }
   return h;
 }

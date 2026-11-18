@@ -102,3 +102,95 @@ describe("new-posts poll (po-1214 review)", () => {
     expect(pollDelay(50)).toBe(POLL_MAX_MS);
   });
 });
+
+import { vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startNewPostsPoll, reviewedPatch } from "./doc-stream";
+
+describe("new-posts poll reads the shown posts at each tick (po-1375)", () => {
+  const post = (id: string, at: string) => ({ id, at }) as any;
+
+  it("Given posts patched after the poll started, When it ticks, Then it counts against the posts shown now, without a restart", async () => {
+    vi.useFakeTimers();
+    try {
+      let shown = [post("a", "2026-11-01 09:00:00")];
+      const seen: number[] = [];
+      const count = vi.fn(async () => 3);
+      const stop = startNewPostsPoll({
+        newest: "2026-11-01 09:00:00",
+        shown: () => shown,
+        count,
+        onFresh: (n) => seen.push(n),
+        visible: () => true,
+      });
+      // A local patch (a reply, an approve) changes the list; the timer runs on.
+      shown = [post("b", "2026-11-01 09:05:00"), ...shown];
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(seen).toEqual([1]);
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(count).toHaveBeenCalledTimes(2);
+      stop();
+      await vi.advanceTimersByTimeAsync(POLL_MS * 4);
+      expect(count).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Given a hidden tab, Then it skips its turn; Given a failed poll, Then it backs off", async () => {
+    vi.useFakeTimers();
+    try {
+      let visible = false;
+      let fail = true;
+      const count = vi.fn(async () => {
+        if (fail) throw new Error("offline");
+        return 0;
+      });
+      const errors: unknown[] = [];
+      const stop = startNewPostsPoll({
+        newest: "2026-11-01 09:00:00",
+        shown: () => [],
+        count,
+        onFresh: () => {},
+        visible: () => visible,
+        onError: (e) => errors.push(e),
+      });
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(count).not.toHaveBeenCalled();
+      visible = true;
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(errors).toHaveLength(1);
+      // One failure: the next poll waits pollDelay(1), not POLL_MS.
+      fail = false;
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(count).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(pollDelay(1) - POLL_MS);
+      expect(count).toHaveBeenCalledTimes(2);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Given DocStream, Then the poll effect does not depend on items (a patch must not restart the timer)", () => {
+    const src = readFileSync(join(__dirname, "..", "components", "DocStream.tsx"), "utf8");
+    const effect = src.slice(src.indexOf("startNewPostsPoll({"));
+    const deps = effect.match(/\}, \[([^\]]*)\]\);/)?.[1] ?? "";
+    expect(deps.split(",").map((d) => d.trim())).toEqual(["newest", "filters", "source", "pinnedNestId"]);
+  });
+});
+
+describe("a post reviewed in place says what the server stores (po-1375)", () => {
+  const inReview = { id: "n:a@2", status: "pending_review", kind: "updated", review: { canReview: true } } as any;
+
+  it("Given an approve, Then status is published (what review-service stores) and the kind is approved", () => {
+    expect(reviewedPatch(inReview, "approved")).toMatchObject({ status: "published", kind: "approved", review: null });
+  });
+
+  it("Given a request for changes, Then status and kind are rejected", () => {
+    expect(reviewedPatch(inReview, "rejected")).toMatchObject({ status: "rejected", kind: "rejected", review: null });
+  });
+});

@@ -350,15 +350,11 @@ describe("comment mentions with the directory toggle on", () => {
     delete process.env.PEOPLE_SUGGEST_ALL_USERS;
   });
 
-  it("offers the whole directory in the mention picker", async () => {
-    const { data } = await jsonRequest(
-      app,
-      "GET",
-      `/nests/${nestId}/mentionable`,
-      undefined,
-      reviewer.apiKey,
-    );
-    expect(data.people.map((p: { email: string }) => p.email)).toContain(outsider.email);
+  it("never lists outsiders in the mention picker (PO-1228)", async () => {
+    for (const path of ["mentionable", "collaborators"]) {
+      const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/${path}`, undefined, owner.apiKey);
+      expect(data.people.map((p: { email: string }) => p.email)).not.toContain(outsider.email);
+    }
   });
 
   it("a read-only reviewer's mention does not grant access", async () => {

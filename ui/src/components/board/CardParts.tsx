@@ -301,6 +301,13 @@ export interface Person {
   member?: boolean;
 }
 
+/** The typed text, when it is a full email of someone not on the nest — the picker's "share and assign" row. */
+export function inviteEmail(typed: string, people: Person[]): string | null {
+  const e = typed.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return null;
+  return people.some((p) => p.email.toLowerCase() === e) ? null : e;
+}
+
 export function AssigneeMenu({
   assignee,
   people,
@@ -308,11 +315,14 @@ export function AssigneeMenu({
   editable,
   onChange,
   showName,
+  canInvite,
 }: {
   assignee?: string;
   people: Person[];
   me?: string;
   editable: boolean;
+  /** Owner/admin: a typed email not on the nest offers "share and assign" (PO-1210). */
+  canInvite?: boolean;
   onChange: (email: string | null, member?: boolean) => void;
   /** Name beside the avatar, always visible ("Unassigned" when empty) — the task view. */
   showName?: boolean;
@@ -353,6 +363,7 @@ export function AssigneeMenu({
       if (me && b.email.toLowerCase() === me) return 1;
       return (a.name ?? a.email).localeCompare(b.name ?? b.email);
     });
+  const invite = canInvite ? inviteEmail(needle, people) : null;
   return (
     <Isolate>
       <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
@@ -395,7 +406,13 @@ export function AssigneeMenu({
                 )}
               </DropdownMenuItem>
             ))}
-            {list.length === 0 && (
+            {invite && (
+              <DropdownMenuItem onSelect={() => onChange(invite, false)} className="gap-2">
+                <Avatar email={invite} size="sm" />
+                <span className="min-w-0 truncate">Share nest with {invite}</span>
+              </DropdownMenuItem>
+            )}
+            {list.length === 0 && !invite && (
               <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
                 Nobody on this nest matches.
               </DropdownMenuLabel>

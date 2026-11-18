@@ -31,8 +31,19 @@ const READ_ONLY = [
   "context_export",
   "context_comments",
   "context_channel_read",
+  // Channel messages (PO-1196): the permalink lookup and search.
+  "context_message_read",
+  "context_channel_search",
+  // Team chat C2 (PO-1197): reading a conversation.
+  "context_conversation_read",
+  // Memory snowball (team chat C6, PO-1199): the ledger and the knowledge view are reads.
+  "context_decisions",
+  "context_channel_knowledge",
   // My Work (PO-1180): the caller's own queue.
   "context_my_work",
+  // Hire (PO-1201): the catalog and the hired list are derived views.
+  "context_hire_catalog",
+  "context_hired_agents",
   "context_relations",
   "context_boards",
   "context_board_items",
@@ -117,6 +128,21 @@ const DESTRUCTIVE = [
   "context_agent_run_close",
   // Agent webhooks (PO-1181): set replaces a target, delete removes one.
   "context_agent_webhooks",
+  // Channel messages (PO-1196): edit replaces text, delete tombstones.
+  "context_message",
+  // Team chat C2 (PO-1197): leave removes a membership, set_private changes
+  // who reads a channel, set replaces a preference.
+  "context_conversations",
+  "context_channel_members",
+  "context_chat_preferences",
+  // Memory snowball (team chat C6): a correction drafts a new version of a node;
+  // the watch setting replaces which agent watches a channel and runs it.
+  "context_correct",
+  "context_channel_watch",
+  // Agent profiles (team chat C7): a description replaces the earlier one.
+  "context_agents",
+  // Hire (PO-1201): let_go deletes a webhook, a key or a metacognition config.
+  "context_hire_agent",
 ];
 
 /** Reaches outside the nest: arbitrary URLs and addresses, the public, or a third-party workspace. */
@@ -163,6 +189,14 @@ const OPEN_WORLD = [
   "context_promote_thread",
   // Points a nest's mention events at an outside URL.
   "context_agent_webhooks",
+  // Memory snowball (team chat C6): each can create or change a node a docs site may serve.
+  "context_remember",
+  "context_correct",
+  "context_channel_watch",
+  // Ask the nest (team chat C7): the question and retrieved text go to the model provider.
+  "context_ask_nest",
+  // Hire (PO-1201): a webhook hire points events at an outside URL.
+  "context_hire_agent",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -219,10 +253,20 @@ async function allDefinedNames(): Promise<string[]> {
   const { AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/agent-tools.js");
   const { MY_WORK_TOOL_DEFINITIONS } = await import("../src/mcp/my-work-tools.js");
   const { STREAM_TOOL_DEFINITIONS } = await import("../src/mcp/stream-tools.js");
+  const { MESSAGE_TOOL_DEFINITIONS } = await import("../src/mcp/message-tools.js");
+  const { CHAT_TOOL_DEFINITIONS } = await import("../src/mcp/chat-tools.js");
+  const { MEMORY_TOOL_DEFINITIONS } = await import("../src/mcp/memory-tools.js");
+  const { NEST_AGENT_TOOL_DEFINITIONS } = await import("../src/mcp/nest-agent-tools.js");
+  const { HIRE_TOOL_DEFINITIONS } = await import("../src/mcp/hire-tools.js");
   const all = [
+    ...NEST_AGENT_TOOL_DEFINITIONS,
     ...CHANNEL_TOOL_DEFINITIONS,
+    ...MESSAGE_TOOL_DEFINITIONS,
+    ...CHAT_TOOL_DEFINITIONS,
+    ...HIRE_TOOL_DEFINITIONS,
     ...MY_WORK_TOOL_DEFINITIONS,
     ...STREAM_TOOL_DEFINITIONS,
+    ...MEMORY_TOOL_DEFINITIONS,
     ...TOOL_DEFINITIONS,
     ...SERVER_TOOL_DEFINITIONS,
     ...WORKFLOW_TOOL_DEFINITIONS,
