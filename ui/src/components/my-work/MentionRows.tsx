@@ -5,7 +5,7 @@
  * it only returns if a later message in that thread mentions you again.
  * People show by display name, and the excerpt is one line of plain text.
  */
-import { AtSign, Check, ChevronLeft, ChevronRight, FileText, Hash, Loader2 } from "lucide-react";
+import { AtSign, Check, ChevronLeft, ChevronRight, FileText, Hash, Loader2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { MentionItem, WorkPagination } from "../../lib/api";
@@ -61,7 +61,7 @@ export function MentionRows({
                 <li key={`${m.nest_id}:${m.thread_id}`} className="group flex items-start gap-1 pr-2 hover:bg-muted/40" data-testid="my-work-mention">
                   <button type="button" onClick={() => onOpen(m)} className="flex min-w-0 flex-1 items-start gap-3 px-4 py-2 text-left" title="Open in thread">
                     <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                      {m.channel ? <Hash className="h-3.5 w-3.5" aria-hidden /> : <FileText className="h-3.5 w-3.5" aria-hidden />}
+                      {m.kind === "conversation" ? <MessageSquare className="h-3.5 w-3.5" aria-hidden /> : m.channel ? <Hash className="h-3.5 w-3.5" aria-hidden /> : <FileText className="h-3.5 w-3.5" aria-hidden />}
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline gap-2 leading-5">

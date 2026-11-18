@@ -35,4 +35,7 @@ describe("AC-C3-08 inbox groups", () => {
     expect(mentionPlace(m("a", "1"))).toBe("#ops");
     expect(mentionPlace(m("a", "1", { kind: "document", channel: null, title: "Launch Plan" }))).toBe("Launch Plan");
   });
+  it("AC-C3-15 a mention in a direct or group message reads as one", () => {
+    expect(mentionPlace(m("a", "1", { kind: "conversation", channel: null, title: "Conversation", node_id: "nodes/conversations/x" }))).toBe("a direct message");
+  });
 });

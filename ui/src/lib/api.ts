@@ -414,8 +414,11 @@ export interface AdminSettings {
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
   experimental_doc_pins: boolean;
-  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM). */
+  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM);
+   *  an alias of `team_chat_enabled` since C2 (either writes both). */
   experimental_agent_stream_enabled: boolean;
+  /** The team chat harness (TEAM_CHAT_ENABLED, PO-1197). */
+  team_chat_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -4421,9 +4424,10 @@ export interface AssignedItem {
  */
 export interface MentionItem {
   type: "mention";
-  /** "channel" opens the channel timeline at the thread; "document" opens
-   *  the document with the comment thread focused. */
-  kind: "channel" | "document";
+  /** "channel" opens the channel timeline at the thread; "conversation" (C2)
+   *  opens the direct or group message (`node_id` is its id); "document"
+   *  opens the document with the comment thread focused. */
+  kind: "channel" | "conversation" | "document";
   nest_id: string;
   nest_name: string;
   node_id: string;

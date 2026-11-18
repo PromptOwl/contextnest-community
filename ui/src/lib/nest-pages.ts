@@ -30,6 +30,10 @@ export interface NestPageCaps {
    *  someone who reaches it only through its visibility or a document share.
    *  Unknown reads as "not a member": a page gated on it stays hidden. */
   isMember?: boolean;
+  /** Team chat for this caller here (GET /nests/:id `chat`, C2): the server
+   *  switch, the nest's own setting and membership in one answer. When it is
+   *  known it decides; unknown falls back to switch and membership. */
+  chatOn?: boolean;
 }
 
 export interface NestPageMeta {

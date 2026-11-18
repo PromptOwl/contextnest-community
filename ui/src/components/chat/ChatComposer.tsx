@@ -45,6 +45,7 @@ export function ChatComposer({
   ariaLabel,
   autoFocus,
   compact,
+  status,
   className,
 }: {
   value: string;
@@ -60,6 +61,8 @@ export function ChatComposer({
   autoFocus?: boolean;
   /** The thread's reply box and the slide-over: one line to start with. */
   compact?: boolean;
+  /** A live line ("Walt is typing…") in the hint's place while there is one. */
+  status?: string | null;
   className?: string;
 }) {
   const [sending, setSending] = useState(false);
@@ -112,7 +115,11 @@ export function ChatComposer({
           {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <ArrowUp className="h-3.5 w-3.5" aria-hidden />}
         </button>
       </div>
-      {!compact && (
+      {status ? (
+        <p className="mt-1.5 truncate px-1 text-xs text-muted-foreground" role="status" aria-live="polite" data-testid="chat-typing">
+          {status}
+        </p>
+      ) : !compact && (
         <p className="mt-1.5 px-1 text-xs text-muted-foreground" data-testid="composer-hint">
           {touch ? (
             <>Enter adds a line. Tap the arrow to send.</>

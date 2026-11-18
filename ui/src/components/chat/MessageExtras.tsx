@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { useAuth } from "../../auth/AuthContext";
 import type { ChannelMessage, ChannelPost, ChannelSummary, PostedMention } from "../../lib/api";
 import { mentionNotice } from "../../lib/channels";
+import { messageFeatures } from "../../lib/chat-harness";
 import { broadcastNotice, canDelete, canEdit } from "../../lib/chat-messages";
 import { ReasonDialog } from "../governance";
 import type { MessageAction } from "./MessageRow";
@@ -39,10 +40,12 @@ export function useMessageExtras(input: { channel: ChannelSummary | null; action
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const { channel, actions, permission } = input;
   const canWrite = !!channel?.can_post;
+  // A conversation has none of the C1 message routes yet (they 404 there).
+  const on = messageFeatures(channel).messageActions;
 
   const extraActions = useCallback(
     (m: AnyMessage): MessageAction[] => {
-      if (!channel || m.deleted) return [];
+      if (!channel || !on || m.deleted) return [];
       const out: MessageAction[] = [];
       if (canWrite) out.push({ id: "react", label: "Add a reaction", icon: SmilePlus, onSelect: () => setPickerFor(m.id) });
       if (canWrite)
@@ -60,11 +63,12 @@ export function useMessageExtras(input: { channel: ChannelSummary | null; action
       if (canWrite && canDelete(m, me, permission)) out.push({ id: "delete", label: "Delete", icon: Trash2, destructive: true, onSelect: () => setDeleting(m) });
       return out;
     },
-    [channel, canWrite, me, permission, actions],
+    [channel, on, canWrite, me, permission, actions],
   );
 
   const renderUnder = useCallback(
-    (m: AnyMessage): ReactNode => (
+    (m: AnyMessage): ReactNode =>
+      on && (
       <>
         <ReactionBar reactions={m.reactions} canReact={canWrite} onToggle={(emoji) => void actions.react(m, emoji).catch(fail("Could not react"))} />
         {pickerFor === m.id && (
@@ -79,8 +83,8 @@ export function useMessageExtras(input: { channel: ChannelSummary | null; action
           />
         )}
       </>
-    ),
-    [canWrite, actions, pickerFor],
+      ),
+    [on, canWrite, actions, pickerFor],
   );
 
   const rowProps = useCallback(

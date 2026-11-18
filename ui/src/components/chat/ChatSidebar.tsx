@@ -1,20 +1,23 @@
 /**
- * The harness sidebar (PO-1200, AC-C3-02): a search box that filters the
- * channels (and will search messages when C1 lands), Channels by latest
- * activity with unread counts and archived ones folded away, my open
- * Mentions in this nest, and — only when their API exists — Saved and
- * Direct messages. The same component is the phone's sheet.
+ * The harness sidebar (PO-1200, AC-C3-02, AC-C3-15): a search box that
+ * filters channels and conversations and searches messages, Channels by
+ * latest activity with unread counts (a lock for private ones) and archived
+ * ones folded away, Direct messages with who is around, Saved, and my open
+ * Mentions in this nest. The same component is the phone's sheet.
  */
 import { useState, type ReactNode } from "react";
-import { Archive, AtSign, Bookmark, ChevronRight, Hash, MessageSquare, Plus, Search, Users } from "lucide-react";
+import { Archive, AtSign, Bookmark, ChevronRight, Hash, Lock, Plus, Search, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChannelSummary, MentionItem } from "../../lib/api";
 import { unreadLabel } from "../../lib/channels";
-import { useDirectMessages, type Seam } from "../../lib/chat-seams";
+import { dmPeer, orderConversations } from "../../lib/chat-harness";
+import type { Seam } from "../../lib/chat-seams";
 import { filterChannels, orderByActivity } from "../../lib/chat-sidebar";
 import { relTime } from "../../lib/dates";
 import { plainExcerpt } from "../../lib/plain-excerpt";
+import { mentionPlace } from "../../lib/my-work-inbox";
 import { mentionAuthor } from "../my-work/MentionRows";
+import { MemberAvatar } from "./Presence";
 
 export function UnreadBadge({ count, className }: { count: number; className?: string }) {
   const label = unreadLabel(count);
@@ -57,12 +60,16 @@ export interface ChatSidebarProps {
   saved?: Seam<{ count: number; onOpen: () => void; open: boolean }>;
   /** The search box's second job once C1 lands: message search. */
   onSearchMessages?: (query: string) => void;
+  /** C2: my direct and group messages here (rows read as channels, key `~uuid`),
+   *  who is around, and "New message". Absent while the nest's chat is off. */
+  dms?: Seam<{ rows: ChannelSummary[]; online: ReadonlySet<string>; onNew: () => void }>;
 }
 
 export function ChatSidebar(p: ChatSidebarProps) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const dms = useDirectMessages(p.nestId);
+  const dms = p.dms;
+  const dmRows = dms?.available ? filterDms(dms.rows, query) : [];
   const live = filterChannels(orderByActivity(p.channels), query);
   const archived = filterChannels(p.archived, query);
   // An archived channel that is open shows its section, so the highlight is visible.
@@ -119,7 +126,11 @@ export function ChatSidebar(p: ChatSidebarProps) {
                 className={cn(ROW, active ? "bg-muted font-medium" : c.unread > 0 && "font-semibold text-foreground")}
                 data-testid="channel-row"
               >
-                <Hash className={cn("h-3.5 w-3.5 shrink-0", active ? "text-foreground" : "text-muted-foreground")} aria-hidden />
+                {c.private ? (
+                  <Lock className={cn("h-3.5 w-3.5 shrink-0", active ? "text-foreground" : "text-muted-foreground")} aria-label="Private" />
+                ) : (
+                  <Hash className={cn("h-3.5 w-3.5 shrink-0", active ? "text-foreground" : "text-muted-foreground")} aria-hidden />
+                )}
                 <span className="truncate">{c.name}</span>
                 {!active && <UnreadBadge count={c.unread} className="ml-auto" />}
               </button>
@@ -157,6 +168,64 @@ export function ChatSidebar(p: ChatSidebarProps) {
           )}
         </Section>
 
+        {dms?.available && (
+          <Section
+            title="Direct messages"
+            testId="chat-dms"
+            action={
+              <button type="button" onClick={dms.onNew} aria-label="New message" title="New message" data-testid="dm-new" className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground">
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            }
+          >
+            {dmRows.length === 0 && (
+              <button type="button" onClick={dms.onNew} className={cn(ROW, "text-xs text-muted-foreground")}>
+                {query ? "No conversation matches." : "Message a teammate or an agent"}
+              </button>
+            )}
+            {dmRows.map((c) => {
+              const active = c.name === p.selected;
+              const conv = c.conversation;
+              const peer = conv ? dmPeer(conv, p.viewer?.email ?? null) : null;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => p.onSelect(c.name)}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(ROW, active ? "bg-muted font-medium" : c.unread > 0 && "font-semibold text-foreground")}
+                  data-testid="dm-row"
+                >
+                  {peer ? (
+                    <MemberAvatar
+                      kind={peer.kind}
+                      label={peer.kind === "agent" ? peer.handle : peer.name || peer.email}
+                      online={peer.kind === "person" ? dms.online.has(peer.email.toLowerCase()) : undefined}
+                      size="sm"
+                    />
+                  ) : (
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground" aria-hidden>
+                      <Users className="h-3 w-3" />
+                    </span>
+                  )}
+                  <span className="truncate">{c.title}</span>
+                  {!active && <UnreadBadge count={c.unread} className="ml-auto" />}
+                </button>
+              );
+            })}
+          </Section>
+        )}
+
+        {p.saved?.available && (
+          <Section title="Saved" testId="chat-saved">
+            <button type="button" onClick={p.saved.onOpen} aria-current={p.saved.open ? "page" : undefined} className={cn(ROW, p.saved.open && "bg-muted font-medium")}>
+              <Bookmark className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              <span className="truncate">Saved messages</span>
+              {p.saved.count > 0 && <span className="ml-auto text-xs text-muted-foreground">{p.saved.count}</span>}
+            </button>
+          </Section>
+        )}
+
         <Section title="Mentions" testId="chat-mentions">
           {p.mentions.length === 0 ? (
             <p className="px-2 py-1 text-xs text-muted-foreground">Nothing waiting on you here.</p>
@@ -170,7 +239,7 @@ export function ChatSidebar(p: ChatSidebarProps) {
                     <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">{relTime(m.mentioned_at)}</span>
                   </span>
                   <span className="block truncate text-xs text-muted-foreground">
-                    {m.channel ? `#${m.channel}` : m.title}
+                    {mentionPlace(m)}
                     {" · "}
                     {plainExcerpt(m.excerpt, [...(p.viewer ? [p.viewer] : []), { email: m.author, name: m.author_name }])}
                   </span>
@@ -180,28 +249,14 @@ export function ChatSidebar(p: ChatSidebarProps) {
           )}
         </Section>
 
-        {p.saved?.available && (
-          <Section title="Saved" testId="chat-saved">
-            <button type="button" onClick={p.saved.onOpen} aria-current={p.saved.open ? "page" : undefined} className={cn(ROW, p.saved.open && "bg-muted font-medium")}>
-              <Bookmark className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="truncate">Saved messages</span>
-              {p.saved.count > 0 && <span className="ml-auto text-xs text-muted-foreground">{p.saved.count}</span>}
-            </button>
-          </Section>
-        )}
-
-        {dms.available && (
-          <Section title="Direct messages" testId="chat-dms">
-            {dms.conversations.map((d) => (
-              <button key={d.id} type="button" className={ROW}>
-                {d.title.includes(",") ? <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />}
-                <span className="truncate">{d.title}</span>
-                <UnreadBadge count={d.unread} className="ml-auto" />
-              </button>
-            ))}
-          </Section>
-        )}
       </div>
     </nav>
   );
+}
+
+/** Conversations whose title contains every word typed, latest first. */
+function filterDms(rows: readonly ChannelSummary[], query: string): ChannelSummary[] {
+  const words = query.toLowerCase().replace(/^[#@]+/, "").split(/\s+/).filter(Boolean);
+  const ordered = orderConversations(rows);
+  return words.length ? ordered.filter((c) => words.every((w) => c.title.toLowerCase().includes(w))) : ordered;
 }

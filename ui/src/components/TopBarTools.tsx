@@ -92,6 +92,7 @@ export function TopBarTools({
   // Channels are for people added to the nest; a share-only grantee or a
   // public reader gets no entry (GET /nests/:id `member`).
   const isMember = (meta.data as any)?.member === true;
+  const chatOn = typeof (meta.data as any)?.chat === "boolean" ? ((meta.data as any).chat as boolean) : undefined;
   const views = useMemo(
     () =>
       caps
@@ -99,11 +100,12 @@ export function TopBarTools({
           workflowPlaneEnabled,
           agentStreamEnabled,
           isMember,
+          chatOn,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, chatOn, stewardshipEnabled, pending],
   );
   // Dashboard: the nests to pick from.
   const nestList = useQuery({ ...reads.nestList(), enabled: !nestId });

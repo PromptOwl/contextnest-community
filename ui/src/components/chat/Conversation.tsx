@@ -6,19 +6,20 @@
  * place: new messages scroll it only when it was already at the end.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Archive, ArchiveRestore, ArrowDown, Hash, Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { ArrowDown, Hash, Loader2, Lock, MessagesSquare, Users, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { OverflowMenu } from "@/components/ui/overflow-menu";
 import { cn } from "@/lib/utils";
 import type { AgentHandle, ChannelPost, ChannelSummary } from "../../lib/api";
 import type { TimelineState } from "../../lib/channels";
 import { buildConversation, newLineAnchor, sortChronological } from "../../lib/chat-grouping";
+import { dmPeer, messageFeatures } from "../../lib/chat-harness";
 import { jumpPill } from "../../lib/chat-layout";
 import { relTime } from "../../lib/dates";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 import { ChatComposer, MENTION_EXTRAS, PostRefusal } from "./ChatComposer";
 import { MessageRow, messageActions, type MessageAction, type MessageRowProps } from "./MessageRow";
+import { MemberAvatar } from "./Presence";
 import { EmptyState } from "./States";
 
 export interface ConversationProps {
@@ -43,16 +44,22 @@ export interface ConversationProps {
   onCopyLink: (post: ChannelPost) => void;
   onLoadMore: () => Promise<void>;
   onOpenNode: (nodeId: string) => void;
-  onArchive?: () => void;
-  onRestore?: () => void;
   /** The list read has failed since it last succeeded (AC-C3-09). */
   lag: { stale: boolean; lastSuccessAt: number | null };
   /** The slide-over: a smaller header, no purpose line. */
   compact?: boolean;
   /** Left of the title: the phone's channel-list button. */
   leading?: ReactNode;
-  /** Right of the title, before the channel menu (search, pins when C1 lands). */
+  /** Right of the title: pins, members, the channel menu. */
   trailing?: ReactNode;
+  /** Under the header (the first-run explainer). */
+  banner?: ReactNode;
+  /** "Walt is typing…" (C2), under the composer. */
+  typingLine?: string | null;
+  /** The composer's text changed (C2: the typing signal out). */
+  onType?: () => void;
+  /** Who is around now, by lowercased login (C2), for a dm's header. */
+  online?: ReadonlySet<string>;
   /** Extra per-post actions (C1: react, edit, delete, pin, save). */
   extraActions?: (post: ChannelPost) => MessageAction[];
   /** Rendered under a post's body (C1: reactions). */
@@ -63,6 +70,11 @@ export interface ConversationProps {
 
 export function Conversation(p: ConversationProps) {
   const { channel, state } = p;
+  const conv = channel.conversation;
+  const peer = conv ? dmPeer(conv, p.me) : null;
+  // A conversation is named by its members; a channel by its name.
+  const label = conv ? channel.title : channel.name;
+  const features = messageFeatures(channel);
   const listRef = useRef<HTMLDivElement>(null);
   const [distance, setDistance] = useState(0);
   const [arrived, setArrived] = useState(0);
@@ -153,9 +165,19 @@ export function Conversation(p: ConversationProps) {
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {p.leading}
         <div className="flex min-w-0 flex-1 items-baseline gap-2 px-1">
-          <h2 className="flex min-w-0 shrink-0 items-center gap-1 truncate text-base font-semibold leading-6">
-            <Hash className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-            <span className="truncate">{channel.name}</span>
+          <h2 className="flex min-w-0 shrink items-center gap-1.5 truncate text-base font-semibold leading-6" data-testid="chat-title">
+            {conv ? (
+              peer ? (
+                <MemberAvatar kind={peer.kind} label={peer.kind === "agent" ? peer.handle : peer.name || peer.email} online={peer.kind === "person" ? p.online?.has(peer.email.toLowerCase()) : undefined} size="sm" />
+              ) : (
+                <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              )
+            ) : channel.private ? (
+              <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="Private" />
+            ) : (
+              <Hash className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+            )}
+            <span className="truncate">{label}</span>
           </h2>
           {channel.archived && <Badge variant="neutral">Archived</Badge>}
           {!p.compact && channel.purpose && (
@@ -165,25 +187,10 @@ export function Conversation(p: ConversationProps) {
           )}
         </div>
         {p.trailing}
-        {p.canManage &&
-          (channel.archived ? (
-            p.onRestore && (
-              <Button size="sm" variant="outline" onClick={p.onRestore} className="h-8 shrink-0">
-                <ArchiveRestore className="mr-1.5 h-3.5 w-3.5" /> Restore
-              </Button>
-            )
-          ) : (
-            p.onArchive && (
-              <OverflowMenu
-                className="h-8 w-8 shrink-0"
-                triggerTitle="Channel actions"
-                testId="channel-actions"
-                actions={[{ label: "Archive channel", icon: Archive, onSelect: p.onArchive, testId: "channel-archive" }]}
-              />
-            )
-          ))}
       </header>
       )}
+
+      {p.banner}
 
       {p.lag.stale && (
         <div className="flex shrink-0 items-center gap-2 border-b bg-muted/60 px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="chat-lag">
@@ -209,7 +216,13 @@ export function Conversation(p: ConversationProps) {
             <EmptyState
               icon={MessagesSquare}
               title="No messages yet"
-              hint={channel.can_post ? "Write the first one below. Type @ to bring in a teammate or an agent." : "Nothing has been posted in this channel."}
+              hint={
+                conv
+                  ? `This is the start of your ${conv.kind === "dm" ? "conversation" : "group"} with ${channel.title}. Only the people in it can read it.`
+                  : channel.can_post
+                    ? "Write the first one below. Type @ to bring in a teammate or an agent."
+                    : "Nothing has been posted in this channel."
+              }
               className="h-full"
             />
           ) : (
@@ -277,13 +290,17 @@ export function Conversation(p: ConversationProps) {
             key={channel.name}
             compact={p.compact}
             value={p.draft}
-            onChange={p.onDraft}
+            onChange={(next) => {
+              p.onDraft(next);
+              if (next) p.onType?.();
+            }}
             onSend={p.onPost}
             people={p.people}
             agents={p.agents}
-            extras={MENTION_EXTRAS}
-            placeholder={`Message ${channel.title}`}
-            ariaLabel={`Message ${channel.title}`}
+            extras={features.broadcast ? MENTION_EXTRAS : undefined}
+            status={p.typingLine}
+            placeholder={`Message ${conv ? channel.title : `#${channel.name}`}`}
+            ariaLabel={`Message ${conv ? channel.title : `#${channel.name}`}`}
           />
         ) : (
           <PostRefusal channel={channel} />

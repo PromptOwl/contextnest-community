@@ -565,7 +565,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission, roles, myStewards, member } = await qc.fetchQuery(reads.nest(nestId));
+        const { nest, permission, roles, myStewards, member, chat } = await qc.fetchQuery(reads.nest(nestId));
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
@@ -628,7 +628,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true, chatOn: chat })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -973,9 +973,12 @@ export default function App() {
   // Whether the caller is a person added to the nest (GET /nests/:id member):
   // Channels are listed for members only. null = not resolved yet.
   const [nestIsMember, setNestIsMember] = useState<boolean | null>(null);
+  // The nest's own chat answer (GET /nests/:id chat, C2); undefined on an older server.
+  const [nestChat, setNestChat] = useState<boolean | undefined>(undefined);
   useEffect(() => {
     setNestCanEdit(null);
     setNestIsMember(null);
+    setNestChat(undefined);
     setNestIsReaderView(null);
     setNestBranding(null);
     if (!nestScopedId) return;
@@ -993,6 +996,7 @@ export default function App() {
         });
         setNestCanEdit(caps.canEditDocs);
         setNestIsMember(meta?.member === true);
+        setNestChat(typeof meta?.chat === "boolean" ? meta.chat : undefined);
         setNestIsReaderView(caps.isReaderView);
         setNestBranding(meta?.nest?.branding ?? null);
       })
@@ -1926,7 +1930,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true, chatOn: nestChat });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring

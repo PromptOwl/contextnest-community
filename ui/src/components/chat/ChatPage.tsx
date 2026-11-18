@@ -6,21 +6,27 @@
  * part of the screen is its own component in this folder.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hash, PanelLeft } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost, ChannelSummary, MentionItem, MessageSearchHit, PinnedMessage, SavedItem } from "../../lib/api";
+import { messageFeatures } from "../../lib/chat-harness";
+import { keyOfConversationId } from "../../lib/chat-live";
 import { channelThreadLink, readChannelDeepLink } from "../../lib/channel-deep-link";
 import { initialChannel } from "../../lib/channels";
 import { paneLayout } from "../../lib/chat-layout";
 import { mentionsForNest, threadNodes, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
-import { reads } from "../../lib/queries";
+import { keys, reads } from "../../lib/queries";
 import { ReasonDialog } from "../governance";
 import { ChannelNavProvider } from "./channel-nav";
+import { ChannelMenu, MembersButton } from "./ChannelMenu";
+import { ChatIntro } from "./ChatIntro";
+import { MembersPanel } from "./MembersPanel";
+import { NewConversationDialog } from "./NewConversationDialog";
 import { ChatSheet, SheetClose } from "./ChatSheet";
 import { ChatSidebar, UnreadBadge } from "./ChatSidebar";
 import { Conversation } from "./Conversation";
@@ -99,6 +105,10 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   // C1: who may delete whose message, and the saved count for the sidebar.
   const meta = useQuery(reads.nest(nestId));
   const permission = (meta.data as { permission?: string } | undefined)?.permission ?? null;
+  const roles = (meta.data as { roles?: string[] } | undefined)?.roles ?? [];
+  // The nest's owner or an admin makes a channel private or public (C2).
+  const nestAdmin = permission === "owner" || permission === "admin" || roles.includes("owner") || roles.includes("admin");
+  const qc = useQueryClient();
   const savedQuery = useQuery(reads.mySaved());
   const extras = useMessageExtras({ channel, actions, permission });
   // What stands in the conversation's place: nothing, Saved, or a search.
@@ -117,6 +127,11 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   const [promoting, setPromoting] = useState<ChannelPost | null>(null);
   const [archiving, setArchiving] = useState<ChannelSummary | null>(null);
   const [sidebarSheet, setSidebarSheet] = useState(false);
+  const [startingDm, setStartingDm] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [leaving, setLeaving] = useState<ChannelSummary | null>(null);
+  const features = messageFeatures(channel);
+  const allRows = useMemo(() => [...list.live, ...data.conversations.rows], [list.live, data.conversations.rows]);
 
   // Landing with no channel in the URL: the most recently active one.
   useEffect(() => {
@@ -138,7 +153,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
 
   // The unread count the channel was opened with, for the "New" line.
   const unreadAtOpen = useRef<{ channel: string; unread: number } | null>(null);
-  const row = list.data?.channels.find((c) => c.name === selected) ?? null;
+  const row = (selected?.startsWith("~") ? data.conversations.rows : (list.data?.channels ?? [])).find((c) => c.name === selected) ?? null;
   if (selected && row && unreadAtOpen.current?.channel !== selected) unreadAtOpen.current = { channel: selected, unread: row.unread };
 
   const select = (name: string) => {
@@ -156,6 +171,14 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
     // Back to the message the thread came from.
     if (openThread) document.getElementById(`message-${openThread}`)?.focus();
   };
+
+  // Removed from what is open (left in another tab, or the list changed):
+  // go to the most recently active channel.
+  useEffect(() => {
+    if (!data.live.closedKey) return;
+    if (data.live.closedKey === selected) go.current({ channel: list.data ? initialChannel(null, list.data) : null }, { replace: true });
+    data.live.clearClosed();
+  }, [data.live, selected, list.data]);
 
   // Escape closes the thread pane (a sheet handles its own).
   useEffect(() => {
@@ -214,6 +237,20 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       },
     });
   };
+  const leave = async (c: ChannelSummary) => {
+    try {
+      await actions.leave();
+      await qc.invalidateQueries({ queryKey: keys.channelList(nestId) });
+      await qc.invalidateQueries({ queryKey: keys.conversations(nestId) });
+      if (c.private || c.conversation) {
+        const next = list.live.find((x) => x.name !== c.name)?.name ?? null;
+        go.current({ channel: next });
+      }
+      toast.success(c.conversation ? "You left the group" : `You left #${c.name}`);
+    } catch (e) {
+      fail("Could not leave")(e);
+    }
+  };
   const copyLink = (p: ChannelPost, messageId?: string) =>
     void copyTextWithToast(`${window.location.origin}${channelThreadLink(nestId, channel?.name ?? selected ?? "", p.id, messageId)}`, "Link copied");
   const jumpTo = (channelName: string, threadId: string, messageId: string | null) => {
@@ -245,7 +282,11 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   }, [pane]);
   const openMention = (m: MentionItem) => {
     setSidebarSheet(false);
-    if (m.kind === "channel" && m.channel) {
+    const convKey = m.kind === "conversation" ? keyOfConversationId(m.node_id) : null;
+    if (convKey) {
+      clicked.current = null;
+      go.current({ channel: convKey, thread: m.thread_id });
+    } else if (m.kind === "channel" && m.channel) {
       clicked.current = null;
       go.current({ channel: m.channel, thread: m.thread_id });
     } else if (onOpenDocumentThread) onOpenDocumentThread(m.node_id, m.thread_id);
@@ -270,6 +311,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       onRestore={(c) => void restore(c)}
       onOpenMention={openMention}
       saved={{ available: true, count: savedQuery.data?.pagination.total ?? 0, open: pane?.kind === "saved", onOpen: () => setPane({ kind: "saved" }) }}
+      dms={data.conversations.available ? { available: true, rows: data.conversations.rows, online: data.live.online, onNew: () => setStartingDm(true) } : { available: false }}
       onSearchMessages={(q) => setPane({ kind: "search", q })}
     />
   );
@@ -308,7 +350,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   const conversation = pane?.kind === "saved" ? (
     <SavedPane onOpen={openSaved} onClose={() => setPane(null)} />
   ) : pane?.kind === "search" ? (
-    <SearchPane nestId={nestId} query={pane.q} channel={channel?.name ?? null} onOpen={openHit} onClose={() => setPane(null)} />
+    <SearchPane nestId={nestId} query={pane.q} channel={features.pins ? (channel?.name ?? null) : null} onOpen={openHit} onClose={() => setPane(null)} />
   ) : noChannels ? (
     <EmptyState
       icon={Hash}
@@ -358,18 +400,46 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       onCopyLink={(p) => copyLink(p)}
       onLoadMore={() => actions.loadMore().catch(fail("Could not load older posts"))}
       onOpenNode={onOpenNode}
-      onArchive={() => setArchiving(channel)}
-      onRestore={() => void restore(channel)}
       lag={list.lag}
+      banner={<ChatIntro me={me?.email ?? null} />}
+      typingLine={data.live.typingLine}
+      onType={data.live.onType}
+      online={data.live.online}
       extraActions={extras.extraActions}
       renderUnder={extras.renderUnder}
       rowProps={extras.rowProps}
-      trailing={<PinsButton nestId={nestId} channel={channel.name} onOpen={openPin} />}
+      trailing={
+        <>
+          {features.pins && <PinsButton nestId={nestId} channel={channel.name} onOpen={openPin} />}
+          {channel.conversation?.kind === "group" && <MembersButton count={channel.conversation.members.length} onClick={() => setMembersOpen(true)} />}
+          {!channel.conversation && <MembersButton count={null} onClick={() => setMembersOpen(true)} />}
+          <ChannelMenu
+            nestId={nestId}
+            channel={channel}
+            nodeId={data.nodeId}
+            canManage={list.canManage}
+            isAdmin={nestAdmin}
+            onMembers={() => setMembersOpen(true)}
+            onJoin={async () => {
+              await actions.join();
+              await qc.invalidateQueries({ queryKey: keys.channelList(nestId) });
+            }}
+            onLeave={() => (channel.private || channel.conversation ? setLeaving(channel) : void leave(channel))}
+            onSetPrivate={async (to) => {
+              await actions.setPrivate(to);
+              await qc.invalidateQueries({ queryKey: keys.channelList(nestId) });
+              await qc.invalidateQueries({ queryKey: keys.channelTimeline(nestId, channel.name) });
+            }}
+            onArchive={() => setArchiving(channel)}
+            onRestore={() => void restore(channel)}
+          />
+        </>
+      }
       leading={
         layout.sidebar === "sheet" ? (
           <button type="button" onClick={() => setSidebarSheet(true)} aria-label="Channels" title="Channels" data-testid="chat-open-sidebar" className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
             <PanelLeft className="h-4 w-4" aria-hidden />
-            <UnreadBadge count={unreadElsewhere(list.live, selected)} className="absolute -right-1 -top-1 min-w-4 px-1 text-[10px] leading-4" />
+            <UnreadBadge count={unreadElsewhere(allRows, selected)} className="absolute -right-1 -top-1 min-w-4 px-1 text-[10px] leading-4" />
           </button>
         ) : undefined
       }
@@ -418,6 +488,40 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
         onCreate={async (name, purpose) => {
           const created = await actions.create(name, purpose);
           select(created.name);
+        }}
+      />
+      <NewConversationDialog
+        open={startingDm}
+        onOpenChange={setStartingDm}
+        people={data.roster.people}
+        agents={data.roster.agents}
+        me={me?.email ?? null}
+        onStart={async (members) => select(await actions.startConversation(members))}
+      />
+      {channel && (
+        <MembersPanel
+          open={membersOpen}
+          onOpenChange={setMembersOpen}
+          nestId={nestId}
+          channel={channel}
+          me={me?.email ?? null}
+          online={data.live.online}
+          people={data.roster.people}
+          agents={data.roster.agents}
+          onAdd={async (member) => {
+            await actions.addMember(member);
+            await qc.invalidateQueries({ queryKey: channel.conversation ? keys.conversations(nestId) : keys.channelList(nestId) });
+          }}
+        />
+      )}
+      <ReasonDialog
+        open={!!leaving}
+        onOpenChange={(open) => !open && setLeaving(null)}
+        title={leaving ? (leaving.conversation ? "Leave this group?" : `Leave #${leaving.name}?`) : ""}
+        description="It is private: once you leave, you can't read it until someone in it adds you back."
+        confirmLabel="Leave"
+        onConfirm={async () => {
+          if (leaving) await leave(leaving);
         }}
       />
       <PromoteDialog post={promoting} onClose={() => setPromoting(null)} onPromote={promote} />

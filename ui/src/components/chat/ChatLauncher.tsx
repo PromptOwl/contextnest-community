@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, Expand, Hash, MessagesSquare, PanelRightClose } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Expand, Hash, Lock, MessagesSquare, PanelRightClose, Users } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -16,7 +16,9 @@ import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost } from "../../lib/api";
 import { channelThreadLink } from "../../lib/channel-deep-link";
 import { initialChannel } from "../../lib/channels";
+import { chatOn, dmPeer, orderConversations } from "../../lib/chat-harness";
 import { launcherPlacement, launcherShown } from "../../lib/chat-layout";
+import { unreadForNest } from "../../lib/chat-live";
 import { orderByActivity, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
 import { pushesContent } from "../../lib/hootie-panel";
@@ -24,6 +26,7 @@ import { reads } from "../../lib/queries";
 import { useSidePanel } from "../../lib/side-panel";
 import { ChannelNavProvider } from "./channel-nav";
 import { UnreadBadge } from "./ChatSidebar";
+import { MemberAvatar } from "./Presence";
 import { Conversation } from "./Conversation";
 import { noticeMentions, useMessageExtras } from "./MessageExtras";
 import { PromoteDialog } from "./PromoteDialog";
@@ -46,9 +49,14 @@ export interface ChatLauncherProps {
 export function ChatLauncher(p: ChatLauncherProps) {
   const { agentStreamEnabled, hootieEnabled, runnerKeyConfigured, isAdmin } = useAuth();
   const meta = useQuery({ ...reads.nest(p.nestId), enabled: agentStreamEnabled && !p.onChatPage });
-  const member = (meta.data as { member?: boolean } | undefined)?.member;
+  // The nest's own answer (`chat`, C2): switch, the nest's setting, membership.
+  const on = chatOn(meta.data as { chat?: boolean; member?: boolean } | undefined, agentStreamEnabled);
   const [open, setOpen] = useSidePanel("chat");
-  const shown = launcherShown({ streamOn: agentStreamEnabled, member, onChatPage: p.onChatPage });
+  const shown = launcherShown({ streamOn: agentStreamEnabled, member: on, onChatPage: p.onChatPage });
+  // App-wide unread (C2): this nest's share, on the tab. Polled while the tab
+  // is visible; nothing moves on a timer, the number just changes.
+  const unread = useQuery({ ...reads.chatUnread(), enabled: shown && !open, refetchInterval: 60_000, refetchIntervalInBackground: false, retry: false });
+  const waiting = unreadForNest(unread.data, p.nestId);
   // Hootie's own rule for showing its tab (HootiePanel.tsx).
   const hootieShown = hootieEnabled && (runnerKeyConfigured || isAdmin);
   const placement = launcherPlacement(hootieShown);
@@ -74,8 +82,13 @@ export function ChatLauncher(p: ChatLauncherProps) {
             placement === "centre" ? "top-1/2 -translate-y-1/2" : "top-[calc(50%+4.5rem)]",
           )}
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
             <MessagesSquare className="h-4 w-4" aria-hidden />
+            {waiting > 0 && (
+              <span className="absolute -right-1.5 -top-1.5 min-w-4 rounded-full bg-background px-1 text-center text-[10px] font-semibold leading-4 text-primary ring-1 ring-primary" aria-label={`${waiting} unread`} data-testid="chat-launcher-unread">
+                {waiting > 99 ? "99+" : waiting}
+              </span>
+            )}
           </span>
           <span className="text-xs font-medium [writing-mode:vertical-rl]">Chat</span>
         </button>
@@ -147,6 +160,9 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
   const copyLink = (post: ChannelPost, messageId?: string) =>
     void copyTextWithToast(`${window.location.origin}${channelThreadLink(p.nestId, channel?.name ?? selected ?? "", post.id, messageId)}`, "Link copied");
   const ordered = orderByActivity(list.live);
+  const dms = orderConversations(data.conversations.rows);
+  const conv = channel?.conversation ?? null;
+  const allRows = [...list.live, ...data.conversations.rows];
 
   return (
     <ChannelNavProvider value={nav}>
@@ -167,9 +183,15 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button type="button" className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-sm font-semibold hover:bg-muted" aria-label="Switch channel" data-testid="slide-over-switcher">
-                <Hash className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-                <span className="truncate">{channel?.name ?? selected ?? "Choose a channel"}</span>
-                <UnreadBadge count={unreadElsewhere(list.live, selected)} />
+                {conv ? (
+                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                ) : channel?.private ? (
+                  <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                ) : (
+                  <Hash className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                )}
+                <span className="truncate">{conv ? channel?.title : (channel?.name ?? selected ?? "Choose a channel")}</span>
+                <UnreadBadge count={unreadElsewhere(allRows, selected)} />
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
               </button>
             </DropdownMenuTrigger>
@@ -184,12 +206,35 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
                   }}
                   className="h-9 gap-2"
                 >
-                  <Hash className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  {c.private ? <Lock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <Hash className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />}
                   <span className={cn("truncate", c.unread > 0 && "font-semibold")}>{c.name}</span>
                   {c.name === selected ? <Check className="ml-auto h-3.5 w-3.5" aria-label="Open" /> : <UnreadBadge count={c.unread} className="ml-auto" />}
                 </DropdownMenuItem>
               ))}
               {ordered.length === 0 && <p className="px-2 py-1.5 text-xs text-muted-foreground">No channels yet.</p>}
+              {dms.length > 0 && <DropdownMenuLabel className="mt-1 text-xs font-semibold text-muted-foreground">Direct messages</DropdownMenuLabel>}
+              {dms.map((c) => {
+                const peer = c.conversation ? dmPeer(c.conversation, me) : null;
+                return (
+                  <DropdownMenuItem
+                    key={c.id}
+                    onSelect={() => {
+                      setSelected(c.name);
+                      setThread(null);
+                    }}
+                    className="h-9 gap-2"
+                    data-testid="slide-over-dm"
+                  >
+                    {peer ? (
+                      <MemberAvatar kind={peer.kind} label={peer.kind === "agent" ? peer.handle : peer.name || peer.email} online={peer.kind === "person" ? data.live.online.has(peer.email.toLowerCase()) : undefined} size="sm" />
+                    ) : (
+                      <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    )}
+                    <span className={cn("truncate", c.unread > 0 && "font-semibold")}>{c.title}</span>
+                    {c.name === selected ? <Check className="ml-auto h-3.5 w-3.5" aria-label="Open" /> : <UnreadBadge count={c.unread} className="ml-auto" />}
+                  </DropdownMenuItem>
+                );
+              })}
             </DropdownMenuContent>
           </DropdownMenu>
           <button
@@ -220,7 +265,7 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
           ) : list.data && list.live.length === 0 ? (
             <EmptyState icon={Hash} title="No channels yet" hint="Open the full page to create the first one." className="h-full" />
           ) : timeline.error ? (
-            <ErrorState title={`Couldn't load #${selected}`} detail={timeline.error} onRetry={timeline.retry} className="m-4" />
+            <ErrorState title={conv ? "Couldn't load this conversation" : `Couldn't load #${selected}`} detail={timeline.error} onRetry={timeline.retry} className="m-4" />
           ) : !channel || !timeline.state ? (
             <ConversationSkeleton compact />
           ) : thread ? (
@@ -282,6 +327,9 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
               onLoadMore={() => actions.loadMore().catch(fail("Could not load older posts"))}
               onOpenNode={p.onOpenNode}
               lag={list.lag}
+              typingLine={data.live.typingLine}
+              onType={data.live.onType}
+              online={data.live.online}
               extraActions={extras.extraActions}
               renderUnder={extras.renderUnder}
               rowProps={extras.rowProps}

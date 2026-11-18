@@ -22,6 +22,7 @@ export function groupMentionsByNest(mentions: readonly MentionItem[]): MentionGr
 }
 
 /** "#ops" for a channel mention, the document's title otherwise. */
-export function mentionPlace(m: Pick<MentionItem, "channel" | "title">): string {
+export function mentionPlace(m: Pick<MentionItem, "channel" | "title"> & { kind?: MentionItem["kind"] }): string {
+  if (m.kind === "conversation") return "a direct message";
   return m.channel ? `#${m.channel}` : m.title;
 }

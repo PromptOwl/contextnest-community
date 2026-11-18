@@ -6,36 +6,15 @@
  * the server, so nothing is faked: a section appears only once its hook is
  * wired to real routes.
  *
- *  - C2 conversations and live: direct messages, presence, typing, the toggle
+ * C2 (conversations and live) is built for real (lib/chat-live.ts,
+ * lib/chat-harness.ts). C6 and C7 have their server on this base; their
+ * screens are slice C9, so these stay seams here:
+ *
  *  - C6 memory snowball: thread↔node relations, decision ledger
  *  - C7 the nest in the conversation: proposal cards, agent profiles
  */
 
-export interface DirectConversation {
-  id: string;
-  title: string;
-  unread: number;
-  last_activity_at: string | null;
-}
-
 export type Seam<T> = { available: false } | ({ available: true } & T);
-
-/** C2: the caller's direct and group messages in this nest. */
-export function useDirectMessages(_nestId: string): Seam<{ conversations: DirectConversation[] }> {
-  return { available: false };
-}
-
-export interface PresenceState {
-  /** Who is here now, by login. */
-  online: Set<string>;
-  /** Who is typing in the open conversation, by display name. */
-  typing: string[];
-}
-
-/** C2: presence and typing for a conversation. */
-export function usePresence(_nestId: string, _conversation: string | null): Seam<PresenceState> {
-  return { available: false };
-}
 
 export interface ThreadRelation {
   node_id: string;
