@@ -464,7 +464,7 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
         return this._nestDocumentsApi;
       },
 
-      // Nest page → Review Queue tab (queue, chips, review pane, bulk, deletions)
+      // Review in My Work (#582): rows, chips, review pane, bulk, deletions
       get reviewQueuePage() {
         return new ReviewQueuePage(this.page, role.alias);
       },

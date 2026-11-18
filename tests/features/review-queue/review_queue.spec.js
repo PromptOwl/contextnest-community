@@ -1,10 +1,21 @@
 /**
  * Review Queue Test Suite — RQ-001 … RQ-035
  *
- * Page under test: the nest page's Review Queue tab
- * (ui/src/components/nest/ReviewTab.tsx) — the queue and its filter chips, who
- * sees which requests, the submitter's own items, the review pane, decisions,
- * bulk actions and deletion requests.
+ * Page under test: review in My Work (ui/src/pages/app/my-work/page.tsx).
+ * Since #582 the nest page has no Review Queue tab. Every change waiting on the
+ * caller is listed in My Work, across nests; clicking a review row opens the
+ * review pane beside the list (ui/src/components/MyWorkReviewPane.tsx →
+ * ui/src/components/governance/ReviewPane.tsx), and an old link to a nest's
+ * Review tab (/nest/<id>?tab=review[&review=<nodeId>]) lands there with the
+ * change open (ui/src/App.tsx). Covered here: who sees which reviews, the
+ * filter chips, the caller's own submissions (Waiting on others), the review
+ * pane, decisions, the batch bar and deletion requests. The nest's "Your Review
+ * Queue" stat card (Documents tab), its Activity tab and the header ribbon's My
+ * Work count stand in for the old tab's stat card, Agent activity chip and
+ * priority sort.
+ *
+ * Cases whose old behaviour #582 removed are rewritten to the closest thing it
+ * shipped; each says so in a "Rewritten for #582" comment.
  *
  * Conventions
  * -----------
@@ -14,6 +25,9 @@
  *   change, a seed) are arranged through the REST API (`reviewQueueApi`); the
  *   step under test goes through the UI. Outcomes are read back through the
  *   API too.
+ * - My Work spans every nest and the accounts are shared with other suites, so
+ *   the page object scopes rows to the test's nest (the nest filter, and rows
+ *   that name the nest). Nothing here assumes an account's inbox is empty.
  * - Every nest is an AUTO_ name, deleted after the test
  *   (`reviewQueueApi.deleteCreatedNests()`), and is in the entity registry for
  *   the teardown and the orphan sweeper. The notifications a nest raised are
@@ -84,6 +98,21 @@ test.describe('Review Queue', () => {
     return reviewer;
   }
 
+  /**
+   * Give secondary_user an editor seat. Skips when the server has none (the
+   * share would make them a nest admin, who can review everything).
+   */
+  async function addEditor(owner, secondary) {
+    test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
+    const granted = await owner.api.shareForAuthoring(owner.nest.id, secondaryRole.email);
+    test.skip(granted !== 'write', 'No editor seats on this server — secondary_user would be a nest admin.');
+    await secondary.initialize();
+    const api = secondary.reviewQueueApi;
+    await api.settleInvitesFor(owner.nest.id);
+    cleanups.push(() => api.settleNotificationsFor(owner.nest.id));
+    return { api, page: secondary.reviewQueuePage };
+  }
+
   /** Create a document and submit it for review as the owner. */
   async function submitted(owner, title, { note, tags, folder } = {}) {
     const doc = await owner.api.createDoc(owner.nest.id, { title, tags, folder });
@@ -105,7 +134,7 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     await submitted(owner, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
   });
 
@@ -114,21 +143,31 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { review } = await submitted(owner, DOC_A, { note: NOTE });
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     const row = reviewer.page.row(DOC_A);
-    await expect(row).toContainText(`v${review.version}`);
+    await expect(row).toContainText(`in ${owner.nest.name}`);
     await expect(row).toContainText(primaryRole.email);
-    await expect(row).toContainText(NOTE);
-    await expect(row).toContainText(/Just now|\d+m ago/);
+    await expect(row).toContainText(/just now|\d+m ago/i);
+    // Rewritten for #582: a My Work row names the nest, requester and time but
+    // not the version or the author's note; both are in the review pane.
+    await reviewer.page.openRow(DOC_A);
+    await expect(reviewer.page.paneNote).toContainText(NOTE);
+    await expect(reviewer.page.approveButton).toHaveAttribute('title', `Publishes v${review.version} as the live version.`);
   });
 
   test("RQ-003: Verify that the empty state shows when there's nothing to review", async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-empty');
     const reviewer = await addNestReviewer(owner, secondary_user);
 
-    await reviewer.page.goto(owner.nest.id);
-    await expect(reviewer.page.emptyState).toBeVisible();
-    await expect(reviewer.page.rows).toHaveCount(0);
+    // Rewritten for #582: My Work's empty states ("You're all caught up",
+    // "Nothing here.") cover every nest, and the shared accounts carry work
+    // from other suites. The nest's own empty queue is the stat card's 0 and
+    // no rows for the nest in My Work.
+    await reviewer.page.gotoDocuments(owner.nest.id);
+    await expect(reviewer.page.statCount).toHaveText('0');
+
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.inboxRows).toHaveCount(0);
   });
 
   test('RQ-004: Verify that the stat card count matches the rows', async ({ primary_user, secondary_user, commonFunction }) => {
@@ -137,67 +176,85 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A);
     await submitted(owner, DOC_B);
 
-    await reviewer.page.goto(owner.nest.id);
-    await expect(reviewer.page.rows).toHaveCount(2);
+    // Rewritten for #582: the stat card is on the Documents tab and opens My
+    // Work, where the nest's rows are counted.
+    await reviewer.page.gotoDocuments(owner.nest.id);
     await expect(reviewer.page.statCount).toHaveText('2');
+    await reviewer.page.statCard.click();
+    await expect(reviewer.page.pageTitle.filter({ hasText: 'My Work' })).toBeVisible();
+
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.rows).toHaveCount(2);
   });
 
   test('RQ-005: Verify that the Changes chip shows only change requests', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-changes');
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { doc } = await submitted(owner, DOC_A);
-    await owner.api.addComment(owner.nest.id, doc.id, COMMENT);
+    // Rewritten for #582: there is no comment feed. A comment reaches the
+    // reviewer in My Work when it @mentions them, and the Reviews chip (the
+    // old Changes chip) shows the reviews without it.
+    await owner.api.addComment(owner.nest.id, doc.id, `@${secondaryRole.email} ${COMMENT}`);
 
-    await reviewer.page.goto(owner.nest.id);
-    await expect(reviewer.page.commentRow(COMMENT)).toBeVisible();
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.mentionRow(COMMENT)).toBeVisible();
 
-    await reviewer.page.changesChip.click();
+    await reviewer.page.reviewsChip.click();
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
-    await expect(reviewer.page.commentRows).toHaveCount(0);
+    await expect(reviewer.page.mentionRows).toHaveCount(0);
   });
 
   test('RQ-006: Verify that the Changes chip sorts by priority', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-priority');
     const reviewer = await addNestReviewer(owner, secondary_user);
-    // Submitted out of priority order, so newest-first order alone can't pass this.
+    // Rewritten for #582: My Work lists reviews newest first and does not sort
+    // by priority. What it does with priority is turn the My Work count red
+    // while an urgent review waits on you, so that is what is checked.
     for (const [title, priority] of [
       ['Priority Urgent', 'urgent'],
       ['Priority Low', 'low'],
-      ['Priority High', 'high'],
     ]) {
       const doc = await owner.api.createDoc(owner.nest.id, { title });
       await owner.api.submitWithPriority(owner.nest.id, doc.id, priority);
     }
 
-    await reviewer.page.goto(owner.nest.id);
-    await reviewer.page.changesChip.click();
-    await expect(reviewer.page.rows.nth(0)).toContainText('Priority Urgent');
-    await expect(reviewer.page.rows.nth(1)).toContainText('Priority High');
-    await expect(reviewer.page.rows.nth(2)).toContainText('Priority Low');
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.rows).toHaveCount(2);
+    await expect(reviewer.page.ribbonCount).toHaveAttribute('data-urgent', 'true');
+    await expect(reviewer.page.ribbonMyWork).toHaveAttribute('title', /\d+ waiting, \d+ urgent/);
   });
 
   test('RQ-007: Verify that the Comments chip shows only comments', async ({ primary_user, secondary_user, commonFunction }) => {
-    const owner = await ownerNest(primary_user, commonFunction, 'rq-comments');
-    const reviewer = await addNestReviewer(owner, secondary_user);
-    const { doc } = await submitted(owner, DOC_A);
-    await owner.api.addComment(owner.nest.id, doc.id, COMMENT);
+    // Rewritten for #582: the Comments chip is gone. My Work's other
+    // single-kind chip is Requests, which shows only requests (here a
+    // deletion request, decided by the owner) and no reviews; the Reviews
+    // chip leaves the request out.
+    const owner = await ownerNest(primary_user, commonFunction, 'rq-requests');
+    const editor = await addEditor(owner, secondary_user);
+    const flagged = await owner.api.createDoc(owner.nest.id, { title: DOC_B });
+    const reason = 'Requests chip check.';
+    await editor.api.requestDocumentDeletion(owner.nest.id, flagged.id, reason);
 
-    await reviewer.page.goto(owner.nest.id);
-    await expect(reviewer.page.row(DOC_A)).toBeVisible();
+    await owner.page.goto(owner.nest);
+    await expect(owner.page.requestRow(reason)).toBeVisible();
 
-    await reviewer.page.commentsChip.click();
-    await expect(reviewer.page.commentRow(COMMENT)).toBeVisible();
-    await expect(reviewer.page.rows).toHaveCount(0);
+    await owner.page.reviewsChip.click();
+    await expect(owner.page.requestRow(reason)).toHaveCount(0);
+
+    await owner.page.requestsChip.click();
+    await expect(owner.page.requestRow(reason)).toBeVisible();
+    await expect(owner.page.rows).toHaveCount(0);
   });
 
   test('RQ-008: Verify that clicking a comment row opens the thread', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-thread');
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { doc } = await submitted(owner, DOC_A);
-    const thread = await owner.api.addComment(owner.nest.id, doc.id, COMMENT);
+    // Rewritten for #582: the comment row is a My Work mention row.
+    const thread = await owner.api.addComment(owner.nest.id, doc.id, `@${secondaryRole.email} ${COMMENT}`);
 
-    await reviewer.page.goto(owner.nest.id);
-    await reviewer.page.commentRow(COMMENT).click();
+    await reviewer.page.goto(owner.nest);
+    await reviewer.page.mentionRow(COMMENT).getByRole('button').first().click();
 
     await expect(reviewer.page.page).toHaveURL(new RegExp(`thread=${thread.id}`));
     await expect(reviewer.page.page.getByText(COMMENT).first()).toBeVisible();
@@ -208,11 +265,13 @@ test.describe('Review Queue', () => {
     const agent = 'qa-review-agent';
     await owner.api.createAgentDocument(owner.nest.id, { title: DOC_A, agent });
 
-    await owner.page.goto(owner.nest.id);
-    await owner.page.agentsChip.click();
+    // Rewritten for #582: the Agent activity chip went with the Review tab.
+    // What agents changed is listed on the nest's Activity tab, which filters
+    // by agent.
+    await owner.page.gotoActivity(owner.nest.id);
+    await owner.page.activityAgentFilter.fill(agent);
 
-    await expect(owner.page.agentPanel).toBeVisible();
-    const row = owner.page.agentRows.filter({ hasText: DOC_A });
+    const row = owner.page.activityRows.filter({ hasText: DOC_A }).first();
     await expect(row).toBeVisible();
     await expect(row).toContainText(agent);
   });
@@ -223,7 +282,7 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A);
     await submitted(owner, DOC_B);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
     await expect(reviewer.page.row(DOC_B)).toBeVisible();
   });
@@ -235,7 +294,7 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_B);
     await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email, scope: 'document', nodeId: doc.id });
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
     await expect(reviewer.page.rows).toHaveCount(1);
   });
@@ -246,7 +305,7 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A, { tags: [TAG] });
     await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email, scope: 'tag', tag: TAG });
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
   });
 
@@ -257,7 +316,7 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_B);
     await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email, scope: 'tag', tag: TAG });
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toBeVisible();
     await expect(reviewer.page.row(DOC_B)).toHaveCount(0);
   });
@@ -267,31 +326,28 @@ test.describe('Review Queue', () => {
     const viewer = await addReader(owner, secondary_user);
     await submitted(owner, DOC_A);
 
-    await viewer.page.gotoLink(owner.nest.id);
-    // The link only falls back to Overview once the queue has loaded, so the
-    // tab can't be absent here just because it hasn't appeared yet.
+    // Rewritten for #582: no one has a Review tab now. A viewer's old Review
+    // Queue link lands on My Work like anyone's, and nothing in the nest
+    // waits on them there.
+    await viewer.page.gotoLink(owner.nest);
     await expect(viewer.page.page).not.toHaveURL(/tab=review/);
-    await expect(viewer.page.page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
-    await expect(viewer.page.reviewTab).toHaveCount(0);
+    await expect(viewer.page.page.getByRole('tab', { name: /^Review Queue/ })).toHaveCount(0);
     await expect(viewer.page.rows).toHaveCount(0);
   });
 
   test('RQ-015: Verify that an editor sees the tab but no rows', async ({ primary_user, secondary_user, commonFunction }) => {
-    test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
     const owner = await ownerNest(primary_user, commonFunction, 'rq-editor');
-    const granted = await owner.api.shareForAuthoring(owner.nest.id, secondaryRole.email);
-    test.skip(granted !== 'write', 'No editor seats on this server — secondary_user would be a nest admin.');
-    await secondary_user.initialize();
-    const editorApi = secondary_user.reviewQueueApi;
-    await editorApi.settleInvitesFor(owner.nest.id);
-    cleanups.push(() => editorApi.settleNotificationsFor(owner.nest.id));
-    await submitted(owner, DOC_A);
+    const editor = await addEditor(owner, secondary_user);
+    const { doc } = await submitted(owner, DOC_A);
 
-    const page = secondary_user.reviewQueuePage;
-    await page.goto(owner.nest.id);
-    await expect(page.reviewTab).toBeVisible();
-    await expect(page.nothingForYou).toBeVisible();
-    await expect(page.rows).toHaveCount(0);
+    // Rewritten for #582: there is no tab, and the old "pending reviews in
+    // this nest, but…" note went with it. The editor's Review Queue link lands
+    // on My Work, which lists nothing in the nest for them to decide, though
+    // the nest does have a change pending.
+    await editor.page.gotoLink(owner.nest);
+    await expect(editor.page.pageTitle.filter({ hasText: 'My Work' })).toBeVisible();
+    await expect(editor.page.rows).toHaveCount(0);
+    expect(await owner.api.nodeStatus(owner.nest.id, doc.id)).toBe('pending_review');
   });
 
   test("RQ-016: Verify that an admin-only draft isn't in a non-admin reviewer's rows", async ({ primary_user, secondary_user, commonFunction }) => {
@@ -300,8 +356,11 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     await submitted(owner, DOC_A, { folder: 'agents' });
 
-    await reviewer.page.goto(owner.nest.id);
+    // The stat card, and its note, are on the Documents tab now.
+    await reviewer.page.gotoDocuments(owner.nest.id);
     await expect(reviewer.page.statCard).toContainText('assigned to other reviewers');
+
+    await reviewer.page.goto(owner.nest);
     await expect(reviewer.page.row(DOC_A)).toHaveCount(0);
   });
 
@@ -309,7 +368,12 @@ test.describe('Review Queue', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-own');
     const { doc } = await submitted(owner, DOC_A);
 
-    await owner.page.gotoReview(owner.nest.id, doc.id);
+    // The submitter's own change is under Waiting on others; opening it shows
+    // the pane read-only. (A shared ?review= link would be the other way in,
+    // but #582's redirect drops the change on a cold load — see RQ-022.)
+    await owner.page.goto(owner.nest);
+    await owner.page.waitingRow(DOC_A).locator('button.text-left').click();
+    await expect(owner.page.pane).toContainText(doc.id);
     await expect(owner.page.readOnlyNote).toContainText('You submitted this change');
     await expect(owner.page.approveButton).toHaveCount(0);
     await expect(owner.page.rows).toHaveCount(0);
@@ -319,35 +383,24 @@ test.describe('Review Queue', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-submitted');
     await submitted(owner, DOC_A);
 
-    await owner.page.goto(owner.nest.id);
-    await expect(owner.page.submittedHeading).toBeVisible();
-    await expect(owner.page.page.getByRole('button', { name: DOC_A, exact: true })).toBeVisible();
-    await expect(owner.page.awaitingBadge).toBeVisible();
+    // Rewritten for #582: "Submitted by you — awaiting review" is My Work's
+    // "Waiting on others", where the row says "Pending Review".
+    await owner.page.goto(owner.nest);
+    await expect(owner.page.waitingRow(DOC_A)).toBeVisible();
+    await expect(owner.page.waitingRow(DOC_A)).toContainText('Pending Review');
+    await expect(owner.page.rows).toHaveCount(0);
   });
 
   test('RQ-019: Verify that Withdraw returns a submission to Draft', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'rq-withdraw');
     const { doc } = await submitted(owner, DOC_A);
 
-    await owner.page.goto(owner.nest.id);
-    await owner.page.withdrawButton.click();
+    await owner.page.goto(owner.nest);
+    await owner.page.waitingRow(DOC_A).getByRole('button', { name: 'Withdraw', exact: true }).click();
 
     await expect(owner.page.toasts.filter({ hasText: 'Submission withdrawn' })).toBeVisible(WRITE);
     expect(await owner.api.nodeStatus(owner.nest.id, doc.id)).toBe('draft');
-
-    const cleared = await owner.page.submittedHeading
-      .waitFor({ state: 'hidden', timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!cleared) {
-      test.info().annotations.push({
-        type: 'known issue',
-        description:
-          '/cancel-review is not in the write scopes in ui/src/lib/queries.ts, so a Withdraw within 5s of the queue loading keeps the item on screen until a reload.',
-      });
-      await owner.page.goto(owner.nest.id);
-    }
-    await expect(owner.page.submittedHeading).toHaveCount(0);
+    await expect(owner.page.waitingRow(DOC_A)).toHaveCount(0);
   });
 
   test('RQ-020: Verify that clicking a row opens the review pane', async ({ primary_user, secondary_user, commonFunction }) => {
@@ -355,11 +408,13 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { doc } = await submitted(owner, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
 
+    // The pane opens beside the list. My Work keeps no ?review= in its URL,
+    // so the pane is identified by the document id it shows.
     await expect(reviewer.page.pane).toContainText(DOC_A);
-    await expect(reviewer.page.page).toHaveURL(new RegExp(`review=${encodeURIComponent(doc.id)}`));
+    await expect(reviewer.page.pane).toContainText(doc.id);
     await expect(reviewer.page.rows).toHaveCount(1);
   });
 
@@ -368,7 +423,7 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     await publishedThenEdited(owner, reviewer, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
 
     await expect(reviewer.page.changesTab).toHaveAttribute('aria-selected', 'true');
@@ -382,8 +437,9 @@ test.describe('Review Queue', () => {
     const { doc } = await submitted(owner, DOC_A);
     await reviewer.api.approve(owner.nest.id, doc.id);
 
-    await reviewer.page.gotoReview(owner.nest.id, doc.id);
-    await expect(reviewer.page.staleBanner).toContainText("isn’t waiting for review any more");
+    // The banner is My Work's "no longer waiting" note in the pane column.
+    await reviewer.page.gotoReview(owner.nest, doc.id);
+    await expect(reviewer.page.notWaiting).toBeVisible();
     await expect(reviewer.page.pane).toHaveCount(0);
   });
 
@@ -394,7 +450,7 @@ test.describe('Review Queue', () => {
     const second = await submitted(owner, DOC_B);
     await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email, scope: 'document', nodeId: first.doc.id });
 
-    await reviewer.page.gotoReview(owner.nest.id, second.doc.id);
+    await reviewer.page.gotoReview(owner.nest, second.doc.id);
     await expect(reviewer.page.readOnlyNote).toContainText('outside your steward scope');
     await expect(reviewer.page.approveButton).toHaveCount(0);
   });
@@ -404,7 +460,7 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { doc } = await submitted(owner, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.approveButton.click();
 
@@ -418,7 +474,7 @@ test.describe('Review Queue', () => {
     const { doc } = await submitted(owner, DOC_A);
     const comment = 'Approved with this comment.';
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.approveWith(comment);
 
@@ -433,12 +489,15 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     await submitted(owner, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.approveButton.click();
 
     await expect(reviewer.page.row(DOC_A)).toHaveCount(0, WRITE);
-    await expect(reviewer.page.emptyState).toBeVisible();
+    // My Work's empty state is account-wide; the nest's own queue is empty
+    // when a fresh read lists nothing for it.
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.inboxRows).toHaveCount(0);
   });
 
   test("RQ-027: Verify that a second reviewer can't approve an approved request", async ({ primary_user, secondary_user, commonFunction }) => {
@@ -447,11 +506,14 @@ test.describe('Review Queue', () => {
     const { doc } = await submitted(owner, DOC_A);
 
     // The later session: opened before the first approval lands.
+    // Both sessions open the change from its My Work row.
     const later = new ReviewQueuePage(await secondary_user.page.context().newPage(), 'second-session');
-    await later.gotoReview(owner.nest.id, doc.id);
+    await later.goto(owner.nest);
+    await later.openRow(DOC_A);
     await later.approveButton.waitFor({ state: 'visible' });
 
-    await reviewer.page.gotoReview(owner.nest.id, doc.id);
+    await reviewer.page.goto(owner.nest);
+    await reviewer.page.openRow(DOC_A);
     await reviewer.page.approveButton.click();
     await expect(reviewer.page.toasts.filter({ hasText: 'Approved and published' })).toBeVisible(WRITE);
 
@@ -464,7 +526,7 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const { doc } = await submitted(owner, DOC_A);
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.requestChangesButton.click();
     await reviewer.page.requestChangesButton.click();
@@ -479,7 +541,7 @@ test.describe('Review Queue', () => {
     const { doc } = await submitted(owner, DOC_A);
     const reason = 'Please add the missing section.';
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.requestChanges(reason);
 
@@ -495,8 +557,11 @@ test.describe('Review Queue', () => {
     const first = await submitted(owner, DOC_A);
     const second = await submitted(owner, DOC_B);
 
-    await reviewer.page.goto(owner.nest.id);
-    await reviewer.page.selectAll.click();
+    // The nest's two rows are ticked one by one: My Work's select-all would
+    // also take any other nest's reviews on the page.
+    await reviewer.page.goto(owner.nest);
+    await reviewer.page.selectRow(DOC_A);
+    await reviewer.page.selectRow(DOC_B);
     await reviewer.page.bulkApprove.click();
     await reviewer.page.reasonConfirm.click();
 
@@ -511,8 +576,9 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A);
     await submitted(owner, DOC_B);
 
-    await reviewer.page.goto(owner.nest.id);
-    await reviewer.page.selectAll.click();
+    await reviewer.page.goto(owner.nest);
+    await reviewer.page.selectRow(DOC_A);
+    await reviewer.page.selectRow(DOC_B);
     await reviewer.page.bulkReject.click();
 
     await expect(reviewer.page.reasonConfirm).toBeDisabled();
@@ -525,43 +591,47 @@ test.describe('Review Queue', () => {
     const reviewer = await addNestReviewer(owner, secondary_user);
     const first = await submitted(owner, DOC_A);
     const second = await submitted(owner, DOC_B);
-    // Two more stay pending, so the bulk bar is still there after the batch.
+    // Two more stay pending, so the batch bar is still there after the batch.
     await submitted(owner, 'Review Doc Gamma');
     await submitted(owner, 'Review Doc Delta');
 
-    await reviewer.page.goto(owner.nest.id);
+    await reviewer.page.goto(owner.nest);
     await reviewer.page.selectRow(DOC_A);
     await reviewer.page.selectRow(DOC_B);
-    // The author withdraws one after the queue loaded, so that one must fail.
+    await expect(reviewer.page.selectedLabel).toHaveText('2 selected');
+    // The author withdraws one after the inbox loaded, so that one must fail.
     await owner.api.cancelReview(owner.nest.id, second.doc.id);
     await reviewer.page.bulkApprove.click();
     await reviewer.page.reasonConfirm.click();
 
     await expect(reviewer.page.toasts.filter({ hasText: '1 approved, 1 could not be' })).toBeVisible(WRITE);
-    await expect(reviewer.page.oneSelected).toBeVisible(WRITE);
+    // Rewritten for #582: My Work keeps a failure selected only while its row
+    // is listed, and the withdrawn change leaves the list on the reload after
+    // the batch, so the old "1 selected" can't stay. Both decided rows leave
+    // and the two untouched ones stay.
+    await expect(reviewer.page.row(DOC_A)).toHaveCount(0, WRITE);
+    await expect(reviewer.page.row(DOC_B)).toHaveCount(0, WRITE);
+    await expect(reviewer.page.rows).toHaveCount(2);
     expect((await owner.api.latestReview(owner.nest.id, first.doc.id)).status).toBe('approved');
     expect(await owner.api.nodeStatus(owner.nest.id, second.doc.id)).toBe('draft');
   });
 
   test('RQ-033: Verify that only admins and owners see Deletion requests', async ({ primary_user, secondary_user, commonFunction }) => {
-    test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
     const owner = await ownerNest(primary_user, commonFunction, 'rq-del-see');
-    const granted = await owner.api.shareForAuthoring(owner.nest.id, secondaryRole.email);
-    test.skip(granted !== 'write', 'No editor seats on this server — secondary_user would be a nest admin.');
-    await secondary_user.initialize();
-    const editorApi = secondary_user.reviewQueueApi;
-    await editorApi.settleInvitesFor(owner.nest.id);
-    cleanups.push(() => editorApi.settleNotificationsFor(owner.nest.id));
+    const editor = await addEditor(owner, secondary_user);
     const doc = await owner.api.createDoc(owner.nest.id, { title: DOC_A });
     const reason = 'No longer needed here.';
-    await editorApi.requestDocumentDeletion(owner.nest.id, doc.id, reason);
+    await editor.api.requestDocumentDeletion(owner.nest.id, doc.id, reason);
 
-    await owner.page.goto(owner.nest.id);
-    await expect(owner.page.deletionRow(reason)).toBeVisible();
+    await owner.page.goto(owner.nest);
+    await expect(owner.page.requestRow(reason)).toBeVisible();
+    await expect(owner.page.requestRow(reason).locator('span.uppercase')).toHaveText(/^deletion$/i);
 
-    await secondary_user.reviewQueuePage.goto(owner.nest.id);
-    await secondary_user.reviewQueuePage.waitForQueueLoaded();
-    await expect(secondary_user.reviewQueuePage.deletionRows).toHaveCount(0);
+    // The editor who asked sees it only as their own ask, under Waiting on
+    // others, never as a request to decide.
+    await editor.page.goto(owner.nest);
+    await expect(editor.page.waitingRow(DOC_A)).toContainText('Deletion Requested');
+    await expect(editor.page.requestRow(reason)).toHaveCount(0);
   });
 
   test('RQ-034: Verify that Delete removes the document in a document deletion request', async ({ primary_user, secondary_user, commonFunction }) => {
@@ -576,10 +646,10 @@ test.describe('Review Queue', () => {
     const reason = 'Flagged for removal.';
     await editorApi.requestDocumentDeletion(owner.nest.id, doc.id, reason);
 
-    await owner.page.goto(owner.nest.id);
+    await owner.page.goto(owner.nest);
     await owner.page.deleteFromRequest(reason);
 
-    await expect(owner.page.deletionRow(reason)).toHaveCount(0, WRITE);
+    await expect(owner.page.requestRow(reason)).toHaveCount(0, WRITE);
     expect((await owner.api.getNode(owner.nest.id, doc.id)).status).toBe(404);
   });
 
@@ -589,14 +659,21 @@ test.describe('Review Queue', () => {
     await submitted(owner, DOC_A);
     await submitted(owner, DOC_B);
 
-    await reviewer.page.goto(owner.nest.id);
+    // Rewritten for #582: the counts are the stat card (Documents tab) and My
+    // Work's Reviews chip narrowed to the nest, in place of the old Changes
+    // chip and the Review Queue tab's badge.
+    await reviewer.page.gotoDocuments(owner.nest.id);
     await expect(reviewer.page.statCount).toHaveText('2');
-    expect(await reviewer.page.counts()).toEqual({ chip: '2', tab: '2' });
+    await reviewer.page.goto(owner.nest);
+    await expect(reviewer.page.rows).toHaveCount(2);
+    await expect.poll(() => reviewer.page.chipCount(reviewer.page.reviewsChip)).toBe('2');
 
     await reviewer.page.openRow(DOC_A);
     await reviewer.page.approveButton.click();
 
+    await expect(reviewer.page.rows).toHaveCount(1, WRITE);
+    await expect.poll(() => reviewer.page.chipCount(reviewer.page.reviewsChip), WRITE).toBe('1');
+    await reviewer.page.gotoDocuments(owner.nest.id);
     await expect(reviewer.page.statCount).toHaveText('1', WRITE);
-    await expect.poll(() => reviewer.page.counts(), WRITE).toEqual({ chip: '1', tab: '1' });
   });
 });

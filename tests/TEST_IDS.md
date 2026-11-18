@@ -57,6 +57,20 @@ Add a row here whenever you add a `data-testid` to the UI.
 | Test ID | Element |
 |---|---|
 | `header-ribbon-my-work` | Header ribbon entry for My Work (carries the pending-count badge) — `ui/src/components/HeaderRibbon.tsx` |
+| `my-work-filter-chips` | The filter row: nest filter and chips |
+| `my-work-nest-filter` | Filter by nest (only when the inbox spans two nests or more) |
+| `my-work-chip-<key>` | Chips: `all`, `reviews`, `tasks`, `notifications`, `requests`, `waiting`; each but All carries its count |
+| `my-work-mention` | One @mention row in the Mentions block — `ui/src/components/my-work/MentionRows.tsx` |
+| `my-work-review-pane` | Column holding the review pane a review row opens — `ui/src/components/MyWorkReviewPane.tsx` |
+| `review-pane` | The review pane itself — `ui/src/components/governance/ReviewPane.tsx` |
+| `review-pane-note` | The author's note on the change |
+| `review-pane-tab-<key>` | Pane tabs: `changes`, `preview` (Full draft), `published` (Live version) |
+| `review-pane-actions` | Decision bar (also shows decision errors) |
+| `review-pane-readonly` | Why the pane is read-only (own submission, outside steward scope) |
+| `review-pane-approve` | Approve & publish (Post comment & approve with a comment open) |
+| `review-pane-request-changes` | Request changes, then Send back to author |
+| `review-pane-reject` | Reject, then Reject with reason |
+| `review-pane-note-input` | Comment / reason textarea |
 | `work-select-all` | Batch bar: select every review checkbox |
 | `work-bulk-approve` | Batch bar: Approve N |
 | `work-bulk-reject` | Batch bar: Reject N |
