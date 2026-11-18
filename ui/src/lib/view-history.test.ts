@@ -34,6 +34,25 @@ describe("AC-UX-02 how a view change is written to history", () => {
     expect(historyWrite({ ...direct, stampable: false })).toBe("none");
   });
 
+  it("PO-1404 leaving the editor for a view at the same address reuses its parked leave-guard entry", () => {
+    // A new document started from the top bar lives at /nest/<id>, the same
+    // address as the nest it returns to after saving. If the write were
+    // "none", the parked entry would stay and the editor's dropParkedEntries
+    // would go Back onto the blank editor's own entry, reopening it.
+    const save = {
+      next: "/nest/n1",
+      current: "/nest/n1",
+      prevKey: "/nest/n1|n1/new",
+      key: null,
+      state: { cnLeaveGuard: true },
+      forceReplace: false,
+      stampable: false,
+    };
+    expect(historyWrite(save)).toBe("replace");
+    // Still the editor (same node): its guard entry is left alone.
+    expect(historyWrite({ ...save, key: save.prevKey })).toBe("none");
+  });
+
   it("says when the entry a row was clicked on needs its view before leaving (My Work opened directly)", () => {
     expect(needsViewStamp(null)).toBe(true);
     expect(needsViewStamp({})).toBe(true);
