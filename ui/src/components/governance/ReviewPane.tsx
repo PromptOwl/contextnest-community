@@ -20,6 +20,7 @@ import {
   Lock,
   Pencil,
   Send,
+  SkipForward,
   X,
 } from "lucide-react";
 import * as api from "../../lib/api";
@@ -61,6 +62,9 @@ interface ReviewPaneProps {
   onRequestChanges: (note: string) => Promise<void>;
   /** Decline for good (reason required). Omit to hide Reject. */
   onReject?: (note: string) => Promise<void>;
+  /** Pass over this one without deciding and open the next. Omit when there is
+   *  no next, and the button is not shown. */
+  onSkip?: () => void;
   /** Open the document in the editor (Edit, Save & approve). */
   onEditDraft: () => void;
   onOpenDocument: (nodeId: string) => void;
@@ -88,6 +92,7 @@ export function ReviewPane({
   onApprove,
   onRequestChanges,
   onReject,
+  onSkip,
   onEditDraft,
   onOpenDocument,
   onClose,
@@ -396,6 +401,18 @@ export function ReviewPane({
                     data-testid="review-pane-edit"
                   >
                     <Pencil className="mr-1.5 h-4 w-4" /> Edit draft
+                  </Button>
+                )}
+                {mode === "idle" && onSkip && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={onSkip}
+                    data-testid="review-pane-skip"
+                    title="Leave this for later and open the next change. It stays in your queue."
+                  >
+                    <SkipForward className="mr-1.5 h-4 w-4" /> Skip
                   </Button>
                 )}
                 {mode === "idle" && (

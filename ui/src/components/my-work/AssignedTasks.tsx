@@ -79,9 +79,41 @@ export function AssignedTasks({ items, today, loadingDone, onStatusChange, onOpe
         <h3 id="my-work-tasks-heading" className="text-sm font-medium">
           Tasks
         </h3>
-        <span className="text-xs text-muted-foreground" data-testid="my-work-tasks-count">
-          {openTotal} open
-          {urgent > 0 && <span className="text-red-600"> · {urgent} urgent</span>}
+        <span className="flex items-center gap-1 text-xs text-muted-foreground" data-testid="my-work-tasks-count">
+          <button
+            type="button"
+            onClick={() => {
+              setFilters({ ...DEFAULT_TASK_FILTERS });
+              setShowAll(false);
+              onStatusChange?.("open");
+            }}
+            aria-pressed={filters.status === "open" && !filters.urgent}
+            data-testid="my-work-count-open"
+            title="Show all open tasks"
+            className={`rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground ${
+              filters.status === "open" && !filters.urgent ? "bg-muted font-medium text-foreground" : ""
+            }`}
+          >
+            {openTotal} open
+          </button>
+          {urgent > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilters({ ...DEFAULT_TASK_FILTERS, urgent: true });
+                setShowAll(false);
+                onStatusChange?.("open");
+              }}
+              aria-pressed={filters.urgent}
+              data-testid="my-work-count-urgent"
+              title="Show only urgent or overdue tasks"
+              className={`rounded px-1.5 py-0.5 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 ${
+                filters.urgent ? "bg-red-50 font-medium dark:bg-red-950/30" : ""
+              }`}
+            >
+              {urgent} urgent
+            </button>
+          )}
         </span>
         <div className="ml-auto flex items-center rounded-md border p-0.5" role="group" aria-label="Task status">
           {STATUS.map((s) => (
