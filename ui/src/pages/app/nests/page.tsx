@@ -570,8 +570,11 @@ export default function NestsPage() {
             open={showCreate}
             onOpenChange={(open) => {
               if (open) return;
+              // Closing discards the draft, so the next New Nest starts empty (PO-1202).
               setShowCreate(false);
               setCreateError(null);
+              setNewName("");
+              setNewDesc("");
             }}
           >
             <DialogContent className="sm:max-w-[480px]">
@@ -620,6 +623,8 @@ export default function NestsPage() {
                     onClick={() => {
                       setShowCreate(false);
                       setCreateError(null);
+                      setNewName("");
+                      setNewDesc("");
                     }}
                   >
                     Cancel
