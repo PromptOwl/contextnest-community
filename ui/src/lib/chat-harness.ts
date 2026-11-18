@@ -141,3 +141,36 @@ export function browserStore(): Store | null {
     return null;
   }
 }
+
+// ─── Finding chat (entries and badges) ───────────────────────────────────
+
+type UnreadSummary = { total: number; mentions: number; nests: Array<{ nest_id: string; nest_name: string; unread: number; mentions: number }> };
+
+/**
+ * This nest's chat entry, from `GET /me/chat/unread`: the summary lists a
+ * nest exactly when chat is on there and the caller is a member, so it is
+ * both the gate and the badge, in one read for every nest.
+ */
+export function nestChat(summary: UnreadSummary | undefined | null, nestId: string): { unread: number; mentions: number } | null {
+  const n = summary?.nests.find((x) => x.nest_id === nestId);
+  return n ? { unread: n.unread, mentions: n.mentions } : null;
+}
+
+/** Where the rail's Chat goes: the nest on screen when it has chat, else
+ *  where my mentions wait, else the most unread, else the first. */
+export function railChatTarget(summary: UnreadSummary | undefined | null, currentNestId: string | null): { nestId: string; nestName: string } | null {
+  const nests = summary?.nests ?? [];
+  if (!nests.length) return null;
+  const pick =
+    nests.find((n) => n.nest_id === currentNestId) ??
+    [...nests].sort((a, b) => b.mentions - a.mentions || b.unread - a.unread)[0];
+  return { nestId: pick.nest_id, nestName: pick.nest_name };
+}
+
+/** The badge on an entry: mentions (they wait on me) before plain unread. */
+export function chatBadge(c: { unread: number; mentions: number } | null | undefined): { count: number; tone: "mention" | "unread" } | null {
+  if (!c) return null;
+  if (c.mentions > 0) return { count: c.mentions, tone: "mention" };
+  if (c.unread > 0) return { count: c.unread, tone: "unread" };
+  return null;
+}

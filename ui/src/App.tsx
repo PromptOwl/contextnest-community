@@ -39,7 +39,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
-import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
+import { nextFromSearch, parkNestReturn, signInAddress, takeNestReturn } from "./lib/sign-in-return";
 import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
@@ -699,12 +699,18 @@ export default function App() {
   );
   useEffect(() => {
     if (deepLinkProbe.status !== "unreachable" || loading || authenticated || authMode !== "key") return;
-    if (landedOnRef.current) parkNestReturn(landedOnRef.current);
+    if (landedOnRef.current) {
+      parkNestReturn(landedOnRef.current);
+      // Keep the link in the address bar as ?next= (PO-1200): a reload, a new
+      // tab or a sign-in that leaves the page still finds it.
+      const at = signInAddress(landedOnRef.current);
+      if (at !== "/" && !nextFromSearch(window.location.search)) window.history.replaceState(window.history.state, "", at);
+    }
     landedOnRef.current = null;
   }, [deepLinkProbe.status, loading, authenticated, authMode]);
   useEffect(() => {
     if (loading || !authenticated) return;
-    const back = takeNestReturn();
+    const back = takeNestReturn() ?? nextFromSearch(window.location.search);
     if (!back || nestIdFromLocation()) return;
     window.history.replaceState(null, "", back);
     setDeepLinkProbe({ status: "loading" });
@@ -1138,7 +1144,7 @@ export default function App() {
           .fetchQuery(reads.nest(nestId))
           .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
           .catch(() => ({ isOwner: false, isAnonOwned: false }))
-          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel: channel ?? undefined, thread: thread ?? undefined }));
       },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
@@ -1576,6 +1582,10 @@ export default function App() {
                     if (tab === "my-work") window.dispatchEvent(new Event("my-work:home"));
                     setView({ page: "dashboard", tab });
                   }}
+                  chatNestId={cur.page === "channels" ? cur.nestId : null}
+                  onOpenChat={(t) =>
+                    setView({ page: "channels", nestId: t.nestId, nestName: t.nestName, isOwner: t.isOwner, isAnonOwned: t.isAnonOwned })
+                  }
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -2360,23 +2370,26 @@ export default function App() {
       )}
       {/* The chat launcher (PO-1200): on every nest page for a member while
           the switch is on; opens the chat as a slide-over beside Hootie's. */}
-      {(authenticated || authMode === "open") && "nestId" in view && (
+      {(authenticated || authMode === "open") && view.page !== "docs" && (
         <ChatLauncher
-          nestId={view.nestId}
-          nestName={view.nestName}
+          nestId={"nestId" in view ? view.nestId : null}
+          nestName={"nestId" in view ? view.nestName : null}
           onChatPage={view.page === "channels"}
-          onOpenFull={(channel, thread) =>
+          onOpenFull={(t, channel, thread) => {
+            const here = "nestId" in view && view.nestId === t.nestId ? view : null;
+            // Off a nest: the nav's own route, which reads ownership first.
+            if (!here) return appNav.openChannel(t.nestId, t.nestName, channel, thread);
             setView({
               page: "channels",
-              nestId: view.nestId,
-              nestName: view.nestName,
-              isOwner: view.isOwner,
-              isAnonOwned: view.isAnonOwned,
+              nestId: t.nestId,
+              nestName: t.nestName,
+              isOwner: here ? here.isOwner : false,
+              isAnonOwned: here ? here.isAnonOwned : false,
               channel: channel ?? undefined,
               thread: thread ?? undefined,
-            })
-          }
-          onOpenNode={(nodeId) => void openNodeFromHootie(view.nestId, nodeId)}
+            });
+          }}
+          onOpenNode={(nestId, nodeId) => void openNodeFromHootie(nestId, nodeId)}
         />
       )}
       {showConnect && "nestId" in view && (

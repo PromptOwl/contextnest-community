@@ -50,3 +50,24 @@ export function takeNestReturn(store: Store = sessionStorage, now = Date.now()):
     return null;
   }
 }
+
+/**
+ * The sign-in page's address while a nest link waits behind it (PO-1200):
+ * `/?next=<link>`. The link stays visible, so a reload, a copy into a new
+ * tab, or a sign-in that leaves the page and comes back with the address
+ * still returns to it — sessionStorage alone is one tab's. A link that would
+ * not be followed is not written.
+ */
+export function signInAddress(link: string): string {
+  const value = safeNestReturn(link);
+  return value ? `/?next=${encodeURIComponent(value)}` : "/";
+}
+
+/** The `?next=` link in a query string, if it is one this app follows. */
+export function nextFromSearch(search: string): string | null {
+  try {
+    return safeNestReturn(new URLSearchParams(search).get("next"));
+  } catch {
+    return null;
+  }
+}

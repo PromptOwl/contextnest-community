@@ -16,9 +16,9 @@ import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost } from "../../lib/api";
 import { channelThreadLink } from "../../lib/channel-deep-link";
 import { initialChannel } from "../../lib/channels";
-import { chatOn, orderConversations } from "../../lib/chat-harness";
+import { chatOn, nestChat, orderConversations, railChatTarget } from "../../lib/chat-harness";
 import { launcherPlacement, launcherShown } from "../../lib/chat-layout";
-import { unreadForNest } from "../../lib/chat-live";
+import { ChatCount, useChatSummary } from "./ChatEntry";
 import { orderByActivity, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
 import { pushesContent } from "../../lib/hootie-panel";
@@ -37,63 +37,98 @@ import { useChannels } from "./useChannels";
 const SLIDE_OVER_WIDTH = 480;
 
 export interface ChatLauncherProps {
-  nestId: string;
-  nestName: string;
+  /** The nest on screen; off a nest (All nests, My Work) the launcher opens
+   *  the nest where my mentions wait, else the most unread. */
+  nestId: string | null;
+  nestName: string | null;
   /** The chat page is on screen: no launcher there. */
   onChatPage: boolean;
-  /** "Open full page": the chat page at this channel and thread. */
-  onOpenFull: (channel: string | null, thread: string | null) => void;
-  onOpenNode: (nodeId: string) => void;
+  /** "Open full page": that nest's chat page at this channel and thread. */
+  onOpenFull: (target: { nestId: string; nestName: string }, channel: string | null, thread: string | null) => void;
+  onOpenNode: (nestId: string, nodeId: string) => void;
+}
+
+function useViewport(): number {
+  const [w, setW] = useState(() => (typeof window === "undefined" ? 1440 : window.innerWidth));
+  useEffect(() => {
+    const on = () => setW(window.innerWidth);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return w;
 }
 
 export function ChatLauncher(p: ChatLauncherProps) {
   const { agentStreamEnabled, hootieEnabled, runnerKeyConfigured, isAdmin } = useAuth();
-  const meta = useQuery({ ...reads.nest(p.nestId), enabled: agentStreamEnabled && !p.onChatPage });
-  // The nest's own answer (`chat`, C2): switch, the nest's setting, membership.
-  const on = chatOn(meta.data as { chat?: boolean; member?: boolean } | undefined, agentStreamEnabled);
+  const meta = useQuery({ ...reads.nest(p.nestId ?? ""), enabled: !!p.nestId && agentStreamEnabled && !p.onChatPage });
+  // App-wide unread (C2): the badge, and off a nest the target. One shared,
+  // polled read; nothing moves on a timer, the number just changes.
+  const summary = useChatSummary();
+  // In a nest: the nest's own answer (`chat`: switch, its setting, membership).
+  const target = p.nestId
+    ? chatOn(meta.data as { chat?: boolean; member?: boolean } | undefined, agentStreamEnabled)
+      ? { nestId: p.nestId, nestName: p.nestName ?? "" }
+      : null
+    : railChatTarget(summary.data, null);
   const [open, setOpen] = useSidePanel("chat");
-  const shown = launcherShown({ streamOn: agentStreamEnabled, member: on, onChatPage: p.onChatPage });
-  // App-wide unread (C2): this nest's share, on the tab. Polled while the tab
-  // is visible; nothing moves on a timer, the number just changes.
-  const unread = useQuery({ ...reads.chatUnread(), enabled: shown && !open, refetchInterval: 60_000, refetchIntervalInBackground: false, retry: false });
-  const waiting = unreadForNest(unread.data, p.nestId);
+  const shown = launcherShown({ streamOn: agentStreamEnabled, member: !!target, onChatPage: p.onChatPage });
+  const counts = target ? nestChat(summary.data, target.nestId) : null;
   // Hootie's own rule for showing its tab (HootiePanel.tsx).
   const hootieShown = hootieEnabled && (runnerKeyConfigured || isAdmin);
-  const placement = launcherPlacement(hootieShown);
+  const placement = launcherPlacement(hootieShown, useViewport());
 
   // Leaving for the chat page, or losing the gate, closes the slide-over.
   useEffect(() => {
     if (!shown && open) setOpen(false);
   }, [shown, open, setOpen]);
 
-  if (!shown) return null;
+  if (!shown || !target) return null;
   return (
     <>
-      {!open && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label="Open chat"
-          title="Chat"
-          data-testid="chat-launcher"
-          data-placement={placement}
-          className={cn(
-            "fixed right-0 z-40 flex flex-col items-center gap-2 rounded-l-xl bg-primary py-3 pl-1.5 pr-1 text-primary-foreground shadow-lg transition-all hover:pl-2.5 focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
-            placement === "centre" ? "top-1/2 -translate-y-1/2" : "top-[calc(50%+4.5rem)]",
-          )}
-        >
-          <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
-            <MessagesSquare className="h-4 w-4" aria-hidden />
-            {waiting > 0 && (
-              <span className="absolute -left-1.5 -top-1.5 min-w-4 rounded-full bg-background px-1 text-center text-[10px] font-semibold leading-4 text-primary ring-1 ring-primary" aria-label={`${waiting} unread`} data-testid="chat-launcher-unread">
-                {waiting > 99 ? "99+" : waiting}
-              </span>
+      {!open &&
+        (placement === "corner" ? (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label="Open chat"
+            title="Chat"
+            data-testid="chat-launcher"
+            data-placement={placement}
+            className="fixed bottom-20 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30"
+          >
+            <MessagesSquare className="h-5 w-5" aria-hidden />
+            <ChatCount counts={counts} className="absolute -right-1 -top-1 bg-background text-primary ring-1 ring-primary" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label="Open chat"
+            title="Chat"
+            data-testid="chat-launcher"
+            data-placement={placement}
+            className={cn(
+              "fixed right-0 z-40 flex flex-col items-center gap-2 rounded-l-xl bg-primary py-3 pl-1.5 pr-1 text-primary-foreground shadow-lg transition-all hover:pl-2.5 focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
+              placement === "centre" ? "top-1/2 -translate-y-1/2" : "top-[calc(50%+4.5rem)]",
             )}
-          </span>
-          <span className="text-xs font-medium [writing-mode:vertical-rl]">Chat</span>
-        </button>
+          >
+            <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
+              <MessagesSquare className="h-4 w-4" aria-hidden />
+              <ChatCount counts={counts} className="absolute -left-2 -top-2 min-w-4 bg-background px-1 text-[10px] leading-4 text-primary ring-1 ring-primary" />
+            </span>
+            <span className="text-xs font-medium [writing-mode:vertical-rl]">Chat</span>
+          </button>
+        ))}
+      {open && (
+        <ChatSlideOver
+          key={target.nestId}
+          nestId={target.nestId}
+          nestName={target.nestName}
+          onClose={() => setOpen(false)}
+          onOpenFull={(channel, thread) => p.onOpenFull(target, channel, thread)}
+          onOpenNode={(nodeId) => p.onOpenNode(target.nestId, nodeId)}
+        />
       )}
-      {open && <ChatSlideOver nestId={p.nestId} nestName={p.nestName} onClose={() => setOpen(false)} onOpenFull={p.onOpenFull} onOpenNode={p.onOpenNode} />}
     </>
   );
 }
@@ -102,7 +137,7 @@ const fail = (fallback: string) => (e: unknown) => {
   toast.error((e as Error | undefined)?.message || fallback);
 };
 
-export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: () => void; onOpenFull: ChatLauncherProps["onOpenFull"]; onOpenNode: (nodeId: string) => void }) {
+export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: () => void; onOpenFull: (channel: string | null, thread: string | null) => void; onOpenNode: (nodeId: string) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [thread, setThread] = useState<string | null>(null);
   const data = useChannels(p.nestId, selected, thread);

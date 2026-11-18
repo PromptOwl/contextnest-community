@@ -27,6 +27,12 @@ describe("AC-C3-07 launcher", () => {
     expect(launcherPlacement(true)).toBe("below-hootie");
     expect(launcherPlacement(false)).toBe("centre");
   });
+  it("AC-C3-22 on a phone the launcher is a button in the bottom corner, clear of the page's edge controls and Hootie's tab", () => {
+    expect(launcherPlacement(true, 390)).toBe("corner");
+    expect(launcherPlacement(false, 390)).toBe("corner");
+    expect(launcherPlacement(true, 1440)).toBe("below-hootie");
+    expect(launcherPlacement(false, 768)).toBe("centre");
+  });
   it("shows only for a member with the switch on, and never on the chat page", () => {
     expect(launcherShown({ streamOn: true, member: true, onChatPage: false })).toBe(true);
     expect(launcherShown({ streamOn: false, member: true, onChatPage: false })).toBe(false);

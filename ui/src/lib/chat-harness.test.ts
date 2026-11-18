@@ -6,6 +6,7 @@ import type { ChatMember, ConversationView } from "./api";
 import {
   INTRO_KEY,
   channelMenu,
+  chatBadge,
   chatOn,
   dmPeer,
   introSeen,
@@ -13,7 +14,9 @@ import {
   memberRows,
   memberSpec,
   messageFeatures,
+  nestChat,
   orderConversations,
+  railChatTarget,
 } from "./chat-harness";
 
 const conv = (over: Partial<ConversationView> = {}): ConversationView => ({
@@ -136,5 +139,39 @@ describe("AC-C3-18 first-run explainer", () => {
     expect(introSeen(broken, "me@x")).toBe(true);
     expect(() => markIntroSeen(broken, "me@x")).not.toThrow();
     expect(introSeen(null, "me@x")).toBe(true);
+  });
+});
+
+describe("AC-C3-21 chat is findable: per-nest entry, rail entry, badges (from /me/chat/unread)", () => {
+  const summary = {
+    total: 9,
+    mentions: 2,
+    nests: [
+      { nest_id: "a", nest_name: "Alpha", unread: 0, mentions: 0, channels: [], conversations: [] },
+      { nest_id: "b", nest_name: "Beta", unread: 7, mentions: 0, channels: [], conversations: [] },
+      { nest_id: "c", nest_name: "Gamma", unread: 2, mentions: 2, channels: [], conversations: [] },
+    ],
+  };
+  it("a nest has a chat entry only when the summary lists it (chat on there, and I am a member)", () => {
+    expect(nestChat(summary, "a")).toEqual({ unread: 0, mentions: 0 });
+    expect(nestChat(summary, "b")).toEqual({ unread: 7, mentions: 0 });
+    expect(nestChat(summary, "z")).toBeNull();
+    expect(nestChat(undefined, "a")).toBeNull();
+  });
+  it("the rail's Chat opens the nest on screen when it has chat, else where my mentions are, else the most unread, else the first", () => {
+    expect(railChatTarget(summary, "a")).toEqual({ nestId: "a", nestName: "Alpha" });
+    expect(railChatTarget(summary, null)).toEqual({ nestId: "c", nestName: "Gamma" });
+    const noMentions = { ...summary, mentions: 0, nests: summary.nests.map((n) => ({ ...n, mentions: 0 })) };
+    expect(railChatTarget(noMentions, "z")).toEqual({ nestId: "b", nestName: "Beta" });
+    const quiet = { ...noMentions, total: 0, nests: noMentions.nests.map((n) => ({ ...n, unread: 0 })) };
+    expect(railChatTarget(quiet, null)).toEqual({ nestId: "a", nestName: "Alpha" });
+    expect(railChatTarget({ total: 0, mentions: 0, nests: [] }, null)).toBeNull();
+    expect(railChatTarget(undefined, null)).toBeNull();
+  });
+  it("the badge counts mentions first: a mention is what waits on me", () => {
+    expect(chatBadge({ unread: 7, mentions: 0 })).toEqual({ count: 7, tone: "unread" });
+    expect(chatBadge({ unread: 2, mentions: 2 })).toEqual({ count: 2, tone: "mention" });
+    expect(chatBadge({ unread: 0, mentions: 0 })).toBeNull();
+    expect(chatBadge(null)).toBeNull();
   });
 });

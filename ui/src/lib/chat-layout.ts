@@ -27,10 +27,17 @@ export function paneLayout(width: number): PaneLayout {
 }
 
 /** The chat launcher stacks under Hootie's tab when that one is on screen,
- *  and takes its place (mid-height) when it is not. */
-export function launcherPlacement(hootieShown: boolean): "below-hootie" | "centre" {
+ *  and takes its place (mid-height) when it is not; on a phone it is a
+ *  button in the bottom corner. */
+export function launcherPlacement(hootieShown: boolean, width = 1440): "below-hootie" | "centre" | "corner" {
+  // A phone: a round button in the bottom corner, where a chat button is
+  // looked for, instead of a tab over the page's middle (PO-1200).
+  if (width < LAUNCHER_CORNER_MAX) return "corner";
   return hootieShown ? "below-hootie" : "centre";
 }
+
+/** Below this width the launcher is a corner button. */
+export const LAUNCHER_CORNER_MAX = 640;
 
 /** The launcher shows on a nest page when the switch is on, the caller is a
  *  person added to the nest, and the page is not the chat itself. */
