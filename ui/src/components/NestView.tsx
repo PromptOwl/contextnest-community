@@ -1015,6 +1015,21 @@ export function NestView({
       overdue ? 0 : RECONCILE_QUIET_MS,
     );
   }, []);
+  // Approvals change without anything happening here (another steward decides,
+  // an agent files a change). While the nest is in view, re-read on focus and
+  // every half minute so the queue and its counts match what is really waiting.
+  useEffect(() => {
+    if (!stewardshipEnabled) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void fetchDataRef.current();
+    };
+    const timer = setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [stewardshipEnabled]);
   useEffect(
     () => () => {
       if (reconcileTimer.current) clearTimeout(reconcileTimer.current);
