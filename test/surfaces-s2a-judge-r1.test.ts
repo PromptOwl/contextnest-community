@@ -11,7 +11,8 @@ import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLi
 
 // ─── fake model ──────────────────────────────────────────────────────────────
 type Turn = { content: any[]; stop_reason: string; usage?: Record<string, number> };
-let modelImpl: (req: any) => Turn | Promise<Turn> = () => submit(noop());
+/** `credential` is the one the call went out on (po-1419: the route may switch it). */
+let modelImpl: (req: any, credential?: { apiKey: string; source: string }) => Turn | Promise<Turn> = () => submit(noop());
 const modelCalls: any[] = [];
 function submit(input: any): Turn {
   return {
@@ -77,11 +78,19 @@ beforeAll(() => {
       ...actual,
       createTurn: async (params: any) => {
         modelCalls.push(JSON.parse(JSON.stringify(params.request)));
-        return await modelImpl(params.request);
+        // Only the SDK call is faked: the run's route (po-1419) is the real
+        // one, so a fallback to PromptOwl's gateway happens as in production.
+        const call = async (credential: any, model: string) => await modelImpl({ ...params.request, model }, credential);
+        if (!params.route) return await call(params.credential, params.request.model);
+        const res = await params.route.call(call, params.signal);
+        return params.route.fallback ? { ...res, model_route: params.route.fallback } : res;
       },
     };
   });
 });
+
+/** Merged over the mocked licence on every call (see createTestApp). */
+const licenseOverrides: Record<string, unknown> = {};
 
 // ─── fake Slack Web API + network guard ──────────────────────────────────────
 interface SlackUser {
@@ -359,6 +368,8 @@ beforeAll(async () => {
   app = await createTestApp("key", {
     superAdmins: ["root@surf.test"],
     gateway: { baseUrl: "https://gateway.promptowl.test", key: "po-key", defaultModel: "default-claude/claude-sonnet-5" },
+    // Mutable: po-1419's fallback test turns byok on for one window.
+    licenseOverrides,
   });
   root = await registerUser(app, "root@surf.test", "Root");
   alice = await registerUser(app, "alice@surf.test", "Alice");
@@ -894,6 +905,64 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(sentEmails.some((m) => /out of credit/i.test(m.subject))).toBe(true);
     const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: a.bindingId })}`, undefined, alice.apiKey);
     expect(led.data.entries.find((x: any) => x.entry_id === `win_${a.w.id}`).verdict.reason_code).toBe("model_billing");
+  });
+
+  it("po-1419: the server's own gateway out of credit — the window is judged on PromptOwl's gateway, the run trace and the ledger say so, and admins still hear the account is out of credit", async () => {
+    licenseOverrides.features = ["byok"];
+    process.env.ANTHROPIC_BASE_URL = "https://own-litellm.test";
+    process.env.ANTHROPIC_API_KEY = "sk-own-SECRET-9999";
+    const keys: string[] = [];
+    try {
+      setChannel("C419", ["U_ALICE", "U_BOB", "UBOT"]);
+      const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C419", nest_id: F }, alice.apiKey);
+      expect(b.status, JSON.stringify(b.data)).toBe(201);
+      await tick(30);
+      const before = (await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F])).length;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        modelImpl = (_req, credential) => {
+          keys.push(credential?.apiKey ?? "");
+          if (credential?.source === "own") {
+            throw Object.assign(new Error("400 Your credit balance is too low to access the Anthropic API."), { status: 400 });
+          }
+          return submit(noop());
+        };
+        await say("C419", "U_BOB", "we agreed the cutover moves to friday after the review meeting FALLBACKCHAT");
+        await tick(21);
+      } finally {
+        warn.mockRestore();
+        modelImpl = () => submit(noop());
+      }
+      const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+      expect(w.status).toBe("judged");
+      expect(w.verdict).toBe("no_op");
+      // First the own gateway's key, then PromptOwl's; never the other way.
+      expect(keys[0]).toBe("sk-own-SECRET-9999");
+      expect(keys.slice(1).every((k) => k === "po-key")).toBe(true);
+      const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+      expect(run.status).toBe("succeeded");
+      expect(JSON.parse(run.trace).model_route).toEqual({
+        source: "promptowl",
+        fallback: "model_billing",
+        status: 400,
+        model: "default-claude/claude-sonnet-5",
+        note: "answered via PromptOwl gateway (fallback: model_billing)",
+      });
+      expect(run.trace).not.toMatch(/SECRET|credit balance/);
+      // The ledger row carries the code; the Control room prints the line.
+      const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: b.data.binding.id })}`, undefined, alice.apiKey);
+      const e = led.data.entries.find((x: any) => x.entry_id === `win_${w.id}`);
+      expect(e.run.model_fallback).toBe("model_billing");
+      const { whatCell } = await import("../ui/src/lib/control-room-overview.js");
+      expect(whatCell(e).sub).toContain("answered via PromptOwl gateway (fallback: model_billing)");
+      // Answered, but the own account is still out of credit: the daily admin notice (or the one already sent today).
+      const after = await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F]);
+      expect(after.length).toBeGreaterThanOrEqual(Math.max(before, 1));
+    } finally {
+      delete licenseOverrides.features;
+      delete process.env.ANTHROPIC_BASE_URL;
+      delete process.env.ANTHROPIC_API_KEY;
+    }
   });
 
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {

@@ -10,7 +10,7 @@
  * src/hootie/model.ts is replaced with a scripted generator, so every test
  * exercises the real route, retrieval, comment and notification code.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import {
   describeModelError as realDescribeModelError,
   ModelRefusedError as RealModelRefusedError,
@@ -76,6 +76,10 @@ function parseSse(text: string): SseEvent[] {
 let scriptedAnswer = "Hoot.";
 /** When set, the mocked model throws it instead of answering. */
 let scriptedError: unknown = null;
+/** po-1419: a round on this key throws this before any text (a key-specific failure). */
+let failForKey: ((apiKey: string | undefined) => unknown) | null = null;
+/** po-1419: every key a round was asked on, in order. */
+let roundKeys: Array<string | undefined> = [];
 /** What the mocked model was asked; tests inspect the retrieved context. */
 let lastModelCall: {
   system: string;
@@ -229,6 +233,9 @@ beforeAll(() => {
         toolChoice: params.toolChoice,
       });
       if (beforeRound) await beforeRound(n);
+      roundKeys.push(params.apiKey);
+      const keyFailure = failForKey?.(params.apiKey);
+      if (keyFailure) throw keyFailure;
       lastModelCall = {
         system: params.system,
         turns: params.messages,
@@ -1256,6 +1263,81 @@ describe("POST /nests/:id/chat — the model's provider picks the key (byok)", (
       delete process.env.ANTHROPIC_BASE_URL;
       delete process.env.ANTHROPIC_API_KEY;
     }
+  });
+});
+
+// ─── po-1419: an own key that fails falls back to PromptOwl's gateway ───
+describe("POST /nests/:id/chat — fallback to PromptOwl's gateway (po-1419)", () => {
+  const PO = { baseUrl: "http://127.0.0.1:9", key: "sk-po-credits", defaultModel: "default-claude/claude-sonnet-5" };
+  const OWN_KEY = "sk-litellm-virtual-OWN1";
+  /** What the SDK throws for an out-of-credit Anthropic account. */
+  const outOfCredit = () =>
+    Object.assign(new Error("400 Your credit balance is too low to access the Anthropic API."), {
+      status: 400,
+      error: { type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API." } },
+    });
+
+  async function boot() {
+    setupTestEnv();
+    process.env.HOOTIE_ENABLED = "true";
+    delete process.env.HOOTIE_MODEL;
+    const app = await createTestApp("key", { features: ["byok"], gateway: PO });
+    process.env.ANTHROPIC_BASE_URL = "http://litellm:4000";
+    process.env.ANTHROPIC_API_KEY = OWN_KEY;
+    const user = await registerUser(app, `fb-${Math.random().toString(36).slice(2, 8)}@acme.com`);
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Fallback" }, user.apiKey);
+    return { app, user, nestId: data.nest.id as string };
+  }
+
+  beforeEach(() => {
+    roundKeys = [];
+  });
+  afterEach(() => {
+    failForKey = null;
+    roundKeys = [];
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.MODEL_FALLBACK_PROMPTOWL;
+  });
+
+  it("the server gateway out of credit: answered on PromptOwl's gateway, a quiet note in done, no error, and the own key never sent there", async () => {
+    const { app, user, nestId } = await boot();
+    failForKey = (k) => (k === OWN_KEY ? outOfCredit() : null);
+    scriptedAnswer = "answered anyway";
+    const { status, events } = await chat(app, nestId, { message: "hi" }, user.apiKey);
+    expect(status).toBe(200);
+    expect(events.some((e: any) => e.event === "error")).toBe(false);
+    const done = events.find((e: any) => e.event === "done")!.data;
+    expect(done.answer).toBe("answered anyway");
+    expect(done.model_fallback).toEqual({ reason: "model_billing", note: "Answered via PromptOwl's gateway (the server's model key is out of credit)." });
+    // First round on the own key, then PromptOwl's, with PromptOwl's team model.
+    expect(roundKeys[0]).toBe(OWN_KEY);
+    expect(roundKeys.slice(1).every((k) => k === PO.key)).toBe(true);
+    expect(lastModelCall!.baseUrl).toBe(PO.baseUrl);
+    expect(lastModelCall!.model).toBe("default-claude/claude-sonnet-5");
+    // Not answer-only: a billing 400 is not a tools refusal.
+    expect(done.answer_only ?? null).toBeNull();
+  });
+
+  it("with model_fallback_promptowl off, the failure is the answer: an error event, PromptOwl never asked", async () => {
+    const { app, user, nestId } = await boot();
+    process.env.MODEL_FALLBACK_PROMPTOWL = "false";
+    failForKey = (k) => (k === OWN_KEY ? outOfCredit() : null);
+    const { events } = await chat(app, nestId, { message: "hi" }, user.apiKey);
+    const err = events.find((e: any) => e.event === "error");
+    expect(err?.data.error).toMatch(/out of credit/);
+    expect(roundKeys.every((k) => k === OWN_KEY)).toBe(true);
+  });
+
+  it("a 400 about the request does not fall back", async () => {
+    const { app, user, nestId } = await boot();
+    failForKey = (k) =>
+      k === OWN_KEY
+        ? Object.assign(new Error("400 messages: roles must alternate"), { status: 400, error: { error: { message: "messages: roles must alternate" } } })
+        : null;
+    const { events } = await chat(app, nestId, { message: "hi" }, user.apiKey);
+    expect(events.find((e: any) => e.event === "done")?.data.model_fallback ?? null).toBeNull();
+    expect(roundKeys.every((k) => k === OWN_KEY)).toBe(true);
   });
 });
 

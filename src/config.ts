@@ -828,6 +828,17 @@ export const config = {
     return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
   },
   /**
+   * po-1419: a model call on an own key (a nest's, or the server's own
+   * gateway) that fails for billing, auth, rate limit, 5xx or no connection
+   * is retried once on PromptOwl's licence gateway. Default ON (it only acts
+   * when the licence has a gateway); "false" turns it off, for byok servers
+   * that must not send content to PromptOwl (air-gapped, data residency).
+   * Superadmin-editable (model_fallback_promptowl; MCP context_model_route_*).
+   */
+  get MODEL_FALLBACK_PROMPTOWL(): boolean {
+    return process.env.MODEL_FALLBACK_PROMPTOWL !== "false";
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,

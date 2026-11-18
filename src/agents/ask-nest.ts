@@ -43,6 +43,7 @@ import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import { resolveModelCredential, hootieModel, resolveGatewayModel, ownModelRoute } from "../shared/model-credential.js";
+import { ModelRoute, type ModelRouteTrace } from "../shared/model-route.js";
 import { resolveContext, type ContextNodeSummary } from "../nodes/context-service.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
 import { resolveNestPermission } from "../shared/access.js";
@@ -232,6 +233,8 @@ interface TurnOutcome {
   trail: { searches: number; reads: number; stopped: boolean };
   /** The turn ended in a model or tool failure: `answer` is the short reason. */
   failed: boolean;
+  /** po-1419: the turn was answered on PromptOwl's gateway after the own key failed. */
+  model_route?: ModelRouteTrace;
 }
 
 /**
@@ -249,6 +252,8 @@ async function runTurn(caller: AskCaller, question: string, conversation: string
   const own = baseCredential.source === "promptowl" ? ownModelRoute(gatewayModel) : null;
   const credential = own?.credential ?? baseCredential;
   const callModel = own?.model ?? gatewayModel;
+  // One route for the turn: Hootie's fallback to PromptOwl's gateway (po-1419).
+  const route = new ModelRoute(credential, callModel, own ? { fallbackModel: gatewayModel } : {});
 
   const gathered = new Gathered();
   const turn = new TurnContext({ nestId, turnId: randomUUID(), caller: { userId, email: userEmail }, userText: question });
@@ -293,6 +298,7 @@ async function runTurn(caller: AskCaller, question: string, conversation: string
       apiKey: credential.apiKey,
       model: callModel,
       baseUrl: credential.baseUrl,
+      route,
       system: promptFor(canSearch),
       turns: [{ role: "user", content: question }],
       tools: canSearch ? tools : [],
@@ -326,11 +332,11 @@ async function runTurn(caller: AskCaller, question: string, conversation: string
       turn.exhausted = true;
       return { answer: `${answer.trim() ? `${answer}\n\n` : ""}${stoppedLine(turn)}`, cited: citedNodes(answer, citable()), proposals, trail: trail(), failed: false };
     }
-    const text = err instanceof ModelRefusedError ? err.message : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
+    const text = err instanceof ModelRefusedError ? err.message : describeModelError(err, { model: hootieModel(route.credential), gateway: !!route.credential.baseUrl });
     console.error("[ask-nest] model call failed", nestId, err);
     return { answer: text, cited: [], proposals: [], trail: trail(), failed: true };
   }
-  return { answer, cited: citedNodes(answer, citable()), proposals, trail: trail(), failed: false };
+  return { answer, cited: citedNodes(answer, citable()), proposals, trail: trail(), failed: false, ...route.trace() };
 }
 
 // ─── Posting ────────────────────────────────────────────────────────────
@@ -468,7 +474,12 @@ async function answerAndMaybePost(
         threadId: place.threadId,
         askedBy: caller.userEmail,
         body,
-        extra: { citations: cited, trail: JSON.stringify(outcome.trail) },
+        extra: {
+          citations: cited,
+          trail: JSON.stringify(outcome.trail),
+          // The ledger line for an answer from the fallback (po-1419).
+          ...(outcome.model_route ? { model_route: outcome.model_route.note } : {}),
+        },
       });
       const threadId = first.thread_id;
       const proposalMessageIds: string[] = [];

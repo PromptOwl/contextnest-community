@@ -1,0 +1,5 @@
+---
+"@promptowl/contextnest-community": patch
+---
+
+A model call on an own key (a nest's key, or the server's own model gateway) that fails because the account is out of credit, the key is refused, the provider is rate-limiting, erroring (5xx) or unreachable is now retried once on PromptOwl's licence gateway, metered in credits, when the licence has one (po-1419). A request that is itself wrong (a 400 about the request, 404, 413) never falls back, and the own key is never sent to PromptOwl. It covers Hootie, ask-nest, metacognition agents, the team chat watcher, the Surfaces judge, summaries and distill, through one shared route. Run traces and the Control room ledger say "answered via PromptOwl gateway (fallback: model_billing)", Hootie shows a quiet note under the answer, and admins still get the out-of-credit notice. Server admins can turn it off under Settings → Hootie → Model gateway (`model_fallback_promptowl`, MCP `context_model_route_update`) for servers that must keep content off PromptOwl.

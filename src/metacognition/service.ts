@@ -39,6 +39,7 @@ import { runTotals } from "../workflow/run-totals.js";
 import { storedEnvValues } from "../workflow/env-routes.js";
 import { getAgent, SERVER_CLAIM, type MetacognitionAgent } from "./store.js";
 import { createTurn, estimateCostUsd, type Usage } from "./model.js";
+import { ModelRoute } from "../shared/model-route.js";
 import { runTool, toolsFor, mcpTokenFrom, defang, type ToolContext } from "./tools.js";
 import { notifyOn } from "./config.js";
 import { McpPool } from "./mcp-client.js";
@@ -299,7 +300,6 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
     await skip("No model key: this server has no PromptOwl model gateway and no own Anthropic key. Add one under Settings, or the nest's runner key.");
     return;
   }
-  const billing = credential.source === "own" ? "own_key" : "promptowl_credits";
 
   // Instructions are the agent node's APPROVED text: a change to what an
   // autonomous agent is told to do is reviewed like any other change.
@@ -342,10 +342,15 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   const mcp = new McpPool(mcpTokenFrom(env));
   let stoppedBy = "end_turn";
   let summary = "";
+  // The run's model route: one fallback to PromptOwl's gateway, then it
+  // stays there (po-1419). The trace names what actually answered.
+  const route = new ModelRoute(credential, model);
+  let fallbackNoted = false;
   const traceOf = () => ({
     persona,
     model,
-    billing,
+    billing: route.billing(),
+    ...route.trace(),
     usage,
     est_cost_usd: estimateCostUsd(model, usage),
     proposals: proposals.made,
@@ -401,12 +406,17 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
       turns++;
       const res = await createTurn({
         credential,
+        route,
         // Don't let one turn's output overrun what the run has left. Input is
         // only known after the call, so the cap is still soft by one turn's
         // input (documented in API.md).
         request: { model, system, messages, tools, max_tokens: Math.max(1024, Math.min(TURN_MAX_TOKENS, caps.max_tokens - spent)) },
         signal: ac.signal,
       });
+      if (route.fallback && !fallbackNoted) {
+        fallbackNoted = true;
+        await note(runId, { action: "branch", detail: { kind: "model_fallback", ...route.fallback } });
+      }
       usage.input_tokens += res.usage?.input_tokens ?? 0;
       usage.output_tokens += res.usage?.output_tokens ?? 0;
       usage.cache_read_input_tokens += res.usage?.cache_read_input_tokens ?? 0;

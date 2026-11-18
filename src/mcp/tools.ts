@@ -148,6 +148,7 @@ import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentToo
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
 import { PUBLIC_LINK_TOOL_DEFINITIONS, PUBLIC_LINK_TOOL_NAMES, isPublicLinkTool, runPublicLinkTool } from "./public-link-tools.js";
+import { MODEL_ROUTE_TOOL_DEFINITIONS, MODEL_ROUTE_TOOL_NAMES, isModelRouteTool, runModelRouteTool } from "./model-route-tools.js";
 import { isChannelTool, runChannelTool } from "./channel-tools.js";
 import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
 import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
@@ -626,6 +627,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   ...AGENT_ADMIN_TOOL_NAMES,
   // Public links (PO-1365) — the REST /nests/:id/publications twins.
   ...PUBLIC_LINK_TOOL_NAMES,
+  // The model route (po-1419): a server setting, server admins only.
+  ...MODEL_ROUTE_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -1891,6 +1894,8 @@ export const TOOL_DEFINITIONS = [
   },
   // Public links (PO-1365), defined in public-link-tools.ts.
   ...PUBLIC_LINK_TOOL_DEFINITIONS,
+  // The model route (po-1419), defined in model-route-tools.ts.
+  ...MODEL_ROUTE_TOOL_DEFINITIONS,
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -5441,6 +5446,9 @@ async function runTool(
       // Promote a thread (PO-1181): always registered (mcp/routes.ts).
       if (isStreamTool(toolName)) {
         return runStreamTool(toolName, args, ctx);
+      }
+      if (isModelRouteTool(toolName)) {
+        return runModelRouteTool(toolName, args, ctx);
       }
       if (isPublicLinkTool(toolName)) {
         return runPublicLinkTool(toolName, args, ctx);

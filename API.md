@@ -3655,6 +3655,21 @@ Each key goes to PromptOwl, which checks it with the provider and keeps it in it
 
 `model_source`: `own` (the server's own model gateway), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time, after the other settings in the request are saved, so a refused key never undoes them; when a later provider is refused, the earlier ones in the same request stay saved. Without `byok` nothing is sent (there is no own key to clear). With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Hootie (`hootie_model`) runs on the own key for any model of a provider with an own key (picking `gpt-4o` from the PromptOwl list counts, since the own model is a provider wildcard); other models keep the key above.
 
+**Fallback to PromptOwl's gateway (po-1419).** `model_fallback_promptowl` (boolean, default `true`) and `model_fallback_available` (read-only: the licence has a PromptOwl gateway). When it is on and the licence has a gateway, a model call on an own credential (a nest's own key, or the server's own gateway) is retried once on PromptOwl's licence gateway, metered in credits, when it fails for:
+
+| Failure | Reason code | Falls back |
+|---|---|---|
+| Out of credit: 402, or a 400/429 naming credit, billing or quota | `model_billing` | yes |
+| Key refused: 401, 403 | `model_auth` | yes |
+| Rate limit: 429, after the SDK's own retries | `model_rate_limited` | yes |
+| 5xx, 529 overloaded | `model_error` | yes |
+| No connection (DNS, refused, reset) | `model_error` | yes |
+| The SDK's own timeout | `model_timeout` | yes |
+| A 400 about the request, 404, 413, 422 | `model_rejected` | no |
+| The caller's own abort; a refusal; a tools rejection | none | no |
+
+A call already on PromptOwl's gateway never falls back, and a run falls back at most once and then stays on PromptOwl's gateway. The fallback uses the licence gateway's own key and URL; the own key is never sent to PromptOwl. For streamed answers (Hootie) it applies only when the failure came before any text. The run trace records `model_route: { source: "promptowl", fallback, status, model, note }` (note: `answered via PromptOwl gateway (fallback: <code>)`), ledger rows carry `run.model_fallback`, Hootie's `done` event carries `model_fallback: { reason, note }` (shown as a quiet note under the answer), and ask-nest messages record the note in their client metadata. Turn it off (`false`) for servers that must not send content to PromptOwl (air-gapped, data residency). PATCH accepts only a boolean (`400` with `fieldErrors.model_fallback_promptowl` otherwise). MCP: `context_model_route_get` and `context_model_route_update { model_fallback_promptowl }`, server admins on their own full credential only.
+
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
 

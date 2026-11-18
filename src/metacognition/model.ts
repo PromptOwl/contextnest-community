@@ -7,6 +7,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { ModelCredential } from "../shared/model-credential.js";
+import { ModelRoute, type ModelRouteTrace } from "../shared/model-route.js";
 
 export interface TurnRequest {
   model: string;
@@ -29,6 +30,8 @@ export interface TurnResult {
     cache_creation_input_tokens?: number | null;
   };
   stop_details?: { explanation?: string | null } | null;
+  /** Set when this call (or an earlier one on the same route) fell back to PromptOwl's gateway. */
+  model_route?: ModelRouteTrace;
 }
 
 /**
@@ -53,8 +56,23 @@ export async function createTurn(params: {
   credential: ModelCredential;
   request: TurnRequest;
   signal?: AbortSignal;
+  /**
+   * The run's route (po-1419): pass one route for every turn of a run so a
+   * fallback to PromptOwl's gateway sticks. Without one, this call alone may
+   * fall back. Either way the fallback is the route's, never the caller's.
+   */
+  route?: ModelRoute;
 }): Promise<TurnResult> {
-  const { credential, request, signal } = params;
+  const route = params.route ?? new ModelRoute(params.credential, params.request.model);
+  const res = await route.call(
+    (credential, model) => turnOn(credential, { ...params.request, model }, params.signal),
+    params.signal,
+  );
+  return route.fallback ? { ...res, model_route: route.fallback } : res;
+}
+
+/** One call on one credential: the tuned request, with its one-step retries. */
+async function turnOn(credential: ModelCredential, request: TurnRequest, signal?: AbortSignal): Promise<TurnResult> {
   const client = clientFor(credential.apiKey, credential.baseUrl);
   const key = `${credential.baseUrl ?? ""}|${request.model}`;
   const base = {

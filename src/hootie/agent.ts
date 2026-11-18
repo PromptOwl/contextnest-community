@@ -21,6 +21,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { streamRound, type ModelMessage, type ModelTurn, type ToolSpec } from "./model.js";
+import type { ModelRoute } from "../shared/model-route.js";
 import type { HootieTool, StatusLine } from "./tools.js";
 import { spend, type TurnContext } from "./turn.js";
 
@@ -55,6 +56,13 @@ export interface AgentParams {
   apiKey: string;
   model: string;
   baseUrl?: string | null;
+  /**
+   * The turn's model route (po-1419). When set, every round goes through it:
+   * a round on an own key that fails before any text (billing, auth, rate
+   * limit, 5xx, no connection) is asked again on PromptOwl's gateway, and the
+   * rest of the turn stays there. apiKey / model / baseUrl are then unused.
+   */
+  route?: ModelRoute;
   system: string;
   turns: ModelTurn[];
   tools: HootieTool[];
@@ -85,15 +93,10 @@ export async function* runAgent(params: AgentParams): AsyncGenerator<AgentEvent>
     await gate();
     if (signal.aborted) return;
     const spent = calls >= params.maxCalls || !!turn?.answerOnly;
-    const round = streamRound({
-      apiKey: params.apiKey,
-      model: params.model,
-      baseUrl: params.baseUrl,
-      system: params.system,
-      messages,
-      signal,
-      ...(specs.length ? { tools: specs, toolChoice: spent ? "none" : "auto" } : {}),
-    });
+    const ask = { system: params.system, messages, signal, ...(specs.length ? { tools: specs, toolChoice: spent ? ("none" as const) : ("auto" as const) } : {}) };
+    const round = params.route
+      ? params.route.stream((c, model) => streamRound({ ...ask, apiKey: c.apiKey, model, baseUrl: c.baseUrl }), signal)
+      : streamRound({ ...ask, apiKey: params.apiKey, model: params.model, baseUrl: params.baseUrl });
     let next = await round.next();
     while (!next.done) {
       if (signal.aborted) return;
