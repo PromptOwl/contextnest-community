@@ -58,7 +58,7 @@ export function TopBarTools({
   onConnect: () => void;
 }) {
   const meta = useNestMeta(nestId ?? "");
-  const { isAdmin, workflowPlaneEnabled, typeViewEnabled, agentStreamEnabled } = useAuth();
+  const { isAdmin, workflowPlaneEnabled, pluginsEnabled, typeViewEnabled, agentStreamEnabled } = useAuth();
   const caps = useMemo(() => {
     const m: any = meta.data;
     if (!nestId || !m) return null;
@@ -97,13 +97,14 @@ export function TopBarTools({
       caps
         ? nestSidebarViews(caps, {
           workflowPlaneEnabled,
+          pluginsEnabled,
           agentStreamEnabled,
           isMember,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, pluginsEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
   );
   // Dashboard: the nests to pick from.
   const nestList = useQuery({ ...reads.nestList(), enabled: !nestId });

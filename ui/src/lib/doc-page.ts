@@ -142,7 +142,7 @@ export interface NestSidebarView {
    *  collapsed "Views" group so the sidebar reads as nest → docs. */
   group?: "views";
   /** App view page to open. */
-  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels";
+  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "plugins" | "channels";
   /** Nest-page tab, for views that are tabs of the nest page. */
   tab?: "overview" | "review";
 }
@@ -158,6 +158,8 @@ export function nestSidebarViews(
   caps: { isReadOnly: boolean; isReaderView: boolean; canEditDocs: boolean },
   opts: {
     workflowPlaneEnabled: boolean;
+    /** The server has Nest Plugins on — lists the Plugins page. */
+    pluginsEnabled?: boolean;
     /** Experimental channels switch (PO-1179). */
     agentStreamEnabled?: boolean;
     /** The caller is a person added to the nest (channels are members-only). */
@@ -180,7 +182,7 @@ export function nestSidebarViews(
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   // The registry pages, each gated by its own meta.visible (workflows: the
   // workflow-plane flag and write access).
-  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled, agentStreamEnabled: !!opts.agentStreamEnabled, isMember: opts.isMember === true }))
+  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled, pluginsEnabled: opts.pluginsEnabled, agentStreamEnabled: !!opts.agentStreamEnabled, isMember: opts.isMember === true }))
     views.push({ id: p.id, label: p.label, icon: p.icon, page: p.viewPage, group: "views" });
   return views;
 }

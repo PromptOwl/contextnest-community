@@ -192,6 +192,16 @@ type View =
       isArchived?: boolean;
     }
   | {
+      page: "plugins";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
+    }
+  | {
       page: "definitions";
       nestId: string;
       nestName: string;
@@ -244,7 +254,7 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels" | "plugins" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -283,6 +293,7 @@ export default function App() {
     authenticated,
     isAdmin,
     workflowPlaneEnabled,
+    pluginsEnabled,
     subagentRunsEnabled,
     mcpOauthEnabled,
     docStreamEnabled,
@@ -557,8 +568,8 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    // Channels are gated on a /health flag the same way.
-    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
+    // Channels and Plugins are gated on a /health flag the same way.
+    if (loading && ["workflows", "channels", "plugins"].includes(nestViewFromLocation() ?? "")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -627,7 +638,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, pluginsEnabled, agentStreamEnabled, isMember: member === true })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -685,7 +696,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled, agentStreamEnabled, loading]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, pluginsEnabled, agentStreamEnabled, loading]);
 
   // A nest link opened while signed out (a channel thread from a mention, a
   // document): the nest does not resolve for an anonymous caller, so the link
@@ -804,6 +815,7 @@ export default function App() {
       view.page === "workflows" ||
       view.page === "definitions" ||
       view.page === "structure" ||
+      view.page === "plugins" ||
       view.page === "board" ||
       view.page === "channels" ||
       view.page === "nest-trace"
@@ -1925,7 +1937,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, pluginsEnabled, agentStreamEnabled, isMember: nestIsMember === true });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring
