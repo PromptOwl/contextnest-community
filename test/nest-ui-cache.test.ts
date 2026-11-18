@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { QueryClient } from "@tanstack/react-query";
 import * as api from "../ui/src/lib/api";
-import { createQueryClient, connectReadCache, reads } from "../ui/src/lib/queries";
+import { createQueryClient, connectReadCache, reads, resetVerdictDrops } from "../ui/src/lib/queries";
 
 /**
  * Nest UI read caching — the structural reads hit on every navigation
@@ -179,6 +179,9 @@ describe("write invalidation scope @unit", () => {
 
   beforeEach(async () => {
     vi.restoreAllMocks();
+    // Review verdicts share one drop inside a short window; a verdict from an
+    // earlier test must not turn this test's first one into a queued drop.
+    resetVerdictDrops();
     qc = createQueryClient();
     connectReadCache(qc);
     // One body covering every shape the seeded reads unwrap — some return the

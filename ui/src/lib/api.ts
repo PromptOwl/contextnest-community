@@ -14,6 +14,7 @@
 
 import { clearDraft } from "./draft";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
+import type { ClientAttribution } from "./client-attribution";
 import {
   ACCESS_OFFER_EVENT,
   accessOfferFromError,
@@ -22,6 +23,7 @@ import {
 } from "./access-requests";
 import type { NestBranding } from "./branding";
 import type { InstructionsRevision } from "./instructions";
+import type { OnboardingState, ConnectionEvidence } from "./onboarding";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -283,6 +285,9 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
+    /** Surfaces (Slack → nest; never in open mode). Off → /surfaces/* 404s
+     *  and the Control room page hides. */
+    surfaces_enabled?: boolean;
     /** Experimental features, one key each (default off; superadmin switches
      *  under Settings → Features). Off → the routes 404 and the UI hides it. */
     experimental?: {
@@ -290,6 +295,8 @@ export async function getHealth() {
       doc_pins?: boolean;
       /** Cross-nest document stream (GET /me/stream, the Stream page). */
       doc_stream?: boolean;
+      /** Agent team stream channels (PO-1179): /nests/:id/channels. */
+      agent_stream?: boolean;
     };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
@@ -390,6 +397,11 @@ export interface AdminSettings {
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;
+  /** First-run onboarding switches (PO-1185). */
+  onboarding_enabled?: boolean;
+  distill_enabled?: boolean;
+  /** Any person may connect their own Slack workspace to a nest they own. */
+  surfaces_slack_self_serve?: boolean;
   /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
   surfaces_slack_hosted_enabled?: boolean;
   surfaces_slack_hosted_client_id?: string;
@@ -402,6 +414,8 @@ export interface AdminSettings {
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
   experimental_doc_pins: boolean;
+  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM). */
+  experimental_agent_stream_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -1774,6 +1788,8 @@ export async function getNest(nestId: string) {
       id: string;
       name: string;
       visibility: NestVisibility;
+      // Owner id; ANON_USER_ID marks an open-mode nest. Absent for a headless reader.
+      user_id?: string;
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;
@@ -1787,6 +1803,10 @@ export async function getNest(nestId: string) {
     roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
     // Caller's own steward rows (scoped). Full roster is admin-only.
     myStewards?: any[];
+    /** A person added to the nest (owner, admin, any collaborator, a steward,
+     *  a team-share member), as opposed to someone who reaches it only through
+     *  its visibility or a document share. Channels are for members (PO-1190). */
+    member?: boolean;
   }>(`/nests/${nestId}`);
 }
 
@@ -2261,6 +2281,35 @@ export async function moveNode(nestId: string, nodeId: string, folder: string) {
   return request<{ ok: boolean; node: any; previousId: string }>(
     `/nests/${nestId}/nodes/${nodeId}/move`,
     { method: "POST", body: JSON.stringify({ folder }) },
+  );
+}
+
+/** Who archived a document, when and why (spec §1.13). */
+export interface ArchivedDocument {
+  at: string;
+  by: string;
+  reason?: string;
+}
+
+/** Take a document out of lists and retrieval, recoverably. */
+export async function archiveNode(nestId: string, nodeId: string, reason?: string) {
+  return request<{ ok: boolean }>(`/nests/${nestId}/nodes/${nodeId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** Bring an archived document back in the status it left. */
+export async function unarchiveNode(nestId: string, nodeId: string) {
+  return request<{ ok: boolean; status: string }>(`/nests/${nestId}/nodes/${nodeId}/unarchive`, {
+    method: "POST",
+  });
+}
+
+/** The archived documents this caller can restore. */
+export async function listArchivedNodes(nestId: string) {
+  return request<{ nodes: Array<{ id: string; title: string; archived?: { at: string; by: string; reason?: string } }> }>(
+    `/nests/${nestId}/nodes?archived=1`,
   );
 }
 
@@ -2819,10 +2868,11 @@ export async function rejectNode(
   nestId: string,
   nodeId: string,
   note: string,
+  kind?: "changes" | "reject",
 ) {
   return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ note }),
+    body: JSON.stringify({ note, kind }),
   });
 }
 
@@ -3002,6 +3052,13 @@ export async function listAnnotations(nestId: string, nodeId: string) {
   );
 }
 
+/** What became of one `@name` when the message was posted (PO-1190). Empty
+ *  for a caller who can't see the roster, so `[]` never means "no mentions". */
+export type PostedMention =
+  | { name: string; kind: "person"; display_name: string; notified: boolean }
+  | { name: string; kind: "agent"; wake: "sent" | "no_webhook" | "skipped" }
+  | { name: string; kind: "nobody" };
+
 export async function createAnnotation(
   nestId: string,
   nodeId: string,
@@ -3011,7 +3068,7 @@ export async function createAnnotation(
     snapshotVersion?: number | null;
   },
 ) {
-  return request<{ thread: AnnotationThread }>(
+  return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
   );
@@ -3023,7 +3080,7 @@ export async function replyAnnotation(
   threadId: string,
   body: string,
 ) {
-  return request<{ thread: AnnotationThread }>(
+  return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
     { method: "POST", body: JSON.stringify({ body }) },
   );
@@ -3051,6 +3108,278 @@ export async function reopenAnnotation(
   );
 }
 
+
+// ─── Channels (agent team stream S1, PO-1179; EXPERIMENTAL_AGENT_STREAM) ──
+// A channel is a node (nodes/channels/<name>); posting and replying use the
+// annotation routes above with the channel's id.
+
+export interface ChannelActor {
+  human: string;
+  agent: string | null;
+  /** "<agent>, on behalf of <human>", or "<human>". */
+  label: string;
+}
+
+export interface ChannelSummary {
+  id: string;
+  name: string;
+  title: string;
+  type: "channel";
+  purpose: string | null;
+  archived: boolean;
+  /** Threads, not messages. */
+  post_count: number;
+  last_post_at: string | null;
+  /** Newest message, post or reply; null for an empty channel. */
+  last_activity_at: string | null;
+  /** Messages by other people since the caller last marked the channel read. */
+  unread: number;
+  can_post: boolean;
+  /** The one line to show in place of the composer when `can_post` is false. */
+  post_refusal: string | null;
+}
+
+/** One `@name` in a message body as the reader sees it (PO-1190). */
+export type ChannelMention =
+  | { name: string; kind: "person"; display_name: string }
+  | { name: string; kind: "agent"; wakeable: boolean }
+  | { name: string; kind: "nobody" };
+
+export interface ChannelMessage {
+  id: string;
+  /** The login (an email). */
+  author: string;
+  /** Display name; the email when the person has none. */
+  author_name?: string;
+  actor: ChannelActor;
+  /** Raw markdown. */
+  body: string;
+  created_at: string;
+  /** The artifacts the message links, resolved for the viewer (PO-1181). */
+  cards?: ArtifactCard[];
+  /** Every `@name` in the body, in order (not in code spans). */
+  mentions?: ChannelMention[];
+}
+
+/** A message from the "what is new" read: which thread it belongs to. */
+export interface ChannelNewMessage extends ChannelMessage {
+  thread_id: string;
+  /** False for the message that opened its thread (a new post). */
+  reply: boolean;
+}
+
+/** An agent handle the composer can offer after `@`. */
+export interface AgentHandle {
+  handle: string;
+  /** False = no wake-up webhook; the agent sees the mention in its own queue. */
+  wakeable: boolean;
+}
+
+// ─── Agent team stream S3 (PO-1181) ───────────────────────────────────────
+
+/** A linked artifact as the viewer may see it: a card for a node they can
+ *  read, an unresolved marker (the link text only) for anything else. */
+export type ArtifactCard =
+  | {
+      link: string;
+      resolved: true;
+      kind: "node" | "artifact";
+      nest_id: string;
+      node_id: string;
+      title: string;
+      type: string;
+      stage: string | null;
+      status: string;
+      version: number | null;
+      url: string;
+    }
+  | { link: string; resolved: false };
+
+/** Cards for several message bodies at once (comment threads). */
+export async function resolveMessageCards(nestId: string, texts: string[]) {
+  return request<{ messages: Array<{ cards: ArtifactCard[] }> }>(`/nests/${nestId}/cards`, {
+    method: "POST",
+    body: JSON.stringify({ texts }),
+  });
+}
+
+export interface PromoteThreadResult {
+  node: { id: string; title: string; type: string; status: string; version: number; url: string };
+  source_thread: { node_id: string; thread_id: string };
+  reply: { thread_id: string; comment_id: string | null };
+  /** True when the thread already had a node of that kind: nothing was created. */
+  existing?: boolean;
+}
+
+/** The last signed POST sent to a wake-up target (a mention or a test). */
+export interface AgentWebhookDelivery {
+  /** ISO 8601. */
+  at: string;
+  status: "ok" | "failed" | "pending";
+  /** Why it failed: "HTTP 502", "timed out", "could not connect", … */
+  reason: string | null;
+  attempts: number;
+  event: "agent.mention" | "agent.test";
+}
+
+/** A wake-up target for an agent handle — host#hash only, never the URL. */
+export interface AgentWebhook {
+  handle: string;
+  target: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_delivery?: AgentWebhookDelivery | null;
+}
+
+export async function listAgentWebhooks(nestId: string) {
+  return request<{ webhooks: AgentWebhook[] }>(`/nests/${nestId}/agent-webhooks`);
+}
+
+/** Save a target; `secret` comes back only when one is minted (the first save). */
+export async function setAgentWebhook(nestId: string, handle: string, url: string) {
+  return request<{ webhook: AgentWebhook; secret?: string }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
+    { method: "PUT", body: JSON.stringify({ url }) },
+  );
+}
+
+/** Mint a new signing secret for the stored target; the URL is not needed again. */
+export async function rotateAgentWebhookSecret(nestId: string, handle: string) {
+  return request<{ webhook: AgentWebhook; secret: string }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`,
+    { method: "PUT", body: JSON.stringify({ rotate: true }) },
+  );
+}
+
+/** Send one signed test POST. A failed delivery is still a 200 with `ok: false`. */
+export async function testAgentWebhook(nestId: string, handle: string) {
+  return request<{ ok: boolean; delivery: AgentWebhookDelivery; webhook: AgentWebhook }>(
+    `/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}/test`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function deleteAgentWebhook(nestId: string, handle: string) {
+  return request<{ deleted: true }>(`/nests/${nestId}/agent-webhooks/${encodeURIComponent(handle)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Promote a comment thread to a decision or task node. `existing: true`
+ *  means this thread already had a node of that kind (link to it). */
+export async function promoteThread(
+  nestId: string,
+  threadId: string,
+  input: { kind: "decision" | "task"; title?: string; summary?: string },
+) {
+  return request<PromoteThreadResult>(`/nests/${nestId}/threads/${encodeURIComponent(threadId)}/promote`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** A node a thread was promoted to, as far as the reader may open it. */
+export interface ChannelPromotion {
+  kind: "decision" | "task";
+  node_id: string;
+  title: string;
+}
+
+/** A top-level post. Its `id` is the THREAD id. */
+export interface ChannelPost extends ChannelMessage {
+  status: "open" | "resolved";
+  reply_count: number;
+  last_reply_at: string | null;
+  /** Newest message in the thread. */
+  last_activity_at?: string;
+  promoted?: ChannelPromotion[];
+}
+
+export interface ChannelList {
+  /** Sorted by name. */
+  channels: ChannelSummary[];
+  /** The not-archived channel with the newest message: where a visitor starts. */
+  most_recent?: string | null;
+  /** May create, archive and restore channels. */
+  can_manage?: boolean;
+}
+
+export interface ChannelPagination {
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface ChannelTimeline {
+  channel: ChannelSummary;
+  /** Latest activity first. */
+  posts: ChannelPost[];
+  pagination: ChannelPagination;
+  /** Opaque cursor for getChannelSince. */
+  next_since?: string;
+}
+
+const channelPath = (nestId: string, name: string) =>
+  `/nests/${nestId}/channels/${encodeURIComponent(name)}`;
+
+/** The refresh read: cheap enough to poll while the tab is visible. */
+export async function listChannels(nestId: string, opts: { archived?: boolean } = {}) {
+  return request<ChannelList>(`/nests/${nestId}/channels${opts.archived ? "?archived=1" : ""}`);
+}
+
+export async function createChannel(nestId: string, input: { name: string; purpose?: string }) {
+  return request<{ channel: ChannelSummary }>(`/nests/${nestId}/channels`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function archiveChannel(nestId: string, name: string, archived = true) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ archived }),
+  });
+}
+
+export async function getChannelTimeline(nestId: string, name: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  const q = qs.toString();
+  return request<ChannelTimeline>(`${channelPath(nestId, name)}${q ? `?${q}` : ""}`);
+}
+
+export async function getChannelThread(nestId: string, name: string, threadId: string, opts: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams({ thread: threadId });
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.offset) qs.set("offset", String(opts.offset));
+  return request<{
+    channel: ChannelSummary;
+    thread: { post: ChannelPost; replies: ChannelMessage[]; pagination: ChannelPagination };
+  }>(`${channelPath(nestId, name)}?${qs}`);
+}
+
+/** Only what was written after `since` (a `next_since` cursor), oldest first. */
+export async function getChannelSince(nestId: string, name: string, since: string) {
+  return request<{ channel: ChannelSummary; messages: ChannelNewMessage[]; has_more: boolean; next_since: string }>(
+    `${channelPath(nestId, name)}?since=${encodeURIComponent(since)}`,
+  );
+}
+
+/** Mark the channel read for the caller as of now (`unread` comes back 0). */
+export async function markChannelRead(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/read`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Agent handles the `@` picker offers next to the nest's people. */
+export async function listAgentHandles(nestId: string) {
+  return request<{ agents: AgentHandle[] }>(`/nests/${nestId}/agent-handles`);
+}
 
 // ─── Comments & activity (collaboration) ─────────────────────────────────
 
@@ -3261,6 +3590,9 @@ export interface Publication {
   comments_enabled: boolean;
   watermark: boolean;
   no_download: boolean;
+  /** The page shows the "Make your own nest" strip. Absent on a server that
+   *  predates the setting, where it is always shown. */
+  show_invite?: boolean;
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;
@@ -3286,6 +3618,7 @@ export async function createPublication(
     comments_enabled?: boolean;
     watermark?: boolean;
     no_download?: boolean;
+    show_invite?: boolean;
     code?: string | null;
     allowlist?: string[];
     expires_at?: string | null;
@@ -3294,6 +3627,18 @@ export async function createPublication(
   return request<{ publish: Publication; link: string }>(
     `/nests/${nestId}/publications`,
     { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** Change a live link's settings in place; its URL stays the same. */
+export async function updatePublication(
+  nestId: string,
+  publishId: string,
+  data: { show_invite: boolean },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications/${publishId}`,
+    { method: "PATCH", body: JSON.stringify(data) },
   );
 }
 
@@ -3672,6 +4017,8 @@ export interface WorkItem {
   requested_by: string;
   requested_at: string;
   priority?: string;
+  /** Review items: the version under review. */
+  version?: number;
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;
@@ -3720,19 +4067,66 @@ export interface AssignedItem {
   open_blockers?: number;
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number }) {
+/**
+ * An open comment thread that @mentions the caller (or an agent they own) and
+ * waits on their answer (PO-1180). Gone once they reply in it after the
+ * mention, or it is resolved.
+ */
+export interface MentionItem {
+  type: "mention";
+  /** "channel" opens the channel timeline at the thread; "document" opens
+   *  the document with the comment thread focused. */
+  kind: "channel" | "document";
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  channel: string | null;
+  thread_id: string;
+  comment_id: string;
+  excerpt: string;
+  author: string;
+  /** The author's display name (their email when they have none). */
+  author_name?: string;
+  /** "<agent>, on behalf of <person>", or the person, by display name. */
+  author_label: string;
+  agent: string | null;
+  /** Set when an agent you own was tagged rather than you. */
+  for_agent: string | null;
+  mentioned_at: string;
+}
+
+/** Clear the caller's own mention of a thread from My Work. The message and
+ *  the thread are untouched; the row returns only if a later message in that
+ *  thread mentions them again. */
+export async function markMentionDone(threadId: string) {
+  return request<{ done: true; thread_id: string; for_agent: string | null }>(
+    `/me/work/mentions/${encodeURIComponent(threadId)}/done`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));
   const qs = q.toString();
   return request<{
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
     assigned?: AssignedItem[];
-    /** Reviews + requests waiting on the caller, all pages; excludes `waiting`. */
+    /** Open threads that @mention the caller, one page (PO-1180). */
+    mentions?: MentionItem[];
+    /** Reviews + requests + open mentions waiting on the caller, all pages;
+     *  excludes `waiting`. */
     waiting_on_me_total?: number;
+    /** Pending reviews filed as urgent that this caller can decide. */
+    urgent_reviews_total?: number;
     pagination?: WorkPagination;
+    /** The mentions' own paging; `total` is every open mention. */
+    mentions_pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 
@@ -3785,6 +4179,15 @@ export interface StreamItem {
   status: string;
   /** null where the caller reads the nest only publicly. */
   author: string | null;
+  /** The author's display name; null when none, and for public readers. */
+  authorName?: string | null;
+  /** The write's attribution (spec §9.4); `client.agent` is the agent the
+   *  person wrote through. null when none, and for public readers. */
+  client?: ClientAttribution | null;
+  /** The version's change note (system auto-publish stamps excluded). */
+  changeNote?: string | null;
+  /** On a version in review: may the caller approve / request changes? */
+  review?: { canReview: boolean } | null;
   at: string;
   summary: string;
   /** Comments on the document's open threads; null where the caller reads
@@ -3847,10 +4250,15 @@ export async function approveReview(nestId: string, nodeId: string, note?: strin
   });
 }
 
-export async function rejectReview(nestId: string, nodeId: string, note?: string) {
+export async function rejectReview(
+  nestId: string,
+  nodeId: string,
+  note?: string,
+  kind?: "changes" | "reject",
+) {
   return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ note }),
+    body: JSON.stringify({ note, kind }),
   });
 }
 
@@ -4309,7 +4717,7 @@ export type HootieMention =
       thread_id: string;
       notified: number;
     }
-  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+  | { status: "undeliverable"; reason: "no_anchor" | "channel" | "post_failed" };
 
 /** What Hootie is doing mid-answer: `tool` is the tool that's running
  *  (`search_nest`, `get_node`, `board_items`, …) or `broaden` (the server's
@@ -4779,3 +5187,274 @@ export async function backfillTickets(nestId: string, body: { limit?: number; dr
     results: { id: string; ticket?: string; outcome: string; reason?: string }[];
   }>(`/nests/${nestId}/tickets/backfill`, { method: "POST", body: JSON.stringify(body) });
 }
+
+// ═══ Control room: Surfaces setup (po-1186 CR3) ═══════════════════════════
+// Kept in one block on purpose: the setup wizard's reads and writes over the
+// existing /surfaces routes, plus the channel list CR3 adds. Credential values
+// only ever go out (PUT); the server answers with set/unset booleans.
+
+export interface SurfacesInstallRef {
+  id: string;
+  surface: string;
+  mode: "manifest" | "hosted" | "selfhosted";
+  status: "pending" | "active" | "revoked" | "disconnected";
+  home_nest_id: string | null;
+}
+
+export interface SurfacesStatus {
+  enabled: true;
+  installs: SurfacesInstallRef[];
+  bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
+  org_name: string | null;
+  slack_hosted: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesBinding {
+  id: string;
+  install_id: string;
+  nest_id: string;
+  conversation_id: string;
+  conversation_name?: string | null;
+  status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  [k: string]: unknown;
+}
+
+export interface SurfacesGuardDetail {
+  readers_total: number;
+  readers_absent: number;
+  members_total: number;
+  members_not_readers: number;
+  guests: number;
+  externals: number;
+  non_user_principals: string[];
+  universe: boolean;
+  org_wide: boolean;
+  ext_shared: boolean;
+}
+
+export interface SurfacesBindingPreview {
+  no_seed: boolean;
+  would_bind: boolean;
+  guard: { capture_ok: boolean; surface_ok: boolean; members_known: boolean; detail: SurfacesGuardDetail };
+  conversation_kind: string | null;
+  is_ext_shared: boolean | null;
+  ext_capture_enabled: boolean;
+  disclosure: string;
+}
+
+export interface SurfacesChannel {
+  id: string;
+  name: string | null;
+  is_private: boolean;
+  is_ext_shared: boolean;
+  num_members: number | null;
+  binding: { id: string; nest_id: string; status: string } | null;
+}
+
+export interface SurfacesSeedRef {
+  id: string;
+  version: number;
+  title: string;
+  source: "bundled" | "library";
+  library_nest_id: string | null;
+}
+
+export interface SurfacesSeedItem {
+  kind: "folder" | "node" | "context" | "definition";
+  target: string;
+  action: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface SurfacesSeedResult {
+  status: string;
+  nest_id: string;
+  seed: { id: string; version: number };
+  items: SurfacesSeedItem[];
+  listener: { propose_folders: string[] };
+}
+
+export interface SurfacesSettingsView {
+  quiet_minutes: number;
+  buffer_ttl_hours: number;
+  reviewer_daily_cards: number;
+  conversation_daily_cards: number;
+  dm_capture: boolean;
+  [k: string]: unknown;
+}
+
+const surfacesJson = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
+
+export const getSurfacesStatus = () => request<SurfacesStatus>("/surfaces/status");
+export const getSurfacesSettings = () => request<{ settings: SurfacesSettingsView }>("/surfaces/settings").then((r) => r.settings);
+export const listSurfacesBindings = () => request<{ bindings: SurfacesBinding[] }>("/surfaces/bindings").then((r) => r.bindings);
+export const createSlackInstall = (homeNestId: string) =>
+  request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
+export const getSlackInstall = (id: string) =>
+  request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** Write-only: values go to the server and never come back. */
+export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
+  request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
+    method: "PUT",
+    body: JSON.stringify(creds),
+  });
+/** Browser navigations (the server answers with a redirect to Slack). */
+export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
+export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
+export const listSlackChannels = (installId: string) =>
+  request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
+export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+  request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
+export const listSurfacesSeeds = (nestId: string) =>
+  request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);
+export const getSurfacesSeedStatus = (nestId: string) =>
+  request<{ nest_id: string; no_seed: boolean; applied: Array<{ seed_id: string; version: number }> }>(`/surfaces/seeds/status?nest_id=${encodeURIComponent(nestId)}`);
+export const applySurfacesSeed = (b: { nest_id: string; seed_id: string; library_nest_id?: string | null; dry_run?: boolean }) =>
+  request<SurfacesSeedResult>("/surfaces/seeds/apply", surfacesJson(b));
+// ═══ end Control room (po-1186 CR3) ═══════════════════════════════════════
+
+// ═══ Control room: dashboard, decision ledger, agents (po-1186 CR2) ════════
+// Kept in one block on purpose (CR3's setup block sits above). Reads over the
+// CR1 ledger/rollups routes and the CR2 cold-start route; one write: register
+// an agent. Shapes live in lib/control-room-overview.ts.
+
+import type {
+  LedgerEntry as CrLedgerEntry,
+  LedgerTotals as CrLedgerTotals,
+  RollupRow as CrRollupRow,
+  BudgetLite as CrBudget,
+} from "./control-room-overview";
+
+export interface CrLedgerQuery {
+  from: string;
+  to: string;
+  agent?: string;
+  verdict?: string;
+  state?: string;
+  source?: string;
+  binding?: string;
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface CrLedgerPage {
+  api_version: string;
+  range: { from: string; to: string };
+  entries: CrLedgerEntry[];
+  next_cursor: string | null;
+  totals: CrLedgerTotals;
+}
+
+export interface CrRollups {
+  api_version: string;
+  grain: "day" | "week";
+  by: "agent" | "nest" | "binding" | "reason" | "none";
+  range: { from: string; to: string };
+  rows: CrRollupRow[];
+  totals: CrLedgerTotals;
+  reconciles_with: string;
+}
+
+export interface CrTrace {
+  api_version: string;
+  entry: CrLedgerEntry;
+  chain: {
+    run: { id: string; agent_node: string | null; status: string; outcome: string | null; started_at: string; finished_at: string | null; cost_usd: number; external_ref?: string | null; triggered_by?: string } | null;
+    verdict: (CrLedgerEntry["verdict"] & { decision?: CrLedgerEntry["decision"]; model?: string | null; prompt_version?: string | null }) | null;
+    proposal: Record<string, any> | null;
+    review: { state: string; by?: string | null; reason?: string | null; at: string } | null;
+    version: { node_id?: string; version: number | null; edited?: boolean; at: string; saved_by?: string | null; author?: string | null } | null;
+    source: { kind: string; label: string | null; url?: string | null; triggered_by?: string | null } | null;
+  };
+  steps: Array<{ seq: number; action: string; node_id: string | null; edge_id: string | null; detail: Record<string, any> | null; at: string }>;
+  gaps: string[];
+}
+
+export interface CrColdStart {
+  nest_id: string;
+  nest_label: string;
+  redacted: "n1" | null;
+  no_seed: boolean;
+  seed: { id: string; version: number; applied_at: string } | null;
+  folders: Array<{ path: string; approved: number; first_approved_at: string | null }>;
+  /** The seed's listener settings couldn't be read, so folder names are withheld. */
+  folders_withheld?: boolean;
+  coverage: { covered: number; total: number };
+  first_approved: { node_id: string | null; at: string; after_seed_ms: number } | null;
+  mirror: { people: { proposed: number; accepted: number }; areas: { proposed: number; accepted: number } };
+  cumulative: Array<{ day: string; approved: number }>;
+}
+
+const crQs = (o: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== "") p.set(k, String(v));
+  return p.toString();
+};
+const crBase = (nestId: string | null, what: "ledger" | "rollups") => (nestId ? `/nests/${encodeURIComponent(nestId)}/${what}` : `/${what}`);
+
+/** One page of the decision ledger, for one nest or every nest the caller administers. */
+export const getLedger = (nestId: string | null, q: CrLedgerQuery) =>
+  request<CrLedgerPage>(`${crBase(nestId, "ledger")}?${crQs({ ...q })}`);
+
+export const getRollups = (
+  nestId: string | null,
+  q: Omit<CrLedgerQuery, "cursor" | "limit" | "q"> & { grain: "day" | "week"; by: CrRollups["by"] },
+) => request<CrRollups>(`${crBase(nestId, "rollups")}?${crQs({ ...q })}`);
+
+export const getLedgerTrace = (entryId: string) => request<CrTrace>(`/ledger/${encodeURIComponent(entryId)}`);
+
+export const getColdStart = (nestId: string | null) =>
+  request<{ api_version: string; nests: CrColdStart[] }>(`/surfaces/cold-start${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`).then((r) => r.nests);
+
+export const getSurfacesBudget = (nestId: string) =>
+  request<{ budget: CrBudget }>(`/surfaces/nests/${encodeURIComponent(nestId)}/budget`).then((r) => r.budget);
+
+/** The ledger export URL (CSV); the browser downloads it with the session cookie. Each export is logged in the nest's activity. */
+export const ledgerExportUrl = (nestId: string, q: Pick<CrLedgerQuery, "from" | "to" | "agent" | "verdict" | "q">, format: "csv" | "ndjson" = "csv") =>
+  `/nests/${encodeURIComponent(nestId)}/ledger/export?${crQs({ ...q, format })}`;
+
+/** Register (upsert) an outside agent as an agent document in the nest. Owner/admin. */
+export const registerAgent = (nestId: string, body: { name: string; runtime?: string; description?: string }) =>
+  request<{ node_id: string; created: boolean; api_version: string }>(`/nests/${encodeURIComponent(nestId)}/agents`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+// ═══ end Control room (po-1186 CR2) ═══════════════════════════════════════
+// ─── First-run onboarding (PO-1185) ─────────────────────────────────────────
+
+export interface DistillJobView {
+  id: string;
+  nest_id: string;
+  url: string;
+  status: "running" | "done" | "failed";
+  phase: "fetching" | "extracting" | "organizing" | "writing" | "done" | "failed";
+  done_steps: number;
+  total_steps: number;
+  nodes: Array<{ id: string; title: string }>;
+  error: string | null;
+}
+
+export type DistillStart =
+  | { mode: "server"; job: DistillJobView }
+  | { mode: "agent"; reason: string; prompt: string; ontology_id: string };
+
+export const getOnboarding = () => request<OnboardingState>("/onboarding");
+export const dismissOnboarding = () => request<OnboardingState>("/onboarding/dismiss", { method: "POST", body: "{}" });
+export const reopenOnboarding = () => request<OnboardingState>("/onboarding/reopen", { method: "POST", body: "{}" });
+export const createMyNest = (name?: string) =>
+  request<{ nest: { id: string; name: string; created: boolean }; state: OnboardingState }>("/onboarding/nest", {
+    method: "POST",
+    body: JSON.stringify(name ? { name } : {}),
+  });
+export const getConnectionEvidence = (nestId: string, since: string) =>
+  request<ConnectionEvidence>(`/onboarding/connection?nest_id=${encodeURIComponent(nestId)}&since=${encodeURIComponent(since)}`);
+export const startDistill = (nestId: string, url: string) =>
+  request<DistillStart>("/onboarding/distill", { method: "POST", body: JSON.stringify({ nest_id: nestId, url }) });
+export const getDistillJob = (jobId: string) => request<{ job: DistillJobView }>(`/onboarding/distill/${encodeURIComponent(jobId)}`);
+/** A browser navigation (OAuth redirect), not a fetch. */
+export const slackConnectUrl = (nestId: string) => `/onboarding/slack/start?nest_id=${encodeURIComponent(nestId)}`;

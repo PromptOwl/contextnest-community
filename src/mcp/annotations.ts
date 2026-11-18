@@ -40,6 +40,10 @@ const overwriteOutside = (title: string, why: string): ToolClassification => ({ 
 export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Server level ───────────────────────────────────────────────────────
   nest_index: read("List nests", "Lists the nests these credentials can read."),
+  // First-run onboarding (PO-1185).
+  context_onboarding: read("Onboarding status", "Reads the caller's welcome-screen state, the activity trace and the caller's own distill job; changes nothing."),
+  context_onboarding_update: add("Update onboarding", "Flips the caller's own welcome-screen flag, or adds the caller's nest; never removes anything."),
+  context_distill: addOutside("Distill a source", "Fetches a public URL from the open internet and adds draft documents (and the ontology document) to a nest; never overwrites or publishes model output."),
   nest_create: add("Create nest", "Creates a new, empty nest; a taken name gets a suffix, never an overwrite."),
 
   // ─── Reading a nest ─────────────────────────────────────────────────────
@@ -54,6 +58,11 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_resolve: read("Fetch matching documents", "Resolves a selector to documents and their bodies."),
   context_export: read("Export whole nest", "Returns the readable documents as one text; it sends nothing anywhere."),
   context_comments: read("Read comments", "Returns a document's comment threads."),
+  context_channel_read: read("Read channel", "Returns a channel's posts or one thread."),
+  context_message_read: read("Read message", "Returns one channel message, with its edit history on request."),
+  context_channel_search: read("Search messages", "Searches channel messages the caller can read."),
+  context_decisions: read("View conversation decisions", "Returns the decisions promoted or remembered from conversations."),
+  context_channel_knowledge: read("View channel knowledge", "Returns the nodes a channel produced and their review status."),
   context_relations: read("List task relations", "Returns a task's relations."),
   context_boards: read("List boards", "Lists saved boards."),
   context_board_items: read("List board items", "Returns a board's items."),
@@ -63,6 +72,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_access_requests: read("View access requests", "Lists pending access requests."),
   context_review_queue: read("View review queue", "Lists review requests."),
   context_my_drafts: read("View my drafts", "Lists the caller's unsubmitted drafts."),
+  context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
+  context_my_work: read("View my work", "Returns the caller's queue: mentions, reviews and requests, assignments, notifications."),
   context_versions: read("View version history", "Returns a document's version history."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
@@ -72,13 +83,38 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_update: overwriteOutside("Update document", "Replaces content, tags and fields of an existing node. On a nest with a docs site, this can change a public page."),
   context_bulk_update: overwriteOutside("Update many documents", "Changes tags, fields and columns on up to 100 existing nodes. On a nest with a docs site, this can change a public page."),
   context_delete: overwriteOutside("Delete documents", "Deletes nodes with their history, irreversibly. On a nest with a docs site, this can change a public page."),
+  context_archive: addOutside("Archive document", "Takes a node out of lists and retrieval; nothing is deleted and context_unarchive restores it."),
+  context_unarchive: addOutside("Unarchive document", "Brings an archived node back in the status it left."),
   context_move: addOutside("Move document or folder", "Refiles a node or folder; an occupied destination is refused, history follows, and it can be moved back. On a nest with a docs site, this can change a public page."),
   context_table_rows: overwriteOutside("Change table rows", "Updates and deletes rows of a table node. On a nest with a docs site, this can change a public page."),
   context_instructions_update: overwrite("Replace nest instructions", "Replaces the whole of CONTEXT.md."),
   context_task_log: add("Log task activity", "Appends to a task's log; claiming only takes an unassigned task."),
 
   // ─── Comments and relations ─────────────────────────────────────────────
+  context_channels: overwriteOutside("Manage channels", "Lists, creates or archives channels; a channel is a node, so creating or archiving one can change what a public docs site serves, like context_create."),
+  context_agent_webhooks: overwriteOutside("Manage agent webhooks", "Lists, sets or removes where an agent's @mentions are POSTed; set replaces a target and the server then sends events to that outside URL."),
+  // Team chat C2 (PO-1197). Conversations and private channels are nodes the
+  // public docs site never serves, so none of these reaches outside.
+  context_conversation_read: read("Read conversation", "Returns a direct or group conversation's posts, one thread, or what is new since a cursor; nothing changes."),
+  context_conversations: overwrite("Manage conversations", "Lists, starts or finds direct and group conversations, adds a member, or leaves one; leaving removes your own membership."),
+  context_channel_members: overwrite("Manage channel members", "Lists a channel's members, invites, joins or leaves, or makes it private or public, which changes who can read it."),
+  context_chat_preferences: overwrite("Chat notification preferences", "Reads or sets your chat notification level for a nest or one conversation, replacing the previous level."),
+  context_presence: add("Set presence", "Lists who is around in the nest, or marks you active for five minutes; nothing is kept beyond that."),
+  context_remember: addOutside("Remember as node", "Creates a node from a message or thread as your own draft (review queue on a governed nest) and replies in the thread. On a nest with a docs site, a published one can change a public page."),
+  context_correct: overwriteOutside("Propose a correction", "Drafts a new version of a node with a correction block and submits it for review; replies in the thread. Where your own edit would publish, this publishes."),
+  context_channel_watch: overwriteOutside("Watch channel", "Saves which metacognition agent watches a channel and runs it; the agent then proposes drafts for review from the conversation (it never posts)."),
+  // The nest in the conversation (team chat C7, PO-1198).
+  context_ask_nest: addOutside("Ask the nest", "Runs a Hootie turn as the caller: the question, the thread's text and retrieved documents go to the configured model provider (outside); with post, adds messages and files hootie-authored drafts for review — never publishes or edits what exists."),
+  context_agents: overwrite("Agent profiles", "Lists and reads agent profiles (a query over existing data); with a description, replaces the agent's earlier description. A read-only key gets a list/read-only view."),
+  context_handoff: add("Hand off a thread", "Adds a handoff message (which mentions the target, so it notifies or wakes them like any comment) or a status update; nothing is edited or removed."),
+  // Hire agents and recommend them (PO-1201, team chat C10).
+  context_hire_catalog: read("View agent catalog", "Lists the kinds of agent this server can offer the nest, with availability."),
+  context_hired_agents: read("List hired agents", "Lists the nest's hired agents, derived from existing rows."),
+  context_agent_recommendations: add("Agent recommendations", "Lists rule-based recommendations; dismiss adds the caller's own mark and removes nothing shared."),
+  context_hire_agent: overwriteOutside("Hire or release agent", "Hire creates a metacognition agent, an agent webhook (the server then POSTs to that outside URL) or a nest-scoped key; let_go deletes one of those."),
+  context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
+  context_message: overwrite("Act on message", "Reacts to, pins or saves a channel message; edit replaces the caller's own text (history kept) and delete leaves a tombstone. Nothing leaves the nest."),
   context_resolve_comment: add("Resolve comment thread", "Flips a thread between open and resolved; the thread is kept and can be reopened."),
   context_add_relation: add("Add task relation", "Adds a relation; duplicates are refused."),
   context_remove_relation: overwrite("Remove task relation", "Removes a relation."),
@@ -104,6 +140,12 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Nest administration ────────────────────────────────────────────────
   context_headless: overwrite("Manage headless publishing", "Dispatches status, enable, disable, create_key and revoke_key; disabling pauses and revoking removes keys. The token goes only to the caller."),
   context_set_visibility: overwriteOutside("Set nest visibility", "Replaces who can read the nest, up to anyone on the internet."),
+  // Public links (PO-1365): /p/<slug> pages on the open web.
+  context_public_links: read("List public links", "Lists the nest's publish rows and their URLs."),
+  context_public_link_create: addOutside("Publish public link", "Adds a page on the open web that serves the document's approved version, and emails an invite list; it replaces nothing."),
+  context_public_link_update: overwriteOutside("Update public link", "Overwrites a published page's settings in place (whether it shows the Make your own nest strip); the page is on the open web."),
+  context_public_link_revoke: overwriteOutside("Revoke public link", "Takes a published page off the open web for good; the document is untouched."),
+  context_nest_teams: overwrite("Share nest with teams", "Dispatches list, share and unshare; sharing gives every team member their team role on the nest, and unsharing removes it."),
   context_systems: overwrite("Manage system identities", "Dispatches list, create, rotate, revoke, add_nest and remove_nest; rotating and revoking kill keys. The token goes only to the caller."),
 
   // ─── Metacognition agents ───────────────────────────────────────────────
@@ -127,6 +169,18 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   workflow_edge_type_upsert: overwrite("Save edge type", "Overwrites an edge type of the same name."),
   workflow_edge_type_delete: overwrite("Delete edge type", "Deletes an edge type."),
 
+  // ─── Agent control room (po-1186) ───────────────────────────────────────
+  context_agent_register: add("Register agent", "Creates an agent node if none has that id; an existing agent is left as it is."),
+  context_agent_run_start: add("Start agent run", "Records a new run (report-only by default); a repeated idempotency key replays, never duplicates."),
+  context_agent_run_step: add("Record agent step", "Appends a decision, proposal, outcome or other step to an open run."),
+  context_agent_run_close: overwrite("Close agent run", "Closes a run; the trace sent here replaces the stored one."),
+  context_agent_ledger: read("View decision ledger", "Lists agent decisions with their chain to the saved version."),
+  context_agent_ledger_trace: read("Trace ledger entry", "Returns one decision's chain, steps and gaps."),
+  context_agent_ledger_export: read("Export decision ledger", "Returns ledger rows as NDJSON; it sends nothing anywhere (the export is logged)."),
+  context_agent_rollups: read("View agent rollups", "Counts the ledger by day or week and by agent, nest or channel."),
+  context_agent_ledger_org: read("View org ledger", "The decision ledger across the nests the caller administers."),
+  context_agent_rollups_org: read("View org rollups", "Rollups across the nests the caller administers."),
+
   // ─── Surfaces: reads ────────────────────────────────────────────────────
   context_surfaces_status: read("Show Surfaces status", "Counts bindings from the server's own tables."),
   context_surfaces_bindings_list: read("List conversation bindings", "Lists bindings from the server's own tables."),
@@ -141,6 +195,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_surfaces_budget_get: read("View Surfaces budget", "Returns the nest's spend budget."),
   context_surfaces_seed_list: read("List available seeds", "Lists available seeds."),
   context_surfaces_seed_status: read("View applied seeds", "Lists applied seeds."),
+  context_surfaces_cold_start: read("View cold start", "Counts approved documents per seed folder from the server's own tables."),
+  context_surfaces_slack_channels_list: readOutside("List Slack channels", "Saves nothing, but asks the third-party workspace which channels the bot is in."),
 
   // ─── Surfaces: writes ───────────────────────────────────────────────────
   context_surfaces_binding_create: addOutside("Bind conversation", "Binds a conversation: reads its members from the workspace and posts a notice there."),

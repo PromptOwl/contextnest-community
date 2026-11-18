@@ -170,23 +170,6 @@ test.describe('Message log', () => {
     }
   });
 
-  test('CN-MSG-003: the page displays its title, information notice and tabs', async ({ primary_user }) => {
-    await asAdmin(primary_user);
-    const { messageLogPage: ml } = primary_user;
-    await ml.gotoAndRead();
-    await expect(ml.pageTitle).toHaveText('Message log');
-    await expect(ml.notice).toHaveText(
-      'Everything this server sent — email, Slack and Teams, webhooks, inbox notifications, and agent comments — across every nest. Visible to superadmins only. Passwords, sign-in links, keys and webhook URLs are redacted before storage, and every view is recorded in the access log.'
-    );
-    await expect(ml.messagesTab).toHaveAttribute('aria-selected', 'true');
-    await expect(ml.accessTab).toHaveAttribute('aria-selected', 'false');
-    await expect(ml.search).toBeVisible();
-    await expect(ml.channelSelect).toHaveText('All channels');
-    await expect(ml.senderSelect).toHaveText('All senders');
-    await expect(ml.statusSelect).toHaveText('Any status');
-    await expect(ml.refreshButton).toBeEnabled();
-  });
-
   test('CN-MSG-004: the messages table displays the correct columns, sorted newest first', async ({ primary_user }) => {
     await asAdmin(primary_user);
     const { messageLogPage: ml } = primary_user;

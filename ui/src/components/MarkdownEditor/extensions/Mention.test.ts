@@ -25,6 +25,11 @@ describe("findMentions", () => {
     expect(m.name).toBe("Hiren F");
   });
 
+  it("leaves a sentence's full stop out of the chip", () => {
+    const [m] = findMentions("thanks @rita.");
+    expect(m).toMatchObject({ name: "rita", start: 7, end: 12 });
+  });
+
   it("handles a mention at the very start of the text", () => {
     const text = "@hiren@promptowl.ai please review";
     const [m] = findMentions(text);
@@ -41,5 +46,19 @@ describe("findMentions", () => {
       "@example.com",
     );
     expect(text.slice(matches[1].start, matches[1].end)).toBe("@(Bea)");
+  });
+
+  it("does not take a sentence's full stop into the name (PO-1189, as the server reads it)", () => {
+    const text = "thanks @rita. And @hiren@promptowl.ai.";
+    const [a, b] = findMentions(text);
+    expect(a.name).toBe("rita");
+    expect(text.slice(a.start, a.end)).toBe("@rita");
+    expect(b.name).toBe("hiren@promptowl.ai");
+    expect(text.slice(b.start, b.localEnd)).toBe("@hiren");
+    expect(text.slice(b.localEnd, b.end)).toBe("@promptowl.ai");
+  });
+
+  it("drops a match that is only dots", () => {
+    expect(findMentions("wait @... what")).toEqual([]);
   });
 });

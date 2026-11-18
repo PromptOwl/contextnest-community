@@ -22,6 +22,7 @@ import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
 import { formatClient, type ClientAttribution } from "@/lib/client-attribution";
+import { versionAgent, clientTitle } from "@/lib/version-author";
 import { NEVER_PUBLISHED_HINT } from "./version-hints";
 
 export interface Version {
@@ -43,6 +44,8 @@ export interface Version {
    *  has resolved a review. Drives the "approved by …" hint in the row. */
   resolvedBy?: string;
   resolutionStatus?: "approved" | "rejected" | string;
+  /** For a rejected version: "changes" (sent back) or "reject" (declined). */
+  resolutionKind?: "changes" | "reject" | string;
   /** The reviewer's own note on that verdict — the rejection reason, or an
    *  approver's comment. Rendered in the row so it isn't buried behind a click. */
   resolutionNote?: string;
@@ -486,7 +489,9 @@ export function VersionHistory({
                   }`}
                 >
                   {previewVersion.resolutionStatus === "rejected"
-                    ? "Rejected by"
+                    ? previewVersion.resolutionKind === "reject"
+                      ? "Rejected by"
+                      : "Changes requested by"
                     : "Approved by"}{" "}
                   {previewVersion.resolvedBy}: {previewVersion.resolutionNote}
                 </div>
@@ -672,10 +677,27 @@ export function VersionHistory({
                           <EditedBy version={version} />
                         </span>
                       </div>
+                      {/* The agent the write named sits under the human, on
+                          its own line and in the same type — two writers, not
+                          one. Session and custom keys go to the hover title.
+                          A block with no agent keeps the old "Client:" line,
+                          in its old place under the date. */}
+                      {version.client && versionAgent(version) ? (
+                        <div
+                          className="text-xs text-muted-foreground break-words"
+                          title={clientTitle(version.client)}
+                          data-testid="version-agent"
+                        >
+                          Agent:{" "}
+                          <span className="font-medium text-foreground/80">
+                            {versionAgent(version)}
+                          </span>
+                        </div>
+                      ) : null}
                       <div className="text-xs text-muted-foreground">
                         {formatDate(version.editedAt)}
                       </div>
-                      {version.client && (
+                      {version.client && !versionAgent(version) && (
                         <div className="text-xs text-muted-foreground break-words">
                           Client:{" "}
                           <span className="font-mono text-foreground/70">
@@ -686,7 +708,9 @@ export function VersionHistory({
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
-                            ? "Rejected by"
+                            ? version.resolutionKind === "reject"
+                              ? "Rejected by"
+                              : "Changes requested by"
                             : "Approved by"}
                           :{" "}
                           <span className="font-medium text-foreground/80">

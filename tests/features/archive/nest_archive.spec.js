@@ -3,7 +3,7 @@
  *
  * Page under test: the nest page (ui/src/components/NestView.tsx) — archiving
  * from inside a nest, what an archived nest still offers, its published links,
- * and the editor's archive request with its Review Queue decision. Archiving,
+ * and the editor's archive request with its decision in My Work. Archiving,
  * the Archived switch and restoring from the dashboard are covered by the
  * Dashboard suite (CN-DASH-045 … CN-DASH-050).
  *
@@ -92,7 +92,7 @@ test.describe('Nest archive', () => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'arch-instead');
 
     await page.goto(nest.id);
-    await page.chooseMenu('Delete');
+    await page.startDelete();
     await expect(page.deleteDialog).toBeVisible();
     // The name is not typed: Delete stays locked, Archive instead does not.
     await expect(page.deleteConfirmInput).toHaveValue('');
@@ -108,7 +108,7 @@ test.describe('Nest archive', () => {
     expect(await api.isLive(nest.id), 'the nest left the live list').toBe(false);
   });
 
-  test('CN-ARCH-002: Verify that an archived nest opens with Connect, Add with AI, Share, New Folder, Import and New Document hidden', async ({
+  test('CN-ARCH-002: Verify that an archived nest opens with Connect, Add with AI, Invite, New Folder, Import and New Document hidden', async ({
     primary_user,
     commonFunction,
   }) => {
@@ -137,15 +137,15 @@ test.describe('Nest archive', () => {
     ]) {
       await expect(action).toHaveCount(0);
     }
-    // The governance tabs are withheld too, and the nest menu keeps no write
-    // action (at most the read-only Activity log).
+    // The governance tabs are withheld too, and Settings keeps no write
+    // action (Delete, review settings).
     await expect(page.tab('Overview')).toBeVisible();
-    for (const tab of ['Review Queue', 'External Edits', 'Collaborators']) {
+    for (const tab of ['External Edits', 'Collaborators', 'Activity']) {
       await expect(page.tab(tab)).toHaveCount(0);
     }
-    const menu = await page.menuItems();
-    for (const entry of ['Delete', 'Nest settings', 'Structure rules', 'Activity trace']) {
-      expect(menu, `the archived nest's menu offers no "${entry}"`).not.toContain(entry);
+    const actions = await page.settingsActions();
+    for (const entry of ['Delete', 'Edit review settings']) {
+      expect(actions, `the archived nest's Settings offers no "${entry}"`).not.toContain(entry);
     }
   });
 
@@ -270,8 +270,8 @@ test.describe('Nest archive', () => {
     const reason = `QA archive ask ${Date.now()}`;
 
     await editorPage.goto(owner.nest.id);
-    await expect.poll(() => editorPage.menuItems(), WRITE).toContain('Delete');
-    await editorPage.chooseMenu('Delete');
+    await expect.poll(() => editorPage.settingsActions(), WRITE).toContain('Delete');
+    await editorPage.startDelete();
     await expect(editorPage.requestDialog).toBeVisible();
     // Both asks stay locked until there is a reason.
     await expect(editorPage.reasonSecondary).toHaveText('Request archive');
@@ -290,14 +290,14 @@ test.describe('Nest archive', () => {
       test.info().annotations.push({
         type: 'known issue',
         description:
-          'After "Request archive" the requester\'s "Archive requested" badge (and the menu without Delete) can stay missing until the nest page is reloaded.',
+          'After "Request archive" the requester\'s "Archive requested" badge (and Settings without Delete) can stay missing until the nest page is reloaded.',
       });
       await editorPage.page.reload();
       await editorPage.backToNests.waitFor({ state: 'visible' });
     }
     await expect(editorPage.flagBadge).toHaveText(/Archive requested/, WRITE);
     // While it is pending, the editor can't raise another one.
-    await expect.poll(() => editorPage.menuItems(), { timeout: 30_000 }).not.toContain('Delete');
+    await expect.poll(() => editorPage.settingsActions(), { timeout: 30_000 }).not.toContain('Delete');
 
     // The server holds it as an archive request with that reason.
     const pending = await owner.api.deletionRequests(owner.nest.id);
@@ -330,7 +330,7 @@ test.describe('Nest archive', () => {
     expect(await owner.api.isLive(owner.nest.id)).toBe(true);
   });
 
-  test('CN-ARCH-009: Verify that rejecting an archive request from the Review Queue removes it and keeps the nest live', async ({
+  test('CN-ARCH-009: Verify that rejecting an archive request from My Work removes it and keeps the nest live', async ({
     primary_user,
     secondary_user,
     commonFunction,
@@ -340,7 +340,6 @@ test.describe('Nest archive', () => {
     const reason = `QA reject me ${Date.now()}`;
     await editorApi.requestNestDeletion(owner.nest.id, 'nest_archive', reason);
 
-    await owner.page.goto(owner.nest.id);
     await owner.page.openReviewQueue();
     const row = owner.page.requestRow(reason);
     await expect(row).toBeVisible(WRITE);
@@ -357,7 +356,7 @@ test.describe('Nest archive', () => {
     expect(declined.some((r) => r.reason === reason)).toBe(true);
   });
 
-  test('CN-ARCH-010: Verify that approving an archive request from the Review Queue archives the nest', async ({
+  test('CN-ARCH-010: Verify that approving an archive request from My Work archives the nest', async ({
     primary_user,
     secondary_user,
     commonFunction,
@@ -367,7 +366,6 @@ test.describe('Nest archive', () => {
     const reason = `QA approve me ${Date.now()}`;
     await editorApi.requestNestDeletion(owner.nest.id, 'nest_archive', reason);
 
-    await owner.page.goto(owner.nest.id);
     await owner.page.openReviewQueue();
     await expect(owner.page.requestRow(reason)).toBeVisible(WRITE);
     await owner.page.requestRow(reason).getByRole('button', { name: 'Approve', exact: true }).click();

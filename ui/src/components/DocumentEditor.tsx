@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SuggestDialog } from "./OrgContribution";
@@ -26,6 +27,7 @@ import {
   tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
+import { visibleTags } from "../lib/ticket";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -80,12 +82,14 @@ import {
   Star,
   Megaphone,
   Undo2,
+  Archive,
   PanelLeft,
   Globe,
   Building2,
   Lock,
   Activity,
   LayoutPanelTop,
+  FileDiff,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -112,6 +116,7 @@ import { CodeHighlight } from "./CodeHighlight";
 import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
+import { shareDocumentLink } from "../lib/share-link";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -149,6 +154,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { versionAuthorShort, clientTitle, lastEditParts, type LastEdit } from "../lib/version-author";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -212,6 +218,8 @@ interface DocumentEditorProps {
   /** After an approve or reject: leave for the queue the doc came from.
    *  Absent = stay and reload the document. */
   onReviewed?: () => void;
+  /** Open this change in the nest's review pane, on its changes. */
+  onOpenReviewPane?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -262,6 +270,7 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onReviewed,
+  onOpenReviewPane,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -290,7 +299,23 @@ export function DocumentEditor({
   // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
-  const [showPublish, setShowPublish] = useState(false);
+  // Set when the visibility picker's "Share with a team…" opens the dialog.
+  const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
+  // Which tab the Publish dialog opens on: "links" from Share's Manage, where
+  // the link already exists and the job is to change or remove it.
+  const [showPublish, setShowPublish] = useState<false | "new" | "links">(false);
+  // The edit actions (Publish, Save draft, Submit) go in the app top bar, after
+  // New document, where the bar shows (md and up). On a phone the top bar is
+  // hidden, so they stay in the sticky bar at the bottom. One place at a time.
+  const [topActionsSlot, setTopActionsSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const mq = window.matchMedia?.("(min-width: 768px)");
+    const pick = () =>
+      setTopActionsSlot(mq?.matches ? document.getElementById("top-bar-doc-actions") : null);
+    pick();
+    mq?.addEventListener("change", pick);
+    return () => mq?.removeEventListener("change", pick);
+  }, []);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
@@ -387,6 +412,11 @@ export function DocumentEditor({
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  // Who sealed the latest version — human and agent (node detail `last_edit`).
+  const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
+  // updated_at as loadNode saw it. A save moves updatedAt past it; the byline
+  // then re-reads last_edit, since a write response does not carry it.
+  const loadedUpdatedAtRef = useRef<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -413,6 +443,9 @@ export function DocumentEditor({
   // isArchived flag, so an archived nest's editor stayed writable everywhere
   // except the one path (Dashboard → nest → doc) that happened to pass it.
   const isArchived = isNestArchived(nestMeta.data?.nest);
+  // This one document is archived (spec §1.13): frozen, like an archived nest.
+  const [archivedDoc, setArchivedDoc] = useState<api.ArchivedDocument | null>(null);
+  const [showArchive, setShowArchive] = useState(false);
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -429,7 +462,7 @@ export function DocumentEditor({
     nestStewards: myStewards,
     nodeRoles: myNodeRoles,
     grant: myGrant,
-    isArchived,
+    isArchived: isArchived || archivedDoc !== null,
   });
   // Creator's display name from the nest roster (same cached read the comments
   // panel makes); the email stays on hover, and is the fallback. Read-only
@@ -440,6 +473,7 @@ export function DocumentEditor({
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
   const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -572,26 +606,6 @@ export function DocumentEditor({
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  // Editing controls (toolbar, Type, Prime) show only while the user works in
-  // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
-  // opened from the page count as inside, or opening one would hide the toolbar.
-  const pageRef = useRef<HTMLDivElement | null>(null);
-  // The top bar counts as inside too: putting the controls away on a press
-  // there shrank a scrolled page mid-click and ate the Back click (CU-wdqcq0656v).
-  const topBarRef = useRef<HTMLDivElement | null>(null);
-  const [pageActive, setPageActive] = useState(isNew);
-  useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!pageActive) return;
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Element | null;
-      if (!t || pageRef.current?.contains(t) || topBarRef.current?.contains(t)) return;
-      if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
-      setPageActive(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    return () => document.removeEventListener("pointerdown", onDown);
-  }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   // Threads whose quoted text isn't in the current document text — the rail
   // labels them "text changed". Computed with the highlights, in the
@@ -1202,8 +1216,11 @@ export function DocumentEditor({
       setTaskPriority((node as any)?.priority ?? undefined);
       setTaskDue((node as any)?.due ?? undefined);
       setStatus(node?.status ?? null);
+      setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
+      setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
+      loadedUpdatedAtRef.current = node?.updated_at ?? null;
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1266,6 +1283,24 @@ export function DocumentEditor({
     if (isNew) return;
     loadNode();
   }, [isNew, loadNode]);
+
+  useEffect(() => {
+    if (isNew || !updatedAt || updatedAt === loadedUpdatedAtRef.current) return;
+    loadedUpdatedAtRef.current = updatedAt;
+    let cancelled = false;
+    api
+      .getNode(nestId, nodeId)
+      .then((r) => {
+        if (!cancelled) setLastEdit((r?.node?.last_edit ?? null) as LastEdit | null);
+      })
+      .catch((err) => {
+        // The byline keeps its last value; the save itself already succeeded.
+        console.warn("last-edit refresh failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, updatedAt]);
 
   const openVersions = useCallback(async () => {
     setShowVersions(true);
@@ -1552,7 +1587,7 @@ export function DocumentEditor({
   const baseVersionRef = useRef(baseVersion);
   baseVersionRef.current = baseVersion;
   const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
-  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed" | "refused"> => {
     const run = async () => {
       const snap = initialSnapshotRef.current;
       const otherFieldsDirty =
@@ -1574,6 +1609,13 @@ export function DocumentEditor({
         setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
         return "saved" as const;
       } catch (err) {
+        // The server refused the tags (e.g. a second ticket number, PO-1218):
+        // say why and put the saved set back — saving the document won't help.
+        if ((err as any)?.status === 400) {
+          setTags([...initialSnapshotRef.current.tags]);
+          toast.error((err as Error).message, { id: "tag-added" });
+          return "refused" as const;
+        }
         console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
         return "failed" as const;
       }
@@ -1610,7 +1652,9 @@ export function DocumentEditor({
     setTouched(true);
     // Say whether it's kept, or "added" reads as persisted when it's local.
     void saveTagsAlone(next).then((r) =>
-      r === "failed"
+      r === "refused"
+        ? undefined
+        : r === "failed"
         ? tagSaveFailed()
         : toast.success(
             accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
@@ -1697,7 +1741,7 @@ export function DocumentEditor({
         isRunnable
           ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
           : { ...payload, ...primePatch, ...viewPatch },
-        baseVersion,
+        baseVersionRef.current,
       );
       if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
       setPreviewNonce((n) => n + 1);
@@ -1735,7 +1779,7 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
-  const runSave = async (afterSave: (savedId: string) => void) => {
+  const runSave = async (afterSave: (savedId: string) => void, retried = false) => {
     // A plain save of someone else's pending submission is refused (locked);
     // the reviewer's edits only land through Save & approve.
     if (reviewerEditing) {
@@ -1784,7 +1828,25 @@ export function DocumentEditor({
       // the edits it had just written. A save is the answer to that question.
       bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
-      setError(err.message);
+      if (err.status === 409 && err.body?.error === "Version conflict") {
+        console.warn("[version-conflict]", err.body);
+        const { current_version: current, updated_by: by } = err.body;
+        if (!retried && typeof current === "number") {
+          // Re-base on the server's head and save again. The server decides the
+          // landing: a draft is updated in place, a published or pending
+          // document gets a new draft on top of the current version.
+          baseVersionRef.current = current;
+          setBaseVersion(current);
+          toast.info(`Changed${by ? ` by ${by}` : ""} meanwhile (now v${current}) — saving your edits on top.`);
+          setSaving(false);
+          return runSave(afterSave, true);
+        }
+        setError(
+          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Reload to take theirs.`,
+        );
+      } else {
+        setError(err.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -1992,6 +2054,11 @@ export function DocumentEditor({
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
+  // Mirrors the server's canDecideExternalEdit (PO-1193): on a governed nest
+  // an edit made outside the app is decided by whoever may approve the
+  // document, on an open nest by whoever may edit it. Everyone else still
+  // sees the notice and the diff.
+  const canDecideExternalEdit = stewardshipEnabled ? canApproveCapability : !isViewOnly;
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
@@ -2136,7 +2203,8 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
-      isPdf: isPdfNode,
+      canArchive:
+        !isArchived && !archivedDoc && (isOwner || isAdmin || hasAdminApprove || hasReviewerRole),
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
@@ -2172,10 +2240,24 @@ export function DocumentEditor({
           };
         case "move":
           return { ...base, icon: FolderInput, onSelect: () => setMoveTo(currentFolder) };
+        case "archive":
+          return { ...base, icon: Archive, onSelect: () => setShowArchive(true) };
         case "share-doc":
           return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "share-link":
+          return {
+            ...base,
+            icon: Globe,
+            onSelect: () =>
+              void shareDocumentLink({
+                nestId,
+                nodeId,
+                title: title.trim() || "Untitled",
+                onManage: () => setShowPublish("links"),
+              }),
+          };
         case "publish":
-          return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
+          return { ...base, icon: Share2, onSelect: () => setShowPublish("new") };
         case "delete":
         case "request-deletion":
           return { ...base, icon: Trash2, onSelect: () => setShowDeletionModal(true) };
@@ -2207,6 +2289,10 @@ export function DocumentEditor({
           <NestVisibilityControl
             nestId={nestId}
             variant="compact"
+            onShareWithTeam={() => {
+              setShareTab("teams");
+              setShowShare(true);
+            }}
             onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
             onError={(m) => {
               if (m) toast.error(m);
@@ -2258,6 +2344,24 @@ export function DocumentEditor({
       )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
+      {!isNew && (
+        <ReasonDialog
+          open={showArchive}
+          onOpenChange={setShowArchive}
+          title={`Archive "${title || nodeId}"?`}
+          description="It leaves document lists, search and AI retrieval. Nothing is deleted: its history is kept, and a steward can restore it."
+          label="Why archive it?"
+          optionalReason
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel="Archive document"
+          onConfirm={async (reason) => {
+            await api.archiveNode(nestId, nodeId, reason || undefined);
+            toast.success("Archived");
+            setShowArchive(false);
+            onBack();
+          }}
+        />
       )}
       {!isNew && (
         <ReasonDialog
@@ -2375,7 +2479,11 @@ export function DocumentEditor({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           documentUrl={documentLink(window.location.origin, nestId, nodeId)}
-          onClose={() => setShowShare(false)}
+          initialTab={shareTab}
+          onClose={() => {
+            setShowShare(false);
+            setShareTab(undefined);
+          }}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
@@ -2387,6 +2495,7 @@ export function DocumentEditor({
           nestId={nestId}
           nodeId={nodeId}
           nodeTitle={title || nodeId}
+          initialTab={showPublish}
           onClose={() => setShowPublish(false)}
         />
       )}
@@ -2463,7 +2572,6 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
-        ref={topBarRef}
         className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
@@ -2650,6 +2758,19 @@ export function DocumentEditor({
                   <span className="hidden sm:inline">Edit</span>
                 </Button>
               )}
+              {onOpenReviewPane && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={onOpenReviewPane}
+                  title="See what changed, side by side with the published version"
+                  data-testid="document-editor-review-changes"
+                >
+                  <FileDiff className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">See changes</span>
+                </Button>
+              )}
               <ReviewActions
                 documentTitle={title}
                 version={baseVersion ?? 1}
@@ -2725,7 +2846,9 @@ export function DocumentEditor({
                   <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+              {/* Fits "human via agent · time" on one line; a long agent name
+                  truncates, and the hover title carries the full detail. */}
+              <DropdownMenuContent align="end" className="min-w-[14rem] max-w-[22rem] max-h-80 overflow-y-auto">
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
@@ -2761,10 +2884,18 @@ export function DocumentEditor({
                             to tell which past version you are reaching for.
                             Same editedAt Version History already renders. */}
                         <span
-                          className="ml-auto text-xs text-muted-foreground"
-                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                          className="ml-auto pl-3 min-w-0 truncate whitespace-nowrap text-xs text-muted-foreground"
+                          title={
+                            [
+                              v.editedAt ? formatServerDate(v.editedAt) : null,
+                              v.editedBy,
+                              clientTitle(v.client),
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || undefined
+                          }
                         >
-                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[versionAuthorShort(v), relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -2869,9 +3000,6 @@ export function DocumentEditor({
             while a long one scrolls under it. 7rem = app header + top bar. */}
         <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
           <div
-            ref={pageRef}
-            onFocusCapture={() => setPageActive(true)}
-            onPointerDownCapture={() => setPageActive(true)}
             className="w-full px-5 py-6 sm:px-10 sm:py-8"
           >
 
@@ -2879,6 +3007,34 @@ export function DocumentEditor({
               <Alert variant="destructive" className="mb-4">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            {archivedDoc && (
+              <Alert className="mb-4" data-testid="document-archived-banner">
+                <Archive className="h-4 w-4" />
+                <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>
+                    Archived by {archivedDoc.by} on {new Date(archivedDoc.at).toLocaleDateString()}
+                    {archivedDoc.reason ? `: ${archivedDoc.reason}` : "."} It is out of lists and retrieval.
+                  </span>
+                  <button
+                    type="button"
+                    className="font-medium underline underline-offset-2 hover:no-underline"
+                    data-testid="restore-archived-document"
+                    onClick={async () => {
+                      try {
+                        await api.unarchiveNode(nestId, nodeId);
+                        toast.success("Restored");
+                        await loadNode();
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Failed to restore");
+                      }
+                    }}
+                  >
+                    Restore
+                  </button>
+                </AlertDescription>
               </Alert>
             )}
 
@@ -2928,6 +3084,7 @@ export function DocumentEditor({
                     nestId={nestId}
                     nodeId={nodeId}
                     pending={pendingChange}
+                    canDecide={canDecideExternalEdit}
                     onResolved={() => {
                       setPendingChange(null);
                       loadNode();
@@ -3020,6 +3177,12 @@ export function DocumentEditor({
               thing (Notion-style): a borderless heading that takes the caret.
               Read-only sessions get a plain h1. */}
                 <div>
+                  <div
+                    className={`flex flex-wrap items-end gap-x-6 gap-y-1${
+                      mode === "view" && !isNew ? "" : " border-b border-border pb-1 focus-within:border-primary"
+                    }`}
+                  >
+                  <div className="min-w-[12rem] flex-1">
                   {mode === "view" && !isNew ? (
                     <h1
                       className="text-4xl font-bold leading-tight tracking-tight text-foreground"
@@ -3028,7 +3191,6 @@ export function DocumentEditor({
                       {title || (loading ? "Loading…" : "Untitled")}
                     </h1>
                   ) : (
-                    <>
                       <input
                         id="document-editor-title"
                         ref={titleInputRef}
@@ -3065,10 +3227,56 @@ export function DocumentEditor({
                         aria-label="Title"
                         aria-invalid={touched && !title.trim() ? true : undefined}
                         data-testid="document-editor-title"
-                        className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
+                        className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
                           }`}
                       />
-                      {((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
+                  )}
+                  </div>
+                  {/* Who made it and who touched it last, beside the title.
+                Hidden for docs with no recorded author (old imports). */}
+                  {!isNew && (author || lastEditBy) && (
+                    <div
+                      className="flex shrink-0 flex-col items-end gap-0.5 pb-1 text-right text-xs text-muted-foreground"
+                      data-testid="document-editor-byline"
+                    >
+                    {author && (
+                      <span className="inline-flex items-center gap-1.5">
+                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                      </span>
+                    )}
+                    {/* Last edited by: the human, then the agent the write
+                        named — never the agent alone. Same type as Created by. */}
+                    {lastEditBy && (
+                      <span
+                        className="inline-flex flex-wrap items-center gap-x-1"
+                        data-testid="document-last-edited-by"
+                      >
+                        Last edited by{" "}
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                          {lastEditBy.human}
+                        </span>
+                        {lastEditBy.agent && (
+                          <>
+                            {" "}via{" "}
+                            <span
+                              className="font-medium text-foreground/80"
+                              title={clientTitle(lastEdit?.client)}
+                            >
+                              {lastEditBy.agent}
+                            </span>
+                          </>
+                        )}
+                        {lastEdit?.edited_at && (
+                          <span title={formatServerDate(lastEdit.edited_at)}>
+                            {" "}· {relTime(lastEdit.edited_at)}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    </div>
+                  )}
+                  </div>
+                  {!(mode === "view" && !isNew) && ((touched && !title.trim()) || title.length >= TITLE_MAX - 30) && (
                         <div className="mt-1 flex items-start justify-between gap-2 text-xs">
                           <span className="text-destructive">
                             {touched && !title.trim() ? "Title is required" : ""}
@@ -3078,8 +3286,6 @@ export function DocumentEditor({
                           </span>
                         </div>
                       )}
-                    </>
-                  )}
                   {/* Rename safety: links referencing this doc by its old title
                 either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
                 still resolves but keeps showing the old name). Compare against
@@ -3288,9 +3494,10 @@ export function DocumentEditor({
                           ))}
                         </datalist>
                       )}
-                      {tags.length > 0 && (
+                      {visibleTags(tags).length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {tags.map((t) => {
+                          {/* The ticket tag shows as the task's ID, not a chip (PO-1231). */}
+                          {visibleTags(tags).map((t) => {
                             // View mode: chip click → filter nest by tag. Edit mode: X removes.
                             const tagClickable = mode === "view" && !!onTagClick;
                             return (
@@ -3449,16 +3656,10 @@ export function DocumentEditor({
                   </div>
                 )}
 
-                {/* People — "Created by" + collaborator chips (version authors ∪
-              document grantees, server-resolved). Hidden entirely for docs
-              with no recorded author (old imports) and no collaborators. */}
-                {!isNew && (author || collaborators.length > 0) && (
+                {/* Collaborator chips (version authors ∪ document grantees,
+              server-resolved). Created by and Last edited by sit under the title. */}
+                {!isNew && collaborators.length > 0 && (
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
-                    {author && (
-                      <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
-                      </span>
-                    )}
                     {collaborators.length > 0 && (
                       <span
                         className="inline-flex items-center gap-1.5"
@@ -3595,18 +3796,10 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {/* Held in place (invisible, unfocusable) while idle — like the
-              editor toolbar below — so activating the page doesn't push the
-              body down. */}
                 {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
-                  <div
-                    className={`flex flex-col sm:flex-row gap-4 w-full ${pageActive ? "" : "invisible"}`}
-                    aria-hidden={!pageActive || undefined}
-                    {...(pageActive ? {} : ({ inert: "" } as object))}
-                  >
+                  <div className="flex flex-col sm:flex-row gap-4 w-full">
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
-                        <label className="block text-sm font-medium mb-1">Type</label>
                         {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
@@ -4175,7 +4368,6 @@ export function DocumentEditor({
                             // scroll a long document to its last line on arrival.
                             autofocus={false}
                             variant="page"
-                            toolbarHidden={!pageActive}
                             toolbarEnd={
                               <>
                                 {/* Rich ↔ raw markdown at the editor's own right end, where the
@@ -4353,15 +4545,11 @@ export function DocumentEditor({
             )}
 
           </div>
-          {/* Sticky action bar, edit mode only — Submit / Create·Save sit at the
-            bottom of the document column so they stay in reach at the end of
-            a long body. In view mode Submit and Edit live in the top bar. */}
-          {mode === "edit" && (
-            <div
-              className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
-              data-testid="document-editor-actions-bottom"
-            >
-              {(() => {
+          {/* Edit actions, edit mode only: Submit / Save draft / Publish. In the
+            app top bar on md and up; a sticky bar at the bottom on a phone.
+            In view mode Submit and Edit live in the document's own top bar. */}
+          {mode === "edit" && (() => {
+            const editActions = (() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
                 const showSubmit = !isViewOnly && canSubmitForReview;
                 if (reviewerEditing) {
@@ -4483,9 +4671,23 @@ export function DocumentEditor({
                     )}
                   </>
                 );
-              })()}
-            </div>
-          )}
+            })();
+            return topActionsSlot ? (
+              createPortal(
+                <div className="ml-1 flex items-center gap-1" data-testid="document-editor-actions-top">
+                  {editActions}
+                </div>,
+                topActionsSlot,
+              )
+            ) : (
+              <div
+                className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+                data-testid="document-editor-actions-bottom"
+              >
+                {editActions}
+              </div>
+            );
+          })()}
         </div>
         {/* Right rail — the outline while reading, the comments once they
             are opened. A long outline stacked above the body pushed the
@@ -4527,6 +4729,7 @@ export function DocumentEditor({
               nestId={nestId}
               nodeId={nodeId}
               readOnly={isViewOnly}
+              canPromote={canAuthorNew && !isViewOnly}
               pendingAnchor={pendingAnchor}
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}

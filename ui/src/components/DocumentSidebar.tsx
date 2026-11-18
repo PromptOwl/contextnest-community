@@ -9,41 +9,34 @@
  * ancestors) over the body-free node listing, so it costs no extra shape and
  * stays consistent with the Documents tab.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
-  ClipboardCheck,
   Folder,
   FolderOpen,
   Globe,
   Building2,
-  Home,
   LayoutGrid,
   Lock,
   PanelLeftClose,
-  Plug,
   Plus,
   Search,
   Users,
 } from "lucide-react";
 import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
-import { reads, useNestMeta } from "../lib/queries";
+import { reads } from "../lib/queries";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
-import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { useAuth } from "../auth/AuthContext";
 import {
   folderAncestors,
   groupNodesByFolder,
-  nestSidebarViews,
-  readDocPagePrefs,
-  writeDocPagePrefs,
-  type NestSidebarView,
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
 import { appRail, type AppPage } from "../lib/pages";
+import { useAdministersNest } from "../lib/administers-nest";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
@@ -60,15 +53,9 @@ interface Props {
   nestId: string | null;
   /** The open document ("new" while creating one), or null on a nest page. */
   nodeId: string | null;
-  /** Which of the nest's views is on screen, for the highlight. */
-  activeView?: NestSidebarView["id"] | null;
   onCollapse: () => void;
   onOpenDocument: (target: SidebarNestTarget & { nodeId: string }) => void;
   onOpenNest: (target: SidebarNestTarget) => void;
-  /** Open one of the current nest's views (review queue, board, graph…). */
-  onOpenView: (target: SidebarNestTarget, view: NestSidebarView) => void;
-  /** Connect this nest to a CLI / MCP client / API caller. */
-  onConnect?: () => void;
   onOpenDashboard: () => void;
   /** Brand image for the top row — the same one the app header uses. */
   logoUrl: string;
@@ -78,6 +65,8 @@ interface Props {
   /** New document, optionally inside a folder. Omit when the caller can't
    *  author in this nest. */
   onNewDocument?: (folder?: string) => void;
+  /** Pinned to the bottom of the rail: Docs and the account menu. */
+  footer?: ReactNode;
 }
 
 /* One row style for both rails (app pages and a nest's views / tree) so the
@@ -101,21 +90,20 @@ const nestTarget = (n: any): SidebarNestTarget => ({
 export function DocumentSidebar({
   nestId,
   nodeId,
-  activeView = null,
   onCollapse,
   onOpenDocument,
   onOpenNest,
-  onOpenView,
-  onConnect,
   onOpenDashboard,
   logoUrl,
   dashboardTab = null,
   onOpenDashboardTab,
   onNewDocument,
+  footer,
 }: Props) {
-  // Only inside a nest — the dashboard rail is app pages, not nests.
-  const nests = useQuery({ ...reads.nestList(), enabled: nestId !== null });
-  const { isAdmin, authMode, workflowPlaneEnabled } = useAuth();
+  // One rail everywhere: the nest list is the same on the dashboard as inside
+  // a nest. Only the current nest is unfolded.
+  const nests = useQuery({ ...reads.nestList() });
+  const { isAdmin, authMode } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -144,7 +132,8 @@ export function DocumentSidebar({
   return (
     <nav
       aria-label="Nests and documents"
-      className="flex h-full flex-col bg-muted/30 text-sm"
+      className="flex h-full flex-col bg-[hsl(228_73%_24%)] text-sm text-foreground"
+      style={NAVY_RAIL_TOKENS}
       data-testid="document-sidebar"
     >
       {/* Brand row — the same logo + badge the app header shows, so the rail
@@ -158,7 +147,8 @@ export function DocumentSidebar({
           title="Dashboard"
           data-testid="document-sidebar-brand"
         >
-          <img src={logoUrl} alt="ContextNest" className="h-7 w-7 object-contain" />
+          {/* The owl is navy, so it sits on a white tile against the navy rail. */}
+          <img src={logoUrl} alt="ContextNest" className="h-8 w-8 rounded-md bg-white object-contain p-1" />
           <span className="font-semibold">ContextNest</span>
           <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
             Community
@@ -175,20 +165,32 @@ export function DocumentSidebar({
           <PanelLeftClose className="h-4 w-4" />
         </button>
       </div>
-      {/* Inside a nest: the way back to every nest. On the dashboard the
-          Nests row below is that. */}
-      {nestId !== null && (
-        <button
-          type="button"
-          onClick={onOpenDashboard}
-          className={cn(ROW, ROW_IDLE, "mx-2 mt-3 w-auto")}
-          title="All nests"
-        >
-          <LayoutGrid className={ROW_ICON} />
-          All nests
-        </button>
-      )}
-      {nestId !== null && (nests.data?.nests?.length ?? 0) > 1 && (
+      {/* Work shortcuts: the ribbon carries My Work and My Drafts from
+          tablet width up, so they only appear here in the phone drawer. */}
+      <WorkShortcuts
+        active={dashboardTab}
+        isAdmin={isAdmin}
+        isSuperadmin={isAdmin && authMode !== "open"}
+        onOpen={onOpenDashboardTab}
+      />
+      {/* The nests page (create, import, archive, connect) is one row away
+          from every page, in or out of a nest. */}
+      <button
+        type="button"
+        onClick={onOpenDashboard}
+        aria-current={nestId === null && dashboardTab === "nests" ? "page" : undefined}
+        className={cn(
+          ROW,
+          nestId === null && dashboardTab === "nests" ? ROW_ACTIVE : ROW_IDLE,
+          "mx-2 mt-1.5 w-auto",
+        )}
+        title="All nests"
+        data-testid="document-sidebar-all-nests"
+      >
+        <LayoutGrid className={ROW_ICON} />
+        All nests
+      </button>
+      {(nests.data?.nests?.length ?? 0) > 1 && (
         <div className="relative mx-2 mt-1 mb-2">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
@@ -203,19 +205,11 @@ export function DocumentSidebar({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        {nestId === null && (
-          <AppPagesNav
-            active={dashboardTab}
-            isAdmin={isAdmin}
-            isSuperadmin={isAdmin && authMode !== "open"}
-            onOpen={onOpenDashboardTab}
-          />
-        )}
-        {nestId !== null && nests.isLoading && (
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {nests.isLoading && (
           <div className="px-2 py-2 text-xs text-muted-foreground">Loading…</div>
         )}
-        {nestId !== null && rows.map((n) => {
+        {rows.map((n) => {
           const open = openNests.has(n.id);
           const current = n.id === nestId;
           const relation = nestRelation(n);
@@ -276,19 +270,6 @@ export function DocumentSidebar({
                   </button>
                 )}
               </div>
-              {open && current && (
-                <NestViews
-                  nestId={n.id}
-                  isOwner={nestTarget(n).isOwner}
-                  isAdmin={isAdmin}
-                  workflowPlaneEnabled={workflowPlaneEnabled}
-                  activeView={activeView}
-                  onOpen={(view) => onOpenView(nestTarget(n), view)}
-                  currentNodeId={current ? nodeId : null}
-                  onOpenNode={(id) => onOpenDocument({ ...nestTarget(n), nodeId: id })}
-                  onConnect={onConnect}
-                />
-              )}
               {open && (
                 <NestTree
                   nestId={n.id}
@@ -301,16 +282,49 @@ export function DocumentSidebar({
           );
         })}
       </div>
+      {footer && (
+        <div
+          className="shrink-0 space-y-0.5 border-t border-border p-2"
+          data-testid="document-sidebar-footer"
+        >
+          {footer}
+        </div>
+      )}
     </nav>
   );
 }
 
-/** The dashboard's pages, straight from the registry, in their rail groups
- *  (Work, Workspace, Admin, Help). Ungrouped pages (Nests) sit on top. A
- *  group folds on click (remembered per browser) and opens itself when the
- *  page on screen is inside it, so the highlight is visible. Same row style
- *  as a nest's views so the rail reads as one. */
-function AppPagesNav({
+/**
+ * The rail is navy, like PromptOwl's. Every control inside reads the shared
+ * color tokens, so re-pointing them here (light text, translucent-looking
+ * hover and border surfaces, a brighter blue for the active item) restyles the
+ * whole rail without touching each row. Menus portaled out of the rail keep
+ * the normal light theme.
+ */
+const NAVY_RAIL_TOKENS = {
+  "--foreground": "0 0% 100%",
+  "--muted-foreground": "228 60% 84%",
+  "--background": "228 73% 20%",
+  "--muted": "228 60% 33%",
+  "--accent": "228 60% 33%",
+  "--accent-foreground": "0 0% 100%",
+  "--secondary": "228 60% 36%",
+  "--secondary-foreground": "0 0% 100%",
+  "--border": "228 55% 34%",
+  "--input": "228 55% 34%",
+  "--primary": "228 80% 48%",
+  "--primary-foreground": "0 0% 100%",
+  "--ring": "228 90% 75%",
+} as CSSProperties;
+
+/** Pages that only show in the rail where the ribbon is hidden. */
+const RIBBON_PAGE_IDS = new Set(["my-work", "my-drafts"]);
+
+/** The "work" pages from the registry. My Work and My Drafts are in the
+ *  header ribbon on tablets and up, so the rail lists them for phones only;
+ *  any other work page (the Stream, when on) stays here on every screen.
+ *  Settings and help pages live under the account menu, not here. */
+function WorkShortcuts({
   active,
   isAdmin,
   isSuperadmin,
@@ -321,50 +335,28 @@ function AppPagesNav({
   isSuperadmin: boolean;
   onOpen?: (id: string) => void;
 }) {
-  const { mcpOauthEnabled, docStreamEnabled } = useAuth();
-  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled });
-  const [closed, setClosedState] = useState<string[]>(
-    () => readDocPagePrefs(localStorage).closedGroups,
-  );
-  const toggle = (id: string, open: boolean) => {
-    const next = open ? closed.filter((g) => g !== id) : [...closed, id];
-    setClosedState(next);
-    writeDocPagePrefs(localStorage, { closedGroups: next });
-  };
+  const { mcpOauthEnabled, docStreamEnabled, surfacesEnabled } = useAuth();
+  // The Control room is listed for nest owners/admins too (po-1186 CR2); the
+  // row appears once the nest list says so.
+  const administersNest = useAdministersNest(surfacesEnabled && !isAdmin) ?? false;
+  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest });
+  const pages = rail.groups.find((g) => g.id === "work")?.pages ?? [];
+  if (pages.length === 0) return null;
+  const alwaysShown = pages.some((p) => !RIBBON_PAGE_IDS.has(p.id));
   return (
-    <div className="mt-3 space-y-0.5" data-testid="document-sidebar-dashboard">
-      {rail.top.map((page) => (
-        <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
+    <div
+      className={cn("mx-2 mt-3 space-y-0.5", !alwaysShown && "md:hidden")}
+      data-testid="document-sidebar-dashboard"
+    >
+      {pages.map((page) => (
+        <AppPageRow
+          key={page.id}
+          page={page}
+          active={page.id === active}
+          onOpen={onOpen}
+          className={RIBBON_PAGE_IDS.has(page.id) ? "md:hidden" : undefined}
+        />
       ))}
-      {rail.groups.map((g) => {
-        const activeInGroup = g.pages.some((p) => p.id === active);
-        const open = !closed.includes(g.id) || activeInGroup;
-        return (
-          <div key={g.id} className="pt-2">
-            <button
-              type="button"
-              onClick={() => toggle(g.id, !open)}
-              aria-expanded={open}
-              className={HEADING}
-              data-testid={`document-sidebar-group-${g.id}`}
-            >
-              {open ? (
-                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-              )}
-              <span className="truncate">{g.label}</span>
-            </button>
-            {open && (
-              <div className="space-y-0.5">
-                {g.pages.map((page) => (
-                  <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} indent />
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -373,12 +365,14 @@ function AppPageRow({
   active,
   indent = false,
   onOpen,
+  className,
 }: {
   page: AppPage;
   active: boolean;
   onOpen?: (id: string) => void;
   /** Inside a group: rows sit under the group header. */
   indent?: boolean;
+  className?: string;
 }) {
   // Badge: a one-row read whose total is the number — the page fetches its
   // own list when opened. Pages without a badge skip the query.
@@ -397,6 +391,7 @@ function AppPageRow({
         ROW,
         indent && "pl-7",
         active ? ROW_ACTIVE : ROW_IDLE,
+        className,
       )}
       data-testid={`document-sidebar-dashboard-${page.id}`}
     >
@@ -424,186 +419,6 @@ function VisibilityGlyph({ visibility }: { visibility?: string }) {
   if (visibility === "org")
     return <Building2 className="h-3 w-3 shrink-0 text-blue-600" aria-label="Organization" />;
   return <Lock className="h-3 w-3 shrink-0 opacity-60" aria-label="Private" />;
-}
-
-// The nest page's own tabs; registry pages carry their icon in meta.
-const TAB_ICONS: Record<string, typeof Home> = { overview: Home, review: ClipboardCheck };
-
-/** The current nest's views — review queue, board, graph, definitions,
- *  workflows — under its name, so none of them is a trip back through the
- *  nest page away. Gated like the nest view switcher (see nestSidebarViews);
- *  the review queue carries its pending count. */
-function NestViews({
-  nestId,
-  isOwner,
-  isAdmin,
-  workflowPlaneEnabled,
-  activeView,
-  onOpen,
-  currentNodeId,
-  onOpenNode,
-  onConnect,
-}: {
-  nestId: string;
-  isOwner: boolean;
-  isAdmin: boolean;
-  workflowPlaneEnabled: boolean;
-  activeView: NestSidebarView["id"] | null;
-  onOpen: (view: NestSidebarView) => void;
-  /** The node on screen, so its View row highlights. */
-  currentNodeId: string | null;
-  onOpenNode: (nodeId: string) => void;
-  onConnect?: () => void;
-}) {
-  const meta = useNestMeta(nestId);
-  const { typeViewEnabled } = useAuth();
-  const caps = useMemo(() => {
-    const m: any = meta.data;
-    if (!m) return null;
-    return deriveNestCaps({
-      roles: m.roles ?? [],
-      permission: m.permission ?? null,
-      myStewards: m.myStewards ?? [],
-      isOwner,
-      isAdmin,
-      readerMode: !!m.nest?.reader_mode,
-      isArchived: isNestArchived(m.nest),
-    });
-  }, [meta.data, isOwner, isAdmin]);
-  // The queue read is write-tier, so only writers ask; its count decides
-  // whether an ungoverned nest gets the row at all (see nestSidebarViews).
-  const queue = useQuery({
-    ...reads.reviewQueue(nestId),
-    enabled: !!caps && !caps.isReadOnly && !caps.isReaderView,
-  });
-  const pending = queue.data?.total ?? queue.data?.requests?.length ?? 0;
-  // Reader mode shows no user Views, same as it shows no built-in ones beyond
-  // its own set (nestSidebarViews returns early for it).
-  const viewNodes = useQuery({
-    ...reads.viewNodes(nestId),
-    enabled: !!caps && !caps.isReaderView && typeViewEnabled,
-  });
-  const userViews: Array<{ id: string; title: string }> = useMemo(
-    () =>
-      (viewNodes.data?.nodes ?? [])
-        .filter((n: any) => n?.type === "view")
-        .map((n: any) => ({ id: String(n.id), title: String(n.title || n.id) })),
-    [viewNodes.data],
-  );
-  const stewardshipEnabled = !!(meta.data as any)?.nest?.stewardship_enabled;
-  const views = useMemo(
-    () =>
-      caps
-        ? nestSidebarViews(caps, {
-          workflowPlaneEnabled,
-          stewardshipEnabled,
-          hasPending: pending > 0,
-        })
-        : [],
-    [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
-  );
-
-  // The "Views" group folds by default (remembered per browser) and opens
-  // itself when the view on screen is inside it, so the highlight is visible.
-  const [viewsOpen, setViewsOpenState] = useState(
-    () => readDocPagePrefs(localStorage).viewsOpen,
-  );
-  const setViewsOpen = (open: boolean) => {
-    setViewsOpenState(open);
-    writeDocPagePrefs(localStorage, { viewsOpen: open });
-  };
-  const activeInGroup = views.some((v) => v.group === "views" && v.id === activeView);
-  const groupShown = viewsOpen || activeInGroup;
-  const top = views.filter((v) => !v.group);
-  const grouped = views.filter((v) => v.group === "views");
-
-  if (views.length === 0) return null;
-  const showUserViews = userViews.length > 0;
-
-  const row = (v: NestSidebarView, indent = false) => {
-    const Icon = v.icon ?? TAB_ICONS[v.id] ?? Home;
-    const active = v.id === activeView;
-    return (
-      <button
-        key={v.id}
-        type="button"
-        onClick={() => onOpen(v)}
-        aria-current={active ? "page" : undefined}
-        className={cn(
-          ROW,
-          indent && "pl-7",
-          active ? ROW_ACTIVE : ROW_IDLE,
-        )}
-        data-testid={`document-sidebar-view-${v.id}`}
-      >
-        <Icon className={ROW_ICON} />
-        <span className="truncate">{v.label}</span>
-        {/* Something to review: a dot you can see from across the room,
-            with the count — like an unread badge. Nothing at zero. */}
-        {v.id === "review" && pending > 0 && (
-          <span
-            className="ml-auto inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-px text-[10px] font-semibold tabular-nums text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-            title={`${pending} awaiting review`}
-            data-testid="document-sidebar-review-badge"
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
-            {pending}
-          </span>
-        )}
-      </button>
-    );
-  };
-
-  return (
-    <div className="mb-1 ml-2 pl-1" data-testid="document-sidebar-views">
-      {top.map((v) => row(v))}
-      {(grouped.length > 0 || showUserViews) && (
-        <>
-          <button
-            type="button"
-            onClick={() => setViewsOpen(!groupShown)}
-            aria-expanded={groupShown}
-            className={cn(ROW, ROW_IDLE)}
-            data-testid="document-sidebar-views-group"
-          >
-            {groupShown ? (
-              <ChevronDown className={ROW_ICON} />
-            ) : (
-              <ChevronRight className={ROW_ICON} />
-            )}
-            <span className="truncate">Views</span>
-          </button>
-          {groupShown && grouped.map((v) => row(v, true))}
-          {groupShown &&
-            userViews.map((v) => (
-              <button
-                key={v.id}
-                type="button"
-                onClick={() => onOpenNode(v.id)}
-                aria-current={v.id === currentNodeId ? "page" : undefined}
-                className={cn(ROW, "pl-7", v.id === currentNodeId ? ROW_ACTIVE : ROW_IDLE)}
-                data-testid={`document-sidebar-userview-${v.id}`}
-              >
-                <LayoutGrid className={ROW_ICON} />
-                <span className="truncate">{v.title}</span>
-              </button>
-            ))}
-        </>
-      )}
-      {onConnect && (
-        <button
-          type="button"
-          onClick={onConnect}
-          className={cn(ROW, ROW_IDLE)}
-          title="Connect a CLI, MCP client or API caller to this nest"
-          data-testid="document-sidebar-connect"
-        >
-          <Plug className={ROW_ICON} />
-          <span className="truncate">Connect</span>
-        </button>
-      )}
-    </div>
-  );
 }
 
 /** One nest's folder → document tree. Folders start closed except the ones

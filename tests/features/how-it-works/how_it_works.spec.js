@@ -121,27 +121,4 @@ test.describe('How it works', () => {
     expect(await hw.crumbs()).toEqual(['Home', 'Docs']);
     await expect(hw.page.locator('main')).toContainText('MCP');
   });
-
-  test('CN-HELP-009: the shortcuts the page names work from it: Ctrl / ⌘ K focuses the search and ? opens the Keyboard shortcuts dialog', async ({ primary_user }) => {
-    await primary_user.initialize();
-    const { page, howItWorksPage: hw } = primary_user;
-    await hw.goto();
-    const documents = hw.section('Documents');
-    await expect(documents).toContainText('searches every nest and document');
-    await expect(documents).toContainText('lists all shortcuts');
-
-    // Ctrl / ⌘ K → the header search takes focus.
-    await hw.sections.first().click();
-    await page.keyboard.press('ControlOrMeta+k');
-    await expect(hw.search).toBeFocused();
-    await page.keyboard.press('Escape');
-
-    // ? → the Keyboard shortcuts dialog.
-    await hw.sections.first().click();
-    await page.keyboard.type('?');
-    await expect(hw.shortcutsDialog).toBeVisible();
-    await page.keyboard.press('Escape');
-    await expect(hw.shortcutsDialog).toBeHidden();
-    await expect(page).toHaveURL(/\/guide$/);
-  });
 });

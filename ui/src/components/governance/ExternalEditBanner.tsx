@@ -25,6 +25,11 @@ interface ExternalEditBannerProps {
   nestId: string;
   nodeId: string;
   pending: PendingChange;
+  /**
+   * May this person approve or reject the edit? The server decides (403
+   * otherwise); without it they still get the notice and the diff.
+   */
+  canDecide: boolean;
   onResolved: () => void;
 }
 
@@ -32,6 +37,7 @@ export function ExternalEditBanner({
   nestId,
   nodeId,
   pending,
+  canDecide,
   onResolved,
 }: ExternalEditBannerProps) {
   const [busy, setBusy] = useState<null | "approve" | "reject" | "view">(null);
@@ -112,26 +118,30 @@ export function ExternalEditBanner({
         )}
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            onClick={handleApprove}
-            disabled={busy !== null}
-            data-testid="external-edit-approve"
-          >
-            {busy === "approve" ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : null}
-            Approve change
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowReject((v) => !v)}
-            disabled={busy !== null}
-            data-testid="external-edit-reject-toggle"
-          >
-            Reject
-          </Button>
+          {canDecide && (
+            <>
+              <Button
+                size="sm"
+                onClick={handleApprove}
+                disabled={busy !== null}
+                data-testid="external-edit-approve"
+              >
+                {busy === "approve" ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : null}
+                Approve change
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowReject((v) => !v)}
+                disabled={busy !== null}
+                data-testid="external-edit-reject-toggle"
+              >
+                Reject
+              </Button>
+            </>
+          )}
           <Button
             size="sm"
             variant="ghost"
@@ -146,7 +156,7 @@ export function ExternalEditBanner({
           </Button>
         </div>
 
-        {showReject && (
+        {canDecide && showReject && (
           <div className="space-y-2 pt-1">
             <Textarea
               value={reason}

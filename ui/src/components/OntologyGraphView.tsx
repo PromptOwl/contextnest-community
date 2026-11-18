@@ -16,10 +16,12 @@ import {
 } from "d3-force";
 import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, ListChecks } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
+import { asDocumentGraph } from "../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
 import { categoryCoverageEmpty } from "../lib/coverage-gaps";
 import { Button } from "./ui/button";
 import { NestPageHeader } from "./NestPageHeader";
+import { prettyFolder } from "./FolderTree";
 
 interface Props {
   nestId: string;
@@ -267,6 +269,8 @@ export function OntologyGraphView({
     let cancelled = false;
     setLoading(true);
     getNestGraph(nestId)
+      // Channels are conversations, not documents: not drawn here while on.
+      .then((g) => asDocumentGraph(nestId, g))
       .then((g) => {
         if (cancelled) return;
         // A different graph: no viewport worth keeping, so let it fit.
@@ -357,7 +361,7 @@ export function OntologyGraphView({
           const fid = `folder:${acc}`;
           if (!seenFolder.has(fid)) {
             seenFolder.add(fid);
-            nodes.push({ id: fid, name: seg, kind: "folder", color: COLORS.folder, val: 2 });
+            nodes.push({ id: fid, name: prettyFolder(seg), kind: "folder", color: COLORS.folder, val: 2 });
           }
           addStruct(prev, fid);
           prev = fid;

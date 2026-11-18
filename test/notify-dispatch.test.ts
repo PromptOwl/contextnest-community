@@ -21,11 +21,10 @@ const { slackSpy, msteamsSpy, emailSpy } = vi.hoisted(() => ({
 vi.mock("../src/notify/slack.js", () => ({ notifySlackForNest: slackSpy }));
 vi.mock("../src/notify/msteams.js", () => ({ notifyMsTeamsForNest: msteamsSpy }));
 vi.mock("../src/notify/email.js", () => ({ notifyEmailForNest: emailSpy }));
+// No database here, so the real sealed-nest lookup fails closed and sends nothing.
+vi.mock("../src/surfaces/sealed.js", () => ({ sealedNest: async () => null }));
 
 import { notifyNestEvent } from "../src/notify/notify.js";
-
-// Connectors fire on the debounce flush, not synchronously — give it a beat.
-const settle = () => new Promise((r) => setTimeout(r, 50));
 
 describe("notifyNestEvent fan-out", () => {
   beforeAll(() => {
@@ -55,9 +54,10 @@ describe("notifyNestEvent fan-out", () => {
     // On flush the connectors fan out under Promise.allSettled, so Slack and
     // Teams both throwing doesn't stop email from receiving the call +
     // structured details — 3-way isolation.
-    await settle();
-    expect(slackSpy).toHaveBeenCalledWith("nest1", "msg");
-    expect(msteamsSpy).toHaveBeenCalledWith("nest1", "msg");
-    expect(emailSpy).toHaveBeenCalledWith("nest1", "msg", details);
+    await vi.waitFor(() => {
+      expect(slackSpy).toHaveBeenCalledWith("nest1", "msg");
+      expect(msteamsSpy).toHaveBeenCalledWith("nest1", "msg");
+      expect(emailSpy).toHaveBeenCalledWith("nest1", "msg", details);
+    }, { timeout: 2000, interval: 10 });
   });
 });

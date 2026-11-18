@@ -408,7 +408,10 @@ describe("viewer overlays", () => {
       owner.apiKey,
     );
     const plainHtml = await (await app.request(`/p/${plain.data.publish.slug}`)).text();
-    expect(plainHtml).not.toContain("@media print");
+    // The page's own strip hides itself in print (PO-1365); what must be
+    // absent is the rule that blanks the document.
+    expect(plainHtml).not.toContain("@media print{html,body{display:none");
+    expect(plainHtml).not.toContain("beforeprint");
   });
 
   // A shared passcode identifies nobody, so there is no address to stamp.
@@ -722,7 +725,9 @@ describe("comments", () => {
     const shell = await (await app.request(`/p/${slug}`)).text();
     expect(shell).toContain("Leave a comment");
     expect(shell).toContain(`src="/p/${slug}/view"`);
-    expect(shell).not.toContain("hello world deck");
+    // The document is framed, never inlined. (Its excerpt is in the <head>,
+    // for link previews — PO-1365.)
+    expect(shell.slice(shell.indexOf("</head>"))).not.toContain("hello world deck");
 
     // The modal is driven by inline JS that no request can exercise, so at
     // least prove it parses — a syntax slip there breaks commenting silently.

@@ -35,9 +35,9 @@ import {
 } from "../../lib/review-pane";
 import { MarkdownEditor } from "../MarkdownEditor";
 import { DiffViewer } from "./DiffViewer";
+import { summarizeChange } from "./change-summary";
 import { unifiedDiff } from "./diff-util";
 import { rowDiffLines, tableRowDiff } from "../../lib/table-row-diff";
-import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import type { ReviewRequest } from "./ReviewQueue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +57,8 @@ interface ReviewPaneProps {
   alwaysIncludeTags?: string[];
   onApprove: (note?: string) => Promise<void>;
   onRequestChanges: (note: string) => Promise<void>;
+  /** Decline for good (reason required). Omit to hide Reject. */
+  onReject?: (note: string) => Promise<void>;
   /** Open the document in the editor (Edit, Save & approve). */
   onEditDraft: () => void;
   onOpenDocument: (nodeId: string) => void;
@@ -83,6 +85,7 @@ export function ReviewPane({
   alwaysIncludeTags = [],
   onApprove,
   onRequestChanges,
+  onReject,
   onEditDraft,
   onOpenDocument,
   onClose,
@@ -120,7 +123,7 @@ export function ReviewPane({
   }, [versions, nodeId, approvedVersion, pendingVersion, tabChosenFor]);
 
   // Inline decisions: no second dialog.
-  const [mode, setMode] = useState<"idle" | "approve" | "changes">("idle");
+  const [mode, setMode] = useState<"idle" | "approve" | "changes" | "reject">("idle");
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
@@ -143,11 +146,11 @@ export function ReviewPane({
     !!node &&
     !api.isPrimeNode(node, primeTags, alwaysIncludeTags);
 
-  const decide = async (kind: "approve" | "changes") => {
-    if (kind === "changes") {
+  const decide = async (kind: "approve" | "changes" | "reject") => {
+    if (kind !== "approve") {
       const err = requestChangesError(note);
       if (err) {
-        setMode("changes");
+        setMode(kind);
         setError(err);
         return;
       }
@@ -156,6 +159,7 @@ export function ReviewPane({
     setError(null);
     try {
       if (kind === "approve") await onApprove(note.trim() || undefined);
+      else if (kind === "reject" && onReject) await onReject(note.trim());
       else await onRequestChanges(note.trim());
     } catch (e) {
       setError(e instanceof Error ? e.message : "That didn't go through. Try again.");
@@ -195,38 +199,39 @@ export function ReviewPane({
 
   const title = request.title || node?.title || nodeId;
   const type: string | undefined = node?.type;
-  const tabs: Array<{ key: ReviewPaneTab; label: string; icon: typeof Eye }> = [
-    { key: "preview", label: "Preview", icon: Eye },
-    ...(hasPublished
-      ? [
-          { key: "changes" as const, label: "Changes", icon: FileDiff },
-          { key: "published" as const, label: `Published v${approvedVersion}`, icon: FileText },
-        ]
-      : []),
-  ];
+  const tabs: Array<{ key: ReviewPaneTab; label: string; icon: typeof Eye }> = hasPublished
+    ? [
+        { key: "changes", label: "Changes", icon: FileDiff },
+        { key: "preview", label: "Full draft", icon: Eye },
+        { key: "published", label: `Live version (v${approvedVersion})`, icon: FileText },
+      ]
+    : [{ key: "preview", label: "Full draft", icon: Eye }];
+  const typeLabel = type ? type.charAt(0).toUpperCase() + type.slice(1) : null;
+  const changeSummary =
+    hasPublished && publishedBody != null ? summarizeChange(publishedBody, body || "").text : null;
 
   return (
     <div className="flex min-w-0 flex-col gap-4" data-testid="review-pane">
-      {/* Header: what this is, who sent it, what it's based on. */}
+      {/* Header: what this is, who sent it, what it changes. */}
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate font-mono text-xs text-muted-foreground">{nodeId}</p>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-semibold leading-tight">{title}</h2>
-            <Badge variant="secondary" className="bg-amber-100 text-amber-800 text-[10px]">
-              In review
-            </Badge>
-            {type && (
-              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
-                {type}
-              </Badge>
-            )}
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {request.requestedBy} · v{pendingVersion}
-            {hasPublished && <> · based on published v{approvedVersion}</>}
-            {!hasPublished && approvedVersion == null && <> · first version</>} · submitted{" "}
+          <h2 className="text-xl font-semibold leading-tight">{title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            From <span className="font-medium text-foreground/80">{request.requestedBy}</span> ·{" "}
             {since(request.requestedAt)}
+            {" · "}
+            {hasPublished
+              ? `edits live v${approvedVersion} into v${pendingVersion}`
+              : approvedVersion == null
+                ? "first version"
+                : `v${pendingVersion}`}
+            {typeLabel && <> · {typeLabel}</>}
+          </p>
+          <p
+            className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70"
+            title={nodeId}
+          >
+            {nodeId}
           </p>
         </div>
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose} aria-label="Close review">
@@ -250,7 +255,17 @@ export function ReviewPane({
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
+      {changeSummary && (
+        <p
+          className="rounded-lg border bg-muted/40 px-4 py-2 text-sm"
+          data-testid="review-pane-change-summary"
+        >
+          <span className="font-medium">What changed: </span>
+          {changeSummary}
+        </p>
+      )}
+
+      <div className="min-w-0">
         {/* The text, three ways. */}
         <div className="min-w-0">
           {tabs.length > 1 && (
@@ -296,7 +311,7 @@ export function ReviewPane({
                   {type === "table" && <TableRowChanges before={publishedBody} after={body || ""} />}
                   <DiffViewer
                     patch={unifiedDiff(publishedBody, body)}
-                    className="max-h-[70vh] border-0"
+                    className="border-0"
                   />
                 </>
               )
@@ -315,45 +330,122 @@ export function ReviewPane({
           </div>
         </div>
 
-        {/* Decision panel. */}
-        <aside className="flex flex-col gap-2 self-start rounded-lg border p-3" data-testid="review-pane-actions">
-          {lockedReason ? (
-            <div className="flex gap-2 text-sm text-muted-foreground" data-testid="review-pane-readonly">
-              <Lock className="mt-0.5 h-4 w-4 shrink-0" />
-              <p>{lockedReason}</p>
-            </div>
-          ) : (
-            <>
-              <p className="text-sm font-medium">Waiting for your review</p>
-              <p className="text-xs text-muted-foreground">
-                Approve to publish it as the official version, or send it back with a reason.
-              </p>
-              {mode !== "idle" && (
-                <Textarea
-                  autoFocus
-                  value={note}
-                  onChange={(e) => {
-                    setNote(e.target.value);
-                    setError(null);
-                  }}
-                  disabled={processing}
-                  placeholder={
-                    mode === "changes" ? "What needs to change? (required)" : "Comment for the author (optional)"
-                  }
-                  className="min-h-[90px] text-sm"
-                  data-testid="review-pane-note-input"
-                />
-              )}
-              {error && <p className="text-xs text-destructive">{error}</p>}
-              {/* Once a decision is picked, only its submit button shows under
-                  the box, so it reads as "post this" — plus Cancel. */}
-              {mode !== "changes" && (
+      </div>
+
+      {/* Decision bar: sticks to the bottom of the screen so the decision never
+          scrolls away from the change, however long the diff. */}
+      <div
+        className="sticky bottom-0 z-10 -mx-1 rounded-lg border bg-background/95 p-3 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] backdrop-blur"
+        data-testid="review-pane-actions"
+      >
+        {lockedReason ? (
+          <div className="flex gap-2 text-sm text-muted-foreground" data-testid="review-pane-readonly">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+            <p>{lockedReason}</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {mode !== "idle" && (
+              <Textarea
+                autoFocus
+                value={note}
+                onChange={(e) => {
+                  setNote(e.target.value);
+                  setError(null);
+                }}
+                disabled={processing}
+                placeholder={
+                  mode === "changes"
+                    ? "What needs to change? (required)"
+                    : mode === "reject"
+                      ? "Why is this being rejected? (required)"
+                      : "Comment for the author (optional)"
+                }
+                className="min-h-[72px] text-sm"
+                data-testid="review-pane-note-input"
+              />
+            )}
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="mr-auto flex items-center gap-2">
+                {mode === "idle" && canEditDraft && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={onEditDraft}
+                    data-testid="review-pane-edit"
+                  >
+                    <Pencil className="mr-1.5 h-4 w-4" /> Edit draft
+                  </Button>
+                )}
+                {mode === "idle" && (
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                    onClick={() => setMode("approve")}
+                  >
+                    Add a comment
+                  </button>
+                )}
+                {mode !== "idle" && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={() => {
+                      setMode("idle");
+                      setNote("");
+                      setError(null);
+                    }}
+                    data-testid="review-pane-cancel"
+                  >
+                    Cancel
+                  </Button>
+                )}
+              </div>
+              {onReject && mode !== "approve" && mode !== "changes" && (
                 <Button
-                  className={cn(APPROVE_BUTTON_CLASS, "w-full justify-center")}
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={processing}
+                  onClick={() => (mode === "reject" ? decide("reject") : setMode("reject"))}
+                  data-testid="review-pane-reject"
+                  title="Decline this for good. The author is told it is not coming back in this form."
+                >
+                  {processing && mode === "reject" ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <X className="mr-1.5 h-4 w-4" />
+                  )}
+                  {mode === "reject" ? "Reject with reason" : "Reject"}
+                </Button>
+              )}
+              {mode !== "approve" && mode !== "reject" && (
+                <Button
                   variant="outline"
+                  className="border-amber-300 text-amber-800 hover:bg-amber-50 hover:text-amber-900"
+                  disabled={processing}
+                  onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
+                  data-testid="review-pane-request-changes"
+                  title="Send it back to the author with a reason. They are expected to revise it."
+                >
+                  {processing && mode === "changes" ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CornerUpLeft className="mr-2 h-4 w-4" />
+                  )}
+                  {mode === "changes" ? "Send back to author" : "Request changes"}
+                </Button>
+              )}
+              {mode !== "changes" && mode !== "reject" && (
+                <Button
+                  className="bg-green-600 text-white shadow-sm hover:bg-green-700 focus-visible:ring-green-600"
                   disabled={processing || bodyLoading || !versions}
                   onClick={() => decide("approve")}
                   data-testid="review-pane-approve"
+                  title={`Publishes v${pendingVersion} as the live version.`}
                 >
                   {processing ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -363,60 +455,9 @@ export function ReviewPane({
                   {mode === "approve" ? "Post comment & approve" : "Approve & publish"}
                 </Button>
               )}
-              {mode === "idle" && (
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground underline-offset-2 hover:underline"
-                  onClick={() => setMode("approve")}
-                >
-                  Approve with a comment
-                </button>
-              )}
-              {mode !== "approve" && (
-                <Button
-                  variant="outline"
-                  className={cn(REJECT_BUTTON_CLASS, "w-full justify-center")}
-                  disabled={processing}
-                  onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
-                  data-testid="review-pane-request-changes"
-                >
-                  {processing ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <CornerUpLeft className="mr-2 h-4 w-4" />
-                  )}
-                  {mode === "changes" ? "Send back to author" : "Request changes"}
-                </Button>
-              )}
-              {mode !== "idle" && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={processing}
-                  onClick={() => {
-                    setMode("idle");
-                    setNote("");
-                    setError(null);
-                  }}
-                  data-testid="review-pane-cancel"
-                >
-                  Cancel
-                </Button>
-              )}
-              {mode === "idle" && canEditDraft && (
-                <Button
-                  variant="ghost"
-                  className="w-full justify-center"
-                  disabled={processing}
-                  onClick={onEditDraft}
-                  data-testid="review-pane-edit"
-                >
-                  <Pencil className="mr-2 h-4 w-4" /> Edit draft
-                </Button>
-              )}
-            </>
-          )}
-        </aside>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
