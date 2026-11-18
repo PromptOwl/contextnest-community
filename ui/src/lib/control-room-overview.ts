@@ -143,6 +143,7 @@ const REASON_TEXT: Record<string, string> = {
   model_timeout: "The model call timed out",
   // Why a listener's judge run failed (po-1407).
   model_auth: "The model key was refused",
+  model_billing: "The model account is out of credit",
   model_rate_limited: "The model is rate-limited",
   model_rejected: "The model refused the request",
   model_error: "The model call failed",

@@ -44,6 +44,31 @@ describe("classifyJudgeFailure", () => {
     }
   });
 
+  it("an out-of-credit model account is model_billing, direct from Anthropic or through LiteLLM; other 400s stay model_rejected", () => {
+    const anthropicMsg = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+    // The Anthropic SDK: status 400, the API's message in error.error.message and in .message.
+    const direct = Object.assign(new Error(`400 ${JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: anthropicMsg } })}`), {
+      status: 400,
+      error: { type: "error", error: { type: "invalid_request_error", message: anthropicMsg } },
+    });
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, direct), "model").code).toBe("model_billing");
+    // LiteLLM proxy (production, 2026-11-18): its BadRequestError wraps Anthropic's body in its own message.
+    const viaLiteLlm = Object.assign(
+      new Error(
+        `400 {"error":{"message":"litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"${anthropicMsg}\"}}","type":null,"param":null,"code":"400"}}`,
+      ),
+      { status: 400, error: { error: { message: `litellm.BadRequestError: AnthropicException - ${anthropicMsg}`, code: "400" } } },
+    );
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, viaLiteLlm), "model").code).toBe("model_billing");
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(402, "Payment Required")), "model").code).toBe("model_billing");
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(429, "You exceeded your current quota, please check your plan and billing details")), "model").code).toBe("model_billing");
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(400, "messages: roles must alternate")), "model").code).toBe("model_rejected");
+    // The log line still carries no message text.
+    const line = judgeFailureLogLine("w3", classifyJudgeFailure(new JudgeRunError(ZERO, viaLiteLlm), "model"));
+    expect(line).toMatch(/reason=model_billing status=400$/);
+    expect(line).not.toMatch(/credit|Anthropic|litellm/i);
+  });
+
   it("the status is carried for the log; the message never is", () => {
     const f = classifyJudgeFailure(new JudgeRunError(ZERO, apiError(401)), "model");
     expect(f).toEqual({ code: "model_auth", name: "APIError", status: 401 });
@@ -104,6 +129,7 @@ describe("Control room words for judge failures", () => {
     }
     expect(reasonLabel("model_auth")).toBe("The model key was refused");
     expect(reasonLabel("model_rejected")).toBe("The model refused the request");
+    expect(reasonLabel("model_billing")).toBe("The model account is out of credit");
   });
 
   it("'No reason given' stays only for a row with no code", () => {

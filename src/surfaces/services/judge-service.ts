@@ -212,6 +212,9 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
       if (ended && progress.nestId && progress.agentNode) {
         await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure).catch(() => undefined);
       }
+      if (ended && failure.code === "model_billing" && progress.nestId) {
+        await alertModelBilling(progress.nestId, w.binding_id).catch(() => undefined);
+      }
     }
     return false;
   }
@@ -807,6 +810,26 @@ async function recordRun(
     // Best effort, but never silent: a lost row is a gap in the ledger trace.
     console.error(`[surfaces] recording the run of window ${windowId} failed: ${err instanceof Error ? err.name : "error"}`);
   }
+}
+
+/**
+ * po-1407: the model account behind this nest is out of credit, so every
+ * window fails until someone tops it up. Counts-only admin alert, at most
+ * once a day per nest (the credential is the nest's or the server's, not the
+ * conversation's).
+ */
+async function alertModelBilling(nestId: string, bindingId: string): Promise<void> {
+  const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+  if (await getDb().get("SELECT 1 AS x FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ? AND created_at > ?", [nestId, since])) return;
+  await recordNotice({
+    kind: "model_billing",
+    audience: "admins",
+    bindingId,
+    nestId,
+    detail: { windows: 1 },
+    subject: "Nest's model account is out of credit",
+    text: "Nest's listener couldn't judge a conversation because the model account it uses is out of credit, so nothing is being kept from bound conversations. Top up the account (or change the model key in Server settings); windows are judged again once the model answers.",
+  });
 }
 
 /** Round 10 (§14): the owner's notice when their unseeded private nest can't take a DM proposal. */

@@ -870,6 +870,32 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(mo.entries.find((x: any) => x.entry_id === `win_${w.id}`).verdict.reason_code).toBe("model_auth");
   });
 
+  it("an out-of-credit model account (LiteLLM 400 'credit balance is too low') ends as model_billing and alerts admins once a day, counts only", async () => {
+    const credit = () => {
+      throw Object.assign(
+        new Error('400 litellm.BadRequestError: AnthropicException - {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}'),
+        { status: 400 },
+      );
+    };
+    const before = (await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F])).length;
+    const a = await failWindow("C410", credit);
+    expect(a.w.reason_code).toBe("model_billing");
+    expect((await one("SELECT reason_code FROM runs WHERE id = ?", [a.w.run_id])).reason_code).toBe("model_billing");
+    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400$/.test(l))).toBe(true);
+    // A second window the same day: same code, no second alert.
+    const b = await failWindow("C411", credit);
+    expect(b.w.reason_code).toBe("model_billing");
+    const notices = await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F]);
+    expect(notices.length - before).toBe(1);
+    const n = notices[notices.length - 1];
+    expect(n.audience).toBe("admins");
+    expect(JSON.parse(n.detail)).toEqual({ windows: 1 });
+    expect(JSON.stringify(notices)).not.toMatch(/credit balance|Anthropic|litellm|PLATYPUS/i);
+    expect(sentEmails.some((m) => /out of credit/i.test(m.subject))).toBe(true);
+    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: a.bindingId })}`, undefined, alice.apiKey);
+    expect(led.data.entries.find((x: any) => x.entry_id === `win_${a.w.id}`).verdict.reason_code).toBe("model_billing");
+  });
+
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {
     const limited = await failWindow("C408", () => {
       throw Object.assign(new Error("rate limited"), { status: 429 });

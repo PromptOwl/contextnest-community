@@ -14,6 +14,7 @@ import { SurfaceRateLimited } from "../contract.js";
 
 export const JUDGE_FAILURE_CODES = [
   "model_auth",
+  "model_billing",
   "model_rate_limited",
   "model_timeout",
   "model_rejected",
@@ -55,6 +56,20 @@ export class JudgeRunError extends Error {
   }
 }
 
+/**
+ * An out-of-credit / billing refusal. Anthropic answers 400 "Your credit
+ * balance is too low to access the Anthropic API"; LiteLLM's BadRequestError
+ * wraps that body in its own message; other providers say 402 or "quota".
+ * Only matched here, never kept or logged.
+ */
+const BILLING_RE = /credit balance|billing|insufficient[_ ](?:quota|funds|credit)|exceeded your current quota|out of credit|payment required/i;
+
+/** Every message the error carries (the SDK puts the API's under error.error.message). */
+function messagesOf(err: unknown): string {
+  const e = err as { message?: unknown; error?: { message?: unknown; error?: { message?: unknown } } } | null;
+  return [e?.message, e?.error?.message, e?.error?.error?.message].filter((m) => typeof m === "string").join(" ");
+}
+
 const TIMEOUT_NAMES = new Set(["AbortError", "TimeoutError", "APIConnectionTimeoutError", "APIUserAbortError"]);
 const PARSE_NAMES = new Set(["SyntaxError", "ZodError"]);
 
@@ -90,6 +105,7 @@ export function classifyJudgeFailure(err: unknown, stage: JudgeStage): JudgeFail
   if (fromModel || stage === "model") {
     if (TIMEOUT_NAMES.has(name)) return out("model_timeout");
     if (status === 401 || status === 403) return out("model_auth");
+    if (status === 402 || ((status === 400 || status === 429) && BILLING_RE.test(messagesOf(cause)))) return out("model_billing");
     if (status === 429) return out("model_rate_limited");
     if (status === 400 || status === 404 || status === 413 || status === 422) return out("model_rejected");
     return out("model_error");
