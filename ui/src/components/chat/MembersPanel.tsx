@@ -72,7 +72,7 @@ export function MembersPanel({
   const title = conv ? (conv.kind === "dm" ? "In this conversation" : "In this group") : `Members of #${channel.name}`;
 
   return (
-    <ChatSheet open={open} onOpenChange={onOpenChange} side="right" title={title} className="w-[min(100vw,24rem)]" testId="chat-members">
+    <ChatSheet open={open} onOpenChange={onOpenChange} side="right" title={title} width="min(100vw, 24rem)" testId="chat-members">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
         <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h2>
         <SheetClose />

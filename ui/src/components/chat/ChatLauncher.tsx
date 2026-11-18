@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, Expand, Hash, Lock, MessagesSquare, PanelRightClose, Users } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Expand, Hash, Lock, MessagesSquare, PanelRightClose } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -16,7 +16,7 @@ import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost } from "../../lib/api";
 import { channelThreadLink } from "../../lib/channel-deep-link";
 import { initialChannel } from "../../lib/channels";
-import { chatOn, dmPeer, orderConversations } from "../../lib/chat-harness";
+import { chatOn, orderConversations } from "../../lib/chat-harness";
 import { launcherPlacement, launcherShown } from "../../lib/chat-layout";
 import { unreadForNest } from "../../lib/chat-live";
 import { orderByActivity, unreadElsewhere } from "../../lib/chat-sidebar";
@@ -26,7 +26,7 @@ import { reads } from "../../lib/queries";
 import { useSidePanel } from "../../lib/side-panel";
 import { ChannelNavProvider } from "./channel-nav";
 import { UnreadBadge } from "./ChatSidebar";
-import { MemberAvatar } from "./Presence";
+import { ConversationIcon } from "./Presence";
 import { Conversation } from "./Conversation";
 import { noticeMentions, useMessageExtras } from "./MessageExtras";
 import { PromoteDialog } from "./PromoteDialog";
@@ -85,7 +85,7 @@ export function ChatLauncher(p: ChatLauncherProps) {
           <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
             <MessagesSquare className="h-4 w-4" aria-hidden />
             {waiting > 0 && (
-              <span className="absolute -right-1.5 -top-1.5 min-w-4 rounded-full bg-background px-1 text-center text-[10px] font-semibold leading-4 text-primary ring-1 ring-primary" aria-label={`${waiting} unread`} data-testid="chat-launcher-unread">
+              <span className="absolute -left-1.5 -top-1.5 min-w-4 rounded-full bg-background px-1 text-center text-[10px] font-semibold leading-4 text-primary ring-1 ring-primary" aria-label={`${waiting} unread`} data-testid="chat-launcher-unread">
                 {waiting > 99 ? "99+" : waiting}
               </span>
             )}
@@ -184,7 +184,7 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
             <DropdownMenuTrigger asChild>
               <button type="button" className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-sm font-semibold hover:bg-muted" aria-label="Switch channel" data-testid="slide-over-switcher">
                 {conv ? (
-                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <ConversationIcon conversation={conv} me={me} online={data.live.online} />
                 ) : channel?.private ? (
                   <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                 ) : (
@@ -214,7 +214,6 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
               {ordered.length === 0 && <p className="px-2 py-1.5 text-xs text-muted-foreground">No channels yet.</p>}
               {dms.length > 0 && <DropdownMenuLabel className="mt-1 text-xs font-semibold text-muted-foreground">Direct messages</DropdownMenuLabel>}
               {dms.map((c) => {
-                const peer = c.conversation ? dmPeer(c.conversation, me) : null;
                 return (
                   <DropdownMenuItem
                     key={c.id}
@@ -225,11 +224,7 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
                     className="h-9 gap-2"
                     data-testid="slide-over-dm"
                   >
-                    {peer ? (
-                      <MemberAvatar kind={peer.kind} label={peer.kind === "agent" ? peer.handle : peer.name || peer.email} online={peer.kind === "person" ? data.live.online.has(peer.email.toLowerCase()) : undefined} size="sm" />
-                    ) : (
-                      <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                    )}
+                    {c.conversation && <ConversationIcon conversation={c.conversation} me={me} online={data.live.online} />}
                     <span className={cn("truncate", c.unread > 0 && "font-semibold")}>{c.title}</span>
                     {c.name === selected ? <Check className="ml-auto h-3.5 w-3.5" aria-label="Open" /> : <UnreadBadge count={c.unread} className="ml-auto" />}
                   </DropdownMenuItem>

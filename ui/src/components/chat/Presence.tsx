@@ -5,9 +5,10 @@
  * a searchable list of the nest's people and agents to pick from.
  */
 import { useMemo, useState } from "react";
-import { Bot, Check, Search } from "lucide-react";
+import { Bot, Check, Search, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { AgentHandle } from "../../lib/api";
+import type { AgentHandle, ConversationView } from "../../lib/api";
+import { dmPeer } from "../../lib/chat-harness";
 import { initialsOf } from "../../lib/doc-stream";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 
@@ -36,6 +37,26 @@ export function MemberAvatar({ kind, label, online, size = "md" }: { kind: "pers
         <PresenceDot online={online} className={cn("absolute ring-2 ring-background", size === "sm" ? "-bottom-0.5 -right-0.5 h-1.5 w-1.5" : "-bottom-0.5 -right-0.5")} />
       )}
     </span>
+  );
+}
+
+/** A conversation's mark: the other person (with presence) or agent for a
+ *  dm, a people mark for a group. One size everywhere it is listed. */
+export function ConversationIcon({ conversation, me, online }: { conversation: Pick<ConversationView, "kind" | "members">; me: string | null; online: ReadonlySet<string> }) {
+  const peer = dmPeer(conversation, me);
+  if (!peer)
+    return (
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground" aria-hidden>
+        <Users className="h-3 w-3" />
+      </span>
+    );
+  return (
+    <MemberAvatar
+      kind={peer.kind}
+      label={peer.kind === "agent" ? peer.handle : peer.name || peer.email}
+      online={peer.kind === "person" ? online.has(peer.email.toLowerCase()) : undefined}
+      size="sm"
+    />
   );
 }
 

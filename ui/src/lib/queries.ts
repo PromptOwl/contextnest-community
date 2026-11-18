@@ -837,7 +837,14 @@ export const reads = {
   channelDocs: (nestId: string) =>
     queryOptions({
       queryKey: keys.channelDocs(nestId),
-      queryFn: async () => ({ nodes: (await api.listFolderNodes(nestId, "channels")).nodes.filter(isChannelDoc) }),
+      // Conversation nodes (C2) too: a member's dms are not documents either.
+      queryFn: async () => {
+        const [channels, conversations] = await Promise.all([
+          api.listFolderNodes(nestId, "channels"),
+          api.listFolderNodes(nestId, "conversations").catch(() => ({ nodes: [] as any[] })),
+        ]);
+        return { nodes: [...channels.nodes, ...conversations.nodes].filter(isChannelDoc) };
+      },
       staleTime: STALE.listing,
     }),
   census: (nestId: string) =>

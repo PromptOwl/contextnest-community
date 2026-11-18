@@ -6,18 +6,18 @@
  * Mentions in this nest. The same component is the phone's sheet.
  */
 import { useState, type ReactNode } from "react";
-import { Archive, AtSign, Bookmark, ChevronRight, Hash, Lock, Plus, Search, Users } from "lucide-react";
+import { Archive, AtSign, Bookmark, ChevronRight, Hash, Lock, Plus, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChannelSummary, MentionItem } from "../../lib/api";
 import { unreadLabel } from "../../lib/channels";
-import { dmPeer, orderConversations } from "../../lib/chat-harness";
+import { orderConversations } from "../../lib/chat-harness";
 import type { Seam } from "../../lib/chat-seams";
 import { filterChannels, orderByActivity } from "../../lib/chat-sidebar";
 import { relTime } from "../../lib/dates";
 import { plainExcerpt } from "../../lib/plain-excerpt";
 import { mentionPlace } from "../../lib/my-work-inbox";
 import { mentionAuthor } from "../my-work/MentionRows";
-import { MemberAvatar } from "./Presence";
+import { ConversationIcon } from "./Presence";
 
 export function UnreadBadge({ count, className }: { count: number; className?: string }) {
   const label = unreadLabel(count);
@@ -87,7 +87,7 @@ export function ChatSidebar(p: ChatSidebarProps) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && p.onSearchMessages && query.trim().length >= 2) p.onSearchMessages(query.trim());
             }}
-            placeholder={p.onSearchMessages ? "Search channels and messages" : "Find a channel"}
+            placeholder={p.onSearchMessages ? "Search" : "Find a channel"}
             aria-label={p.onSearchMessages ? "Search channels and messages" : "Find a channel"}
             data-testid="chat-search"
             className="h-8 w-full rounded-md border border-input bg-background pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -185,8 +185,6 @@ export function ChatSidebar(p: ChatSidebarProps) {
             )}
             {dmRows.map((c) => {
               const active = c.name === p.selected;
-              const conv = c.conversation;
-              const peer = conv ? dmPeer(conv, p.viewer?.email ?? null) : null;
               return (
                 <button
                   key={c.id}
@@ -196,18 +194,7 @@ export function ChatSidebar(p: ChatSidebarProps) {
                   className={cn(ROW, active ? "bg-muted font-medium" : c.unread > 0 && "font-semibold text-foreground")}
                   data-testid="dm-row"
                 >
-                  {peer ? (
-                    <MemberAvatar
-                      kind={peer.kind}
-                      label={peer.kind === "agent" ? peer.handle : peer.name || peer.email}
-                      online={peer.kind === "person" ? dms.online.has(peer.email.toLowerCase()) : undefined}
-                      size="sm"
-                    />
-                  ) : (
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground" aria-hidden>
-                      <Users className="h-3 w-3" />
-                    </span>
-                  )}
+                  {c.conversation && <ConversationIcon conversation={c.conversation} me={p.viewer?.email ?? null} online={dms.online} />}
                   <span className="truncate">{c.title}</span>
                   {!active && <UnreadBadge count={c.unread} className="ml-auto" />}
                 </button>

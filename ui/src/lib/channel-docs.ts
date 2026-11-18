@@ -29,6 +29,7 @@ export function channelNameOfDoc(nodeId: string): string | null {
 }
 
 const CONVERSATION_ID = /^nodes\/conversations\/[^/]+$/;
+const CONVERSATION_FOLDER = "conversations";
 
 /** A channel node, or a conversation node (C2): neither is a document. */
 export function isChannelDoc(node: Tagged): boolean {
@@ -69,6 +70,12 @@ export function withoutChannelsInCensus<C extends NestCensus>(census: C, channel
   const n = channels.length;
   if (n === 0) return census;
   const ids = new Set(channels.map((c) => c.id));
+  // Channels sit in `channels/`, conversations (C2) in `conversations/`.
+  const inFolder = new Map<string, number>();
+  for (const c of channels) {
+    const folder = CONVERSATION_ID.test(c.id) ? CONVERSATION_FOLDER : CHANNEL_FOLDER;
+    inFolder.set(folder, (inFolder.get(folder) ?? 0) + 1);
+  }
   const live = channels.filter((c) => c.status === "published" || c.status === "approved").length;
   const editedThisWeek = channels.filter((c) => {
     const at = c.updated_at ? Date.parse(c.updated_at) : NaN;
@@ -78,8 +85,11 @@ export function withoutChannelsInCensus<C extends NestCensus>(census: C, channel
     ...census,
     total: Math.max(0, census.total - n),
     folders: census.folders
-      .map((f) => (f.path === CHANNEL_FOLDER ? { ...f, count: f.count - n, total: f.total - n } : f))
-      .filter((f) => f.path !== CHANNEL_FOLDER || f.total > 0),
+      .map((f) => {
+        const k = inFolder.get(f.path) ?? 0;
+        return k ? { ...f, count: f.count - k, total: f.total - k } : f;
+      })
+      .filter((f) => !inFolder.has(f.path) || f.total > 0),
     tags: lowered(census.tags, channels.flatMap(tagsOf), sameTag) ?? census.tags,
     types: lowered(census.types, channels.map((c) => c.type ?? "document")) ?? census.types,
     statuses: lowered(census.statuses, channels.map((c) => c.status ?? "")) ?? census.statuses,

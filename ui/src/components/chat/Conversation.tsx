@@ -6,20 +6,22 @@
  * place: new messages scroll it only when it was already at the end.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Hash, Loader2, Lock, MessagesSquare, Users, WifiOff } from "lucide-react";
+import { ArrowDown, Hash, Loader2, Lock, MessagesSquare, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { AgentHandle, ChannelPost, ChannelSummary } from "../../lib/api";
 import type { TimelineState } from "../../lib/channels";
 import { buildConversation, newLineAnchor, sortChronological } from "../../lib/chat-grouping";
-import { dmPeer, messageFeatures } from "../../lib/chat-harness";
+import { messageFeatures } from "../../lib/chat-harness";
 import { jumpPill } from "../../lib/chat-layout";
 import { relTime } from "../../lib/dates";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 import { ChatComposer, MENTION_EXTRAS, PostRefusal } from "./ChatComposer";
 import { MessageRow, messageActions, type MessageAction, type MessageRowProps } from "./MessageRow";
-import { MemberAvatar } from "./Presence";
+import { ConversationIcon } from "./Presence";
+
+const NO_ONE: ReadonlySet<string> = new Set();
 import { EmptyState } from "./States";
 
 export interface ConversationProps {
@@ -71,7 +73,6 @@ export interface ConversationProps {
 export function Conversation(p: ConversationProps) {
   const { channel, state } = p;
   const conv = channel.conversation;
-  const peer = conv ? dmPeer(conv, p.me) : null;
   // A conversation is named by its members; a channel by its name.
   const label = conv ? channel.title : channel.name;
   const features = messageFeatures(channel);
@@ -167,11 +168,7 @@ export function Conversation(p: ConversationProps) {
         <div className="flex min-w-0 flex-1 items-baseline gap-2 px-1">
           <h2 className="flex min-w-0 shrink items-center gap-1.5 truncate text-base font-semibold leading-6" data-testid="chat-title">
             {conv ? (
-              peer ? (
-                <MemberAvatar kind={peer.kind} label={peer.kind === "agent" ? peer.handle : peer.name || peer.email} online={peer.kind === "person" ? p.online?.has(peer.email.toLowerCase()) : undefined} size="sm" />
-              ) : (
-                <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-              )
+              <ConversationIcon conversation={conv} me={p.me} online={p.online ?? NO_ONE} />
             ) : channel.private ? (
               <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="Private" />
             ) : (

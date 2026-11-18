@@ -465,7 +465,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
           {layout.thread === "beside" ? (
             threadPane
           ) : (
-            <ChatSheet open={!!openThread && !!channel} onOpenChange={(o) => !o && closeThread()} side="right" title="Thread" className="w-[min(100vw,26rem)]" testId="chat-thread-sheet">
+            <ChatSheet open={!!openThread && !!channel} onOpenChange={(o) => !o && closeThread()} side="right" title="Thread" width="min(100vw, 26rem)" testId="chat-thread-sheet">
               {threadPane}
             </ChatSheet>
           )}

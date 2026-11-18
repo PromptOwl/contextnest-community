@@ -17,6 +17,7 @@ export function ChatSheet({
   title,
   children,
   className,
+  width = "min(100vw, 22rem)",
   testId,
 }: {
   open: boolean;
@@ -26,6 +27,10 @@ export function ChatSheet({
   title: string;
   children: ReactNode;
   className?: string;
+  /** The panel's width. Inline, because the app's dialog clamp
+   *  (`[role=dialog][data-state] { width: … }` in index.css) outranks a
+   *  width utility class. */
+  width?: string;
   testId?: string;
 }) {
   return (
@@ -34,8 +39,9 @@ export function ChatSheet({
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 motion-reduce:animate-none" />
         <DialogPrimitive.Content
           data-testid={testId}
+          style={{ width }}
           className={cn(
-            "fixed inset-y-0 z-50 flex w-[min(100vw,22rem)] flex-col bg-background shadow-2xl outline-none duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 motion-reduce:animate-none",
+            "fixed inset-y-0 z-50 flex flex-col bg-background shadow-2xl outline-none duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 motion-reduce:animate-none",
             side === "left"
               ? "left-0 border-r data-[state=open]:slide-in-from-left"
               : "right-0 border-l data-[state=open]:slide-in-from-right",
