@@ -3,6 +3,7 @@
  * prime sets — so they stay short and typeable: no punctuation soup, no
  * emoji, no path separators, and a length a chip can render.
  */
+import { isTicketTag } from "./ticket";
 
 export const MAX_TAG_LENGTH = 40;
 
@@ -59,7 +60,8 @@ export function newTags(existing: string[], candidates: string[]): string[] {
 /** The nest's tags to suggest in a tag field: its vocabulary minus the ones already applied. */
 export function tagSuggestions(all: string[], applied: string[]): string[] {
   const have = new Set(applied.map(tagKey));
-  return all.filter((t) => !have.has(tagKey(t)));
+  // Ticket numbers are server-assigned, never offered (PO-1231).
+  return all.filter((t) => !have.has(tagKey(t)) && !isTicketTag(t));
 }
 
 export function tagKey(tag: string): string {

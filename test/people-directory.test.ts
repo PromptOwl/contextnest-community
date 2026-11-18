@@ -379,9 +379,9 @@ describe("people suggestions with the directory toggle on", () => {
   });
 });
 
-// The board's assignee picker offers only members; a directory suggestion is
-// marked so an owner can share the nest first instead of hitting a 400.
-describe("mentionable marks who is on the nest", () => {
+// The pickers list nest people only, even with the directory on (PO-1210);
+// an outsider can't be assigned until the nest is shared with them.
+describe("mentionable lists only who is on the nest", () => {
   let app: any;
   let owner: { apiKey: string; email: string };
   let outsider: { apiKey: string; email: string };
@@ -413,9 +413,9 @@ describe("mentionable marks who is on the nest", () => {
   const assign = () =>
     jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/card`, { assignee: outsider.email }, owner.apiKey);
 
-  it("a directory user is not a member and can't be assigned until shared", async () => {
+  it("a directory user is not listed and can't be assigned until shared", async () => {
     expect(await member(owner.email)).toBe(true);
-    expect(await member(outsider.email)).toBe(false);
+    expect(await member(outsider.email)).toBeUndefined();
     expect((await assign()).status).toBe(400);
 
     await jsonRequest(

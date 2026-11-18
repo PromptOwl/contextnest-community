@@ -5,7 +5,7 @@
  *
  *   GET    /agent-webhooks            → { webhooks: [{ handle, target, …, last_delivery }] }  (target = host#hash, never the URL)
  *   PUT    /agent-webhooks/:handle { url?, rotate? } → { webhook, secret? }    (secret only when minted;
- *                                       url may be left out for a handle that has one — rotate from the row)
+ *                                       url may be left out with rotate: true on a handle that has one)
  *   POST   /agent-webhooks/:handle/test → { ok, delivery, webhook }            (one signed agent.test POST; 429 past the limit)
  *   DELETE /agent-webhooks/:handle    → { deleted: true }
  *

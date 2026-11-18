@@ -389,6 +389,28 @@ describe("AC-ST-04: a writer promotes a thread to a decision", () => {
     expect(r.data.node.id).toMatch(/^nodes\/tasks\//);
   });
 
+  it("promotes in a review-required nest: the node is created and the thread links it", async () => {
+    const gov = (await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey)).data.nest.id as string;
+    await jsonRequest(app, "PATCH", `/nests/${gov}/settings`, { stewardship_enabled: true, allow_self_approve: false }, owner.apiKey);
+    const doc = await jsonRequest(app, "POST", `/nests/${gov}/nodes`, { title: "Plan", content: "v1" }, owner.apiKey);
+    expect(doc.status, JSON.stringify(doc.data)).toBe(201);
+    const t = await open(owner, doc.data.id ?? doc.data.node.id, "Decide the launch date", {}, gov);
+    const r = await jsonRequest(app, "POST", `/nests/${gov}/threads/${t.id}/promote`, { kind: "decision" }, owner.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const got = await jsonRequest(app, "GET", `/nests/${gov}/nodes/${r.data.node.id}`, undefined, owner.apiKey);
+    expect(got.status, JSON.stringify(got.data)).toBe(200);
+  });
+
+  it("a document comment thread promotes too (the AnnotationsPanel buttons)", async () => {
+    const t = await open(alice, secretId, "We keep the plan under wraps until launch");
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/threads/${t.id}/promote`, { kind: "decision" }, carol.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.source_thread).toEqual({ node_id: secretId, thread_id: t.id });
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${secretId}/annotations`, undefined, carol.apiKey);
+    const thread = list.data.threads.find((x: { id: string }) => x.id === t.id);
+    expect(thread.comments[thread.comments.length - 1].body).toContain(`[[${r.data.node.id}]]`);
+  });
+
   it("a read collaborator cannot promote; an outsider and another nest's thread are not found", async () => {
     const t = await open(alice, OPS, "Promote me?");
     const ro = await jsonRequest(app, "POST", `/nests/${nestId}/threads/${t.id}/promote`, { kind: "decision" }, reader.apiKey);
@@ -664,8 +686,17 @@ describe("AC-ST-07: MCP context_agent_webhooks matches REST /agent-webhooks", ()
     const rotated = await callTool(owner.apiKey, "context_agent_webhooks", { action: "set", handle: "duet", url: "https://duet.example.com/hook", rotate: true });
     expect(rotated.data.secret).toMatch(/^whsec_/);
     expect(rotated.data.secret).not.toBe(set.data.secret);
+    // A rotate may omit the URL: the stored target stays, the secret changes.
+    const urlless = await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/duet`, { rotate: true }, owner.apiKey);
+    expect(urlless.status).toBe(200);
+    expect(urlless.data.secret).toMatch(/^whsec_/);
+    expect(urlless.data.secret).not.toBe(rotated.data.secret);
+    expect(urlless.data.webhook.target).toBe(set.data.webhook.target);
+    // Without rotate, or for a new handle, the URL is still required.
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/duet`, {}, owner.apiKey)).status).toBe(400);
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/nobody`, { rotate: true }, owner.apiKey)).status).toBe(400);
 
-    const list = await callTool(owner.apiKey, "context_agent_webhooks", { action: "list" });
+    const list =await callTool(owner.apiKey, "context_agent_webhooks", { action: "list" });
     expect(list.isError, list.text).toBe(false);
     const rest = await jsonRequest(app, "GET", `/nests/${nestId}/agent-webhooks`, undefined, owner.apiKey);
     expect(list.data).toEqual(rest.data);

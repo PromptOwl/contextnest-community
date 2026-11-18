@@ -49,6 +49,8 @@ interface PublishDialogProps {
   nestId: string;
   nodeId: string;
   nodeTitle: string;
+  /** Tab to open on. "links" when the caller is managing a link that exists. */
+  initialTab?: "new" | "links";
   onClose: () => void;
 }
 
@@ -64,11 +66,14 @@ const MODES: Array<{
   { value: "invite", label: "Invite only", hint: "Named people only", icon: UserCheck },
 ];
 
-export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDialogProps) {
+export function PublishDialog({ nestId, nodeId, nodeTitle, initialTab = "new", onClose }: PublishDialogProps) {
   const [mode, setMode] = useState<api.PublishMode>("public");
   const [comments, setComments] = useState(false);
   const [watermark, setWatermark] = useState(false);
   const [noDownload, setNoDownload] = useState(false);
+  // The "Make your own nest" strip on the page. On unless switched off.
+  const [showInvite, setShowInvite] = useState(true);
+  const [savingInvite, setSavingInvite] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [allowlist, setAllowlist] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -156,6 +161,7 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
         comments_enabled: comments,
         watermark,
         no_download: noDownload,
+        show_invite: showInvite,
         code: mode === "code" ? code.trim() : null,
         allowlist: mode === "invite" ? emails : [],
         // <input type="date"> gives a bare day; publish through the end of it.
@@ -183,6 +189,23 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
       await refreshLinks();
     } catch (e: any) {
       setError(e?.message || "Could not revoke this link");
+    }
+  }
+
+  // Switch the strip on a link that is already out there; its URL stays.
+  async function handleInvite(p: api.Publication, on: boolean) {
+    setError(null);
+    setSavingInvite(p.id);
+    try {
+      const res = await api.updatePublication(nestId, p.id, { show_invite: on });
+      setLinks((ls) => ls.map((l) => (l.id === p.id ? { ...l, ...res.publish, link: l.link } : l)));
+      toast.success(
+        on ? "“Make your own nest” is shown on this link" : "“Make your own nest” removed from this link",
+      );
+    } catch (e: any) {
+      setError(e?.message || "Could not change this link");
+    } finally {
+      setSavingInvite(null);
     }
   }
 
@@ -244,7 +267,7 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
           </Alert>
         )}
 
-        <Tabs defaultValue="new">
+        <Tabs defaultValue={initialTab}>
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="new">New link</TabsTrigger>
             <TabsTrigger value="links">Links ({links.length})</TabsTrigger>
@@ -358,6 +381,13 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
                 checked={noDownload}
                 onChange={setNoDownload}
               />
+              <ToggleRow
+                id="publish-show-invite"
+                label="Show “Make your own nest”"
+                hint="One line at the bottom of the page, linking to sign-up on this server. Turn it off for a document you send to a client."
+                checked={showInvite}
+                onChange={setShowInvite}
+              />
             </div>
 
             {newLink && (
@@ -435,6 +465,20 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
                         </Button>
                       )}
                     </div>
+                    {!dead && (
+                      <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+                        <Label htmlFor={`publish-invite-${p.id}`} className="text-xs font-normal text-muted-foreground">
+                          Show “Make your own nest” on the page
+                        </Label>
+                        <Switch
+                          id={`publish-invite-${p.id}`}
+                          data-testid={`publish-link-invite-${p.id}`}
+                          checked={p.show_invite !== false}
+                          disabled={savingInvite === p.id}
+                          onCheckedChange={(on) => handleInvite(p, on)}
+                        />
+                      </div>
+                    )}
                     {views[p.id] && (
                       <div className="mt-2 border-t pt-2">
                         {!views[p.id].length ? (

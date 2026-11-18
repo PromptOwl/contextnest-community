@@ -18,6 +18,8 @@ import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { STREAM_TOOL, streamToolEnabled } from "./stream-tool.js";
+import { AGENT_TOOL_DEFINITIONS } from "./agent-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
 import { metacognitionEnabled } from "../metacognition/manage.js";
 import { SURFACES_TOOL_DEFINITIONS } from "./surfaces-tools.js";
@@ -32,6 +34,7 @@ import { CHANNEL_TOOL_DEFINITIONS, READ_KEY_TOOL_VIEWS, READ_ONLY_KEY_REFUSAL } 
 import { CHAT_READ_KEY_TOOL_VIEWS, CHAT_TOOL_DEFINITIONS } from "./chat-tools.js";
 import { MY_WORK_TOOL_DEFINITIONS } from "./my-work-tools.js";
 import { STREAM_TOOL_DEFINITIONS } from "./stream-tools.js";
+import { MESSAGE_TOOL_DEFINITIONS } from "./message-tools.js";
 import { isInitializeRequest, nestConnectInstructions, peekJsonRpc } from "./connect-instructions.js";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -71,13 +74,14 @@ function nestToolDefinitions() {
       ? [
           ...TOOL_DEFINITIONS,
           ...WORKFLOW_TOOL_DEFINITIONS,
+          ...AGENT_TOOL_DEFINITIONS,
           ...(metacognitionEnabled() ? METACOGNITION_TOOL_DEFINITIONS : []),
           ...(surfacesEnabled() ? SURFACES_TOOL_DEFINITIONS : []),
         ]
       : TOOL_DEFINITIONS),
     // Channels (PO-1179): their own experimental switch, independent of the
     // workflow plane.
-    ...(config.EXPERIMENTAL_AGENT_STREAM ? CHANNEL_TOOL_DEFINITIONS : []),
+    ...(config.EXPERIMENTAL_AGENT_STREAM ? [...CHANNEL_TOOL_DEFINITIONS, ...MESSAGE_TOOL_DEFINITIONS] : []),
     // Team chat C2 (PO-1197): conversations, membership, preferences,
     // presence — the same switch (TEAM_CHAT_ENABLED, alias above).
     ...(config.TEAM_CHAT_ENABLED ? CHAT_TOOL_DEFINITIONS : []),
@@ -144,6 +148,8 @@ function createMcpServerForNest(
     // the agent the truth. runTool still refuses a write tool on its own
     // (the SDK answers an unregistered name with an error before that).
     if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
+    // The document stream exists only while its experimental switch is on.
+    if (tool.name === STREAM_TOOL && !streamToolEnabled()) continue;
     // Admin tools are only advertised to the people who may use them.
     if (MCP_ADMIN_TOOLS.has(tool.name) && !isNestAdmin) continue;
     // A tool that also writes is offered to a read-only key as what that key

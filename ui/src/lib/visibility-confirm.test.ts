@@ -6,6 +6,7 @@ import {
   visibilityBlockedReason,
   visibilityMenuOptions,
   settleVisibilityChange,
+  visibilityPickerOptions,
 } from "./visibility-confirm";
 
 // Who a tier reaches depends on what the server is. 'org' = every account on
@@ -162,5 +163,34 @@ describe("settleVisibilityChange — what the control shows after a save", () =>
     const r = await settleVisibilityChange("private", "public", async () => ({ visibility: "private" }));
     expect(r.visibility).toBe("private");
     expect(r.error).toMatch(/did not accept/i);
+  });
+});
+
+// On a shared deployment, 'org' reaches every organization on the server, so
+// the picker offers team sharing in its place. On a single-organization
+// server, 'org' is the company and stays.
+describe("visibilityPickerOptions — tiers plus team sharing", () => {
+  const owners = { publicBy: "owners", orgBy: "owners", isServerAdmin: false } as const;
+  const values = (opts: { value: string }[]) => opts.map((o) => o.value);
+
+  it("shared deployment: offers 'Share with a team…' and not Organization", () => {
+    const opts = visibilityPickerOptions("private", { sharedDeployment: true }, owners, { canShareWithTeam: true });
+    expect(values(opts)).toEqual(["private", "team", "public"]);
+    expect(opts.find((o) => o.value === "team")?.label).toBe("Share with a team…");
+  });
+
+  it("shared deployment: a nest that is already org still shows org, so the value is not misreported", () => {
+    const opts = visibilityPickerOptions("org", { sharedDeployment: true }, owners, { canShareWithTeam: true });
+    expect(values(opts)).toEqual(["private", "org", "team", "public"]);
+  });
+
+  it("shared deployment without a team-share target: no team option, still no Organization", () => {
+    const opts = visibilityPickerOptions("private", { sharedDeployment: true }, owners, { canShareWithTeam: false });
+    expect(values(opts)).toEqual(["private", "public"]);
+  });
+
+  it("single-organization server: Organization stays and no team option is added", () => {
+    const opts = visibilityPickerOptions("private", { sharedDeployment: false }, owners, { canShareWithTeam: true });
+    expect(values(opts)).toEqual(["private", "org", "public"]);
   });
 });

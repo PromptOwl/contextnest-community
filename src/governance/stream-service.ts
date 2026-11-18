@@ -28,7 +28,8 @@
  *
  * Bounded work per call: a handful of SQL statements (page, total, four facet
  * counts, tags + comment counts for the page) plus one body read per item on
- * the page for its summary.
+ * the page for its summary. The new-posts poll asks for the count alone
+ * (`items: false`): one COUNT, nothing else.
  */
 
 import { getDb } from "../db/client.js";
@@ -38,6 +39,10 @@ import { jsonTextValues } from "../db/sql.js";
 import { isPublicReader } from "../shared/access.js";
 import { ensureNodeIndex } from "../nodes/node-index.js";
 import { normalizeTag } from "./tag-index-service.js";
+import { canUserApproveMany } from "./stewardship-service.js";
+import { deserializeClient } from "../shared/client-metadata.js";
+import { AUTO_PUBLISH_NOTE_PREFIX } from "../nodes/service.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export type StreamKind = "created" | "updated" | "published" | "approved" | "rejected";
 
@@ -55,6 +60,19 @@ export interface StreamItem {
   status: string;
   /** Author email; null where the caller reads the nest only publicly. */
   author: string | null;
+  /** The author's display name (the account's name, or a system account's
+   *  name); null when there is none, and for public readers (po-1214). */
+  authorName: string | null;
+  /** The write's caller attribution (spec §9.4) — `client.agent` is the agent
+   *  the person wrote through. null when the write named none, and for public
+   *  readers. */
+  client: ClientMetadata | null;
+  /** The version's change note; null when none, and for public readers. */
+  changeNote: string | null;
+  /** On a version in review: whether the caller may approve or request
+   *  changes on it (the same verdict as GET …/can-approve). null otherwise,
+   *  and for public readers. */
+  review: { canReview: boolean } | null;
   at: string;
   /** First ~200 characters of this version's body, flattened. */
   summary: string;
@@ -94,6 +112,9 @@ export interface StreamFilters {
   author?: string[];
   /** Lower bound on the version's timestamp, "YYYY-MM-DD HH:MM:SS" (UTC). */
   since?: string;
+  /** "agent": versions whose write named an agent (`client.agent`);
+   *  "human": versions that named none (po-1214). */
+  source?: "agent" | "human";
 }
 
 const SUMMARY_CHARS = 200;
@@ -126,14 +147,59 @@ interface NestScope {
   publicOnly: boolean;
 }
 
-/** Flatten a body to a one-line preview. */
-export function summarize(body: string): string {
-  const flat = body
-    .replace(/<[^>]+>/g, " ")
+/** A heading's text for comparing with the title: no emphasis or code marks,
+ *  no trailing punctuation, case-folded, whitespace collapsed. */
+function headingKey(s: string): string {
+  return s
+    .replace(/[*_`~]/g, "")
+    .replace(/[\s:.!?;,\-–—]+$/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** Flatten a body to a one-line preview. A leading heading that only
+ *  repeats the title (ignoring case, emphasis and trailing punctuation) is
+ *  dropped: the post already shows the title (po-1214). */
+export function summarize(body: string, title?: string): string {
+  let text = body.replace(/<[^>]+>/g, " ");
+  const t = title ? headingKey(title) : "";
+  if (t) {
+    text = text.replace(/^\s*#{1,6}\s+(.*)\n?/, (line, heading: string) =>
+      headingKey(heading) === t ? "" : line,
+    );
+  }
+  const flat = text
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/\s+/g, " ")
     .trim();
   return flat.length > SUMMARY_CHARS ? `${flat.slice(0, SUMMARY_CHARS)}…` : flat;
+}
+
+/**
+ * SQL for "this version's write named an agent". `client_json` is
+ * JSON.stringify output (serializeClient — see the note there) of a FLAT
+ * block: the engine's clientMetadataSchema allows only scalar values, so there
+ * is no nested object to carry an inner `"agent":` key, and no null to store
+ * (canary-tested). A top-level string `agent` is therefore the literal
+ * `"agent":"` followed by a non-empty value; a key or value that merely
+ * contains the word is prefixed or escaped and does not match, and a
+ * non-string scalar (`"agent":5`) is not an agent name (tested). Text matching
+ * keeps it one predicate on both drivers (no json_extract / ->>). It is an
+ * unindexed scan over the filtered rows, bounded by the since-window and the
+ * nest scope; revisit with a stored flag if node_versions grows large.
+ */
+const AGENT_SQL = `(v.client_json LIKE '%"agent":"%' AND v.client_json NOT LIKE '%"agent":""%')`;
+
+/** A stored client block as a post shows it: `agent` is a name, so a
+ *  non-string one (the schema allows any scalar) is dropped, not shown as
+ *  "via 5". Matches AGENT_SQL, so the post is filed under people. */
+function postClient(raw: string | null): ClientMetadata | null {
+  const client = deserializeClient(raw);
+  if (!client) return null;
+  if (client.agent === undefined || typeof client.agent === "string") return client;
+  const { agent: _dropped, ...rest } = client as Record<string, unknown>;
+  return Object.keys(rest).length ? (rest as ClientMetadata) : null;
 }
 
 /**
@@ -217,6 +283,13 @@ export async function getDocStream(params: {
   filters?: StreamFilters;
   limit?: number;
   offset?: number;
+  /** false: skip the facet counts even on the first page — the new-posts
+   *  poll (po-1214) only needs `total`. Default true. */
+  facets?: boolean;
+  /** false: count only — `total` and `has_more`, no page. The new-posts poll
+   *  (po-1214) needs nothing else, so it skips the page query, its joins, the
+   *  review verdicts and the version reads. Default true. */
+  items?: boolean;
   /** One version's body and frontmatter (null when it can't be read). The
    *  body feeds the summary; a public reader's title/type/tags come from the
    *  frontmatter. */
@@ -271,7 +344,10 @@ export async function getDocStream(params: {
   // Facet counts run over exactly this; the page and total add the filters.
   const base = visible(scopes);
 
-  const memberFacetFiltered = authors.length > 0 || tags.length > 0 || types.length > 0;
+  // `source` reads the write's attribution, which a public reader never sees
+  // (no author, no client) — so, like the author facet, it runs over member
+  // scopes only and is never an oracle for an agent's name.
+  const memberFacetFiltered = authors.length > 0 || tags.length > 0 || types.length > 0 || !!f.source;
   const { where, params: whereParams } = visible(memberFacetFiltered ? memberScopes : scopes);
   if (f.nest?.length) {
     where.push(`v.nest_id IN (${f.nest.map(() => "?").join(",")})`);
@@ -287,6 +363,8 @@ export async function getDocStream(params: {
     where.push(`LOWER(v.author) IN (${authors.map(() => "?").join(",")})`);
     whereParams.push(...authors);
   }
+  if (f.source === "agent") where.push(AGENT_SQL);
+  else if (f.source === "human") where.push(`(v.client_json IS NULL OR NOT ${AGENT_SQL})`);
   if (tags.length) {
     where.push(
       `EXISTS (SELECT 1 FROM node_tag_index t
@@ -297,19 +375,26 @@ export async function getDocStream(params: {
   }
   const whereSql = where.join(" AND ");
 
+  const wantItems = params.items !== false;
   const [totalRow, rows] = await Promise.all([
     db.get(`SELECT COUNT(*) AS c ${FROM} WHERE ${whereSql}`, whereParams) as Promise<{
       c: number | string;
     }>,
-    db.all(
+    (wantItems ? db.all(
       `SELECT v.id, v.nest_id, v.node_id, v.version, v.status, v.author, v.created_at,
-              v.tags_json, ni.title, ni.type
+              v.tags_json, v.client_json, v.change_note, ni.title, ni.type,
+              u.name AS author_name, sa.name AS system_name
          ${FROM}
+         -- The same join getVersionAttribution uses: users.email is UNIQUE and
+         -- stored lowercased, as is node_versions.author; system_accounts is
+         -- keyed by user_id. At most one row each, so paging is unchanged.
+         LEFT JOIN users u ON u.email = v.author
+         LEFT JOIN system_accounts sa ON sa.user_id = u.id
         WHERE ${whereSql}
         ORDER BY v.created_at DESC, v.id DESC
         LIMIT ? OFFSET ?`,
       [...whereParams, limit, offset],
-    ) as Promise<
+    ) : Promise.resolve([])) as Promise<
       Array<{
         id: number | string;
         nest_id: string;
@@ -319,16 +404,23 @@ export async function getDocStream(params: {
         author: string;
         created_at: string;
         tags_json: string | null;
+        client_json: string | null;
+        change_note: string | null;
         title: string;
         type: string;
+        author_name: string | null;
+        system_name: string | null;
       }>
     >,
   ]);
   const total = Number(totalRow?.c ?? 0);
+  if (!wantItems) {
+    return { items: [], total, counts: null, limit, offset, has_more: offset < total };
+  }
 
   const memberBase = memberScopes.length ? visible(memberScopes) : null;
   const counts =
-    offset === 0
+    offset === 0 && params.facets !== false
       ? await facetCounts(
           { sql: base.where.join(" AND "), params: base.params },
           memberBase ? { sql: memberBase.where.join(" AND "), params: memberBase.params } : null,
@@ -375,6 +467,22 @@ export async function getDocStream(params: {
   }
 
   const publicNests = new Set(scopes.filter((s) => s.publicOnly).map((s) => s.nestId));
+
+  // Review in place (po-1214): for the page's in-review versions, may the
+  // caller approve? One batched verdict per nest — the same decideApproval
+  // GET …/can-approve answers with, separation of duties included.
+  const reviewable = new Map<string, boolean>();
+  const pendingByNest = new Map<string, string[]>();
+  for (const r of rows) {
+    if (r.status !== "pending_review" || publicNests.has(r.nest_id)) continue;
+    pendingByNest.set(r.nest_id, [...(pendingByNest.get(r.nest_id) ?? []), r.node_id]);
+  }
+  await Promise.all(
+    [...pendingByNest].map(async ([nestId, nodeIds]) => {
+      const verdicts = await canUserApproveMany(nestId, nodeIds, params.userEmail);
+      for (const id of nodeIds) reviewable.set(`${nestId}\u0000${id}`, verdicts.get(id)?.allowed === true);
+    }),
+  );
   // One version read (a chain replay) per item, a few at a time rather than
   // the whole page at once.
   const versionsRead = await mapLimit(rows, SUMMARY_CONCURRENCY, async (r) => {
@@ -411,8 +519,15 @@ export async function getDocStream(params: {
       version,
       status: r.status,
       author: isPublic ? null : r.author,
+      authorName: isPublic ? null : r.system_name || r.author_name || null,
+      client: isPublic ? null : postClient(r.client_json),
+      changeNote: isPublic ? null : personNote(r.change_note),
+      review:
+        isPublic || r.status !== "pending_review"
+          ? null
+          : { canReview: reviewable.get(k) === true },
       at: r.created_at,
-      summary: summarize(read?.body ?? ""),
+      summary: summarize(read?.body ?? "", title),
       commentCount: isPublic ? null : commentMap.get(k) ?? 0,
       kind: kindOf(version, r.status, approved.has(`${k}@${version}`)),
     };
@@ -426,6 +541,15 @@ export async function getDocStream(params: {
     offset,
     has_more: offset + items.length < total,
   };
+}
+
+/** A change note a person (or their agent) wrote. The server's own
+ *  "Auto-published on create/edit (<reason>)" stamp (AUTO_PUBLISH_NOTE_PREFIX) says
+ *  nothing about the change, so a post shows no note for it. */
+function personNote(raw: string | null): string | null {
+  const note = raw?.trim();
+  if (!note || note.startsWith(AUTO_PUBLISH_NOTE_PREFIX)) return null;
+  return note;
 }
 
 /** A public item's tags: the version's own frontmatter, else the tags the

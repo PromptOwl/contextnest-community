@@ -1,6 +1,6 @@
 /**
  * Per-nest chat setting (team chat harness C2, PO-1197): one column on the
- * nests row, `chat_enabled` (migration 089), the way `allow_self_approve`
+ * nests row, `chat_enabled` (migration 098), the way `allow_self_approve`
  * and the other per-nest switches are kept.
  *
  * The server switch (`config.TEAM_CHAT_ENABLED`) turns the harness on for

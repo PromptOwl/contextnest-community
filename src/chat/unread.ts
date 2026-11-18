@@ -42,8 +42,6 @@ export async function chatUnreadSummary(params: {
   email: string;
   onlyNestId?: string | null;
   actingAs?: string | null;
-  /** My Work's already-read open mentions, so the index isn't read twice. */
-  mentions?: Array<{ nest_id: string; node_id: string }>;
 }): Promise<ChatUnread> {
   const out: ChatUnread = { total: 0, mentions: 0, nests: [] };
   if (!config.TEAM_CHAT_ENABLED) return out;
@@ -63,7 +61,7 @@ export function _resetUnreadCache(): void {
 }
 
 async function build(
-  params: { userId: string; email: string; onlyNestId?: string | null; actingAs?: string | null; mentions?: Array<{ nest_id: string; node_id: string }> },
+  params: { userId: string; email: string; onlyNestId?: string | null; actingAs?: string | null },
   out: ChatUnread,
 ): Promise<ChatUnread> {
   const { userId, email } = params;
@@ -78,7 +76,7 @@ async function build(
 
   // Open mentions in chat containers, per nest (access-checked by the index read).
   const mentionsByNest = new Map<string, number>();
-  const mentions = params.mentions ?? (await listOpenMentions({ userId, email, nestNames, actingAs: params.actingAs ?? null }));
+  const mentions = (await listOpenMentions({ userId, email, nestNames, actingAs: params.actingAs ?? null })).items;
   for (const m of mentions) {
     if (!isChannelId(m.node_id) && !isConversationId(m.node_id)) continue;
     mentionsByNest.set(m.nest_id, (mentionsByNest.get(m.nest_id) ?? 0) + 1);

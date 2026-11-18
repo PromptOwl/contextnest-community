@@ -41,6 +41,7 @@ import { nowMsExpr } from "../db/sql.js";
 import { NotFoundError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { agentHandlesOwnedBy } from "./agent-mentions.js";
+import { isBroadcastName } from "../channels/broadcast.js";
 
 /** The longest excerpt a mention item carries (then "…"). */
 export const MENTION_EXCERPT_MAX = 280;
@@ -55,7 +56,8 @@ const MAX_SCAN = 2000;
 
 /**
  * Record who a just-posted thread message @mentions. Best-effort, like every
- * fan-out on the comment path: a failure here never fails the post.
+ * fan-out on the comment path: a failure here never fails the post. Comments
+ * have no edit or single-delete route, so a recorded row never goes stale.
  */
 export async function indexCommentMentions(params: {
   nestId: string;
@@ -65,6 +67,9 @@ export async function indexCommentMentions(params: {
   commentId: string;
   body: string;
   authorEmail: string;
+  /** The row's time for a name, when not the message's own (an edit stamps
+   *  the names it added with the edit's time; PO-1196). */
+  at?: (name: string) => string | undefined;
 }): Promise<number> {
   const { nestId, nodeId, threadId, commentId, body, authorEmail } = params;
   try {
@@ -75,23 +80,26 @@ export async function indexCommentMentions(params: {
     const author = authorEmail.toLowerCase();
     const people = new Set<string>();
     const handles = new Set<string>();
-    const rows: Array<{ userId: string | null; handle: string }> = [];
+    const rows: Array<{ userId: string | null; handle: string; at?: string }> = [];
     for (const name of names) {
       if (rows.length >= MAX_MENTION_RECIPIENTS) break;
       const person = resolveMention(roster, name) ?? (await findDirectoryPerson(name));
       if (person?.userId) {
         if (person.email.toLowerCase() === author || people.has(person.userId)) continue;
         people.add(person.userId);
-        rows.push({ userId: person.userId, handle: person.email.toLowerCase() });
+        rows.push({ userId: person.userId, handle: person.email.toLowerCase(), at: params.at?.(name) });
         continue;
       }
       // A steward invited by email who never signed up has an email but no
       // account: nobody to put it in front of, and not an agent either.
       if (person) continue;
+      // `@channel` / `@here` are a broadcast (channels/broadcast.ts), never a
+      // handle that could be woken.
+      if (isBroadcastName(name)) continue;
       const handle = name.trim().toLowerCase();
       if (!handle || handles.has(handle)) continue;
       handles.add(handle);
-      rows.push({ userId: null, handle });
+      rows.push({ userId: null, handle, at: params.at?.(name) });
     }
     if (rows.length === 0) return 0;
 
@@ -107,7 +115,7 @@ export async function indexCommentMentions(params: {
         `INSERT INTO comment_mentions
            (id, nest_id, node_id, thread_id, comment_id, mentioned_user_id, handle, author, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, nodeId, threadId, commentId, r.userId, r.handle, author, msg.created_at],
+        [uuid(), nestId, nodeId, threadId, commentId, r.userId, r.handle, author, r.at ?? msg.created_at],
       );
     }
     return rows.length;
@@ -123,25 +131,26 @@ export async function indexCommentMentions(params: {
  * millisecond message from someone else from being taken for it).
  */
 export function justWritten(
-  thread: { comments: Array<{ id: string; author: string }> },
+  thread: { comments: Array<{ id: string; author: string; body?: string }> },
   authorEmail: string,
+  body?: string,
 ): string | null {
   const me = authorEmail.toLowerCase();
-  for (let i = thread.comments.length - 1; i >= 0; i--) {
-    if (thread.comments[i].author.toLowerCase() === me) return thread.comments[i].id;
-  }
-  return null;
+  const mine = thread.comments.filter((c) => c.author.toLowerCase() === me);
+  // Same text first: two quick replies by one author can't swap ids.
+  const hit = [...mine].reverse().find((c) => body !== undefined && c.body === body) ?? mine[mine.length - 1];
+  return hit?.id ?? null;
 }
 
 /** Index the message a post or reply just wrote (see indexCommentMentions). */
 export async function indexPostedMessage(params: {
   nestId: string;
   nodeId: string;
-  thread: { id: string; comments: Array<{ id: string; author: string }> };
+  thread: { id: string; comments: Array<{ id: string; author: string; body?: string }> };
   body: string;
   authorEmail: string;
 }): Promise<void> {
-  const commentId = justWritten(params.thread, params.authorEmail);
+  const commentId = justWritten(params.thread, params.authorEmail, params.body);
   if (!commentId) return;
   await indexCommentMentions({
     nestId: params.nestId,
@@ -202,7 +211,8 @@ interface Row {
 
 function excerptOf(body: string): string {
   const flat = String(body ?? "").replace(/\s+/g, " ").trim();
-  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX)}…` : flat;
+  // Drop a high surrogate the cut left alone, so an emoji is never split.
+  return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX).replace(/[\uD800-\uDBFF]$/, "")}…` : flat;
 }
 
 /** "2026-11-08 10:00:00.123" (both dialects' nowMsExpr) → ISO 8601 UTC. */
@@ -261,10 +271,15 @@ export async function listOpenMentions(params: {
   nestNames: Map<string, string>;
   /** The agent handle this call is acting as (actingAgentHandle), if any. */
   actingAs?: string | null;
-}): Promise<MentionItem[]> {
+  /** Label only this page (default: all); `total` and `nodeKeys` count every open item. */
+  offset?: number;
+  limit?: number;
+  /** Only this thread's items (markMentionDone). */
+  thread?: string;
+}): Promise<{ items: MentionItem[]; total: number; nodeKeys: Set<string> }> {
   const { userId, email, nestNames } = params;
   const nestIds = [...nestNames.keys()];
-  if (nestIds.length === 0 || !userId) return [];
+  if (nestIds.length === 0 || !userId) return { items: [], total: 0, nodeKeys: new Set() };
   const me = email.toLowerCase();
   const acting = params.actingAs ? normHandle(params.actingAs) : "";
   const owned = (await agentHandlesOwnedBy({ userId, email })).filter((h) => h !== acting);
@@ -295,7 +310,7 @@ export async function listOpenMentions(params: {
                  WHERE r.thread_id = m.thread_id
                    AND LOWER(r.author) = ?
                    AND r.id <> m.comment_id
-                   AND r.created_at >= c.created_at))
+                   AND r.created_at >= m.created_at))
         )
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT ${MAX_SCAN}`,
@@ -347,19 +362,21 @@ export async function listOpenMentions(params: {
   // A conversation's mentions exist only while chat is on there (C2): the
   // server switch, and the nest's own setting (asked once per nest).
   const chatOn = new Map<string, boolean>();
-  const visible: Row[] = [];
-  for (const r of [...perThread.values()].filter((r) => allowed.get(key(r.nest_id, r.node_id)))) {
+  const shown: Row[] = [];
+  for (const r of perThread.values()) {
+    if (!allowed.get(key(r.nest_id, r.node_id)) || (params.thread && r.thread_id !== params.thread)) continue;
     if (isConversationId(r.node_id)) {
       if (!config.TEAM_CHAT_ENABLED) continue;
       if (!chatOn.has(r.nest_id)) chatOn.set(r.nest_id, await nestChatEnabled(r.nest_id).catch(() => false));
       if (!chatOn.get(r.nest_id)) continue;
     }
-    visible.push(r);
+    shown.push(r);
   }
-  const shown = visible;
-  const names = await displayNames(shown.map((r) => r.author));
+  const offset = params.offset ?? 0;
+  const page = shown.slice(offset, params.limit === undefined ? undefined : offset + params.limit);
+  const names = await displayNames(page.map((r) => r.author));
   const out: MentionItem[] = [];
-  for (const r of shown) {
+  for (const r of page) {
     const { actor, name } = await namedActor(r.author, deserializeClient(r.client_json), names);
     const channel = config.EXPERIMENTAL_AGENT_STREAM && isChannelRow(r) ? r.node_id.split("/").pop()! : null;
     const conversation = config.TEAM_CHAT_ENABLED && isConversationId(r.node_id);
@@ -382,7 +399,9 @@ export async function listOpenMentions(params: {
       mentioned_at: toIso(r.created_at),
     });
   }
-  return out;
+  // nodeKeys: the person's own mentions only — an agent's must not hide their inbox row.
+  const own = shown.filter((r) => r.mentioned_user_id === userId);
+  return { items: out, total: shown.length, nodeKeys: new Set(own.map((r) => key(r.nest_id, r.node_id))) };
 }
 
 /**
@@ -409,7 +428,7 @@ export async function markMentionDone(params: {
   const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
   const forAgent = params.forAgent === undefined || params.forAgent === null || params.forAgent === "" ? null : normHandle(params.forAgent);
   const mine = threadId
-    ? (await listOpenMentions(params)).find((m) => m.thread_id === threadId && m.for_agent === forAgent)
+    ? (await listOpenMentions({ ...params, thread: threadId })).items.find((m) => m.for_agent === forAgent)
     : undefined;
   if (!mine) throw new NotFoundError("No open mention of yours in that thread");
   const db = getDb();
@@ -420,19 +439,4 @@ export async function markMentionDone(params: {
     [params.userId, mine.nest_id, threadId, forAgent ?? ""],
   );
   return { done: true, thread_id: threadId, for_agent: forAgent };
-}
-
-/**
- * "nest\0node" for every document the caller has a mention row on, answered
- * or not — the inbox's "X mentioned you" rows for those are the same event
- * the Mentions section already carries, so My Work stops counting them twice.
- */
-export async function mentionedNodeKeys(userId: string, nestIds: string[]): Promise<Set<string>> {
-  if (!userId || nestIds.length === 0) return new Set();
-  const rows = (await getDb().all(
-    `SELECT DISTINCT nest_id, node_id FROM comment_mentions
-      WHERE mentioned_user_id = ? AND nest_id IN (${nestIds.map(() => "?").join(", ")})`,
-    [userId, ...nestIds],
-  )) as Array<{ nest_id: string; node_id: string }>;
-  return new Set(rows.map((r) => `${r.nest_id}\u0000${r.node_id}`));
 }

@@ -33,6 +33,7 @@ import { wakeForPostedMessage, type WakeOutcome } from "../stream/agent-wake.js"
 import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { isChannelNode } from "./channel-node.js";
 import { normHandle, resolveBodyMentions } from "./message-meta.js";
+import { indexBroadcast } from "./broadcast.js";
 // Team chat harness C2 (PO-1197): conversations, the live event, 'all' subscribers.
 import { isConversationId } from "../chat/containers.js";
 import { afterPostedMessage, indexConversationAgents } from "../chat/hooks.js";
@@ -40,6 +41,8 @@ import { afterPostedMessage, indexConversationAgents } from "../chat/hooks.js";
 export type MentionOutcome =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
   | { name: string; kind: "agent"; wake: WakeOutcome }
+  /** `@channel` / `@here` in a channel: how many other members it reached (PO-1196). */
+  | { name: string; kind: "everyone"; reached: number }
   | { name: string; kind: "nobody" };
 
 export interface PostedMessage {
@@ -69,6 +72,11 @@ export async function fanOutPostedMessage(params: {
   const channel = conversation || (await isChannelNode(nestId, nodeId));
   await notifyComment({ nestId, nodeId, body, actorEmail: authorEmail, baseUrl, channel, ...(isReply ? { thread } : {}) });
   await indexPostedMessage({ nestId, nodeId, thread, body, authorEmail });
+  const commentId = justWritten(thread, authorEmail);
+  // `@channel` / `@here`: a row for every other member (channels only; after
+  // the named rows, which it skips). Never wakes anyone.
+  const reached =
+    channel && commentId ? await indexBroadcast({ nestId, nodeId, threadId: thread.id, commentId, body, authorEmail }) : 0;
   // An agent member of a conversation is addressed by every message in it (C2).
   if (conversation) await indexConversationAgents({ nestId, nodeId, thread, authorEmail });
   // Reads the index rows just written, so it runs after them.
@@ -76,15 +84,19 @@ export async function fanOutPostedMessage(params: {
   // A conversation has no node to project into.
   if (!conversation) await syncAnnotationsNode(nestId, nodeId, authorEmail);
 
-  const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: justWritten(thread, authorEmail), mentions: [] };
+  const posted: PostedMessage = { node_id: nodeId, thread_id: thread.id, comment_id: commentId, mentions: [] };
   // The live event and the 'all' subscribers (C2); never for a document thread.
-  if (channel) await afterPostedMessage({ nestId, nodeId, thread, isReply, authorEmail, commentId: posted.comment_id });
+  if (channel) await afterPostedMessage({ nestId, nodeId, thread, isReply, authorEmail, commentId });
   const mayKnow = await canSeeRoster(nestId, params.authorUserId, authorEmail, await listNestPeople(nestId)).catch(() => false);
   if (!mayKnow) return posted;
 
   const author = authorEmail.toLowerCase();
   const mentions = posted.mentions;
-  for (const m of (await resolveBodyMentions(nestId, [body]).catch(() => [[]]))[0] ?? []) {
+  for (const m of (await resolveBodyMentions(nestId, [body], { broadcast: channel }).catch(() => [[]]))[0] ?? []) {
+    if (m.everyone) {
+      mentions.push({ name: m.name, kind: "everyone", reached });
+      continue;
+    }
     if (m.person) {
       const p = m.person;
       const notified =
@@ -107,6 +119,7 @@ export function mentionsLine(mentions: MentionOutcome[]): string {
   if (mentions.length === 0) return "";
   const parts = mentions.map((m) => {
     if (m.kind === "person") return `@${m.name} reached ${m.display_name}${m.notified ? "" : " (not notified: it is you, or they can't open this)"}`;
+    if (m.kind === "everyone") return `@${m.name} reached ${m.reached} other ${m.reached === 1 ? "person" : "people"} added to the nest`;
     if (m.kind === "agent") {
       return m.wake === "sent"
         ? `@${m.name} is an agent, wake-up sent`

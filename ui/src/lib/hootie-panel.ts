@@ -5,6 +5,9 @@
 import type { HootieBrand } from "./api";
 import { WIKI_LINK, citationResolver, splitWikiLink, type CitableNode } from "../../../src/hootie/citations";
 
+/** Window event that opens the Hootie panel (no detail). */
+export const HOOTIE_OPEN_EVENT = "hootie:open";
+
 export const HOOTIE_PANEL_MIN = 340;
 export const HOOTIE_PANEL_MAX = 720;
 export const HOOTIE_PANEL_DEFAULT = 420;
