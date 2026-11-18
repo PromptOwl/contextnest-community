@@ -783,6 +783,35 @@ export const config = {
   get HOOTIE_MODEL(): string {
     return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
   },
+  /**
+   * First-run onboarding (PO-1185): the welcome screen a signed-in person with
+   * no nest of their own sees instead of an empty nest list. Default ON.
+   * Superadmin-editable at runtime via /admin/settings (onboarding_enabled).
+   */
+  get ONBOARDING_ENABLED(): boolean {
+    return process.env.ONBOARDING_ENABLED !== "false";
+  },
+  /**
+   * Server-side "Distill a site or repo" (PO-1185): the server fetches a public
+   * https URL and writes nodes into the caller's nest with the default ontology
+   * prompt. Default ON: it only spends model credits when a model key is
+   * configured, and is rate limited per person. Off, or with no model key, the
+   * welcome screen hands the same prompt to the person's connected agent.
+   * Superadmin-editable at runtime via /admin/settings (distill_enabled).
+   */
+  get DISTILL_ENABLED(): boolean {
+    return process.env.DISTILL_ENABLED !== "false";
+  },
+  /**
+   * Self-serve Slack (PO-1185): any signed-in person may connect their own
+   * Slack workspace to a nest they own through the hosted Slack app. Needs
+   * Surfaces and the hosted Slack app on (and its credentials set by a server
+   * admin). Default OFF. Superadmin-editable via /admin/settings
+   * (surfaces_slack_self_serve).
+   */
+  get SURFACES_SLACK_SELF_SERVE(): boolean {
+    return process.env.SURFACES_SLACK_SELF_SERVE === "true";
+  },
   /** Testing aid: log Hootie's full model request and answer (nest content!).
    *  Off by default; summaries (model, key tail, tokens) are always logged. */
   get HOOTIE_DEBUG_LOG(): boolean {
@@ -887,7 +916,24 @@ export const config = {
    * (`experimental_agent_stream_enabled`). May change or disappear.
    */
   get EXPERIMENTAL_AGENT_STREAM(): boolean {
-    return process.env.EXPERIMENTAL_AGENT_STREAM === "true";
+    // An alias of TEAM_CHAT_ENABLED since the team chat harness (PO-1197):
+    // either name turns the same thing on. Kept so existing deploys and
+    // settings rows keep working; TEAM_CHAT_ENABLED supersedes it.
+    return this.TEAM_CHAT_ENABLED;
+  },
+  /**
+   * The team chat harness (PO-1197): channels, direct and group messages,
+   * private channels, presence, the live event stream and the chat MCP tools.
+   * Default OFF. On by `TEAM_CHAT_ENABLED=true` (or its older alias
+   * `EXPERIMENTAL_AGENT_STREAM=true`), or by a superadmin under Settings
+   * (`team_chat_enabled`), live, no restart. Off → every /nests/:id/channels,
+   * /conversations and /chat route and every /me/chat route answers 404, the
+   * chat MCP tools are not offered, `GET /nests/:id` says `chat: false`, and
+   * nothing else changes. A nest's owner or admin can also turn chat off for
+   * that one nest (`PATCH /nests/:id/chat/settings`).
+   */
+  get TEAM_CHAT_ENABLED(): boolean {
+    return process.env.TEAM_CHAT_ENABLED === "true" || process.env.EXPERIMENTAL_AGENT_STREAM === "true";
   },
   /**
    * Development only: let a metacognition agent's feeds and MCP servers be
@@ -948,6 +994,17 @@ export const config = {
   get RUN_MAX_CONCURRENT_ROOTS(): number {
     const n = parseInt(process.env.RUN_MAX_CONCURRENT_ROOTS || "50", 10);
     return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 50;
+  },
+  /** Agent event API (po-1186): run steps a single credential may post per
+   *  minute (REST + MCP, every run). Excess → 429 + Retry-After. */
+  get AGENT_EVENTS_RATE_PER_MIN(): number {
+    const n = parseInt(process.env.AGENT_EVENTS_RATE_PER_MIN || "600", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(1, n)) : 600;
+  },
+  /** Agent event API (po-1186): runs a single credential may start per minute. */
+  get AGENT_RUNS_RATE_PER_MIN(): number {
+    const n = parseInt(process.env.AGENT_RUNS_RATE_PER_MIN || "60", 10);
+    return Number.isFinite(n) ? Math.min(10000, Math.max(1, n)) : 60;
   },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run

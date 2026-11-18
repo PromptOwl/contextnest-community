@@ -89,11 +89,12 @@ interface PromotedRow extends PromotedRef {
 async function promotedRows(nestId: string, threadIds: string[]): Promise<PromotedRow[]> {
   if (threadIds.length === 0) return [];
   const wanted = new Set(threadIds);
+  // One LIKE per thread id narrows the scan to rows naming these threads.
   const rows = (await getDb().all(
     `SELECT node_id, title, type, status, frontmatter_json FROM node_index
-      WHERE nest_id = ? AND frontmatter_json LIKE '%"source_thread"%'
+      WHERE nest_id = ? AND (${threadIds.map(() => "frontmatter_json LIKE ?").join(" OR ")})
       ORDER BY node_id`,
-    [nestId],
+    [nestId, ...threadIds.map((id) => `%"${id.replace(/[%_\\"]/g, "")}"%`)],
   )) as Array<{ node_id: string; title: string; type: string; status: string; frontmatter_json: string }>;
   const out: PromotedRow[] = [];
   for (const r of rows) {

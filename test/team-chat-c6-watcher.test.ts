@@ -258,6 +258,22 @@ describe("AC-C6-09: adding the agent to a channel", () => {
     expect(ran.data.result.reason).toMatch(/off|disabled/i);
     expect(requests).toHaveLength(0);
   });
+
+  it("a private channel is never watched: enabling is refused, a watch set before it went private stays silent", async () => {
+    expect((await setWatch(owner, { enabled: true, mode: "asks" })).status).toBe(200);
+    const priv = await jsonRequest(app, "POST", `/nests/${nestId}/channels/ops/private`, { private: true }, owner.apiKey);
+    expect(priv.status, JSON.stringify(priv.data)).toBe(200);
+    try {
+      const ran = await runWatch(owner);
+      expect(ran.data.result.ran).toBe(false);
+      expect(ran.data.result.reason).toMatch(/private/);
+      expect(requests).toHaveLength(0);
+      expect((await setWatch(owner, { enabled: true })).status).toBe(400);
+      expect((await setWatch(owner, { enabled: false })).status).toBe(200);
+    } finally {
+      await jsonRequest(app, "POST", `/nests/${nestId}/channels/ops/private`, { private: false }, owner.apiKey);
+    }
+  });
 });
 
 // ─── AC-C6-10 ───────────────────────────────────────────────────────────

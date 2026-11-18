@@ -30,7 +30,8 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { clearParkedDeepLink, deepLinkToOpenOnReturn, parkDeepLink, takeParkedDeepLink } from "./lib/deep-link-return";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
@@ -40,6 +41,7 @@ import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-hi
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { useAdministersNest } from "./lib/administers-nest";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
 import {
@@ -275,12 +277,18 @@ export default function App() {
     mcpOauthEnabled,
     docStreamEnabled,
     agentStreamEnabled,
+    surfacesEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // Does the person administer any nest (the Control room, po-1186 CR2)?
+  // Only asked while Surfaces is on; unknown counts as yes here so a
+  // /control-room link isn't bounced before the nest list arrives — the rail
+  // (DocumentSidebar) waits for the answer instead.
+  const administersNest = useAdministersNest(authenticated && surfacesEnabled && !isAdmin);
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest: administersNest ?? true };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -820,6 +828,59 @@ export default function App() {
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
 
+  // A deep link followed while signed out (PO-1391). A private nest does not
+  // resolve for a stranger, so the probe ends "unreachable", the effect above
+  // drops the link from the address bar and the sign-in form shows. When the
+  // person then signs in, put the link back and probe again as them: they land
+  // on the nest or document they were sent, not on Home (the nest list or the
+  // first-run welcome screen) or a "no access" page. Declared after the URL
+  // sync so its address is the one left standing. The helper only returns the
+  // address this page was opened on; the parked one is checked again on take.
+  const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
+  const wasSignedInRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = authenticated;
+    const link = deepLinkToRetryAfterSignIn({
+      probeStatus: deepLinkProbe.status,
+      entryLink: entryLinkRef.current,
+      wasSignedIn,
+      signedIn: authenticated,
+    });
+    // A sign-in that left the page (PromptOwl, Google, single sign-on) comes
+    // back to Home on a fresh load: open the link parked before leaving.
+    const parked =
+      !link &&
+      deepLinkToOpenOnReturn({
+        sessionKnown: true,
+        signedIn: authenticated,
+        firstLook: wasSignedIn !== true,
+        probeStatus: deepLinkProbe.status,
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+        ? takeParkedDeepLink()
+        : null;
+    const open = link ?? parked;
+    if (!open) return;
+    // Once: a second sign-in in this tab (another account) starts from Home.
+    entryLinkRef.current = null;
+    clearParkedDeepLink();
+    window.history.replaceState(window.history.state, "", open);
+    setDeepLinkProbe({ status: "loading" });
+    // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
+  }, [authenticated, loading]);
+
+  // Park the link while the sign-in form is up, so it also survives a sign-in
+  // that leaves the page. Only for a signed-out visitor whose link did not
+  // resolve: a signed-in person's dead link is not something to come back to.
+  useEffect(() => {
+    if (loading || authenticated || authMode !== "key") return;
+    if (deepLinkProbe.status !== "unreachable") return;
+    parkDeepLink(entryLinkRef.current);
+  }, [loading, authenticated, authMode, deepLinkProbe.status]);
+
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the
   // rendered page disagreeing. Entries without a `view`-shaped state (a fresh
@@ -970,7 +1031,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled, surfacesEnabled]);
 
   // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
   const pageTabTitle = tabTitle(crumbs);
@@ -1008,11 +1069,9 @@ export default function App() {
         }
         void qc
           .fetchQuery(reads.nest(nestId))
-          .then((meta) => meta.permission === "owner")
-          .catch(() => false)
-          .then((isOwner) =>
-            setView({ page: "channels", nestId, nestName, isOwner, isAnonOwned: false, channel, thread }),
-          );
+          .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
+          .catch(() => ({ isOwner: false, isAnonOwned: false }))
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
       },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
@@ -1325,8 +1384,9 @@ export default function App() {
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
   // Beside the sidebar the shell fills its flex column: `w-full`, and no
   // `mx-auto` — auto margins on a flex-column item shrink it to its content.
-  // Without a sidebar the old centred page width applies.
-  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
+  // Without a sidebar the old centred page width applies; `w-full` keeps it
+  // full width now that the shell column is a flex column too (PO-1168).
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto w-full`;
   // Reader branding (CU-wdqcq02ptm): only for a caller in reader mode, and
   // only when the nest has any. Otherwise every value below is inert and the
   // shell renders exactly as before.
@@ -1453,7 +1513,9 @@ export default function App() {
         })()}
         </>
       )}
-      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
+      {/* A full-height column, so the footer's mt-auto pins the version line to
+          the bottom of a short page (PO-1168). */}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : "flex min-h-screen flex-col"}>
       {/* Header */}
       {/* `contents`: a sticky child only sticks within its parent's box, and
           <header> is exactly one row tall — so the row below must have the
@@ -2066,9 +2128,9 @@ export default function App() {
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
         readerBrand ? (
-          <ReaderBrandFooter branding={readerBrand} className={shellWidth} />
+          <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
-        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} mt-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
           {isAdmin && <UpdateBadge />}
         </footer>

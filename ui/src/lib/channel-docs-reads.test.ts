@@ -93,6 +93,12 @@ describe("document reads and channel nodes", () => {
     expect(hits.count).toBe(1);
   });
 
+  it("switching channels on drops cross-nest search cached under the old setting", async () => {
+    await qc.fetchQuery(reads.globalSearch("x", 20));
+    setChannelsOn(true);
+    expect(qc.getQueryState(reads.globalSearch("x", 20).queryKey)?.isInvalidated).toBe(true);
+  });
+
   it("the census loses the channels and its recent list is refilled with documents", async () => {
     setChannelsOn(true);
     const { census: c } = await qc.fetchQuery(reads.census(NEST));

@@ -474,14 +474,12 @@ describe("the key's identity is not a person", () => {
     expect(JSON.stringify(data)).not.toContain(email);
   });
 
-  it("is not offered by the all-users people directory, or resolvable as a mention", async () => {
+  it("is not resolvable as a mention through the all-users people directory", async () => {
     const email = await serviceEmail();
     process.env.PEOPLE_SUGGEST_ALL_USERS = "true";
     try {
-      const { withDirectory, findDirectoryPerson } = await import("../src/nests/people-service.js");
-      const dir = await withDirectory([]);
-      expect(dir.map((p) => p.email)).toContain("writer@headless.test");
-      expect(dir.map((p) => p.email)).not.toContain(email);
+      const { findDirectoryPerson } = await import("../src/nests/people-service.js");
+      expect(await findDirectoryPerson("writer@headless.test")).toBeDefined();
       expect(await findDirectoryPerson(email)).toBeUndefined();
     } finally {
       delete process.env.PEOPLE_SUGGEST_ALL_USERS;

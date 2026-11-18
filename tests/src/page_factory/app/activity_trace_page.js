@@ -77,7 +77,11 @@ class ActivityTracePage {
    */
   async nextRead(action = async () => {}, where = () => true) {
     const [res] = await Promise.all([
-      this.page.waitForResponse((r) => ActivityTracePage.isTraceRead(r) && where(ActivityTracePage.queryOf(r))),
+      // The server-wide trace holds close to a million rows on dev; a filtered
+      // read on a loaded shared server can take longer than the default 30 s.
+      this.page.waitForResponse((r) => ActivityTracePage.isTraceRead(r) && where(ActivityTracePage.queryOf(r)), {
+        timeout: 90_000,
+      }),
       action(),
     ]);
     return { query: ActivityTracePage.queryOf(res), body: await res.json().catch(() => null) };

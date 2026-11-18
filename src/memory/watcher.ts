@@ -55,6 +55,7 @@ import { McpPool } from "../metacognition/mcp-client.js";
 import { inFolders, mayProposeIn, parseChannelWatch, type ChannelWatchConfig } from "../metacognition/config.js";
 import { meaningfulChars } from "../surfaces/core/gate.js";
 import { channelIdFor, getReadableChannel, isNestMember, parseChannelName } from "../channels/channel-service.js";
+import { isPrivateChannel } from "../chat/containers.js";
 import { channelNameOf, isChannelId } from "../channels/channel-node.js";
 import { displayNames } from "../channels/message-meta.js";
 import { recordThreadRelation } from "../nodes/relations.js";
@@ -228,6 +229,8 @@ export async function setChannelWatch(
     },
     "watch",
   );
+  // Its drafts go to reviewers who may not be channel members (C2).
+  if (entry.enabled && view.private) throw new ValidationError(`#${view.name} is private; a watcher would copy it into drafts the whole nest's reviewers can read.`);
 
   // One watcher per channel: moving it to another agent removes it from the old one.
   if (current && current.agent.node_id !== agent.node_id) {
@@ -378,6 +381,8 @@ export async function runChannelWatch(
   const { agent, entry } = w;
   if (!entry.enabled) return silent(opts.trigger, "off");
   if (!agent.enabled) return silent(opts.trigger, "agent off");
+  // Re-checked per run: a channel made private after the watch was set.
+  if (await isPrivateChannel(nestId, channelId)) return silent(opts.trigger, "private channel");
   if (!(await ownerCanRun(nestId, agent.created_by))) return silent(opts.trigger, "owner has no write access");
   const credential = await credentialFor(nestId);
   if (!credential) return silent(opts.trigger, "no model key");

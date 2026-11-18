@@ -20,12 +20,17 @@ An external runner (Hootie, Claude, a Temporal worker, cron + curl) executes a w
 
 Run history: `GET /nests/{nest}/runs?agent=&status=` · full trace: `GET /runs/{run_id}`. Below write tier the freeform payloads — run `inputs`, run `trace`, and each step's `detail` — are redacted to `null`; a read-tier caller still sees the run's existence, agent, status, timing and step order.
 
+### Reporting instead of running (agent event API, po-1186)
+
+An agent that executes elsewhere and only needs to **report** what it did starts its run with `report_only: true` — no bundle is built, the response is just `{run_id}` — and records typed steps: `decision` (verdict `no_op|propose|act|escalate`, a reason code, its own one-line summary and references as evidence, never message text), `proposal` (a review it opened, which back-links the review to the run) and `outcome` (something it did outside the nest). Close with `usage`, `est_cost_usd` and `summary`. Every start and step takes an `Idempotency-Key`, so a retried hook never writes twice; a different body under the same key is a `409 idempotency_conflict`. External reports need a nest-scoped key. These runs land in the **decision ledger** (`GET /nests/{nest}/ledger`, trace `GET /ledger/{entry}`, rollups `GET /nests/{nest}/rollups`) beside the Slack listener's windows and metacognition runs. See API.md, "Agent event API and decision ledger", and the `context_agent_*` MCP tools.
+
 ## MCP tools
 
 The same build-and-execute surface is available to MCP agents on any nest's `/mcp` endpoint (advertised only when the flag is on). Each tool calls the same service/validator code as its REST route, so behaviour can't drift.
 
 - **Build** — `workflow_edge_types_list` · `workflow_edge_type_upsert` · `workflow_edge_type_delete` · `workflow_edges_list` · `workflow_edge_create` (DAG cycle guard + condition validation) · `workflow_edge_delete`.
-- **Execute** (the agent is the runner) — `workflow_run` (→ bundle + run_id) · `workflow_run_step` · `workflow_run_close` · `workflow_run_get` · `workflow_runs_list`.
+- **Execute** (the agent is the runner) — `workflow_run` (→ bundle + run_id) · `workflow_run_step` · `workflow_run_close` · `workflow_run_get` · `workflow_runs_list`. `workflow_run` and `workflow_run_step` take an optional `idempotency_key`.
+- **Report and audit** (po-1186) — `context_agent_register` · `context_agent_run_start` (report-only by default) · `context_agent_run_step` · `context_agent_run_close` · `context_agent_ledger` · `context_agent_ledger_trace` · `context_agent_ledger_export` · `context_agent_rollups`; org-wide `context_agent_ledger_org` / `context_agent_rollups_org` on the server-level `/mcp`.
 
 Write tools need write tier; run-detail tools scope the `run_id` to the caller's nest. Redaction matches the REST read tier.
 

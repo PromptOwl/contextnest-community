@@ -27,7 +27,7 @@
  * Each handler still checks its own rule through the service, so MCP and REST
  * share one gate.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { attributeRequest } from "../shared/client-metadata.js";
@@ -40,16 +40,17 @@ import {
   readChannel,
   setChannelArchived,
 } from "./channel-service.js";
+import { channelMessageRoutes } from "./message-routes.js";
 
 export const channelRoutes = new Hono<AuthEnv>();
 export const agentHandleRoutes = new Hono<AuthEnv>();
 
 agentHandleRoutes.get("/", async (c) => c.json(await listKnownAgents(await caller(c))));
 
-async function caller(c: any) {
-  const userId = c.get("userId") as string;
+async function caller(c: Context<AuthEnv>) {
+  const userId = c.get("userId");
   return {
-    nestId: c.req.param("nestId") as string,
+    nestId: c.req.param("nestId")!,
     userId,
     userEmail: await resolveCallerEmail(userId),
     // Artifact cards (PO-1181) may resolve links into other nests only for a
@@ -58,7 +59,7 @@ async function caller(c: any) {
   };
 }
 
-async function jsonObject(c: any): Promise<Record<string, unknown>> {
+async function jsonObject(c: Context<AuthEnv>): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -81,10 +82,15 @@ channelRoutes.post("/", async (c) => {
   const who = await caller(c);
   const result = await createChannel(
     { ...who, client: attributeRequest(c, body.client) },
-    { name: body.name, purpose: body.purpose },
+    { name: body.name, purpose: body.purpose, private: body.private },
   );
   return c.json(result, 201);
 });
+
+// Message actions, pins and search (PO-1196, message-routes.ts). Mounted
+// before `/:name` so GET /channels/search is the search, not a channel read
+// ("search" is a reserved channel name).
+channelRoutes.route("/", channelMessageRoutes);
 
 /** `:name` may be a node id, so it arrives URL-encoded. */
 function channelParam(c: any): string {
