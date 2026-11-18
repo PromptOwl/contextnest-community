@@ -26,6 +26,21 @@ export function workItemKey(w: WorkItem): string {
 }
 
 /**
+ * `items` without the rows this page already decided (keys from workItemKey).
+ *
+ * Quick decisions share one refetch (VERDICT_REFETCH_WINDOW_MS in queries.ts),
+ * so a page read right after a decision can still list the row the reviewer
+ * just decided, and it would come back on screen (PO-1404). A key is forgotten
+ * once a read no longer lists it: the server has caught up, and a later request
+ * for the same document must show.
+ */
+export function withoutResolved(items: WorkItem[], resolved: Set<string>): WorkItem[] {
+  const listed = new Set(items.map(workItemKey));
+  for (const key of [...resolved]) if (!listed.has(key)) resolved.delete(key);
+  return resolved.size === 0 ? items : items.filter((w) => !resolved.has(workItemKey(w)));
+}
+
+/**
  * The My Work badge: everything waiting on you — the reviews and requests the
  * server totals, plus the open tasks assigned to you. Assigned tasks aren't in
  * pagination.total because they don't page with the reviews. Unread

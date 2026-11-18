@@ -2,7 +2,7 @@
  * MyWorkPage — My Work (/my-work): tasks assigned to you, the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
 import { RunLink } from "../../../components/RunLink";
-import { Fragment, useState, useEffect } from "react";
+import { Fragment, useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
 import {
@@ -18,7 +18,7 @@ import {
   ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
-import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
+import { nothingWaitingOnMe, splitWorkItems, withoutResolved, workItemKey } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
@@ -100,12 +100,15 @@ export default function MyWorkPage() {
     window.addEventListener("my-work:home", home);
     return () => window.removeEventListener("my-work:home", home);
   }, []);
+  // Rows decided on this page. A read inside the shared verdict refetch window
+  // can still list them; withoutResolved keeps them off screen (PO-1404).
+  const resolvedRef = useRef<Set<string>>(new Set());
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
       const next = await qc.fetchQuery(reads.myWork({ offset }));
       setWork((prev) => ({
-        items: next.items,
+        items: withoutResolved(next.items, resolvedRef.current),
         waiting: next.waiting,
         notifications: next.notifications ?? prev.notifications,
         assigned: next.assigned ?? prev.assigned,
@@ -417,6 +420,7 @@ export default function MyWorkPage() {
   };
 
   const dropWorkItem = (w: api.WorkItem) => {
+    resolvedRef.current.add(workItemKey(w));
     setWork((prev) => ({
       ...prev,
       items: prev.items.filter((i) => workItemKey(i) !== workItemKey(w)),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitWorkItems, workItemKey, waitingOnMeCount, nothingWaitingOnMe, urgentOnMeCount } from "./my-work-groups";
+import { splitWorkItems, workItemKey, waitingOnMeCount, nothingWaitingOnMe, urgentOnMeCount, withoutResolved } from "./my-work-groups";
 import type { AssignedItem, WorkItem } from "./api";
 
 const item = (node_id: string, type: WorkItem["type"], target_type?: string) =>
@@ -117,5 +117,24 @@ describe("AC-MW-04 the badge and the empty state with mentions", () => {
   });
   it("counts mentions once, through waiting_on_me_total (not per row shown)", () => {
     expect(waitingOnMeCount({ waiting_on_me_total: 120, assigned: [], notifications: [] } as any)).toBe(120);
+  });
+});
+
+describe("withoutResolved (PO-1404)", () => {
+  // Quick decisions share one refetch (VERDICT_REFETCH_WINDOW_MS), so a page
+  // read right after the second approval can still hold the row the reviewer
+  // just decided. It must not come back.
+  it("keeps a row decided on this page out of a stale read", () => {
+    const resolved = new Set([workItemKey(item("done", "review"))]);
+    const out = withoutResolved([item("done", "review"), item("open", "review")], resolved);
+    expect(out.map((w) => w.node_id)).toEqual(["open"]);
+    expect(resolved.size).toBe(1);
+  });
+
+  it("forgets a decided row once the server stops listing it, so a new request for it shows", () => {
+    const resolved = new Set([workItemKey(item("done", "review"))]);
+    expect(withoutResolved([item("open", "review")], resolved).map((w) => w.node_id)).toEqual(["open"]);
+    expect(resolved.size).toBe(0);
+    expect(withoutResolved([item("done", "review")], resolved).map((w) => w.node_id)).toEqual(["done"]);
   });
 });
