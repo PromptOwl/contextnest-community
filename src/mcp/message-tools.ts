@@ -17,7 +17,7 @@
  *
  * Inline schemas: Community-only tables over the comment-thread store; the
  * engine has no message operation to import a descriptor from
- * (scripts/check-mcp-schemas.mjs baseline raised 103 → 106, documented).
+ * (scripts/check-mcp-schemas.mjs baseline raised 112 → 115, documented).
  */
 import { config } from "../config.js";
 import { listVisibleNests } from "../nests/service.js";
@@ -77,7 +77,7 @@ export const MESSAGE_TOOL_DEFINITIONS = [
       "Search channel messages. Every word in `q` must occur (case-insensitive); results come newest first with an `excerpt`, `highlights` (offsets into the excerpt), " +
       "the channel, thread id, message id and permalink `url`. Narrow with `channel` (a name), `from` (a login email, or \"me\"), `before` / `after` (a timestamp or a message id). " +
       "Searches this nest; `all_nests: true` searches every nest you are a member of (a nest-scoped key still sees this nest only). " +
-      "At most the 1,000 newest matches are considered (`ceiling`); pass `before` to reach older ones. Deleted messages are never found. Members only.",
+      "At most the 5,000 newest messages are considered (`ceiling`); pass `before` to reach older ones. Deleted messages are never found. Members only.",
     inputSchema: {
       type: "object" as const,
       properties: {

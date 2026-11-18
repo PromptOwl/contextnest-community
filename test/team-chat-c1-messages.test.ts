@@ -1181,4 +1181,22 @@ describe("SEC-C1: review findings", () => {
     expect(unknown.status).toBe(400);
     expect(unknown.data).toEqual(r.data);
   });
+
+  it("SEC-C1-10 document search spends no chat-search quota and names the nest; re-editing an @channel spends no broadcast", async () => {
+    await resetAuthRateLimit();
+    await open(alice, "walrus sighting at the dock");
+    for (let i = 0; i < 61; i++) {
+      const d = await jsonRequest(app, "GET", `/nests/${nestId}/search?q=walrus`, undefined, rita.apiKey);
+      expect(d.status, `search ${i}`).toBe(200);
+      expect(d.data.messages[0], `search ${i}`).toMatchObject({ nest_id: nestId, nest_name: "Team" });
+    }
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels/search?q=walrus`, undefined, rita.apiKey)).status).toBe(200);
+
+    const node = await newChannel("standups");
+    const t = await open(alice, "@channel standup", node);
+    for (let i = 0; i < 11; i++) {
+      expect((await edit(alice, t.message_id, `@channel standup v${i}`, {}, "standups")).status, `edit ${i}`).toBe(200);
+    }
+    await resetAuthRateLimit();
+  });
 });

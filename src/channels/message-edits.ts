@@ -15,7 +15,7 @@
  * `deleted_by` / `deleted_reason` are set, and the thread, its other
  * messages and the message's place in the timeline are kept. Its mention
  * rows, reactions, pins and saves go at once, so it leaves My Work and
- * search; its edit history is kept but no longer served.
+ * search; its edit history is deleted with it.
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
@@ -28,7 +28,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { newMentions } from "../shared/mentions.js";
 import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import type { ActorLabel } from "./actor-label.js";
-import { broadcastRefusal, indexBroadcast } from "./broadcast.js";
+import { broadcastNames, broadcastRefusal, indexBroadcast } from "./broadcast.js";
 import type { ChannelNewMessage } from "./channel-service.js";
 import {
   EDIT_LIMIT,
@@ -71,8 +71,9 @@ export async function editMessage(
   await assertMayAct(caller, located);
   assertNotDeleted(located);
   if (!isAuthor(caller, located.row)) throw new ForbiddenError(NOT_YOURS);
-  // An `@channel` added by an edit is bounded exactly as in a post.
-  const broadcast = await broadcastRefusal(caller.nestId, body, caller.userId);
+  // An `@channel` the edit ADDS is bounded exactly as in a post; one already there costs nothing.
+  const hadBroadcast = new Set(broadcastNames(located.row.body));
+  const broadcast = broadcastNames(body).some((n) => !hadBroadcast.has(n)) ? await broadcastRefusal(caller.nestId, body, caller.userId) : null;
   if (broadcast) throw broadcast.status === 429 ? new RateLimitedError(broadcast.error, broadcast.retryAfter ?? 60) : new ValidationError(broadcast.error);
 
   const { nestId } = caller;

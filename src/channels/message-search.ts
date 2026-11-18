@@ -25,6 +25,7 @@
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { canOpenNode } from "../governance/mention-notify.js";
+import { getNest } from "../nests/service.js";
 import { fold, matchDocuments, toSearchHit } from "../nodes/search.js";
 import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { channelNameOf, isChannelNode } from "./channel-node.js";
@@ -158,12 +159,14 @@ async function search(
   who: { userId: string; userEmail: string },
   nestNames: Map<string, string>,
   input: SearchInput,
+  /** false for the document search's piggyback: it must not spend the chat-search quota. */
+  limited = true,
 ): Promise<SearchResult> {
   const q = parseQuery(input.q);
   const { limit, offset } = parsePage(input);
   const nestIds = [...nestNames.keys()];
   if (nestIds.length === 0) return { results: [], pagination: { limit, offset, has_more: false }, ceiling: SEARCH_SCAN_CEILING };
-  takeOrRefuse(`chat-search:${who.userId}`, SEARCH_LIMIT, "searches");
+  if (limited) takeOrRefuse(`chat-search:${who.userId}`, SEARCH_LIMIT, "searches");
 
   // The exact filters run in the database; the text match is the document
   // matcher's, over the newest SEARCH_SCAN_CEILING rows in scope.
@@ -265,10 +268,11 @@ export async function searchAcrossNests(
   who: { userId: string; userEmail: string },
   visible: Map<string, string>,
   input: SearchInput,
+  limited = true,
 ): Promise<SearchResult> {
   const member = new Map<string, string>();
   for (const [id, name] of visible) if (await isNestMember(id, who.userId).catch(() => false)) member.set(id, name);
-  return search(who, member, input);
+  return search(who, member, input, limited);
 }
 
 /**
@@ -289,7 +293,14 @@ export async function messageHitsForDocumentSearch(
   try {
     const { config } = await import("../config.js");
     if (!config.EXPERIMENTAL_AGENT_STREAM) return null;
-    const r = await searchAcrossNests(who, nestNames, { q, limit: Math.min(Math.max(limit, 1), SEARCH_PAGE_MAX) });
+    const r = await searchAcrossNests(who, nestNames, { q, limit: Math.min(Math.max(limit, 1), SEARCH_PAGE_MAX) }, false);
+    // Single-nest callers pass the id as its name; show the real one.
+    const names = new Map<string, string>();
+    for (const h of r.results) {
+      if (h.nest_name !== h.nest_id) continue;
+      if (!names.has(h.nest_id)) names.set(h.nest_id, (await getNest(h.nest_id).catch(() => null))?.name ?? h.nest_id);
+      h.nest_name = names.get(h.nest_id)!;
+    }
     return r.results;
   } catch (err) {
     if (err instanceof ValidationError) return [];

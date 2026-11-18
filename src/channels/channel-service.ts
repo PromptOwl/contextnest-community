@@ -619,14 +619,18 @@ export async function messagesFromRows(caller: Caller, channelName: string, rows
 export async function firstMessageIds(threadIds: string[]): Promise<Map<string, string>> {
   const firsts = new Map<string, string>();
   if (threadIds.length === 0) return firsts;
-  // Read newest first, so the last write to the map per thread is its oldest.
-  for (const r of (await getDb().all(
-    `SELECT thread_id, id FROM annotation_comments
-      WHERE thread_id IN (${threadIds.map(() => "?").join(", ")})
-      ORDER BY created_at DESC, id DESC`,
-    threadIds,
-  )) as Array<{ thread_id: string; id: string }>) {
-    firsts.set(r.thread_id, r.id);
+  // Only each thread's opening row (same rule as openingsFor), never every reply.
+  for (const ids of chunks(threadIds)) {
+    for (const r of (await getDb().all(
+      `SELECT c.thread_id, c.id FROM annotation_comments c
+        WHERE c.thread_id IN (${marks(ids)})
+          AND NOT EXISTS (SELECT 1 FROM annotation_comments e
+                           WHERE e.thread_id = c.thread_id
+                             AND (e.created_at < c.created_at OR (e.created_at = c.created_at AND e.id < c.id)))`,
+      ids,
+    )) as Array<{ thread_id: string; id: string }>) {
+      firsts.set(r.thread_id, r.id);
+    }
   }
   return firsts;
 }
