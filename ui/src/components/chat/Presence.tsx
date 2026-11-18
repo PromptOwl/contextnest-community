@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import type { AgentHandle, ConversationView } from "../../lib/api";
 import { dmPeer } from "../../lib/chat-harness";
 import { initialsOf } from "../../lib/doc-stream";
+import { personTint } from "../AuthorshipChips";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 
 export function PresenceDot({ online, className }: { online: boolean; className?: string }) {
@@ -22,12 +23,16 @@ export function PresenceDot({ online, className }: { online: boolean; className?
 }
 
 /** A member's square avatar (initials, or the bot mark), with presence on its corner. */
-export function MemberAvatar({ kind, label, online, size = "md" }: { kind: "person" | "agent"; label: string; online?: boolean; size?: "sm" | "md" }) {
+/** A member's square avatar: initials in the app's per-person tint
+ *  (`personTint`, as on authorship chips and board assignees), or the bot
+ *  mark for an agent; presence on its corner. */
+export function MemberAvatar({ kind, label, email, online, size = "md" }: { kind: "person" | "agent"; label: string; email?: string | null; online?: boolean; size?: "sm" | "md" }) {
   return (
     <span className="relative shrink-0" aria-hidden>
       <span
         className={cn(
-          "flex select-none items-center justify-center rounded-md bg-muted font-medium text-muted-foreground",
+          "flex select-none items-center justify-center rounded-md font-medium",
+          kind === "person" && email ? personTint(email) : "bg-muted text-muted-foreground",
           size === "sm" ? "h-5 w-5 text-[9px]" : "h-8 w-8 text-xs",
         )}
       >
@@ -54,6 +59,7 @@ export function ConversationIcon({ conversation, me, online }: { conversation: P
     <MemberAvatar
       kind={peer.kind}
       label={peer.kind === "agent" ? peer.handle : peer.name || peer.email}
+      email={peer.kind === "person" ? peer.email : null}
       online={peer.kind === "person" ? online.has(peer.email.toLowerCase()) : undefined}
       size="sm"
     />
@@ -136,7 +142,7 @@ export function PeoplePicker({
                 className={cn("flex h-10 w-full items-center gap-2.5 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", on && "bg-muted")}
                 data-testid="people-option"
               >
-                <MemberAvatar kind={o.kind} label={pickLabel(o)} size="sm" />
+                <MemberAvatar kind={o.kind} label={pickLabel(o)} email={o.kind === "person" ? o.email : null} size="sm" />
                 <span className="min-w-0 flex-1 truncate">
                   {pickLabel(o)}
                   {o.kind === "person" && o.name !== o.email && <span className="ml-2 text-xs text-muted-foreground">{o.email}</span>}

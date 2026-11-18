@@ -3,8 +3,8 @@
  * The first message of a group carries the avatar, the name and the time;
  * the rest show the body alone, with the time in the gutter under the
  * pointer. Actions sit in a small toolbar at the message's top-right, shown
- * for the message under the pointer or holding focus (always for the open
- * thread's post); on a touch screen one menu per message takes their place.
+ * for the message under the pointer or holding focus, floating just above
+ * it so it never covers the name or the text; on a touch screen one menu per message takes their place.
  * A post also carries its thread summary and its markers (resolved,
  * promoted).
  */
@@ -178,7 +178,7 @@ export const MessageRow = forwardRef<HTMLDivElement, MessageRowProps>(function M
           {/* Wide screens: the toolbar for the message under the pointer or holding focus. */}
           <div
             className={cn(
-              "absolute -top-3 right-3 hidden items-center gap-0.5 rounded-md border bg-background p-0.5 shadow-sm sm:flex",
+              "absolute -top-4 right-3 z-10 hidden items-center gap-0.5 rounded-md border bg-background p-0.5 shadow-sm sm:flex",
               !pinnedActions && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:hidden",
             )}
             role="toolbar"

@@ -191,7 +191,10 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
                   <Hash className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                 )}
                 <span className="truncate">{conv ? channel?.title : (channel?.name ?? selected ?? "Choose a channel")}</span>
-                <UnreadBadge count={unreadElsewhere(allRows, selected)} />
+                {/* Unread elsewhere: a dot, so it never reads as this channel's count. */}
+                {unreadElsewhere(allRows, selected) > 0 && (
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-primary" role="img" aria-label={`${unreadElsewhere(allRows, selected)} unread elsewhere`} data-testid="slide-over-unread-elsewhere" />
+                )}
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
               </button>
             </DropdownMenuTrigger>

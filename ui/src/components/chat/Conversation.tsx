@@ -166,7 +166,7 @@ export function Conversation(p: ConversationProps) {
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {p.leading}
         <div className="flex min-w-0 flex-1 items-baseline gap-2 px-1">
-          <h2 className="flex min-w-0 shrink items-center gap-1.5 truncate text-base font-semibold leading-6" data-testid="chat-title">
+          <h2 className={cn("flex min-w-0 items-center gap-1.5 truncate text-base font-semibold leading-6", conv ? "shrink" : "shrink-0")} data-testid="chat-title">
             {conv ? (
               <ConversationIcon conversation={conv} me={p.me} online={p.online ?? NO_ONE} />
             ) : channel.private ? (
@@ -244,7 +244,6 @@ export function Conversation(p: ConversationProps) {
                   testId="chat-post"
                   highlight={p.highlightThread === row.message.id}
                   threadOpen={p.openThread === row.message.id}
-                  pinnedActions={p.openThread === row.message.id}
                   onOpenThread={() => p.onOpenThread(row.message)}
                   onOpenNode={p.onOpenNode}
                   {...(p.rowProps?.(row.message) ?? {})}

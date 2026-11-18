@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import type { ChannelMessage } from "../../lib/api";
 import { authorOf } from "../../lib/channels";
 import type { MessageWikilink } from "../../lib/message-wikilinks";
-import { initialsOf } from "../AuthorshipChips";
+import { initialsOf, personTint } from "../AuthorshipChips";
 import { CommentBody } from "../MentionTextarea";
 import { useChannelNav } from "./channel-nav";
 
@@ -51,13 +51,16 @@ export const MessageBody = memo(function MessageBody({ body, mentions, cards, cl
   );
 });
 
+/** A person carries the app's per-person tint (`personTint`, as on document
+ *  authorship chips and board assignees); an agent keeps the quiet bot mark. */
 export function Avatar({ message, size = "md" }: { message: Pick<ChannelMessage, "actor" | "author" | "author_name">; size?: "md" | "sm" }) {
   const who = authorOf(message);
   return (
     <span
       aria-hidden
       className={cn(
-        "flex shrink-0 select-none items-center justify-center rounded-md bg-muted font-medium text-muted-foreground",
+        "flex shrink-0 select-none items-center justify-center rounded-md font-medium",
+        who.agent ? "bg-muted text-muted-foreground" : personTint(message.author),
         size === "sm" ? "h-7 w-7 text-[10px]" : "h-8 w-8 text-xs",
       )}
     >

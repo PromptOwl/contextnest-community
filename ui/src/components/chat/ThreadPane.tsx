@@ -159,7 +159,6 @@ export function ThreadPane(p: ThreadPaneProps) {
               message={post}
               first
               last
-              pinnedActions
               testId="thread-post"
               highlight={p.highlightMessage === post.id || p.highlightMessage === (post as { message_id?: string }).message_id}
               onOpenNode={p.onOpenNode}

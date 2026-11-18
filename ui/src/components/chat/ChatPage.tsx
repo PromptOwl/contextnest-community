@@ -437,9 +437,10 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       }
       leading={
         layout.sidebar === "sheet" ? (
-          <button type="button" onClick={() => setSidebarSheet(true)} aria-label="Channels" title="Channels" data-testid="chat-open-sidebar" className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
+          <button type="button" onClick={() => setSidebarSheet(true)} aria-label="Channels" title="Channels" data-testid="chat-open-sidebar" className="flex h-8 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
             <PanelLeft className="h-4 w-4" aria-hidden />
-            <UnreadBadge count={unreadElsewhere(allRows, selected)} className="absolute -right-1 -top-1 min-w-4 px-1 text-[10px] leading-4" />
+            {/* Beside the icon, never on it (it covered the icon at two digits). */}
+            <UnreadBadge count={unreadElsewhere(allRows, selected)} />
           </button>
         ) : undefined
       }

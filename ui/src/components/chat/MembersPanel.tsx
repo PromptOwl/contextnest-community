@@ -109,7 +109,7 @@ export function MembersPanel({
             <ul data-testid="member-list">
               {rows.map((r) => (
                 <li key={r.key} className="flex h-11 items-center gap-2.5 rounded-md px-2" data-testid="member-row">
-                  <MemberAvatar kind={r.kind} label={r.label} online={r.online} />
+                  <MemberAvatar kind={r.kind} label={r.label} email={r.email} online={r.online} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">
                       {r.label}
