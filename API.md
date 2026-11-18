@@ -1622,9 +1622,9 @@ Response: same as `/approve`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/reject`
 ```json
-{ "note": "needs change X" }
+{ "note": "needs change X", "kind": "changes" }
 ```
-`note` required. Same permission gating as approve (`role = 'reviewer'`).
+`note` required. Same permission gating as approve (`role = 'reviewer'`). `kind` is `"changes"` (the default: sent back, a revision is expected) or `"reject"` (declined for good); anything else → `400`. Both leave the review `rejected`; the kind is recorded on the review request, shown in the version history as `resolutionKind`, and named in the notification ("sent back for changes" or "rejected").
 
 ### POST `/nests/:nestId/nodes/:nodeId/cancel-review`
 Cancels the pending review. Returns node to `draft`.
@@ -2040,7 +2040,7 @@ Version metadata plus each version's **change log** — the unified diff taking 
 
 `content` is always `""` here. The list deliberately does **not** carry bodies: attaching them means replaying the version chain once per row and shipping N full copies of the document just to open the history panel. Fetch the one body you need from `GET .../versions/:version` below.
 
-Each version may also include `resolvedBy` + `resolutionStatus`, the steward who approved or rejected it, joined from `review_requests` (`node_versions` stores the status but not the resolver's email).
+Each version may also include `resolvedBy` + `resolutionStatus`, the steward who approved or rejected it, joined from `review_requests` (`node_versions` stores the status but not the resolver's email). A rejected version also carries `resolutionKind`: `"changes"` (sent back) or `"reject"` (declined for good); rejections recorded before 4.0.0 read as `"changes"`.
 
 `client` is the caller attribution the write carried — which agent, in which session (see [Caller attribution](#caller-attribution-client)). Absent on every version whose write sent none, which includes every version written before the field existed.
 
