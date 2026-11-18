@@ -81,6 +81,9 @@ export async function createTurn(params: {
       } catch (err) {
         const e = err as { status?: number; error?: { error?: { message?: string } }; message?: string };
         const msg = `${e?.error?.error?.message ?? ""} ${e?.message ?? ""}`.toLowerCase();
+        // Matches the API's invalid_request_error naming the parameter
+        // ("temperature: …" / "sampling parameters …"); a gateway that
+        // forwards it keeps the wording.
         if (e?.status !== 400 || !/temperature|sampling/.test(msg)) throw err;
         const res = (await client.messages.create(base, { signal })) as TurnResult;
         noTemperatureModels.add(key);

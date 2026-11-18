@@ -205,8 +205,12 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
         Date.now(),
       ).catch(() => false);
       // The failed attempt as a run, so the ledger trace has a run to follow.
+      // recordRun is best effort (it catches and logs its own DB errors); the
+      // .catch keeps this error handler from ever rejecting. The cost is the
+      // final attempt's: the first attempt's spend is settled on the nest's
+      // budget but, as before, not added to the window.
       if (ended && progress.nestId && progress.agentNode) {
-        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure);
+        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure).catch(() => undefined);
       }
     }
     return false;
