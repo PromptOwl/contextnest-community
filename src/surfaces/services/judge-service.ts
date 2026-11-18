@@ -57,6 +57,9 @@ import { routeNewProposal } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
+import { classifyJudgeFailure, judgeFailureLogLine, JudgeRunError, type JudgeFailure, type JudgeStage } from "./judge-failure.js";
+
+export { JudgeRunError } from "./judge-failure.js";
 
 export const PROMPT_VERSION = "surfaces-judge-v1";
 export const MAX_TURNS = 4;
@@ -180,11 +183,14 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
   );
   if (claimed.changes === 0) return false;
   const w = (await getWindow(windowId))!;
+  const progress: JudgeProgress = { stage: "setup", nestId: null, agentNode: null, model: null, cost: 0 };
   try {
-    await judgeClaimed(w, token, nowMs);
+    await judgeClaimed(w, token, nowMs, progress);
     return true;
   } catch (err) {
-    console.error(`[surfaces] judging window ${windowId} failed: ${err instanceof Error ? err.name : "error"}`);
+    // po-1407: one fixed reason code, and a log line with no message text.
+    const failure = classifyJudgeFailure(err, progress.stage);
+    console.error(judgeFailureLogLine(windowId, failure));
     if (!retry) {
       await getDb().run("UPDATE surface_windows SET status = 'closing', updated_at = ? WHERE id = ? AND status = 'judging' AND claim_token = ?", [
         iso(Date.now()),
@@ -192,10 +198,28 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
         token,
       ]);
     } else {
-      await finalize(w, token, { status: "judged", verdict: "error", reason_code: null }, Date.now()).catch(() => false);
+      const ended = await finalize(
+        w,
+        token,
+        { status: "judged", verdict: "error", reason_code: failure.code, model: progress.model, cost_micros: progress.cost },
+        Date.now(),
+      ).catch(() => false);
+      // The failed attempt as a run, so the ledger trace has a run to follow.
+      if (ended && progress.nestId && progress.agentNode) {
+        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure);
+      }
     }
     return false;
   }
+}
+
+/** How far the judge got: what a failure is classified and recorded by. */
+interface JudgeProgress {
+  stage: JudgeStage;
+  nestId: string | null;
+  agentNode: string | null;
+  model: string | null;
+  cost: number;
 }
 
 async function ownerOf(email: string): Promise<{ userId: string; email: string } | null> {
@@ -337,13 +361,6 @@ interface RunResult {
   usage: Usage4;
 }
 
-/** A judge run that failed part-way; carries what it already spent (round 2, L1). */
-export class JudgeRunError extends Error {
-  constructor(public readonly usage: Usage4, cause: unknown) {
-    super(cause instanceof Error ? cause.name : "judge run failed");
-  }
-}
-
 /** Per-run read limits (round 2, L1): priced into the 16k-input reservation. */
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const MAX_TOOL_RESULT_CHARS = 8_000;
@@ -460,7 +477,7 @@ async function dedupCandidates(nestId: string, nowMs: number, nv: NestView): Pro
   ];
 }
 
-async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise<void> {
+async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress: JudgeProgress): Promise<void> {
   const forced = !!w.forced;
   const binding = (await getBindingRow(w.binding_id)) as BindingRow | null;
   const end = (f: Finalize) => finalize(w, token, f, nowMs);
@@ -476,7 +493,10 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
     await end({ status: "judged", verdict: "no_op", reason_code: "too_small" });
     return;
   }
+  progress.nestId = binding.nest_id;
+  progress.agentNode = binding.listener_agent_node_id ?? null;
   const listener = await listenerFor(binding.id);
+  if (listener) progress.agentNode = listener.node_id;
   const owner = listener ? await ownerOf(listener.created_by) : null;
   if (!listener || !owner || permissionLevel(await resolveNestPermission(binding.nest_id, owner.userId)) < permissionLevel("write")) {
     await end({ status: "judged", verdict: "error", reason_code: "no_listener" });
@@ -496,7 +516,10 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
     return;
   }
   const model = await resolveGatewayModel(credential, config.SURFACES_JUDGE_MODEL || listener.config.model || hootieModel(credential));
+  progress.model = model;
+  progress.stage = "nest";
   const nv = await nestView(binding.nest_id, owner.userId, { folders, thesisNodeId });
+  progress.stage = "setup";
   const install = await getInstall(binding.install_id);
   if (!nv || !install) {
     await end({ status: "judged", verdict: "error", reason_code: "nest_unreadable" });
@@ -532,7 +555,9 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
   // §13: the seed's thesis is the listener's north star — approved text only,
   // and only when the seed or a nest admin wrote it (S7-R2 L3); fenced below
   // as the owner's description, never instructions.
+  progress.stage = "nest";
   const thesis = thesisNodeId ? await trustedThesis(binding, thesisNodeId, nv) : null;
+  progress.stage = "setup";
   const user = [
     `Nest: ${attr(nv.nestName)}. Folders you may propose into: ${folders.join(", ")}.`,
     ...(thesis
@@ -559,6 +584,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
         return;
       }
       let run: RunResult;
+      progress.stage = "model";
       try {
         run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders);
       } catch (err) {
@@ -566,12 +592,16 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
         const u = err instanceof JudgeRunError ? err.usage : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
         const spent = costMicros(model, u.input, u.output, u.cacheRead, u.cacheWrite);
         cost += spent;
+        progress.cost = cost;
         await settle(binding.nest_id, estimate, spent, nowMs);
         throw err;
       }
       const actual = costMicros(model, run.usage.input, run.usage.output, run.usage.cacheRead, run.usage.cacheWrite);
       cost += actual;
+      progress.cost = cost;
+      progress.stage = "setup";
       await settle(binding.nest_id, estimate, actual, nowMs);
+      progress.stage = "verdict";
       const v = validateVerdict(run.raw, view, {
         nodeIds: new Set([...nv.nodeIds].filter((id) => inListenerFolders(id, folders))),
         folders,
@@ -579,11 +609,13 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number): Promise
         adminFolders,
       });
       if (v.ok) verdict = v.verdict;
+      progress.stage = "setup";
     }
   } finally {
     clearTimeout(timer);
   }
   await recordRun(binding.nest_id, listener.node_id, model, cost, verdict, w.id);
+  progress.stage = "commit";
   if (!verdict) {
     await end({ status: "judged", verdict: "error_schema", reason_code: null, model, cost_micros: cost });
     return;
@@ -715,29 +747,55 @@ async function noteRequester(binding: BindingRow, w: WindowRow, text: string): P
  * The window carries the run's id (`surface_windows.run_id`), the run →
  * window hop the decision ledger's trace follows (po-1186 AC-CR-05b).
  */
-async function recordRun(nestId: string, agentNode: string, model: string, cost: number, v: Verdict | null, windowId: string): Promise<void> {
+async function recordRun(
+  nestId: string,
+  agentNode: string,
+  model: string | null,
+  cost: number,
+  v: Verdict | null,
+  windowId: string,
+  failure: JudgeFailure | null = null,
+): Promise<void> {
   const now = new Date().toISOString();
   const runId = `run_${uuid()}`;
+  // A failed attempt (po-1407): status failed, verdict error, the reason code;
+  // the trace keeps the error's class name and HTTP status, never its message.
+  const trace = failure
+    ? {
+        kind: "surfaces_judge",
+        model,
+        prompt_version: PROMPT_VERSION,
+        est_cost_usd: Math.round(cost) / 1_000_000,
+        verdict: "error",
+        reason_code: failure.code,
+        error_name: failure.name,
+        http_status: failure.status,
+        ...(failure.code === "model_timeout" ? { timeout: true } : {}),
+        items: 0,
+      }
+    : {
+        kind: "surfaces_judge",
+        model,
+        prompt_version: PROMPT_VERSION,
+        est_cost_usd: Math.round(cost) / 1_000_000,
+        verdict: v?.verdict ?? "error_schema",
+        items: v?.items.length ?? 0,
+      };
   try {
     await getDb().run(
-      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, trace, started_at, finished_at, claimed_by, claimed_at, source, verdict)
-       VALUES (?, ?, ?, 'surfaces:window', 'succeeded', NULL, ?, ?, ?, 'server:surfaces', ?, 'server:surfaces', ?)`,
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, trace, started_at, finished_at, claimed_by, claimed_at, source, verdict, reason_code)
+       VALUES (?, ?, ?, 'surfaces:window', ?, NULL, ?, ?, ?, 'server:surfaces', ?, 'server:surfaces', ?, ?)`,
       [
         runId,
         nestId,
         agentNode,
-        JSON.stringify({
-          kind: "surfaces_judge",
-          model,
-          prompt_version: PROMPT_VERSION,
-          est_cost_usd: Math.round(cost) / 1_000_000,
-          verdict: v?.verdict ?? "error_schema",
-          items: v?.items.length ?? 0,
-        }),
+        failure ? "failed" : "succeeded",
+        JSON.stringify(trace),
         now,
         now,
         now,
-        v?.verdict ?? "error",
+        failure ? "error" : (v?.verdict ?? "error"),
+        failure ? failure.code : null,
       ],
     );
     await getDb().run("UPDATE surface_windows SET run_id = ? WHERE id = ? AND run_id IS NULL", [runId, windowId]);
