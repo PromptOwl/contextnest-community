@@ -28,6 +28,8 @@ export interface AppNav {
   /** A change My Work should open beside its list on arrival (from a link to
    *  a nest's old Review tab, or See changes on a document). */
   initialReview?: { nestId: string; nodeId: string } | null;
+  /** Open a channel with one thread open (a My Work channel mention), in-app. */
+  openChannel: (nestId: string, nestName: string, channel: string, thread: string) => void;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
   /** Return to the page this one was opened from (the header bell), if any. */

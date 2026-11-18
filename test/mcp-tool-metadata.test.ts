@@ -52,6 +52,8 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
   process.env.FEATURE_SURFACES = "true";
+  process.env.EXPERIMENTAL_AGENT_STREAM = "true";
+  process.env.EXPERIMENTAL_DOC_STREAM = "true";
   env = setupTestEnv();
   app = await createTestApp("key");
   const owner = await registerUser(app, "owner@metadata.test", "Owner");
@@ -70,6 +72,8 @@ afterAll(async () => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_METACOGNITION;
   delete process.env.FEATURE_SURFACES;
+  delete process.env.EXPERIMENTAL_AGENT_STREAM;
+  delete process.env.EXPERIMENTAL_DOC_STREAM;
   await env.cleanup();
 });
 
@@ -126,7 +130,7 @@ describe("every listed tool", () => {
 
 describe("confirm_billing", () => {
   // Written out, not read from the source, so widening the set is a decision.
-  const CAN_RAISE_A_BILL = ["context_assign_steward", "context_grant", "context_resolve_access_request", "context_share_nest"];
+  const CAN_RAISE_A_BILL = ["context_assign_steward", "context_grant", "context_resolve_access_request", "context_share_nest", "context_nest_teams"];
 
   it("is offered only on the tools that can raise what someone is billed", async () => {
     for (const [label, path, key] of endpoints()) {

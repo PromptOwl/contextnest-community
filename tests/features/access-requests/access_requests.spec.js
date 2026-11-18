@@ -135,7 +135,9 @@ test.describe('Request access on a denied write', () => {
     await viewer.keyboard.press('End');
     await viewer.keyboard.type(' Edited by the viewer.');
     await viewer.getByTestId('document-editor-save').click();
-    await expect(viewer.getByText(/published|saved as a draft/)).toBeVisible(WRITE);
+    // The save toast. On a nest without stewardship the page also shows an
+    // "Auto-published" badge, which the same words match, so name the toast.
+    await expect(viewer.locator('[data-sonner-toast]').filter({ hasText: /published|saved as a draft/ }).first()).toBeVisible(WRITE);
   });
 
   test('CN-ACCESS-003 a denied nest request shows who said no, why, and when they can ask again', async ({

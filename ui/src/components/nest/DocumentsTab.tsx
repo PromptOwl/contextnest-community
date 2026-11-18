@@ -11,6 +11,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../lib/api";
 import { toast } from "sonner";
 import { reads } from "../../lib/queries";
+import { isChannelDoc } from "../../lib/channel-docs";
+import { useHidesChannelDocs } from "../../lib/use-hides-channel-docs";
 import { selectionState, toggleMany } from "../../lib/bulk-select";
 import { matchesFilters } from "../../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty, childFolders, hasActiveFilters as hasActiveFiltersOn } from "../../lib/visible-documents";
@@ -22,7 +24,6 @@ import { FolderDeleteDialog } from "./FolderDeleteDialog";
 import { FolderMoveDialog } from "./FolderMoveDialog";
 import { BulkSelectionBar } from "./BulkSelectionBar";
 import { Checkbox } from "@/components/ui/checkbox";
-import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -33,7 +34,7 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus, Activity, Ruler,
+  FolderOpen, ChevronRight, Share2, Globe, FolderPlus, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
 import { ActivityLogPanel } from "../ActivityLogPanel";
@@ -43,6 +44,7 @@ import {
   type DocumentLifecycleStatus, type Steward, type ReviewRequest, type Version,
 } from "../governance";
 import { PublishDialog } from "../PublishDialog";
+import { shareDocumentLink } from "../../lib/share-link";
 import { ShareTargetDialog } from "../ShareTargetDialog";
 import { folderGrantTarget } from "../../lib/folder-target";
 import { checkFolderPath } from "../../lib/folder-path";
@@ -194,6 +196,7 @@ export function DocumentsTab({
     ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
     : 0;
 
+  const [archivedDocs, setArchivedDocs] = useState<Array<{ id: string; title: string }> | null>(null);
   // Folder being renamed or moved (admin/owner).
   const [moveFolderTarget, setMoveFolderTarget] = useState<
     { path: string; label: string } | null
@@ -243,6 +246,8 @@ export function DocumentsTab({
   }, [deletionRequests]);
 
   const [publishNode, setPublishNode] = useState<any | null>(null);
+  // Share's Manage opens the Publish dialog on its Links tab.
+  const [publishTab, setPublishTab] = useState<"new" | "links">("new");
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -452,7 +457,13 @@ export function DocumentsTab({
   // drops keys.nodes, so react-query re-reads it — no manual reset.
   const [wantFull, setWantFull] = useState(false);
   const fullQuery = useQuery({ ...reads.nodes(nestId), enabled: wantFull });
-  const fullNodes: any[] | null = wantFull ? (fullQuery.data?.nodes ?? null) : null;
+  // The full listing is shared with wikilink resolution, so it still carries
+  // channel nodes; a document list leaves them out while channels are on.
+  const hideChannels = useHidesChannelDocs(nestId);
+  const fullNodes: any[] | null = useMemo(() => {
+    const all: any[] | null = wantFull ? (fullQuery.data?.nodes ?? null) : null;
+    return all && hideChannels ? all.filter((n) => !isChannelDoc(n)) : all;
+  }, [wantFull, fullQuery.data, hideChannels]);
   const fullLoading = wantFull && fullQuery.isLoading;
   const loadFullNest = useCallback(() => setWantFull(true), []);
 
@@ -1241,7 +1252,6 @@ export function DocumentsTab({
                   // so reorganizing an under-review doc stays possible.
                   const canMove =
                     canEditNode(node) &&
-                    nodeTypeSupportsMove(nodeType) &&
                     (node.status !== "pending_review" ||
                       isOwner ||
                       isAdmin ||
@@ -1321,7 +1331,31 @@ export function DocumentsTab({
                             </DropdownMenuItem>
                           )}
                           {canManage && (
-                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                            <DropdownMenuItem
+                              data-testid={`doc-share-link-${node.id}`}
+                              onSelect={() =>
+                                void shareDocumentLink({
+                                  nestId,
+                                  nodeId: node.id,
+                                  title: node.title || node.id,
+                                  onManage: () => {
+                                    setPublishTab("links");
+                                    setPublishNode(node);
+                                  },
+                                })
+                              }
+                            >
+                              <Globe className="h-3.5 w-3.5 mr-2" />
+                              Share public link
+                            </DropdownMenuItem>
+                          )}
+                          {canManage && (
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setPublishTab("new");
+                                setPublishNode(node);
+                              }}
+                            >
                               <Share2 className="h-3.5 w-3.5 mr-2" />
                               Publish
                             </DropdownMenuItem>
@@ -1990,6 +2024,38 @@ export function DocumentsTab({
                 );
               })()}
 
+              {/* Archived documents, for stewards to find and restore. Fetched on
+                  open; the server returns only the ones this caller can restore. */}
+              {(canManage || canEditDocs) && (
+                <details
+                  className="mt-4 text-xs text-muted-foreground"
+                  data-testid="archived-documents"
+                  onToggle={(e) => {
+                    if (e.currentTarget.open) {
+                      api.listArchivedNodes(nestId).then(
+                        (r) => setArchivedDocs(r.nodes),
+                        (err) => toast.error(err instanceof Error ? err.message : "Could not load archived documents"),
+                      );
+                    }
+                  }}
+                >
+                  <summary className="cursor-pointer select-none">Archived documents</summary>
+                  <div className="mt-2 space-y-1 pl-1">
+                    {archivedDocs?.length === 0 && <div>Nothing archived that you can restore.</div>}
+                    {archivedDocs?.map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        className="block text-left text-primary hover:underline"
+                        onClick={() => onOpenDocument(d.id)}
+                      >
+                        {d.title}
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              )}
+
               {/* Wiki link health — orphans + broken [[links]]. Answering it
                   needs every document's body, so opening the block is what
                   fetches the whole nest. */}
@@ -2100,7 +2166,7 @@ export function DocumentsTab({
         nestId={nestId}
         nodes={selectedNodes}
         folders={allFolders}
-        canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
+        canEdit={selectedNodes.every((n) => canEditNode(n))}
         canDelete={selectedNodes.every((n) => canManage || isMine(n))}
         canSubmit={stewardshipEnabled && selectedNodes.some((n) => n.status === "draft" && canEditNode(n))}
         onClear={() => setSelected(new Map())}
@@ -2242,6 +2308,7 @@ export function DocumentsTab({
           nestId={nestId}
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
+          initialTab={publishTab}
           onClose={() => setPublishNode(null)}
         />
       )}

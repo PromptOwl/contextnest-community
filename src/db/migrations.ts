@@ -4,6 +4,9 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
+import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
+import { runTotals } from "../workflow/run-totals.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -1465,6 +1468,11 @@ export function runMigrations(db: Database.Database): void {
     if (publishCols.length && !publishCols.includes("no_download")) {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
+    // PO-1365: the per-link switch for the "Make your own nest" strip. On by
+    // default, so every link made before it existed keeps showing the strip.
+    if (publishCols.length && !publishCols.includes("show_invite")) {
+      db.exec("ALTER TABLE publish ADD COLUMN show_invite INTEGER NOT NULL DEFAULT 1");
+    }
   }
 
   // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
@@ -2480,6 +2488,291 @@ export function runMigrations(db: Database.Database): void {
       )
     `);
     recordMigration("083_view_summaries");
+  }
+
+  // 084: first-run onboarding (PO-1185): the welcome screen state per person,
+  //   server-side distill jobs, and where a self-serve Slack install returns.
+  //   Shared DDL with Postgres (src/onboarding/schema-ddl.ts).
+  if (!hasMigration("084_onboarding")) {
+    db.transaction(() => {
+      db.exec(onboardingDdl("(datetime('now'))"));
+      const cols = db.prepare("PRAGMA table_info(surface_oauth_states)").all() as Array<{ name: string }>;
+      if (cols.length && !cols.some((c) => c.name === "return_to")) {
+        db.exec("ALTER TABLE surface_oauth_states ADD COLUMN return_to TEXT");
+      }
+    })();
+    recordMigration("084_onboarding");
+  }
+  // A database that ran 084 before its one-running-distill-per-person index
+  // existed (this branch's own test servers) gets it here. Idempotent.
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_jobs_one_running ON distill_jobs(user_id) WHERE status = 'running'");
+
+  // 086: agent control room, CR1 (po-1186). The decision ledger is a view over
+  //   runs, run steps and the Surfaces tables, so these are columns, not a new
+  //   table. 084 and 085 are taken on open branches (onboarding, comment
+  //   mentions); ids match by string.
+  //   - runs.idempotency_key: one run per (nest, key) for an external agent's
+  //     retried start; runs.external_ref: the caller's own id, shown, never
+  //     trusted; runs.source: runner | external | server:metacognition |
+  //     server:surfaces (backfilled from claimed_by / triggered_by).
+  //   - runs.verdict / runs.reason_code: the strongest `decision` step's
+  //     verdict, written with the step so the ledger can filter on it in SQL.
+  //   - run_steps.client_key: one step per (run, key).
+  //   - surface_windows.run_id: the listener's run for the window it judged,
+  //     the run → window hop the ledger trace needs.
+  if (!hasMigration("086_control_room_ledger")) {
+    db.transaction(() => {
+      const cols = (table: string) =>
+        new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+      const runCols = cols("runs");
+      if (!runCols.has("idempotency_key")) db.exec("ALTER TABLE runs ADD COLUMN idempotency_key TEXT");
+      if (!runCols.has("source")) db.exec("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'runner'");
+      if (!runCols.has("external_ref")) db.exec("ALTER TABLE runs ADD COLUMN external_ref TEXT");
+      if (!runCols.has("verdict")) db.exec("ALTER TABLE runs ADD COLUMN verdict TEXT");
+      if (!runCols.has("reason_code")) db.exec("ALTER TABLE runs ADD COLUMN reason_code TEXT");
+      if (!cols("run_steps").has("client_key")) db.exec("ALTER TABLE run_steps ADD COLUMN client_key TEXT");
+      if (!cols("surface_windows").has("run_id")) db.exec("ALTER TABLE surface_windows ADD COLUMN run_id TEXT");
+      db.exec(controlRoomLedgerIndexesAndBackfill());
+    })();
+    recordMigration("086_control_room_ledger");
+  }
+
+  // 090: a run's cost and tokens on the run (po-1186 CR1 review). Written
+  //   with the trace at close (run-service closeRun), like `verdict`, so the
+  //   ledger's totals and rollups aggregate in SQL instead of parsing every
+  //   run's trace. Backfilled from the traces already stored.
+  if (!hasMigration("090_control_room_run_totals")) {
+    db.transaction(() => {
+      const runCols = new Set((db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+      if (!runCols.has("est_cost_micros")) db.exec("ALTER TABLE runs ADD COLUMN est_cost_micros INTEGER");
+      if (!runCols.has("tokens")) db.exec("ALTER TABLE runs ADD COLUMN tokens INTEGER");
+      const set = db.prepare("UPDATE runs SET est_cost_micros = ?, tokens = ? WHERE id = ?");
+      // Ids first, one trace at a time: better-sqlite3 refuses a write while an
+      // iterate() cursor is open, and .all() of every trace could be large.
+      const traceOf = db.prepare("SELECT trace FROM runs WHERE id = ?").pluck();
+      const ids = db.prepare("SELECT id FROM runs WHERE trace IS NOT NULL AND est_cost_micros IS NULL").pluck().all() as string[];
+      for (const id of ids) {
+        const t = runTotals(traceOf.get(id) as string);
+        set.run(t.costMicros, t.tokens, id);
+      }
+    })();
+    recordMigration("090_control_room_run_totals");
+  }
+
+  // 094: caller attribution on comment-thread messages (PO-1179, agent team
+  //   stream channels). Nullable `client_json`, like the version rows (044):
+  //   the "<agent>, on behalf of <human>" label. A label, never an identity.
+  //   085–093 are taken on open branches; ids match by string.
+  if (!hasMigration("094_annotation_comment_client")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec("ALTER TABLE annotation_comments ADD COLUMN client_json TEXT");
+    }
+    recordMigration("094_annotation_comment_client");
+  }
+
+  // 085: the @mention index My Work reads (PO-1180, agent team stream S2).
+  //   One row per person (or unresolved @handle) a comment-thread message
+  //   names, written where the message is posted, so `/me/work` answers "which
+  //   open threads tag me" from an index instead of scanning every thread's
+  //   text. `mentioned_user_id` is set when the name resolved to an account
+  //   (resolveMention, the same rule mention-notify uses); NULL means the
+  //   handle named no person — an agent's handle, until agent principals exist
+  //   (src/mentions/agent-mentions.ts). Rows go with their message, thread or
+  //   nest (ON DELETE CASCADE). Nothing to backfill: My Work starts from the
+  //   mentions made after the upgrade. Runs after 094 on purpose: 085 was
+  //   reserved when development jumped to 086+; it depends on none of them.
+  if (!hasMigration("085_comment_mentions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS comment_mentions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        mentioned_user_id TEXT,
+        handle TEXT NOT NULL,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+    `);
+    recordMigration("085_comment_mentions");
+  }
+
+  // 095: agent wake-up targets and their delivery ledger (PO-1181, agent team
+  //   stream S3). `agent_webhooks` is the nest-level, admin-only map from an
+  //   agent @handle to the runner URL an @mention of it is POSTed to, with the
+  //   HMAC secret that signs each POST; both are stored encrypted
+  //   (shared/secret-box). It is the stand-in until agent principals carry
+  //   their own target (src/stream/agent-wake.ts setAgentWebhookResolver).
+  //   `agent_wake_deliveries` holds one row per (message, handle) delivery,
+  //   keyed by its idempotency key, so a retry never sends twice; it is also
+  //   what the per-thread / per-handle rate fence counts.
+  if (!hasMigration("095_agent_webhooks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_webhooks (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        url_enc TEXT NOT NULL,
+        secret_enc TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (nest_id, handle)
+      );
+      CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+        idempotency_key TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        handle TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        comment_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+    `);
+    recordMigration("095_agent_webhooks");
+  }
+
+  // 087: per-person marks for the agent team stream, and what a wake-up
+  //   delivery ended as (PO-1190 / PO-1189, agent team stream S4).
+  //   `stream_marks` is ONE small table for the two things a person marks:
+  //     kind 'channel' — "I have read this channel up to `at`" (ref = the
+  //       channel's node id). Unread counts are messages by other people
+  //       after it; no row means nothing read yet.
+  //     kind 'mention' — "I am done with my mention in this thread" (ref =
+  //       the thread id). The mention leaves My Work until a later message in
+  //       that thread names them again. `subject` is '' for the person, or
+  //       the agent handle when they cleared it acting as that agent.
+  //   Rows are the caller's own state: nothing here is shared or shown to
+  //   anyone else. They go with the nest, and the nest is part of the key: a
+  //   channel's node id (nodes/channels/general) repeats from nest to nest.
+  //   `agent_wake_deliveries` gains `attempts` (a failed POST is retried),
+  //   `finished_at` (when it reached its final status) and `event`
+  //   ('agent.mention', or 'agent.test' for the panel's test button), so the
+  //   webhooks panel can show each handle's last delivery.
+  if (!hasMigration("096_stream_marks")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS stream_marks (
+        user_id TEXT NOT NULL,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        at TEXT NOT NULL,
+        PRIMARY KEY (user_id, nest_id, kind, ref, subject)
+      );
+    `);
+    const cols = (
+      db.prepare("PRAGMA table_info(agent_wake_deliveries)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length) {
+      if (!cols.includes("attempts")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1");
+      if (!cols.includes("finished_at")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN finished_at TEXT");
+      if (!cols.includes("event")) db.exec("ALTER TABLE agent_wake_deliveries ADD COLUMN event TEXT NOT NULL DEFAULT 'agent.mention'");
+    }
+    recordMigration("096_stream_marks");
+  }
+
+  // 097: what a person or an agent can do to ONE channel message (PO-1196,
+  //   team chat harness C1). Built on what exists:
+  //     node_pins (071) gains `message_id` and `thread_id`: a channel's pinned
+  //       messages are editorial pins (scope 'nest') on the channel node with
+  //       the message set, and a person's saved messages are their personal
+  //       pins (scope 'user') the same way — so the existing pin cascades
+  //       (nest deleted, account removed, person leaves the nest) cover them.
+  //       The two per-scope unique indexes now exclude message rows, which
+  //       get their own.
+  //     annotation_comments gains four nullable columns: `edited_at`, and the
+  //       tombstone `deleted_at` / `deleted_by` (the login) / `deleted_reason`
+  //       ('author' or 'moderation'). A deleted message keeps its row with a
+  //       blank body, so the thread, its replies and the message's place in
+  //       the timeline are kept.
+  //   Two tables where nothing existed:
+  //     message_reactions  one row per (message, emoji, person); `client_json`
+  //                        keeps the agent that reacted, as a message row does.
+  //     message_edits      the body each edit REPLACED (comments have no
+  //                        version chain; node_versions is for nodes), so
+  //                        earlier texts can be read back by members.
+  //   Rows go with their message, thread or nest (ON DELETE CASCADE). Nothing
+  //   to backfill.
+  if (!hasMigration("097_channel_message_actions")) {
+    const pinCols = (
+      db.prepare("PRAGMA table_info(node_pins)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (pinCols.length) {
+      if (!pinCols.includes("message_id")) db.exec("ALTER TABLE node_pins ADD COLUMN message_id TEXT");
+      if (!pinCols.includes("thread_id")) db.exec("ALTER TABLE node_pins ADD COLUMN thread_id TEXT");
+      db.exec(`
+        DROP INDEX IF EXISTS idx_node_pins_editorial;
+        DROP INDEX IF EXISTS idx_node_pins_personal;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+          ON node_pins(nest_id, node_id) WHERE scope = 'nest' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+          ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user' AND message_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_editorial
+          ON node_pins(nest_id, message_id) WHERE scope = 'nest' AND message_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_personal
+          ON node_pins(nest_id, message_id, user_id) WHERE scope = 'user' AND message_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_node_pins_message ON node_pins(message_id) WHERE message_id IS NOT NULL;
+      `);
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS message_reactions (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        emoji TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        author TEXT NOT NULL,
+        client_json TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (comment_id, emoji, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_reactions_user ON message_reactions(user_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_edits (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+        body TEXT NOT NULL,
+        edited_by TEXT NOT NULL,
+        client_json TEXT,
+        replaced_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
+    `);
+    const cols = (
+      db.prepare("PRAGMA table_info(annotation_comments)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length) {
+      for (const col of ["edited_at", "deleted_at", "deleted_by", "deleted_reason"]) {
+        if (!cols.includes(col)) db.exec(`ALTER TABLE annotation_comments ADD COLUMN ${col} TEXT`);
+      }
+    }
+    recordMigration("097_channel_message_actions");
+  }
+
+  // 098: the team chat harness, slice C2 (PO-1197).
+  //   One column: `nests.chat_enabled` — the nest's own chat switch (owner/
+  //   admin; PATCH /nests/:id/chat/settings), kept like allow_self_approve.
+  //   Everything else C2 adds lives in existing stores: conversations are
+  //   nodes (nodes/conversations/<uuid>), their messages comment threads,
+  //   their members the node's `grants` rows, the private marker a tag in
+  //   `node_tag_index`, notification levels rows in `stream_marks`
+  //   (kind 'notify'); presence and typing are in memory.
+  if (!hasMigration("098_team_chat_c2")) {
+    const nestCols098 = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!nestCols098.includes("chat_enabled")) db.exec("ALTER TABLE nests ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 1");
+    recordMigration("098_team_chat_c2");
   }
 }
 

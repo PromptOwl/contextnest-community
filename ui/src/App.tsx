@@ -30,13 +30,20 @@ import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
+import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { deepLinkToRetryAfterSignIn, entryDeepLink, nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { clearParkedDeepLink, deepLinkToOpenOnReturn, parkDeepLink, takeParkedDeepLink } from "./lib/deep-link-return";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
+import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
+import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
+import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
+import { channelNameOfDoc } from "./lib/channel-docs";
+import { channelForDocument } from "./lib/queries";
 import { appPageIdFromPath, appPath, appRail, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { useAdministersNest } from "./lib/administers-nest";
 import { SettingsShell } from "./components/SettingsShell";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
@@ -195,6 +202,21 @@ type View =
       isArchived?: boolean;
     }
   | {
+      /** Channels (experimental, PO-1179): the nest's channel list and the
+       *  selected channel's timeline. */
+      page: "channels";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      readerMode?: boolean;
+      isArchived?: boolean;
+      /** The selected channel and the open thread (?channel=&thread=), so a
+       *  reload, Back/Forward and a copied link restore the same view. */
+      channel?: string;
+      thread?: string;
+    }
+  | {
       page: "board";
       nestId: string;
       nestName: string;
@@ -222,7 +244,7 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "channels" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -238,6 +260,8 @@ const nodeKey = (view: View): string | null => {
   if (view.page === "document") return `${view.nestId}/${view.nodeId}`;
   if (view.page === "nest" && view.readerMode && view.readerDoc)
     return `${view.nestId}/${view.readerDoc}`;
+  // Channels: each channel, and each thread opened in it, is a Back stop.
+  if (view.page === "channels") return channelHistoryKey(view.nestId, view.channel, view.thread);
   return null;
 };
 
@@ -262,12 +286,19 @@ export default function App() {
     subagentRunsEnabled,
     mcpOauthEnabled,
     docStreamEnabled,
+    agentStreamEnabled,
+    surfacesEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // Does the person administer any nest (the Control room, po-1186 CR2)?
+  // Only asked while Surfaces is on; unknown counts as yes here so a
+  // /control-room link isn't bounced before the nest list arrives — the rail
+  // (DocumentSidebar) waits for the answer instead.
+  const administersNest = useAdministersNest(authenticated && surfacesEnabled && !isAdmin);
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest: administersNest ?? true };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -301,6 +332,10 @@ export default function App() {
   // isn't looking at a node, so in either case the next node it lands on
   // just replaces rather than pushing (nothing node-shaped to come "back" to).
   const lastNodeKeyRef = useRef<string | null>(null);
+  // Set by a view change that must not add a Back stop (Channels choosing a
+  // channel for a URL that named none: Back would land on the bare URL and be
+  // sent forward again). Consumed by the next URL write.
+  const replaceNextRef = useRef(false);
   // Route views for product analytics. The SPA keeps one URL, so the view is
   // the event property; no-op unless the server configured a PostHog key.
   useEffect(() => {
@@ -522,13 +557,14 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    if (loading && nestViewFromLocation() === "workflows") return;
+    // Channels are gated on a /health flag the same way.
+    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission, roles, myStewards } = await qc.fetchQuery(reads.nest(nestId));
+        const { nest, permission, roles, myStewards, member } = await qc.fetchQuery(reads.nest(nestId));
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
@@ -591,7 +627,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -620,6 +656,13 @@ export default function App() {
             isAnonOwned: false,
             readerMode,
             ...(subPage === "structure" && params.get("folder") ? { folder: params.get("folder")! } : {}),
+            // ?channel=&thread= → that channel with that thread open (a My Work
+            // mention, a copied link, a reload).
+            ...(subPage === "channels"
+              ? (({ channel, thread }) => ({ channel: channel ?? undefined, thread: thread ?? undefined }))(
+                  readChannelDeepLink(window.location.search),
+                )
+              : {}),
           } as View);
           return;
         }
@@ -642,7 +685,69 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled, loading]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, agentStreamEnabled, loading]);
+
+  // A nest link opened while signed out (a channel thread from a mention, a
+  // document): the nest does not resolve for an anonymous caller, so the link
+  // is parked, and reopened once the person is signed in (PO-1189). The link is
+  // read before the URL sync below clears the unresolved nest from the bar.
+  const landedOnRef = useRef<string | null>(
+    typeof window !== "undefined" && nestIdFromLocation()
+      ? window.location.pathname + window.location.search
+      : null,
+  );
+  useEffect(() => {
+    if (deepLinkProbe.status !== "unreachable" || loading || authenticated || authMode !== "key") return;
+    if (landedOnRef.current) parkNestReturn(landedOnRef.current);
+    landedOnRef.current = null;
+  }, [deepLinkProbe.status, loading, authenticated, authMode]);
+  useEffect(() => {
+    if (loading || !authenticated) return;
+    const back = takeNestReturn();
+    if (!back || nestIdFromLocation()) return;
+    window.history.replaceState(null, "", back);
+    setDeepLinkProbe({ status: "loading" });
+  }, [authenticated, loading]);
+
+  // A channel is a node, so search, a wikilink or a card can address it as a
+  // document. While channels are on, a person on the nest gets the channel's
+  // conversation instead (PO-1189). The document view waits for the answer so
+  // the node's page never flashes first; anyone else, and any plain document
+  // filed under channels/, opens as the document it is.
+  const channelDocKey =
+    view.page === "document" && agentStreamEnabled && channelNameOfDoc(view.nodeId)
+      ? `${view.nestId}/${view.nodeId}`
+      : null;
+  const [plainDocKey, setPlainDocKey] = useState<string | null>(null);
+  const channelDocPending = channelDocKey !== null && plainDocKey !== channelDocKey;
+  useEffect(() => {
+    if (!channelDocKey) return;
+    const v = viewRef.current;
+    if (v.page !== "document") return;
+    let cancelled = false;
+    void channelForDocument(v.nestId, v.nodeId).then((channel) => {
+      if (cancelled) return;
+      if (!channel) {
+        setPlainDocKey(channelDocKey);
+        return;
+      }
+      // In place of the document's entry, so Back does not return to an
+      // address that would only send the person here again.
+      replaceNextRef.current = true;
+      setViewNow({
+        page: "channels",
+        nestId: v.nestId,
+        nestName: v.nestName,
+        isOwner: v.isOwner,
+        isAnonOwned: v.isAnonOwned,
+        channel,
+        thread: v.initialThreadId,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [channelDocKey]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -663,6 +768,9 @@ export default function App() {
     // The nest rides in the path (/nest/<id>), never the query — a legacy
     // ?nest= that got us here is dropped once the path form is written.
     params.delete("nest");
+    // The selected channel and open thread ride in the query on the Channels
+    // page and nowhere else.
+    if (view.page !== "channels") params.delete("channel");
     let pathNestId: string | null = null;
     let pathView: string | null = null;
     if (view.page === "document") {
@@ -697,6 +805,7 @@ export default function App() {
       view.page === "definitions" ||
       view.page === "structure" ||
       view.page === "board" ||
+      view.page === "channels" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
@@ -704,7 +813,10 @@ export default function App() {
       if (view.page === "structure" && view.folder) params.set("folder", view.folder);
       else params.delete("folder");
       params.delete("doc");
-      params.delete("thread");
+      // Dropping ?thread= here is what broke the My Work jump (PO-1189): the
+      // Channels page owns it together with ?channel=.
+      if (view.page === "channels") writeChannelParams(params, view);
+      else params.delete("thread");
       params.delete("tab");
       params.delete("view");
       params.delete("review");
@@ -722,19 +834,79 @@ export default function App() {
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     const key = historyKey(path, view);
-    if (next !== current) {
-      // `view` rides as the entry's state so the popstate handler below can
-      // restore it without re-deriving it from the URL.
-      const state = window.history.state;
-      const onAppEntry = !!state && typeof state === "object" && "page" in state;
-      if (historyWriteMode(lastNodeKeyRef.current, key, onAppEntry) === "push") {
-        window.history.pushState(view, "", next);
-      } else {
-        window.history.replaceState(view, "", next);
-      }
-    }
+    const forceReplace = replaceNextRef.current;
+    replaceNextRef.current = false;
+    // `view` rides as the entry's state so the popstate handler below can
+    // restore it without re-deriving it from the URL. Which write, and why,
+    // is historyWrite's (lib/view-history.ts): a channel link opened directly
+    // already has the right address, so its entry is stamped with the view;
+    // the next channel or thread then adds a Back stop and Back restores it.
+    const write = historyWrite({
+      next,
+      current,
+      prevKey: lastNodeKeyRef.current,
+      key,
+      state: window.history.state,
+      forceReplace,
+      stampable: view.page === "channels",
+    });
+    if (write === "push") window.history.pushState(view, "", next);
+    else if (write !== "none") window.history.replaceState(view, "", next);
     lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
+
+  // A deep link followed while signed out (PO-1391). A private nest does not
+  // resolve for a stranger, so the probe ends "unreachable", the effect above
+  // drops the link from the address bar and the sign-in form shows. When the
+  // person then signs in, put the link back and probe again as them: they land
+  // on the nest or document they were sent, not on Home (the nest list or the
+  // first-run welcome screen) or a "no access" page. Declared after the URL
+  // sync so its address is the one left standing. The helper only returns the
+  // address this page was opened on; the parked one is checked again on take.
+  const entryLinkRef = useRef<string | null>(typeof window === "undefined" ? null : entryDeepLink());
+  const wasSignedInRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = authenticated;
+    const link = deepLinkToRetryAfterSignIn({
+      probeStatus: deepLinkProbe.status,
+      entryLink: entryLinkRef.current,
+      wasSignedIn,
+      signedIn: authenticated,
+    });
+    // A sign-in that left the page (PromptOwl, Google, single sign-on) comes
+    // back to Home on a fresh load: open the link parked before leaving.
+    const parked =
+      !link &&
+      deepLinkToOpenOnReturn({
+        sessionKnown: true,
+        signedIn: authenticated,
+        firstLook: wasSignedIn !== true,
+        probeStatus: deepLinkProbe.status,
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+        ? takeParkedDeepLink()
+        : null;
+    const open = link ?? parked;
+    if (!open) return;
+    // Once: a second sign-in in this tab (another account) starts from Home.
+    entryLinkRef.current = null;
+    clearParkedDeepLink();
+    window.history.replaceState(window.history.state, "", open);
+    setDeepLinkProbe({ status: "loading" });
+    // deepLinkProbe.status is read, not watched: only a sign-in triggers this.
+  }, [authenticated, loading]);
+
+  // Park the link while the sign-in form is up, so it also survives a sign-in
+  // that leaves the page. Only for a signed-out visitor whose link did not
+  // resolve: a signed-in person's dead link is not something to come back to.
+  useEffect(() => {
+    if (loading || authenticated || authMode !== "key") return;
+    if (deepLinkProbe.status !== "unreachable") return;
+    parkDeepLink(entryLinkRef.current);
+  }, [loading, authenticated, authMode, deepLinkProbe.status]);
 
   // Browser Back/Forward past a pushed node entry: restore the view that was
   // current when it was written, instead of leaving the address bar and the
@@ -797,8 +969,12 @@ export default function App() {
   const nestScopedId = "nestId" in view ? view.nestId : null;
   const nestScopedIsOwner = "nestId" in view ? view.isOwner : false;
   const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
+  // Whether the caller is a person added to the nest (GET /nests/:id member):
+  // Channels are listed for members only. null = not resolved yet.
+  const [nestIsMember, setNestIsMember] = useState<boolean | null>(null);
   useEffect(() => {
     setNestCanEdit(null);
+    setNestIsMember(null);
     setNestIsReaderView(null);
     setNestBranding(null);
     if (!nestScopedId) return;
@@ -815,12 +991,14 @@ export default function App() {
           readerMode: !!meta?.nest?.reader_mode,
         });
         setNestCanEdit(caps.canEditDocs);
+        setNestIsMember(meta?.member === true);
         setNestIsReaderView(caps.isReaderView);
         setNestBranding(meta?.nest?.branding ?? null);
       })
       .catch(() => {
         if (cancelled) return;
         setNestCanEdit(false);
+        setNestIsMember(false);
         setNestIsReaderView(false);
       });
     return () => {
@@ -884,7 +1062,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled, surfacesEnabled]);
 
   // Tab title follows the breadcrumb. A branded reader sets its own (BrandTitle).
   const pageTabTitle = tabTitle(crumbs);
@@ -941,9 +1119,25 @@ export default function App() {
           openReview: { nestId, nodeId },
           returnTo: viewRef.current,
         }),
+      // A channel mention in My Work: in-app, straight to the thread. The
+      // nest read is cached, and says whether the caller owns the nest.
+      openChannel: (nestId, nestName, channel, thread) => {
+        // The row was clicked on a page worth coming Back to. A page opened
+        // directly (a bookmark, a reload) has no view on its history entry,
+        // and the first move away from such an entry reuses it; give it its
+        // view so this one adds a Back stop instead.
+        if (needsViewStamp(window.history.state)) {
+          window.history.replaceState(viewRef.current, "", window.location.href);
+        }
+        void qc
+          .fetchQuery(reads.nest(nestId))
+          .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
+          .catch(() => ({ isOwner: false, isAnonOwned: false }))
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
+      },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
-    [setView],
+    [setView, qc],
   );
   const dashReturnTo = view.page === "dashboard" ? view.returnTo : undefined;
   const dashOpenReview = view.page === "dashboard" ? view.openReview : undefined;
@@ -1311,8 +1505,9 @@ export default function App() {
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
   // Beside the sidebar the shell fills its flex column: `w-full`, and no
   // `mx-auto` — auto margins on a flex-column item shrink it to its content.
-  // Without a sidebar the old centred page width applies.
-  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
+  // Without a sidebar the old centred page width applies; `w-full` keeps it
+  // full width now that the shell column is a flex column too (PO-1168).
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto w-full`;
   // Reader branding (CU-wdqcq02ptm): only for a caller in reader mode, and
   // only when the nest has any. Otherwise every value below is inert and the
   // shell renders exactly as before.
@@ -1442,7 +1637,9 @@ export default function App() {
         })()}
         </>
       )}
-      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
+      {/* A full-height column, so the footer's mt-auto pins the version line to
+          the bottom of a short page (PO-1168). */}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : "flex min-h-screen flex-col"}>
       {/* Header */}
       {/* `contents`: a sticky child only sticks within its parent's box, and
           <header> is exactly one row tall — so the row below must have the
@@ -1729,7 +1926,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring
@@ -1916,7 +2113,10 @@ export default function App() {
             }
           />
         )}
-        {view.page === "document" && (() => {
+        {view.page === "document" && channelDocPending && (
+          <div className="py-12 text-center text-muted-foreground">Loading...</div>
+        )}
+        {view.page === "document" && !channelDocPending && (() => {
           // Shared nav helpers to avoid setView shape duplication.
           const doc = view;
           const openDocument = (target: {
@@ -2094,6 +2294,18 @@ export default function App() {
             openFolder: (folder: string) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialFolder: folder, tab: "documents" }),
             folder: v.page === "structure" ? v.folder : undefined,
+            channel: v.page === "channels" ? v.channel : undefined,
+            thread: v.page === "channels" ? v.thread : undefined,
+            // Not a guarded navigation (the page holds no unsaved document),
+            // and functional so it never writes over a newer view.
+            setChannelLocation: (loc: { channel: string | null; thread?: string | null }, opts?: { replace?: boolean }) => {
+              // Nothing to change: leave the "no Back stop" mark unset, or it
+              // would apply to whatever navigation came next.
+              const to = nextChannelLocation(viewRef.current, v.nestId, loc);
+              if (!to) return;
+              if (opts?.replace) replaceNextRef.current = true;
+              setViewNow((cur) => (cur.page === "channels" && cur.nestId === v.nestId ? { ...cur, ...to } : cur));
+            },
           };
           return (
             <NestPageProvider value={ctx}>
@@ -2119,9 +2331,9 @@ export default function App() {
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
         readerBrand ? (
-          <ReaderBrandFooter branding={readerBrand} className={shellWidth} />
+          <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
-        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} mt-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
           {isAdmin && <UpdateBadge />}
         </footer>

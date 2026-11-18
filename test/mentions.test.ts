@@ -28,6 +28,12 @@ describe("mention parsing", () => {
     expect(extractMentions("file@host")).toEqual([]);
   });
 
+  it("leaves a sentence's full stops out of a bare name, never inner dots", () => {
+    expect(extractMentions("thanks @rita.")).toEqual(["rita"]);
+    expect(extractMentions("ask @a.b. and @a.b.c...")).toEqual(["a.b", "a.b.c"]);
+    expect(extractMentions("cc @ada@acme.com.")).toEqual(["ada@acme.com"]);
+  });
+
   it("reports only what a save adds", () => {
     expect(newMentions("cc @ada", "cc @ada and @grace")).toEqual(["grace"]);
     expect(newMentions("cc @ada", "cc @ADA")).toEqual([]);

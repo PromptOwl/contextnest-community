@@ -41,9 +41,25 @@ export function applyMentionPick(
   return { value: value.slice(0, start) + insert + tail, caret: start + insert.length };
 }
 
+/** One `@name` as the server resolved it for a channel message (PO-1190):
+ *  a person, an agent handle, or nobody. */
+export type MentionRef =
+  | { name: string; kind: "person"; display_name: string }
+  | { name: string; kind: "agent"; wakeable: boolean }
+  | { name: string; kind: "nobody" };
+
 export type MentionSegment =
   | { kind: "text"; text: string }
-  | { kind: "mention"; text: string; name: string; resolved: boolean };
+  | { kind: "mention"; text: string; name: string; resolved: boolean; ref?: MentionRef };
+
+/**
+ * A bare name without the full stops that end a sentence: "thanks @rita."
+ * names rita, and the dot stays text. Mirrors `bareName` in
+ * src/shared/mentions.ts; no address, local part or handle ends in a dot.
+ */
+export function trimSentenceDots(bare: string): string {
+  return bare.replace(/\.+$/, "");
+}
 
 // One pass, two alternatives: a code span — fenced block or inline, emitted as
 // plain text because an `@name` there is source — or a mention in one of its
@@ -65,14 +81,21 @@ const SEGMENT =
  * editor's decoration: an optimistic mention is a plain name, whereas marking
  * them all broken would tell a reader that a whole thread of real mentions
  * went nowhere.
+ *
+ * `refs` is a channel message's own `mentions` list: when given, each name
+ * takes the server's verdict (person, agent or nobody) instead of the roster,
+ * so an agent handle reads as resolved and the reader needs no roster at all.
+ * A name the list does not carry reads as resolved, like the no-roster case.
  */
 export function mentionSegments(
   body: string,
   members: MentionMember[],
+  refs?: MentionRef[],
 ): MentionSegment[] {
   const segments: MentionSegment[] = [];
   const text = body || "";
   const rosterKnown = members.length > 0;
+  const refFor = (name: string) => refs?.find((r) => r.name.toLowerCase() === name.toLowerCase());
   let last = 0;
   const pushText = (s: string) => {
     if (!s) return;
@@ -92,16 +115,23 @@ export function mentionSegments(
       last = match.index + full.length;
       continue;
     }
-    const name = (bracketed || bare || "").trim();
+    // A sentence's full stop is not part of a bare name; it stays text.
+    const dots = bare ? bare.length - trimSentenceDots(bare).length : 0;
+    const name = (bracketed || trimSentenceDots(bare || "")).trim();
     const start = match.index + (lead ? lead.length : 0);
+    const end = match.index + full.length - dots;
+    // "@..." names nobody: leave it as the text it is.
+    if (!name) continue;
     pushText(text.slice(last, start));
+    const ref = refs ? refFor(name) : undefined;
     segments.push({
       kind: "mention",
-      text: text.slice(start, match.index + full.length),
+      text: text.slice(start, end),
       name,
-      resolved: !rosterKnown || isMemberName(members, name),
+      resolved: refs ? ref?.kind !== "nobody" : !rosterKnown || isMemberName(members, name),
+      ...(ref ? { ref } : {}),
     });
-    last = match.index + full.length;
+    last = end;
   }
   pushText(text.slice(last));
   return segments;

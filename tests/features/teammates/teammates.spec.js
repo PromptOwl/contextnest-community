@@ -92,6 +92,9 @@ test.describe('Teammates', () => {
   test('CN-TMATE-002: the All Users list shows You/Superadmin/Invited badges, key count and last active', async ({
     primary_user,
   }) => {
+    // Checks every row of the real directory against the server: dev has over
+    // a hundred users, which alone takes most of the default 2-minute budget.
+    test.slow();
     await openAsAdmin(primary_user);
     const { page, nestsPage, teammatesPage: tm } = primary_user;
 

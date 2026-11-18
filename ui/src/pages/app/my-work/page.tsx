@@ -15,7 +15,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  ArrowLeft, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
+  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
@@ -29,9 +29,10 @@ import { ReasonDialog, ReviewActions } from "../../../components/governance";
 import { MyWorkReviewPane } from "../../../components/MyWorkReviewPane";
 import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
+import { MentionRows } from "../../../components/my-work/MentionRows";
 
 export default function MyWorkPage() {
-  const { openNest: onSelectNest, openReview: onOpenReview, goBack, initialReview } = useAppNav();
+  const { openNest: onSelectNest, openReview: onOpenReview, openChannel, goBack, initialReview } = useAppNav();
   const { adminStatus } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [rawWork, setWork] = useState<{
@@ -40,7 +41,10 @@ export default function MyWorkPage() {
     notifications?: api.WatcherNotification[];
     assigned?: api.AssignedItem[];
     pagination?: api.WorkPagination;
+    mentions?: api.MentionItem[];
+    mentions_pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
+  const [loadingMentions, setLoadingMentions] = useState(false);
   // One nest, or all of them.
   const [nestFilter, setNestFilter] = useState<string>("all");
   const nestOptions = (() => {
@@ -48,6 +52,7 @@ export default function MyWorkPage() {
     for (const w of [...rawWork.items, ...rawWork.waiting]) m.set(w.nest_id, w.nest_name);
     for (const a of rawWork.assigned ?? []) m.set(a.nest_id, a.nest_name);
     for (const n of rawWork.notifications ?? []) m.set(n.nest_id, n.nest_name);
+    for (const x of rawWork.mentions ?? []) m.set(x.nest_id, x.nest_name);
     return [...m].sort((a, b) => a[1].localeCompare(b[1]));
   })();
   const inNest = (id: string) => nestFilter === "all" || id === nestFilter;
@@ -57,6 +62,7 @@ export default function MyWorkPage() {
     waiting: rawWork.waiting.filter((w) => inNest(w.nest_id)),
     assigned: (rawWork.assigned ?? []).filter((a) => inNest(a.nest_id)),
     notifications: (rawWork.notifications ?? []).filter((n) => inNest(n.nest_id)),
+    mentions: rawWork.mentions?.filter((m) => inNest(m.nest_id)),
   };
   // Gates the "My Work" empty state — without it, the empty message flashes
   // on every mount/tab switch before the best-effort /me/work fetch resolves.
@@ -104,6 +110,9 @@ export default function MyWorkPage() {
         notifications: next.notifications ?? prev.notifications,
         assigned: next.assigned ?? prev.assigned,
         pagination: next.pagination,
+        // Review paging leaves the mentions page where it was.
+        mentions: prev.mentions,
+        mentions_pagination: prev.mentions_pagination,
       }));
       // A selection only means anything against the rows on screen. Carrying
       // it across a page turn (or over rows that just got resolved) left the
@@ -119,6 +128,60 @@ export default function MyWorkPage() {
     }
   };
 
+
+  // Mentions page on their own cursor (mentions_offset); the rest of the
+  // inbox stays as it is.
+  const goToMentionsPage = async (mentionsOffset: number) => {
+    setLoadingMentions(true);
+    try {
+      const next = await qc.fetchQuery(reads.myWork({ mentionsOffset }));
+      setWork((prev) => ({ ...prev, mentions: next.mentions, mentions_pagination: next.mentions_pagination }));
+    } catch (e) {
+      console.error("[MyWork] goToMentionsPage failed", e);
+    } finally {
+      setLoadingMentions(false);
+    }
+  };
+
+  // Jump to the thread: a channel post opens the channel timeline with the
+  // thread open; a document comment opens the document with it focused.
+  const openMention = (m: api.MentionItem) => {
+    if (m.kind === "channel" && m.channel) {
+      // In-app, like every other row: no full page load (PO-1189).
+      openChannel(m.nest_id, m.nest_name, m.channel, m.thread_id);
+      return;
+    }
+    onOpenReview(m.nest_id, m.nest_name, m.node_id, { thread: m.thread_id });
+  };
+
+  // "Mark done": the row leaves the list at once; the sidebar badge follows
+  // from the same write (it drops the cached /me/work reads). The message and
+  // the thread are untouched, and the row returns only on a new mention.
+  const [doneThread, setDoneThread] = useState<string | null>(null);
+  const markMentionDone = async (m: api.MentionItem) => {
+    setDoneThread(m.thread_id);
+    try {
+      await api.markMentionDone(m.thread_id);
+      setWork((prev) => {
+        const mentions = (prev.mentions ?? []).filter((x) => x.thread_id !== m.thread_id);
+        const page = prev.mentions_pagination;
+        return {
+          ...prev,
+          mentions,
+          mentions_pagination: page ? { ...page, total: Math.max(0, page.total - 1) } : page,
+        };
+      });
+      // The page just emptied but more remain: show them rather than nothing.
+      const page = work.mentions_pagination;
+      if (page && (work.mentions?.length ?? 0) === 1 && page.total > 1) {
+        void goToMentionsPage(Math.max(0, page.offset - (page.has_more ? 0 : page.limit)));
+      }
+    } catch (e: any) {
+      toast.error(e?.message || "Could not mark the mention done");
+    } finally {
+      setDoneThread(null);
+    }
+  };
 
   // First page on mount, and again whenever the signed-in user changes (in
   // open mode the page stays mounted across login). Best-effort: a failed
@@ -466,11 +529,24 @@ export default function MyWorkPage() {
                 </div>
               </div>
             )}
+            {/* Open threads that @mention you, in channels and on documents,
+                waiting on your reply (PO-1180). Reply, resolve or mark done
+                and the row goes. Newest first; click jumps to the thread. */}
+            <MentionRows
+              mentions={chip === "all" ? (work.mentions ?? []) : []}
+              viewer={adminStatus?.me ?? null}
+              pagination={work.mentions_pagination}
+              loading={loadingMentions}
+              busyThread={doneThread}
+              onOpen={openMention}
+              onDone={markMentionDone}
+              onPage={goToMentionsPage}
+            />
             <div>
               {showNotes && (work.notifications?.length ?? 0) > 0 && (
                 <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
                   <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
-                    🔔 Notifications
+                    <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
                     <span className="text-xs text-muted-foreground">
                       ({work.notifications!.length})
                     </span>

@@ -86,6 +86,7 @@ import {
   matchesBlockedFilter,
   matchesTitleFilter,
   moveNeedsReview,
+  inDoneFolder,
   openBlockers,
   subItemsByParent,
   timestampsTooltip,
@@ -742,8 +743,8 @@ function MaturityBoardInner({
     [census.data],
   );
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders),
-    [visibleNodes, effectiveConfig, emptyFolders],
+    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, nodes),
+    [visibleNodes, effectiveConfig, emptyFolders, nodes],
   );
 
   // Each column in the active board's saved order (Linear/Jira stack rank).
@@ -791,8 +792,8 @@ function MaturityBoardInner({
   });
   const people = useMemo(
     () =>
-      (roster?.people ?? []).filter((p) => !!p.email && (canShare || p.member !== false)),
-    [roster, canShare],
+      (roster?.people ?? []).filter((p) => !!p.email && p.member !== false),
+    [roster],
   );
   // People a card can land on as-is (an assignee column needs no share step).
   const members = useMemo(() => people.filter((p) => p.member !== false), [people]);
@@ -957,7 +958,7 @@ function MaturityBoardInner({
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        // The caller opens the new task — refresh the board behind it, don't wait.
+        // Refresh the board so the new card shows — don't wait.
         void load({ silent: true });
         return res?.node?.id as string | undefined;
       } catch (e: any) {
@@ -1420,7 +1421,7 @@ function MaturityBoardInner({
   );
   const allTagValues = useMemo(() => {
     const set = new Set<string>();
-    for (const n of nodes) for (const t of n.tags) set.add(t.replace(/^#/, ""));
+    for (const n of nodes) for (const t of visibleTags(n.tags)) set.add(t.replace(/^#/, ""));
     return [...set].sort();
   }, [nodes]);
 
@@ -1603,7 +1604,7 @@ function MaturityBoardInner({
       <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${laneKey !== undefined ? "min-h-12" : ""}`}>
         {cards.map((n, i) => {
           const kids = subItems.get(n.id) ?? [];
-          const completed = !!n.completed_at;
+          const completed = !!n.completed_at || inDoneFolder(n.id, doneTags);
           const shownTags = cardTags(n.tags);
           return (
             <div key={n.id}>
@@ -1764,6 +1765,7 @@ function MaturityBoardInner({
                           people={people}
                           me={me}
                           editable={canEditDocs}
+                          canInvite={canShare}
                           onChange={(assignee, member) =>
                             assignee && member === false
                               ? setPendingShare({ id: n.id, email: assignee })
@@ -1806,7 +1808,11 @@ function MaturityBoardInner({
             onSubmit={async (task) => {
               const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
               setAddingIn(null);
-              if (id) onOpenDocument(id);
+              // Stay on the Board (PO-1246); the card lands in its column.
+              if (id)
+                toast.success(`Task "${task.title}" created`, {
+                  action: { label: "Open", onClick: () => onOpenDocument(id) },
+                });
             }}
             onClose={() => setAddingIn(null)}
           />
@@ -2465,9 +2471,9 @@ function MaturityBoardInner({
         )}
         {(blockedCount > 0 || hideBlocked) && (
           <Button
-            variant={hideBlocked ? "secondary" : "ghost"}
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className={`h-7 px-2 text-xs ${hideBlocked ? "border border-primary/30 bg-primary/10 font-medium text-primary hover:bg-primary/15" : ""}`}
             aria-pressed={hideBlocked}
             title={hideBlocked ? "Show blocked tasks again" : "Hide tasks that have an open blocker"}
             onClick={() => setHideBlocked((v) => !v)}

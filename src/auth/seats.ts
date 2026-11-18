@@ -28,6 +28,7 @@ export const confirmBillingToolField = {
 export const BILLING_CONFIRM_TOOLS: ReadonlySet<string> = new Set([
   "context_assign_steward",
   "context_grant",
+  "context_nest_teams",
   "context_resolve_access_request",
   "context_share_nest",
 ]);

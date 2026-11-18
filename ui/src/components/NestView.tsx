@@ -9,6 +9,7 @@ import { OrgContributorPanel } from "./OrgContribution";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { nestNameProblem } from "../lib/nest-name";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { matchesFilters } from "../lib/node-filter";
 import { reviewIdFromSearch, withReviewParam } from "../lib/review-pane";
@@ -197,16 +198,23 @@ export function NestView({
     lastSavedName.current = nestName;
   }, [nestName, nestId]);
   const renameTimer = useRef<number | null>(null);
-  const renameRef = useRef<() => void>(() => { });
+  const renameRef = useRef<(final?: boolean) => void>(() => { });
   // Escape reverts editableName via setState, which is batched and hasn't
   // applied yet when the input's own blur (triggered synchronously by the
   // Escape handler) fires flushRename — so flushRename would still see the
   // stale, edited value. This flag tells that one flush to no-op instead.
   const skipNextFlush = useRef(createConsumeOnceFlag()).current;
   const [renameError, setRenameError] = useState<string | null>(null);
-  renameRef.current = async () => {
+  // `final` = Enter/blur: a name that can't be saved puts the last good one
+  // back (PO-1209); mid-typing it only says why, so retyping isn't undone.
+  renameRef.current = async (final = false) => {
     const trimmed = editableName.trim();
-    if (!trimmed) return;
+    const problem = nestNameProblem(editableName);
+    if (problem) {
+      setRenameError(problem);
+      if (final) setEditableName(lastSavedName.current);
+      return;
+    }
     if (trimmed === lastSavedName.current.trim()) return;
     try {
       await api.updateNest(nestId, { name: trimmed });
@@ -231,7 +239,7 @@ export function NestView({
       renameTimer.current = null;
     }
     if (skipNextFlush.consume()) return;
-    void renameRef.current();
+    void renameRef.current(true);
   }, []);
   useEffect(
     () => () => {
@@ -1466,6 +1474,9 @@ export function NestView({
               <NestVisibilityControl
                 nestId={nestId}
                 variant="header"
+                // Team sharing lives on the Collaborators tab, whose add
+                // control opens on Team on a shared deployment.
+                onShareWithTeam={() => setActiveTab("collaborators")}
                 onChanged={fetchData}
                 onError={(m) => {
                   if (m) toast.error(m);
@@ -1743,7 +1754,8 @@ export function NestView({
         {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. Not on Overview: it
-          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
+          carries the same numbers as its own summary line (CU-wdqcq02qb1). Not on
+          Stream either: a feed starts with its posts (po-1214). Documents only. */}
         {activeTab === "documents" && (
           <div
             className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled

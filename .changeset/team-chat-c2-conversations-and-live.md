@@ -1,0 +1,5 @@
+---
+"@promptowl/contextnest-community": minor
+---
+
+Team chat, slice C2 (PO-1197). One switch, `TEAM_CHAT_ENABLED` (superadmin `team_chat_enabled`; `/health` `team_chat`; `EXPERIMENTAL_AGENT_STREAM` stays as its alias), and a per-nest chat setting an owner or admin can turn off. Direct and group conversations between members of a nest — ordinary nodes under `nodes/conversations/`, their messages the node's threads, their members the node's shares, agents by handle — with create/find by member set, list, read, mark read, leave and add. Private channels (a channel tagged `#private` with a member list: create, invite, join, leave, members, make public/private), invisible to non-members everywhere. Notification levels `all | mentions | none` per nest and per conversation, honoured by the mention fan-out. Presence heartbeats and typing, and `GET /nests/:id/chat/events`, a live event stream with `Last-Event-ID` resume. `GET /me/chat/unread` and a `chat` section of My Work. MCP twins: `context_conversations`, `context_conversation_read`, `context_channel_members`, `context_chat_preferences`, `context_presence`.

@@ -58,7 +58,7 @@ export function TopBarTools({
   onConnect: () => void;
 }) {
   const meta = useNestMeta(nestId ?? "");
-  const { isAdmin, workflowPlaneEnabled, typeViewEnabled } = useAuth();
+  const { isAdmin, workflowPlaneEnabled, typeViewEnabled, agentStreamEnabled } = useAuth();
   const caps = useMemo(() => {
     const m: any = meta.data;
     if (!nestId || !m) return null;
@@ -89,12 +89,21 @@ export function TopBarTools({
     [viewNodes.data],
   );
   const stewardshipEnabled = !!(meta.data as any)?.nest?.stewardship_enabled;
+  // Channels are for people added to the nest; a share-only grantee or a
+  // public reader gets no entry (GET /nests/:id `member`).
+  const isMember = (meta.data as any)?.member === true;
   const views = useMemo(
     () =>
       caps
-        ? nestSidebarViews(caps, { workflowPlaneEnabled, stewardshipEnabled, hasPending: pending > 0 })
+        ? nestSidebarViews(caps, {
+          workflowPlaneEnabled,
+          agentStreamEnabled,
+          isMember,
+          stewardshipEnabled,
+          hasPending: pending > 0,
+        })
         : [],
-    [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
   );
   // Dashboard: the nests to pick from.
   const nestList = useQuery({ ...reads.nestList(), enabled: !nestId });

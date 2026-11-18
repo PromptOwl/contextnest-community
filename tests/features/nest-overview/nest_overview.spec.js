@@ -289,6 +289,8 @@ test.describe('Nest overview', () => {
     primary_user,
     commonFunction,
   }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const { nest, page } = await ownerNest(primary_user, commonFunction, 'ovr-open-folder', STANDARD);
 
     await page.gotoNest(nest.id);

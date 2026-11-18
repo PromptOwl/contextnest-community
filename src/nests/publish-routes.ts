@@ -10,28 +10,27 @@
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { ForbiddenError, NotFoundError } from "../shared/errors.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { sendEmailToRecipient, isEmailConfigured } from "../notify/email.js";
 import {
-  createPublish,
+  publishDocumentLink,
   listPublish,
   getPublishById,
   revokePublish,
+  updatePublish,
   listViews,
-  listAllowlist,
   toPublishResponse,
-  type PublishMode,
+  PUBLISH_FORBIDDEN,
+  PUBLISH_NOT_FOUND,
+  type PublishRequest,
 } from "./publish-service.js";
 
 export const publishRoutes = new Hono<AuthEnv>();
 
 async function requireManage(c: any, nestId: string): Promise<void> {
   if (!(await canManageStewards(nestId, c.get("userId")))) {
-    throw new ForbiddenError(
-      "Only a nest admin, the nest owner, or the server admin can publish documents.",
-    );
+    throw new ForbiddenError(PUBLISH_FORBIDDEN);
   }
 }
 
@@ -39,55 +38,12 @@ async function requireManage(c: any, nestId: string): Promise<void> {
 publishRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId);
-  const body = await c.req.json<{
-    node_id?: string;
-    access_mode?: string;
-    comments_enabled?: boolean;
-    watermark?: boolean;
-    no_download?: boolean;
-    code?: string | null;
-    allowlist?: string[];
-    expires_at?: string | null;
-  }>();
-
-  const mode = (body.access_mode ?? "public") as PublishMode;
-  // An email or invite link is opened ONLY by clicking a mailed magic link, so
-  // without a mail transport it is a link nobody — not even the person who was
-  // invited — can ever open. Refuse it rather than hand back a dead link.
-  if ((mode === "email" || mode === "invite") && !isEmailConfigured()) {
-    throw new ValidationError(
-      "Email and invite links need email set up on this server (SMTP or AWS SES, plus NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
-    );
-  }
-  const row = await createPublish({
+  const { row, link } = await publishDocumentLink({
     nestId,
-    nodeId: (body.node_id ?? "").trim(),
-    mode,
-    commentsEnabled: !!body.comments_enabled,
-    watermark: !!body.watermark,
-    noDownload: !!body.no_download,
-    code: body.code ?? null,
-    allowlist: Array.isArray(body.allowlist) ? body.allowlist : [],
-    expiresAt: body.expires_at ?? null,
-    createdBy: c.get("userId"),
+    userId: c.get("userId"),
+    baseUrl: requestBaseUrl(c.req.url),
+    request: await c.req.json<PublishRequest>(),
   });
-  const link = `${requestBaseUrl(c.req.url)}/p/${row.slug}`;
-
-  // Invite mode is useless without the invitation: an allow-listed reader who
-  // never receives the link has no way to reach the document. Fire-and-forget,
-  // like every other notification here — a dead SMTP config must not fail the
-  // publish (the link still works for anyone who has it).
-  if (mode === "invite") {
-    for (const email of await listAllowlist(row.id)) {
-      void sendEmailToRecipient(email, {
-        status: "shared",
-        docTitle: "A document has been shared with you",
-        path: "PromptOwl · ContextNest",
-        permission: "view",
-        link,
-      }, { nestId });
-    }
-  }
   return c.json({ publish: toPublishResponse(row), link }, 201);
 });
 
@@ -108,9 +64,26 @@ publishRoutes.get("/:id/views", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId);
   const row = await getPublishById(nestId, c.req.param("id")!);
-  if (!row) throw new NotFoundError("Publish not found");
+  if (!row) throw new NotFoundError(PUBLISH_NOT_FOUND);
   const views = await listViews(row.id);
   return c.json({ count: views.length, views });
+});
+
+// PATCH /nests/:nestId/publications/:id — change a live link's settings in
+// place (its URL stays the same). Body: { show_invite: boolean }.
+publishRoutes.patch("/:id", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await requireManage(c, nestId);
+  // `?? {}`: a body of literal `null` parses fine and must be a 400, not a 500.
+  const body = ((await c.req.json<{ show_invite?: unknown } | null>().catch(() => null)) ?? {}) as {
+    show_invite?: unknown;
+  };
+  const row = await updatePublish(nestId, c.req.param("id")!, body);
+  if (!row) throw new NotFoundError(PUBLISH_NOT_FOUND);
+  return c.json({
+    publish: toPublishResponse(row),
+    link: `${requestBaseUrl(c.req.url)}/p/${row.slug}`,
+  });
 });
 
 // DELETE /nests/:nestId/publish/:id — revoke the link.
@@ -118,6 +91,6 @@ publishRoutes.delete("/:id", async (c) => {
   const nestId = c.req.param("nestId")!;
   await requireManage(c, nestId);
   const ok = await revokePublish(nestId, c.req.param("id")!);
-  if (!ok) throw new NotFoundError("Publish not found");
+  if (!ok) throw new NotFoundError(PUBLISH_NOT_FOUND);
   return c.json({ revoked: true });
 });

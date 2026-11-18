@@ -9,6 +9,8 @@ import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
+import * as teams from "../governance/teams-service.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
 import { standingBlockFor } from "../governance/always-include-service.js";
@@ -17,6 +19,7 @@ import {
   canReadNode,
   canRequestDeletion,
   filterAccessible,
+  readableDeletionRequests,
 } from "../governance/access-guard.js";
 import {
   matchDocuments,
@@ -57,6 +60,8 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { htmlWriteGuard, htmlWriteNotice } from "../nodes/html-artifact.js";
+import { documentWebUrl } from "../shared/web-links.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
@@ -77,7 +82,6 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -93,11 +97,14 @@ import {
   moveFolder,
   listNodesForCallerByEmail,
   getNodeForCaller,
+  archiveNode,
+  unarchiveNode,
+  canArchiveNode,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
 } from "../nodes/service.js";
-import { deleteNest, archiveNest } from "../nests/service.js";
+import { deleteNest, archiveNest, listVisibleNests } from "../nests/service.js";
 import { agentSummaryProse } from "../views/deps.js";
 import {
   addComputedFields,
@@ -136,11 +143,27 @@ import {
 } from "../shared/client-metadata.js";
 import { z } from "zod";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { AGENT_ADMIN_TOOL_NAMES, AGENT_READ_TOOL_NAMES, isAgentTool, runAgentTool } from "./agent-tools.js";
 import { isMetacognitionTool, runMetacognitionTool } from "./metacognition-tools.js";
 import { SURFACES_ADMIN_TOOL_NAMES, SURFACES_READ_TOOL_NAMES, isSurfacesTool, runSurfacesTool } from "./surfaces-tools.js";
+import { PUBLIC_LINK_TOOL_DEFINITIONS, PUBLIC_LINK_TOOL_NAMES, isPublicLinkTool, runPublicLinkTool } from "./public-link-tools.js";
+import { isChannelTool, runChannelTool } from "./channel-tools.js";
+import { CHAT_READ_TOOL_NAMES, isChatTool, runChatTool } from "./chat-tools.js";
+import { conversationIdOf, isConversationDoc, isConversationId } from "../chat/containers.js";
+import { nestChatEnabled } from "../chat/settings.js";
+import { isMyWorkTool, runMyWorkTool } from "./my-work-tools.js";
+import { isStreamTool, runStreamTool } from "./stream-tools.js";
+import { isMessageTool, runMessageTool } from "./message-tools.js";
+import { messageHitsForDocumentSearch } from "../channels/message-search.js";
+import { channelsHint } from "./channel-tools.js";
+import { channelIdFor, channelPostRefusal, isChannelDoc, parseChannelName } from "../channels/channel-service.js";
+import { messageClient } from "../channels/message-meta.js";
+import { fanOutPostedMessage, mentionsLine } from "../channels/post-message.js";
+import { actingAgentHandle, markMentionDone } from "../mentions/mention-index.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
 import * as headless from "../auth/headless.js";
 import { setNestVisibility } from "../nests/visibility-service.js";
+import { streamToolEnabled, streamToolResult } from "./stream-tool.js";
 import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
@@ -217,7 +240,7 @@ function describeRevision(r: InstructionsRevision): string {
   return `r${r.seq} · ${r.createdAt} · ${who} (${r.source})${r.note ? ` — ${r.note}` : ""}`;
 }
 
-function toolError(
+export function toolError(
   text: string,
   code:
     | "DOCUMENT_NOT_FOUND"
@@ -441,6 +464,12 @@ export interface McpToolContext {
    * any other caller of handleToolCall gets no contributor reach.
    */
   contributorCredential?: boolean;
+  /**
+   * The credential is not fenced to one nest (no API-key nest scope): the
+   * cross-nest reads GET /me/* serve may be answered from this endpoint too
+   * (context_my_work). Unset is false — the call sees this nest only.
+   */
+  crossNest?: boolean;
 }
 
 /**
@@ -457,6 +486,8 @@ export interface McpToolContext {
 export const MCP_READ_TOOLS = new Set<string>([
   // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
   ...SURFACES_READ_TOOL_NAMES,
+  // Agent control room reads (po-1186): ledger, trace, export, rollups.
+  ...AGENT_READ_TOOL_NAMES,
   // per-nest read tools
   "context_init",
   "context_instructions_history",
@@ -469,9 +500,26 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_resolve",
   "context_export",
   "context_comments",
+  // Channels (PO-1179, experimental): reading a timeline or thread.
+  "context_channel_read",
+  // Team chat C2 (PO-1197): the read actions; the write actions of the same
+  // tools are refused inside (chat-tools.ts), and a read-only key is offered
+  // a read-only view of each (CHAT_READ_KEY_TOOL_VIEWS).
+  ...CHAT_READ_TOOL_NAMES,
+  // …and listing them (PO-1190, AC-AX-06). The tool also creates and
+  // archives; a read-only key is OFFERED a list-only view of it (mcp/routes.ts
+  // readKeyToolView) and runChannelTool refuses every other action.
+  "context_channels",
+  // Channel messages (PO-1196): the permalink lookup and search read only;
+  // context_message (react, edit, …) writes and is not here.
+  "context_message_read",
+  "context_channel_search",
   "context_stewards",
   "context_review_queue",
   "context_my_drafts",
+  "context_stream",
+  // My Work (PO-1180): the caller's own queue, read-only.
+  "context_my_work",
   "context_versions",
   "context_deletion_queue",
   "context_unsynced_list",
@@ -481,8 +529,10 @@ export const MCP_READ_TOOLS = new Set<string>([
   "context_fields",
   "context_access_requests",
   "context_verify",
-  // server-level read tool
+  // server-level read tools
   "nest_index",
+  // first-run onboarding reads (PO-1185)
+  "context_onboarding",
   // workflow-plane read tools (only advertised when the feature flag is on)
   "workflow_run_get",
   "workflow_runs_list",
@@ -507,7 +557,11 @@ export function toolShape(toolName: string, inputSchema: unknown): Record<string
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
     let field: z.ZodTypeAny;
-    if (def.type === "string") field = z.string();
+    // A string enum validates and advertises its values; a list of
+    // non-strings (or an empty one) falls back to a plain string.
+    if (def.type === "string" && Array.isArray(def.enum) && def.enum.length > 0 && def.enum.every((v: unknown) => typeof v === "string"))
+      field = z.enum(def.enum as [string, ...string[]]);
+    else if (def.type === "string") field = z.string();
     else if (def.type === "number") field = z.number();
     else if (def.type === "array") field = arrayToolField(def);
     else field = z.any();
@@ -528,6 +582,8 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   "context_headless",
   // Nest visibility — the REST PATCH /nests/:id/visibility twin, same service.
   "context_set_visibility",
+  // Team sharing — the REST /nests/:id/teams twin, same service.
+  "context_nest_teams",
   "context_systems",
   "context_instructions_update",
   // Metacognition agents (CU-wdqcq05rqq) are an owner/admin feature for every
@@ -541,6 +597,10 @@ export const MCP_ADMIN_TOOLS = new Set<string>([
   // Surfaces (bindings, identity links): only advertised while
   // FEATURE_SURFACES is on (mcp/routes.ts); re-checked per call.
   ...SURFACES_ADMIN_TOOL_NAMES,
+  // Registering an agent (po-1186) mints a governed agent node: owner/admin.
+  ...AGENT_ADMIN_TOOL_NAMES,
+  // Public links (PO-1365) — the REST /nests/:id/publications twins.
+  ...PUBLIC_LINK_TOOL_NAMES,
 ]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
@@ -571,6 +631,15 @@ const TASK_FIELD_PROPERTIES = {
       'Id of the parent node in this nest (e.g. "nodes/launch") — makes this a sub-item. Cycles are refused. null or "" clears it.',
   },
 };
+
+/** A tool's input schema from the engine catalog, for tools that mirror an op. */
+function engineToolSchema(op: string) {
+  const desc = engineApi.getOperation(op);
+  if (!desc) throw new Error(`The engine has no "${op}" operation. Check the engine version.`);
+  const schema = inputJsonSchema(desc) as { type: "object"; properties?: Record<string, unknown> };
+  const { uri: _uri, ...properties } = schema.properties ?? {};
+  return { ...schema, properties };
+}
 
 /**
  * The `view` argument of context_create / context_update (§1.12), taken from
@@ -723,7 +792,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_get",
-    description: "Read the full content of one document, by title or ID.",
+    description:
+      "Read the full content of one document, by title or ID. The result includes the document's web app link — the one to hand a person who asks for a link.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -818,29 +888,31 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_comments",
     description:
-      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context.",
+      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context. Pass `thread` to get that one thread (with or without the document's id): what a wake-up's `read` call asks for.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        thread: { type: "string", description: "A thread id: return only that thread. The node is found from the thread when no title or id is given." },
       },
     },
   },
   {
     name: "context_comment",
     description:
-      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person.",
+      "Leave a comment on a document, or post in a channel — the same threads the web UI shows. Omit `thread` to open a new one; pass a thread id to reply (the document or channel is then found from the thread, so `thread` and `body` are enough). Anyone who can read a document may comment on it. In a channel (when the server has channels on) pass `channel`: its name, `#name` or node id; people added to the nest may post there. `@name` in the body notifies that person, or wakes that agent. The result carries `thread_id`, `comment_id` and `mentions`: for each @name, whether it reached a person, is a known agent (and whether a wake-up was sent), or matched nobody. To show as an agent rather than as the person behind the key, pass `client: { agent: \"<your name>\" }`.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        channel: { type: "string", description: 'A channel to post in: its name ("ops"), "#ops" or its node id. From context_channels.' },
         body: { type: "string", description: "The comment text" },
         thread: {
           type: "string",
           description:
-            "Thread id to reply to (from context_comments). Omit to open a new thread on the document.",
+            "Thread id to reply to (from context_comments or context_channel_read). Omit to open a new thread.",
         },
       },
       required: ["body"],
@@ -849,19 +921,24 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve_comment",
     description:
-      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on.",
+      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on. The thread id alone is enough. With `mention_done: true` the thread is left as it is and only YOUR mention of it is cleared from context_my_work (it comes back if you are mentioned there again).",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
+        channel: { type: "string", description: "The channel the thread is in (optional; the thread id is enough)." },
         thread: {
           type: "string",
-          description: "Thread id, from context_comments",
+          description: "Thread id, from context_comments, context_channel_read or context_my_work",
         },
         reopen: {
           type: "boolean",
           description: "Reopen the thread instead of resolving it",
+        },
+        mention_done: {
+          type: "boolean",
+          description: "Clear your own mention of this thread from My Work without resolving the thread.",
         },
       },
       required: ["thread"],
@@ -920,19 +997,20 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_create",
     description:
-      "Create a new knowledge node in the vault (type \"task\" for a board task; any node may carry assignee/due/priority/parent). The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
+      "Create a new knowledge node in the vault (type \"task\" for a board task; any node may carry assignee/due/priority/parent). To post an HTML page (a deck, dashboard, report or any web page), set type \"artifact\" and put the raw HTML document in `content` — it renders as a page in the web app. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move. The result gives the document's web app link: that is the link to hand a person.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Descriptive title" },
         content: {
           type: "string",
-          description: "Markdown content body",
+          description:
+            "The body. Markdown for a document. For type \"artifact\": the raw HTML document itself (starting at <!DOCTYPE html> or <html>), with no markdown code fence around it — a fenced body would show as code instead of rendering.",
         },
         type: {
           type: "string",
           description:
-            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
+            "Node type (default: document, a markdown page). Use \"artifact\" for an HTML page: the content is raw HTML and it renders as a page in the web app, where people can open and comment on it. Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",
@@ -1009,7 +1087,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
+      "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller. The result gives the document's web app link: that is the link to hand a person.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1027,7 +1105,8 @@ export const TOOL_DEFINITIONS = [
         },
         content: {
           type: "string",
-          description: "New content (replaces)",
+          description:
+            "New content (replaces). Markdown for a document. For an artifact (an HTML page): the raw HTML document itself, with no markdown code fence around it.",
         },
         description: {
           type: "string",
@@ -1096,6 +1175,18 @@ export const TOOL_DEFINITIONS = [
         },
       },
     },
+  },
+  {
+    // Schema straight from the engine's catalog, less `uri`: no resolver here.
+    name: "context_archive",
+    description:
+      "Archive a node: out of lists and retrieval with its history kept, until context_unarchive brings it back. Use this rather than context_delete when it might be wanted again. Stewards only; refused while a review is pending.",
+    inputSchema: engineToolSchema("context_archive"),
+  },
+  {
+    name: "context_unarchive",
+    description: "Bring an archived node back in the status it was archived from. Name it by id. Stewards only.",
+    inputSchema: engineToolSchema("context_unarchive"),
   },
   {
     name: "context_move",
@@ -1505,6 +1596,25 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    // po-1214: the document stream a person sees on /stream, for agents.
+    // Only advertised while EXPERIMENTAL_DOC_STREAM is on (streamToolEnabled).
+    name: "context_stream",
+    description:
+      "Read the document stream: recent versions, newest first — who changed what (the person, and the agent they wrote through), the change note, an excerpt, open comment count, and whether you may review it. Reply to a post with context_comment (its id), approve or reject one in review with context_approve / context_reject. Pass `since` (the newest `at` you have seen) to get only what is new.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        since: { type: "string", description: "Only versions at or after this time (ISO date-time, or an `at` value from an earlier call)." },
+        source: { type: "string", enum: ["agent", "human"], description: '"agent" for versions written through an agent, "human" for the rest. Omit for both.' },
+        author: { type: "string", description: "Only versions by this email. Comma-separate several (any of them)." },
+        tag: { type: "string", description: "Only documents carrying this tag. Comma-separate several (any of them)." },
+        type: { type: "string", description: "Only documents of this type. Comma-separate several (any of them)." },
+        limit: { type: "number", description: "Posts to return, 1-100 (default 25)." },
+        offset: { type: "number", description: "Skip this many posts (paging)." },
+      },
+    },
+  },
+  {
     name: "context_submit_review",
     description:
       "Submit a node for steward review. The node will be marked as pending review and stewards will be notified.",
@@ -1705,6 +1815,23 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_nest_teams",
+    description:
+      "Share this nest with whole teams. Nest owners/admins only. action: list (the teams shared with this nest, with their members, plus the teams you can share) | share (team_id) | unshare (team_id). Each member gets the role they hold on the team. On a server that hosts several organizations, you can share only a team you are an editor, admin or owner of; on a single-organization server, any team. Prefer this to visibility 'org' when the nest is for one group of people. Mirrors GET/POST/DELETE /nests/:id/teams.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "share", "unshare"],
+          description: "What to do.",
+        },
+        team_id: { type: "string", description: "Team id (share, unshare), from list." },
+      },
+      required: ["action"],
+    },
+  },
+  {
     name: "context_systems",
     description:
       'Manage named systems (machine identities such as "GitHub sync"). Nest owners/admins only. Systems are non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
@@ -1733,6 +1860,8 @@ export const TOOL_DEFINITIONS = [
       required: ["action"],
     },
   },
+  // Public links (PO-1365), defined in public-link-tools.ts.
+  ...PUBLIC_LINK_TOOL_DEFINITIONS,
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -1820,6 +1949,27 @@ async function resolveLlmBody(
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
   }
+}
+
+/**
+ * The document's address in the web app, for the PERSON the agent is working
+ * for (PO-1336). Results used to carry no link at all, so an agent asked for
+ * one built it from the API or MCP URL, which a browser cannot open. Prose
+ * only: the catalog payloads of these tools have no link field, and
+ * test/mcp-catalog-conformance.test.ts refuses an added key. "" when the
+ * server's public address is unknown.
+ */
+function webLinkProse(ctx: McpToolContext, nodeId: string): string {
+  const url = documentWebUrl(ctx.baseUrl, ctx.nestId, nodeId);
+  return url ? `\nOpen in the web app (the link for people — share this one, not an API or MCP URL): ${url}` : "";
+}
+
+/** The same, for a listing: one pattern instead of a link per row. */
+function webLinkPatternProse(ctx: McpToolContext): string {
+  const url = documentWebUrl(ctx.baseUrl, ctx.nestId, "");
+  return url
+    ? `\n\nTo link a person to one of these, use the web app address (not an API or MCP URL): ${url}<node id, URL-encoded>`
+    : "";
 }
 
 /** " · assignee x · due 2026-10-31 · high" — empty for a node with none. */
@@ -2203,7 +2353,8 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
       return {
         text:
           `Replaced the file of **${node.frontmatter.title}** (${node.id}) with ${upload.filename} — version ${version}, status: ${node.frontmatter.status}. The new original is at ${url}.` +
-          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : ""),
+          (saved.warnings?.length ? ` Note: ${saved.warnings.join(" ")}` : "") +
+          webLinkProse(ctx, node.id),
         data: {
           kind: upload.kind,
           id: node.id,
@@ -2244,7 +2395,8 @@ async function runUploadTool(args: Record<string, any>, ctx: McpToolContext): Pr
       return {
         text:
           `Created ${upload.kind === "pdf" ? "PDF" : "document"}: **${docTitle}** (${node.id}) from ${upload.filename} — status: ${node.frontmatter.status}` +
-          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : "."),
+          (saved.original ? `. The original is linked from the document at /nests/${nestId}/originals/${saved.original.file}.` : ".") +
+          webLinkProse(ctx, node.id),
         data: {
           kind: upload.kind,
           id: node.id,
@@ -2289,6 +2441,73 @@ async function nestAdminRefusal(ctx: McpToolContext): Promise<ToolResult | null>
     return toolError("Only a nest owner or admin can manage this.", "UNAUTHORIZED_ACTION");
   }
   return null;
+}
+
+/** context_nest_teams — list / share / unshare a nest's teams, the MCP twin
+ *  of /nests/:id/teams (nest-team-routes.ts), on the same service. */
+async function runNestTeamsTool(
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  const refused = await nestAdminRefusal(ctx);
+  if (refused) return refused;
+  const action = String(args.action || "");
+  const teamId = typeof args.team_id === "string" ? args.team_id.trim() : "";
+  try {
+    if (action === "list") {
+      const refs = await teams.listNestTeams(ctx.nestId);
+      const shared = [];
+      for (const ref of refs) {
+        const team = await teams.getTeam(ref.teamId).catch(() => null);
+        shared.push({
+          team_id: ref.teamId,
+          name: team?.name ?? ref.teamName,
+          members: (team?.members ?? []).map((m) => ({ email: m.email, role: m.role })),
+        });
+      }
+      const sharedIds = new Set(shared.map((t) => t.team_id));
+      const available = (await teams.listVisibleTeams(ctx.userId))
+        .filter((t) => !sharedIds.has(t.id))
+        .map((t) => ({ team_id: t.id, name: t.name, member_count: t.members.length }));
+      const lines = [
+        shared.length
+          ? `Shared with: ${shared.map((t) => `${t.name} (${t.members.length})`).join(", ")}.`
+          : "No teams are shared with this nest.",
+        available.length
+          ? `Can share: ${available.map((t) => `${t.name} [${t.team_id}]`).join(", ")}.`
+          : "No other teams to share.",
+      ];
+      return { text: lines.join("\n"), data: { shared, available } };
+    }
+    if (action !== "share" && action !== "unshare") {
+      return toolError("action must be list, share or unshare.", "VALIDATION_FAILED");
+    }
+    if (!teamId) return toolError("team_id is required.", "VALIDATION_FAILED");
+    if (action === "share") {
+      // Same refusal as REST (re-review R3-L1): a sealed personal nest stays private.
+      const { sealedNest } = await import("../surfaces/sealed.js");
+      if (await sealedNest(ctx.nestId)) {
+        return toolError("Private nests can't be shared with a team.", "UNAUTHORIZED_ACTION");
+      }
+      const refs = await teams.shareTeamWithNest({
+        nestId: ctx.nestId,
+        teamId,
+        callerUserId: ctx.userId,
+        allowAdmin: await isLicenseAdminUserId(ctx.userId),
+        baseUrl: ctx.baseUrl,
+      });
+      const name = refs.find((r) => r.teamId === teamId)?.teamName ?? teamId;
+      return { text: `Shared this nest with the team "${name}".`, data: { teams: refs } };
+    }
+    const refs = await teams.unshareTeamFromNest({ nestId: ctx.nestId, teamId });
+    return { text: "Unshared the team from this nest.", data: { teams: refs } };
+  } catch (err: any) {
+    if (err instanceof BillingConfirmError) throw err;
+    const status = err instanceof AppError ? err.statusCode : undefined;
+    const code =
+      status === 404 ? "DOCUMENT_NOT_FOUND" : status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED";
+    return toolError(err?.message || "Team sharing failed.", code);
+  }
 }
 
 async function runHeadlessTool(
@@ -2572,6 +2791,8 @@ async function runTool(
   switch (toolName) {
     case "context_headless":
       return runHeadlessTool(args, ctx);
+    case "context_nest_teams":
+      return runNestTeamsTool(args, ctx);
     case "context_set_visibility": {
       const refused = await nestAdminRefusal(ctx);
       if (refused) return refused;
@@ -2790,10 +3011,23 @@ async function runTool(
         accessible = matchDocuments(rebodied, query).filter((n) => !isDerivedAnnotationsNode(n.id));
       }
       const count = accessible.length;
+      // Channel messages that match (PO-1196): the same matcher over the
+      // channels this member can read; [] while channels are off.
+      const messageHits = await messageHitsForDocumentSearch(
+        { userId, userEmail },
+        new Map([[nestId, nestId]]),
+        query,
+        limit,
+      );
+      const messagesText = messageHits?.length
+        ? `\n\nChannel messages matching "${query}" (${messageHits.length}):\n${messageHits
+            .map((m) => `- **${m.actor.label}** in #${m.channel} (${m.created_at}) [thread ${m.thread_id}; message ${m.message_id}]: ${m.excerpt}`)
+            .join("\n")}`
+        : "";
       if (count === 0)
         return {
-          text: `No nodes matched search: "${query}"`,
-          data: { results: [], count },
+          text: `No nodes matched search: "${query}"${messagesText}`,
+          data: { results: [], count, ...(messageHits ? { messages: messageHits } : {}) },
         };
       // Bodies stay gated exactly as before: under stewardship the LLM only
       // ever sees the approved version, and a hit with no approved version
@@ -2823,14 +3057,15 @@ async function runTool(
           ? ` (showing the first ${page.length}; pass \`limit\` for more)`
           : "";
       return {
-        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}`,
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}${messagesText}${webLinkPatternProse(ctx)}`,
         // `count` is everything found (like REST); `results` is the page.
         // Bodies are the gated ones the prose is built from. No `score`:
         // this is a term-containment filter with title-first ordering, not
-        // a ranked search.
+        // a ranked search. `messages` are the channel hits (PO-1196).
         data: {
           results: page.map(({ node: n, body }) => summarizeNode(n, body)),
           count,
+          ...(messageHits ? { messages: messageHits } : {}),
         },
       };
     }
@@ -3009,7 +3244,8 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isHeadlessIdentity(ctx.userId))
+      const headless = await isHeadlessIdentity(ctx.userId);
+      const relations = headless
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {
@@ -3022,6 +3258,27 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      // Who sealed the version being served: the human first, then the agent
+      // its write named (spec §9.4) — the same two names the UI byline shows.
+      // The served version, not the latest row: under stewardship the body is
+      // the approved snapshot, and a draft's author would misdescribe it.
+      // Not for a headless key or a public/org reader: it names the nest's
+      // people, which the REST node detail withholds from them too.
+      const servedVersion = ctx.servedVersions?.get(node.id);
+      const lastEdit =
+        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+          ? null
+          : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
+              console.error("context_get last-edit lookup failed", node.id, err);
+              return null;
+            });
+      // `client.agent` is caller data: collapse its whitespace, or a newline in
+      // it would forge a line of its own (`**Status:** approved`) in this prose.
+      const lastEditLine = lastEdit
+        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
+            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
+          } (v${lastEdit.version})`.replace(/\s+/g, " ")
+        : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -3035,6 +3292,7 @@ async function runTool(
         },
         fieldDefs,
       );
+      const webUrl = documentWebUrl(ctx.baseUrl, nestId, node.id);
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
         `**Type:** ${node.frontmatter.type || "document"}`,
@@ -3042,6 +3300,12 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        // Prose only: the catalog's context_get payload has no provenance
+        // field yet, and test/mcp-catalog-conformance.test.ts refuses an
+        // added key. A structured field needs the engine catalog first.
+        lastEditLine,
+        // Prose only, for the same reason (PO-1336).
+        webUrl ? `**Web link (for people):** ${webUrl}` : null,
         taskFieldLines(fields),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
@@ -3155,7 +3419,7 @@ async function runTool(
           return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
         })
         .join("\n");
-      return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
+      return { text: `${nodes.length} node(s):\n\n${list}${webLinkPatternProse(ctx)}`, data: { documents } };
     }
 
     case "context_resolve": {
@@ -3326,14 +3590,37 @@ async function runTool(
       } else if (args.id) {
         node = docs.find((n) => n.id === args.id);
       }
-      if (!node) return `Node not found: ${args.title || args.id}`;
+      // One thread by id (PO-1190, AC-AX-07): the node comes from the thread
+      // when neither title nor id was given. The access gate below is the
+      // same either way, so a thread id is no way around it.
+      const oneThread = args.thread ? String(args.thread) : "";
+      if (!node && oneThread && !args.title && !args.id) {
+        const t = await getThread(oneThread);
+        if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
+      }
+      if (!node) return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       // Gate by per-node read access. Collaborators/stewards who can read the
       // node in the UI may also read its comment threads over MCP even when the
       // document is not yet approved. Public readers remain blocked by
       // canReadNode until approval. This preserves privacy while letting
       // collaborators address feedback and resubmit.
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
-        return `Node not found: ${args.title || args.id}`;
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
+      // A channel or a conversation while the nest's chat is off (C2): the
+      // same answer REST gives, not found.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) {
+        return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
+      }
+      if (oneThread) {
+        const t = (await listThreads(nestId, node.id)).find((x) => x.id === oneThread);
+        if (!t) return toolError("Thread not found", "DOCUMENT_NOT_FOUND");
+        const lines = t.comments.map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`).join("\n");
+        const quote = t.anchor?.quote ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n` : "";
+        return {
+          text: `# Thread ${t.id} on "${node.frontmatter.title}" [${t.status}]\n\n${quote}${lines}\n\nReply with context_comment { thread: "${t.id}", body }.`,
+          data: { node_id: node.id, title: node.frontmatter.title, thread: t },
+        };
       }
       const threads = await listThreads(nestId, node.id);
       if (!threads.length)
@@ -3385,32 +3672,102 @@ async function runTool(
         return "thread is required — the id from context_comments.";
       }
 
+      // "Mark done" (PO-1189, AC-UX-09): clear the caller's own mention of
+      // this thread from My Work and touch nothing else. Their own mention
+      // first; failing that, the mention of the agent this call acts as.
+      if (isResolve && args.mention_done === true) {
+        const nestNames = new Map<string, string>();
+        for (const n of await listVisibleNests(ctx.userId)) {
+          if (ctx.crossNest === true || n.id === nestId) nestNames.set(n.id, n.name ?? n.id);
+        }
+        const actingAs = actingAgentHandle(ctx.client);
+        const mark = (forAgent: string | null) =>
+          markMentionDone({ userId: ctx.userId, email: userEmail, nestNames, threadId, forAgent, actingAs });
+        try {
+          const done = await mark(null).catch((err) => {
+            if (err instanceof NotFoundError && actingAs) return mark(actingAs);
+            throw err;
+          });
+          return {
+            text: `Cleared ${done.for_agent ? `@${done.for_agent}'s` : "your"} mention in thread ${threadId} from My Work. The thread itself is unchanged; a later mention there brings it back.`,
+            data: done,
+          };
+        } catch (err) {
+          if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+          throw err;
+        }
+      }
+
+      // Which node. One of: `channel` (a name, #name or node id), `title`,
+      // `id` — which also takes a channel's name, since that is what agents
+      // try first — or nothing but `thread`, when the node is the thread's own
+      // (AC-AX-03). Whatever names it, the access checks below are the same.
       const docs = await storage.discoverDocuments();
+      const streamOn = config.EXPERIMENTAL_AGENT_STREAM;
+      const channelDoc = (raw: unknown): ContextNode | undefined => {
+        try {
+          const id = channelIdFor(parseChannelName(raw));
+          const hit = docs.find((n) => n.id === id);
+          return hit && isChannelDoc(hit) ? hit : undefined;
+        } catch {
+          return undefined;
+        }
+      };
       let node: ContextNode | undefined;
-      if (args.title) {
+      if (args.channel !== undefined && args.channel !== null && args.channel !== "") {
+        node = streamOn ? channelDoc(args.channel) : undefined;
+      } else if (args.title) {
         node = docs.find(
           (n) =>
             n.frontmatter.title.toLowerCase() ===
             String(args.title).toLowerCase(),
         );
       } else if (args.id) {
-        node = docs.find((n) => n.id === String(args.id));
+        node = docs.find((n) => n.id === String(args.id)) ?? (streamOn ? channelDoc(args.id) : undefined);
+      } else if (threadId) {
+        const t = await getThread(threadId);
+        if (t && t.nestId === nestId) node = docs.find((n) => n.id === t.nodeId);
       }
-      if (!node) {
-        return toolError(
-          `Node not found: ${args.title || args.id || "(no title or id given)"}`,
+      // A direct or group conversation (team chat C2) has no document: a
+      // virtual node, so the same read, posting and thread checks run on it.
+      if (!node && config.TEAM_CHAT_ENABLED && !args.channel && !args.title) {
+        let cid = conversationIdOf(args.id);
+        if (!cid && !args.id && threadId) {
+          const t = await getThread(threadId);
+          if (t && t.nestId === nestId && isConversationId(t.nodeId)) cid = t.nodeId;
+        }
+        if (cid) node = { id: cid, frontmatter: { title: "Conversation" } } as unknown as ContextNode;
+      }
+      const named = args.channel || args.title || args.id;
+      const notFound = async () =>
+        toolError(
+          (named
+            ? `${args.channel ? "Channel" : "Node"} not found: ${named}.`
+            : threadId
+              ? `Thread not found: ${threadId}.`
+              : "Say where: pass `channel` (a channel's name), `id` or `title` (a document), or `thread` to reply.") +
+            (streamOn && !args.title ? await channelsHint(ctx) : ""),
           "DOCUMENT_NOT_FOUND",
         );
-      }
+      if (!node) return notFound();
       if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
         // Same shape as the not-found above, and it never repeats the resolved
         // title — otherwise the refusal confirms what the caller guessed.
+        return notFound();
+      }
+      // A channel or a conversation while the nest's chat is off (C2): not found, as on REST.
+      if ((isChannelDoc(node) || isConversationDoc(node)) && !(await nestChatEnabled(nestId))) return notFound();
+      const label = node.frontmatter.title || node.id;
+
+      // A channel takes posts — and resolves — from people added to the nest
+      // only; the same rule the REST comment routes apply.
+      const channelRefusal = await channelPostRefusal(nestId, node.id, ctx.userId, userEmail, isResolve ? undefined : body);
+      if (channelRefusal) {
         return toolError(
-          `Node not found: ${args.title || args.id}`,
-          "DOCUMENT_NOT_FOUND",
+          channelRefusal.error,
+          channelRefusal.status === 403 ? "UNAUTHORIZED_ACTION" : "VALIDATION_FAILED",
         );
       }
-      const label = node.frontmatter.title || node.id;
 
       // A thread id has to belong to THIS node: the services scope their own
       // lookups, but saying so here turns an opaque failure into an
@@ -3442,34 +3799,37 @@ async function runTool(
 
       // addComment reopens a resolved thread. Not echoed in the confirmation,
       // for the reason below: it would report the thread's state.
+      // The stored attribution names an agent only when the caller declared
+      // one; a bare key label is kept beside it (channels/message-meta.ts).
+      const written = messageClient(ctx.client, args.client, ctx.apiKeyLabel);
       const thread = threadId
-        ? await addComment(nestId, node.id, threadId, userEmail, body)
-        : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
+        ? await addComment(nestId, node.id, threadId, userEmail, body, written)
+        : await createThread(nestId, node.id, { body, anchor: null }, userEmail, written);
       // The confirmation deliberately doesn't report the thread's comment
       // count: writing is admitted on a node whose threads the caller may not
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // The @mentions, then (for a reply) the thread's earlier participants —
-      // the same fan-out the REST reply route uses — then the document's
-      // watchers and reviewer stewards. One notification per person.
-      //
-      // baseUrl: without it the notification still reaches the person, but
-      // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
-      // empty when that isn't configured — every other notifying tool in
-      // this file passes it, and the REST route passes requestBaseUrl.
-      await notifyComment({
+      // The fan-out is the REST routes' own (channels/post-message.ts): the
+      // @mentions, on a document the thread's earlier participants and its
+      // followers, the mention index, agent wake-ups, the annotations
+      // projection. baseUrl: without it a notification's "Open document" link
+      // falls back to PUBLIC_BASE_URL and comes out empty when that isn't set.
+      const posted = await fanOutPostedMessage({
         nestId,
         nodeId: node.id,
+        thread,
+        isReply: !!threadId,
         body,
-        actorEmail: userEmail,
+        authorEmail: userEmail,
+        authorUserId: ctx.userId,
         baseUrl: ctx.baseUrl,
-        ...(threadId ? { thread } : {}),
       });
-      await syncAnnotationsNode(nestId, node.id, userEmail);
-      return threadId
+      const said = threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
         : `Commented on "${label}" — opened thread ${thread.id}. Reply to it by passing that id as \`thread\`.`;
+      const reached = mentionsLine(posted.mentions);
+      return { text: reached ? `${said}\n${reached}` : said, data: posted };
     }
 
     case "context_create": {
@@ -3500,6 +3860,12 @@ async function runTool(
       } catch (err) {
         return toolError((err as Error).message, "VALIDATION_FAILED");
       }
+      // An HTML page sent as a document (usually inside a code fence) is
+      // stored as the artifact it is — see nodes/html-artifact.ts (PO-1336).
+      // Decided before the agent-write hold, so a queued write is the same one.
+      const html = htmlWriteGuard({ type: args.type, content: args.content });
+      const createContent = html ? html.content : args.content;
+      const createType = html?.type ?? args.type;
       const wanted = String(args.title ?? "").toLowerCase();
       return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
         const existingDocs = await storage.discoverDocuments();
@@ -3540,8 +3906,8 @@ async function runTool(
             documents: [
               {
                 title: args.title,
-                content: args.content,
-                type: args.type,
+                content: createContent,
+                type: createType,
                 tags: args.tags,
                 scope: args.scope,
                 folder: args.folder,
@@ -3567,8 +3933,8 @@ async function runTool(
           nestId,
           {
             title: args.title,
-            content: args.content,
-            type: args.type,
+            content: createContent,
+            type: createType,
             tags: args.tags,
             scope: args.scope,
             folder: args.folder,
@@ -3589,7 +3955,7 @@ async function runTool(
         const created = settableTaskFields(node.frontmatter.metadata);
         const tableRefs = await tableRefReport(nestId, node, ctx.userId, ctx.userEmail);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}${tableRefProse(tableRefs)}${html ? `\n${htmlWriteNotice(html)}` : ""}${webLinkProse(ctx, node.id)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -3635,6 +4001,15 @@ async function runTool(
       } catch (err) {
         return toolError((err as Error).message, "VALIDATION_FAILED");
       }
+      // A replaced body that is an HTML page: unwrap a fenced artifact, and
+      // re-type a document to the artifact it now is (nodes/html-artifact.ts,
+      // PO-1336). `append` is never looked at.
+      const html = htmlWriteGuard({
+        type: args.type,
+        storedType: node.frontmatter.type,
+        content: args.content,
+      });
+      const updateType = html?.type ?? args.type;
       // Tags REPLACE, per the engine catalog's context_update. This used to
       // merge ("Tags to add"), which left no way to remove a tag over MCP.
       let result: Awaited<ReturnType<typeof updateNode>>;
@@ -3643,12 +4018,12 @@ async function runTool(
           nestId,
           node.id,
           {
-            content: args.content,
+            content: html ? html.content : args.content,
             append: args.append,
             tags: args.tags,
             ...(args.description !== undefined ? { description: args.description } : {}),
             status: args.status,
-            ...(args.type !== undefined ? { type: args.type } : {}),
+            ...(updateType !== undefined ? { type: updateType } : {}),
             changeNote: args.changeNote,
             client: ctx.client,
             ...taskFields,
@@ -3669,7 +4044,7 @@ async function runTool(
       const fields = settableTaskFields(updated.frontmatter.metadata);
       const tableRefs = await tableRefReport(nestId, updated, ctx.userId, ctx.userEmail);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}${tableRefProse(tableRefs)}${html ? `\n${htmlWriteNotice(html)}` : ""}${webLinkProse(ctx, updated.id)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
@@ -3895,6 +4270,32 @@ async function runTool(
           title: node.frontmatter.title,
           deleted: true as const,
         },
+      };
+    }
+
+    case "context_archive":
+    case "context_unarchive": {
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      const verb = toolName === "context_archive" ? "archive" : "unarchive";
+      if (!(await canArchiveNode(nestId, node.id, userEmail))) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to ${verb} "${node.frontmatter.title}": only a steward of this document can.`,
+          { type: "node", id: node.id },
+        );
+      }
+      if (verb === "unarchive") {
+        const { status } = await unarchiveNode(nestId, node.id, userEmail, { client: ctx.client });
+        return { text: `Unarchived **${node.frontmatter.title}** (${node.id}), back as ${status}.`, data: { id: node.id, status } };
+      }
+      const archived = await archiveNode(nestId, node.id, userEmail, {
+        ...(typeof args.reason === "string" ? { reason: args.reason } : {}),
+        client: ctx.client,
+      });
+      return {
+        text: `Archived **${node.frontmatter.title}** (${node.id}). Nothing was deleted: context_unarchive brings it back.`,
+        data: { id: node.id, status: "rejected", archived },
       };
     }
 
@@ -4213,7 +4614,13 @@ async function runTool(
 
     case "context_deletion_queue": {
       const status = args.status === "declined" ? "declined" : "pending";
-      const requests = await reviews.listDeletionRequests({ nestId, status });
+      // Same narrowing as GET /nests/:id/deletion-requests (PO-1192).
+      const requests = await readableDeletionRequests(
+        nestId,
+        userId,
+        userEmail,
+        await reviews.listDeletionRequests({ nestId, status }),
+      );
       if (requests.length === 0) {
         return status === "pending"
           ? "No deletion requests waiting. All caught up!"
@@ -4557,6 +4964,13 @@ async function runTool(
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
       return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
+    }
+
+    case "context_stream": {
+      if (!streamToolEnabled()) {
+        return toolError("The document stream is not enabled on this server (EXPERIMENTAL_DOC_STREAM).", "UNAUTHORIZED_ACTION");
+      }
+      return streamToolResult(ctx.userId, userEmail, args, ctx.nestId);
     }
 
     case "context_submit_review": {
@@ -4903,6 +5317,10 @@ async function runTool(
       if (isWorkflowTool(toolName)) {
         return runWorkflowTool(toolName, args, ctx);
       }
+      // Agent control room (po-1186): registered with the workflow tools.
+      if (isAgentTool(toolName) && config.FEATURE_WORKFLOW_PLANE) {
+        return runAgentTool(toolName, args, ctx);
+      }
       // Metacognition tools: same deal, behind both flags; each call re-checks
       // owner/admin and refuses system keys in metacognition/manage.ts.
       if (isMetacognitionTool(toolName)) {
@@ -4910,6 +5328,30 @@ async function runTool(
       }
       if (isSurfacesTool(toolName)) {
         return runSurfacesTool(toolName, args, ctx);
+      }
+      // Channels (PO-1179): only registered while EXPERIMENTAL_AGENT_STREAM is
+      // on (mcp/routes.ts); runChannelTool re-checks the switch.
+      if (isChannelTool(toolName)) {
+        return runChannelTool(toolName, args, ctx);
+      }
+      // Channel messages (PO-1196): same switch, re-checked in runMessageTool.
+      if (isMessageTool(toolName)) {
+        return runMessageTool(toolName, args, ctx);
+      }
+      // Team chat C2 (PO-1197): registered while TEAM_CHAT_ENABLED is on.
+      if (isChatTool(toolName)) {
+        return runChatTool(toolName, args, ctx);
+      }
+      // My Work (PO-1180): always registered (mcp/routes.ts).
+      if (isMyWorkTool(toolName)) {
+        return runMyWorkTool(toolName, args, ctx);
+      }
+      // Promote a thread (PO-1181): always registered (mcp/routes.ts).
+      if (isStreamTool(toolName)) {
+        return runStreamTool(toolName, args, ctx);
+      }
+      if (isPublicLinkTool(toolName)) {
+        return runPublicLinkTool(toolName, args, ctx);
       }
       return `Unknown tool: ${toolName}`;
   }

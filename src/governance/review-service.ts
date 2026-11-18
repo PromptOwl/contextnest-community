@@ -10,7 +10,7 @@ import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
 import { adminFolderRefusal } from "../surfaces/admin-folders.js";
-import { ConflictError } from "../shared/errors.js";
+import { ConflictError, ValidationError } from "../shared/errors.js";
 import { assertDeletionRequestable } from "../structure/writes.js";
 import {
   notifyReviewRequested,
@@ -76,6 +76,13 @@ export async function submitForReview(params: {
   const { id, version } = await withNodeWriteLock(
     nodeWriteKey(params.nestId, params.nodeId),
     async () => {
+      // Under the lock archiveNode takes, so an archive can't land between this and the seal.
+      const { storage: vault } = await engineCache.get(params.nestId);
+      const live = await vault.readDocument(params.nodeId).catch(() => null);
+      if (live?.frontmatter.archived) {
+        throw new ValidationError("This document is archived. Restore it first.");
+      }
+
       // Check no pending review already exists for this node
       const existing = (await db.get(
         "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",

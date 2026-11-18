@@ -1,0 +1,2 @@
+# Node scripts with a shebang must stay LF: a CRLF checkout (core.autocrlf on Windows) breaks Vite's import of them.
+*.mjs text eol=lf

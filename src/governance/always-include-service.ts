@@ -159,7 +159,7 @@ async function resolveApprovedAlwaysInclude(
   const candidates = (await readIndexedNodes(nestId))
     .filter((n) => {
       const av = approved.get(n.id);
-      if (av === undefined) return false;
+      if (av === undefined || n.frontmatter.archived) return false;
       const fm = n.frontmatter as { tags?: unknown[]; metadata?: unknown; version?: unknown };
       return (
         approvedTagged.has(n.id) ||

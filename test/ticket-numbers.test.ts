@@ -232,6 +232,13 @@ describe("editing tags", () => {
     expect(await ticketOf("first")).toBe("po-1");
   });
 
+  it("a second ticket tag beside the number is refused, not silently dropped (PO-1218)", async () => {
+    const added = await patch("first", { tags: ["community", "stage:in-progress", "ticket:po-1", "ticket:po-99"] });
+    expect(added.status).toBe(400);
+    expect(added.data.error).toMatch(/This task is PO-1\. .*can't be changed/);
+    expect(await tagsOf("first")).not.toContain("ticket:po-99");
+  });
+
   it("a stage change stamps moved_at", async () => {
     const before = await get("second");
     await new Promise((r) => setTimeout(r, 15));

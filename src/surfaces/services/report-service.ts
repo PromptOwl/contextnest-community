@@ -5,6 +5,7 @@
  */
 import { getDb } from "../../db/client.js";
 import { canAdministerNest, isOrgAdmin } from "./binding-service.js";
+import { PRIVATE_TITLE, PRIVATE_CONVERSATION, personalOwner } from "../n1.js";
 
 export async function listWindows(
   actorUserId: string,
@@ -46,13 +47,8 @@ function safe<T>(s: unknown, d: T): T {
 
 // ─── S2b: proposals and the commit audit ────────────────────────────────────
 
-/** Is this nest someone's personal (DM) nest, and whose? */
-async function personalOwner(nestId: string): Promise<string | null> {
-  const r = (await getDb().get("SELECT community_user_id FROM surface_personal_nests WHERE nest_id = ?", [nestId])) as { community_user_id: string } | undefined;
-  return r?.community_user_id ?? null;
-}
-
-export const PRIVATE_TITLE = "DM · private nest · title hidden";
+// N1 lives in src/surfaces/n1.ts, shared with the decision ledger (po-1186).
+export { PRIVATE_TITLE };
 
 async function visibleNest(actorUserId: string, nestId: string, admin: boolean, cache: Map<string, boolean>): Promise<boolean> {
   if (admin) return true;
@@ -92,7 +88,7 @@ export async function listProposals(actorUserId: string, f: { nestId?: string; s
       id: r.id,
       nest_id: r.nest_id,
       binding_id: r.binding_id,
-      conversation: redact ? "DM · private nest" : (r.conversation_name ?? null),
+      conversation: redact ? PRIVATE_CONVERSATION : (r.conversation_name ?? null),
       card_kind: r.card_kind,
       state: r.state,
       forced: !!r.forced,

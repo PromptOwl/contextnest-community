@@ -49,6 +49,10 @@ interface ShareNestDialogProps {
   stewardshipEnabled?: boolean;
   /** Opened from a document: its link, offered first. Absent elsewhere. */
   documentUrl?: string;
+  /** Which tab opens first. Defaults to Teams on a shared deployment (where
+   *  'org' visibility reaches every organization, so a team is how a nest
+   *  reaches a group) and People elsewhere. */
+  initialTab?: "people" | "teams";
 }
 
 export function ShareNestDialog({
@@ -58,8 +62,12 @@ export function ShareNestDialog({
   onChanged,
   stewardshipEnabled = false,
   documentUrl,
+  initialTab,
 }: ShareNestDialogProps) {
-  const { adminStatus } = useAuth();
+  const { adminStatus, sharedDeployment } = useAuth();
+  const [tab, setTab] = useState<"people" | "teams">(
+    initialTab ?? (sharedDeployment ? "teams" : "people"),
+  );
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [error, setError] = useState<string | null>(null);
 
@@ -105,15 +113,26 @@ export function ShareNestDialog({
             nestId={nestId}
             onChanged={onChanged}
             onError={setError}
+            onShareWithTeam={() => setTab("teams")}
           />
 
           {/* People and Teams split into tabs so the dialog stays short no
               matter how many collaborators or teams a nest has. Only the
               active tab's list renders. */}
-          <Tabs defaultValue="people">
+          <Tabs value={tab} onValueChange={(v) => setTab(v as "people" | "teams")}>
+            {/* Teams first on a shared deployment, People first elsewhere. */}
             <TabsList className="grid grid-cols-2 w-full">
-              <TabsTrigger value="people">People</TabsTrigger>
-              <TabsTrigger value="teams">Teams</TabsTrigger>
+              {sharedDeployment ? (
+                <>
+                  <TabsTrigger value="teams">Teams</TabsTrigger>
+                  <TabsTrigger value="people">People</TabsTrigger>
+                </>
+              ) : (
+                <>
+                  <TabsTrigger value="people">People</TabsTrigger>
+                  <TabsTrigger value="teams">Teams</TabsTrigger>
+                </>
+              )}
             </TabsList>
             <TabsContent
               value="people"
