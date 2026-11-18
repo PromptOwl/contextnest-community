@@ -249,9 +249,11 @@ export function createMyNest(
   name?: string,
   recipe?: RecipeRef | null,
   keyId: string | null = null,
+  /** MCP is an agent surface whatever it authenticated with (S7-R2 M1): the push-confirmation gate applies. */
+  agentSurface = false,
 ): Promise<NestRef & { created: boolean; recipe?: RecipeApplied }> {
   const prev = (createMyNestChains.get(userId) ?? Promise.resolve()).catch(() => {});
-  const run = prev.then(() => createMyNestOnce(userId, name, recipe ?? null, keyId));
+  const run = prev.then(() => createMyNestOnce(userId, name, recipe ?? null, keyId, agentSurface));
   createMyNestChains.set(userId, run);
   void run
     .catch(() => {})
@@ -261,7 +263,7 @@ export function createMyNest(
   return run;
 }
 
-async function createMyNestOnce(userId: string, name: string | undefined, recipe: RecipeRef | null, keyId: string | null): Promise<NestRef & { created: boolean; recipe?: RecipeApplied }> {
+async function createMyNestOnce(userId: string, name: string | undefined, recipe: RecipeRef | null, keyId: string | null, agentSurface: boolean): Promise<NestRef & { created: boolean; recipe?: RecipeApplied }> {
   if (userId === ANON_USER_ID) throw new ForbiddenError("Sign in to create a nest of your own.");
   // A recipe is checked before anything exists (PO-1411); it is applied only
   // to a nest this call makes, never to one an earlier call made.
@@ -295,7 +297,7 @@ async function createMyNestOnce(userId: string, name: string | undefined, recipe
   }
   await upsert(userId, { nest_id: nest.id });
   if (!recipe) return { id: nest.id, name: nest.name, created: true };
-  return { id: nest.id, name: nest.name, created: true, recipe: await applyRecipe(nest.id, recipe, userId, { keyId, agentSurface: false }) };
+  return { id: nest.id, name: nest.name, created: true, recipe: await applyRecipe(nest.id, recipe, userId, { keyId, agentSurface }) };
 }
 
 /** The caller must be able to read the nest; one message for every miss. */

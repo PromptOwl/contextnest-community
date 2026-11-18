@@ -137,7 +137,7 @@ export async function handleOnboardingTool(name: string, args: Record<string, an
       else if (action === "create_nest") {
         if (!ctx.contributorCredential) return "Creating your nest needs your own full credential (a session, an OAuth grant or a read-write personal key).";
         const recipe = parseRecipeRef(args.recipe);
-        const nest = await createMyNest(ctx.userId, typeof args.name === "string" ? args.name : undefined, recipe, ctx.apiKeyId ?? null);
+        const nest = await createMyNest(ctx.userId, typeof args.name === "string" ? args.name : undefined, recipe, ctx.apiKeyId ?? null, true);
         const recipeLine = nest.recipe ? ` ${recipeAppliedText(nest.recipe)}` : recipe && !nest.created ? " The recipe was not applied: it only applies to a nest this call creates." : "";
         return json(`${nest.created ? "Created" : "You already have"} "${nest.name}" (id: ${nest.id}).${recipeLine}`, { nest });
       } else return 'action must be "dismiss", "reopen" or "create_nest".';

@@ -323,6 +323,32 @@ describe("AC5: an unknown recipe creates nothing; Blank is today's nest", () => 
     expect(row).toBeUndefined();
   });
 
+  it("a library the caller can't read → 404, no nest, nothing leaked", async () => {
+    const lib = await createNest(other, { name: "Otto library" });
+    const r = await createNest(owner, { name: "From a library", recipe: `${lib.data.nest.id}:product-factory` });
+    expect(r.status).toBe(404);
+    expect(r.data.error).toBe("Recipe not found");
+    expect(await db.get("SELECT id FROM nests WHERE name = ?", ["From a library"])).toBeUndefined();
+  });
+
+  it("a nest-scoped key can't read the catalog or create a nest", async () => {
+    const k = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: factoryId }, owner.apiKey);
+    expect(k.status, JSON.stringify(k.data)).toBeLessThan(300);
+    const key = k.data.api_key ?? k.data.key;
+    expect((await jsonRequest(app, "GET", "/recipes", undefined, key)).status).toBe(403);
+    expect((await createNest({ ...owner, apiKey: key }, { name: "Scoped", recipe: "ideation" })).status).toBe(403);
+  });
+
+  it("a failed apply still creates the nest and says why", async () => {
+    const { applyRecipe } = await import("../src/nests/recipe-service.js");
+    const n = await createNest(owner, { name: "Claimed" });
+    // Another apply holds the nest's claim: the recipe reports failed, never throws.
+    await db.run("INSERT INTO surface_seed_claims (nest_id, token, expires_at) VALUES (?, ?, ?)", [n.data.nest.id, "x", new Date(Date.now() + 60_000).toISOString()]);
+    const out = await applyRecipe(n.data.nest.id, { seedId: "ideation", libraryNestId: null }, owner.userId, { keyId: null, agentSurface: false });
+    expect(out.status).toBe("failed");
+    expect(out.error).toMatch(/already being applied/);
+  });
+
   it("a seed that is not a recipe → 404", async () => {
     const r = await createNest(owner, { name: "Generic", recipe: "generic-team" });
     expect(r.status).toBe(404);
@@ -416,6 +442,7 @@ describe("AC9 (server): POST /onboarding/nest takes a recipe", () => {
     const again = await jsonRequest(app, "POST", "/onboarding/nest", { recipe: "operations" }, newbie.apiKey);
     expect(again.status).toBe(200);
     expect(again.data.nest.recipe).toBeUndefined();
+    expect(again.data.recipe_ignored).toMatch(/already have a nest/);
   });
 
   it("an unknown recipe makes no nest", async () => {
