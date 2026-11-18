@@ -26,6 +26,7 @@ import {
   tagSuggestions,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
+import { visibleTags } from "../lib/ticket";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -80,6 +81,7 @@ import {
   Star,
   Megaphone,
   Undo2,
+  Archive,
   PanelLeft,
   Globe,
   Building2,
@@ -112,6 +114,7 @@ import { CodeHighlight } from "./CodeHighlight";
 import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
+import { shareDocumentLink } from "../lib/share-link";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { DocPinControl } from "./nest/DocPins";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -149,6 +152,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { backlinkRefLabels, findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { versionAuthorShort, clientTitle, lastEditParts, type LastEdit } from "../lib/version-author";
 import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -290,7 +294,11 @@ export function DocumentEditor({
   // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
-  const [showPublish, setShowPublish] = useState(false);
+  // Set when the visibility picker's "Share with a team…" opens the dialog.
+  const [shareTab, setShareTab] = useState<"people" | "teams" | undefined>(undefined);
+  // Which tab the Publish dialog opens on: "links" from Share's Manage, where
+  // the link already exists and the job is to change or remove it.
+  const [showPublish, setShowPublish] = useState<false | "new" | "links">(false);
   // Admin activity log for this document (CU-wdqcq03aw2).
   const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
@@ -387,6 +395,11 @@ export function DocumentEditor({
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  // Who sealed the latest version — human and agent (node detail `last_edit`).
+  const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
+  // updated_at as loadNode saw it. A save moves updatedAt past it; the byline
+  // then re-reads last_edit, since a write response does not carry it.
+  const loadedUpdatedAtRef = useRef<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -413,6 +426,9 @@ export function DocumentEditor({
   // isArchived flag, so an archived nest's editor stayed writable everywhere
   // except the one path (Dashboard → nest → doc) that happened to pass it.
   const isArchived = isNestArchived(nestMeta.data?.nest);
+  // This one document is archived (spec §1.13): frozen, like an archived nest.
+  const [archivedDoc, setArchivedDoc] = useState<api.ArchivedDocument | null>(null);
+  const [showArchive, setShowArchive] = useState(false);
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -429,7 +445,7 @@ export function DocumentEditor({
     nestStewards: myStewards,
     nodeRoles: myNodeRoles,
     grant: myGrant,
-    isArchived,
+    isArchived: isArchived || archivedDoc !== null,
   });
   // Creator's display name from the nest roster (same cached read the comments
   // panel makes); the email stays on hover, and is the fallback. Read-only
@@ -440,6 +456,7 @@ export function DocumentEditor({
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
   const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -1202,8 +1219,11 @@ export function DocumentEditor({
       setTaskPriority((node as any)?.priority ?? undefined);
       setTaskDue((node as any)?.due ?? undefined);
       setStatus(node?.status ?? null);
+      setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
+      setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
+      loadedUpdatedAtRef.current = node?.updated_at ?? null;
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1266,6 +1286,24 @@ export function DocumentEditor({
     if (isNew) return;
     loadNode();
   }, [isNew, loadNode]);
+
+  useEffect(() => {
+    if (isNew || !updatedAt || updatedAt === loadedUpdatedAtRef.current) return;
+    loadedUpdatedAtRef.current = updatedAt;
+    let cancelled = false;
+    api
+      .getNode(nestId, nodeId)
+      .then((r) => {
+        if (!cancelled) setLastEdit((r?.node?.last_edit ?? null) as LastEdit | null);
+      })
+      .catch((err) => {
+        // The byline keeps its last value; the save itself already succeeded.
+        console.warn("last-edit refresh failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, updatedAt]);
 
   const openVersions = useCallback(async () => {
     setShowVersions(true);
@@ -1552,7 +1590,7 @@ export function DocumentEditor({
   const baseVersionRef = useRef(baseVersion);
   baseVersionRef.current = baseVersion;
   const tagSaveChain = useRef<Promise<unknown>>(Promise.resolve());
-  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed"> => {
+  const saveTagsAlone = (next: string[]): Promise<"saved" | "deferred" | "failed" | "refused"> => {
     const run = async () => {
       const snap = initialSnapshotRef.current;
       const otherFieldsDirty =
@@ -1574,6 +1612,13 @@ export function DocumentEditor({
         setTags((cur) => [...cur]); // re-run isDirty against the new snapshot
         return "saved" as const;
       } catch (err) {
+        // The server refused the tags (e.g. a second ticket number, PO-1218):
+        // say why and put the saved set back — saving the document won't help.
+        if ((err as any)?.status === 400) {
+          setTags([...initialSnapshotRef.current.tags]);
+          toast.error((err as Error).message, { id: "tag-added" });
+          return "refused" as const;
+        }
         console.error("[DocumentEditor] tag save failed", nestId, nodeId, err);
         return "failed" as const;
       }
@@ -1610,7 +1655,9 @@ export function DocumentEditor({
     setTouched(true);
     // Say whether it's kept, or "added" reads as persisted when it's local.
     void saveTagsAlone(next).then((r) =>
-      r === "failed"
+      r === "refused"
+        ? undefined
+        : r === "failed"
         ? tagSaveFailed()
         : toast.success(
             accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
@@ -1697,7 +1744,7 @@ export function DocumentEditor({
         isRunnable
           ? { ...payload, ...primePatch, ...viewPatch, schedule: schedule.trim() }
           : { ...payload, ...primePatch, ...viewPatch },
-        baseVersion,
+        baseVersionRef.current,
       );
       if (viewMeta) loadedViewRef.current = viewJson(viewMeta);
       setPreviewNonce((n) => n + 1);
@@ -1735,7 +1782,7 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
-  const runSave = async (afterSave: (savedId: string) => void) => {
+  const runSave = async (afterSave: (savedId: string) => void, retried = false) => {
     // A plain save of someone else's pending submission is refused (locked);
     // the reviewer's edits only land through Save & approve.
     if (reviewerEditing) {
@@ -1784,7 +1831,25 @@ export function DocumentEditor({
       // the edits it had just written. A save is the answer to that question.
       bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
-      setError(err.message);
+      if (err.status === 409 && err.body?.error === "Version conflict") {
+        console.warn("[version-conflict]", err.body);
+        const { current_version: current, updated_by: by } = err.body;
+        if (!retried && typeof current === "number") {
+          // Re-base on the server's head and save again. The server decides the
+          // landing: a draft is updated in place, a published or pending
+          // document gets a new draft on top of the current version.
+          baseVersionRef.current = current;
+          setBaseVersion(current);
+          toast.info(`Changed${by ? ` by ${by}` : ""} meanwhile (now v${current}) — saving your edits on top.`);
+          setSaving(false);
+          return runSave(afterSave, true);
+        }
+        setError(
+          `Version conflict: changed${by ? ` by ${by}` : ""} (now v${current ?? "?"}). Reload to take theirs.`,
+        );
+      } else {
+        setError(err.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -1992,6 +2057,11 @@ export function DocumentEditor({
   const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
+  // Mirrors the server's canDecideExternalEdit (PO-1193): on a governed nest
+  // an edit made outside the app is decided by whoever may approve the
+  // document, on an open nest by whoever may edit it. Everyone else still
+  // sees the notice and the diff.
+  const canDecideExternalEdit = stewardshipEnabled ? canApproveCapability : !isViewOnly;
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
@@ -2136,7 +2206,8 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
-      isPdf: isPdfNode,
+      canArchive:
+        !isArchived && !archivedDoc && (isOwner || isAdmin || hasAdminApprove || hasReviewerRole),
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
@@ -2172,10 +2243,24 @@ export function DocumentEditor({
           };
         case "move":
           return { ...base, icon: FolderInput, onSelect: () => setMoveTo(currentFolder) };
+        case "archive":
+          return { ...base, icon: Archive, onSelect: () => setShowArchive(true) };
         case "share-doc":
           return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "share-link":
+          return {
+            ...base,
+            icon: Globe,
+            onSelect: () =>
+              void shareDocumentLink({
+                nestId,
+                nodeId,
+                title: title.trim() || "Untitled",
+                onManage: () => setShowPublish("links"),
+              }),
+          };
         case "publish":
-          return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
+          return { ...base, icon: Share2, onSelect: () => setShowPublish("new") };
         case "delete":
         case "request-deletion":
           return { ...base, icon: Trash2, onSelect: () => setShowDeletionModal(true) };
@@ -2207,6 +2292,10 @@ export function DocumentEditor({
           <NestVisibilityControl
             nestId={nestId}
             variant="compact"
+            onShareWithTeam={() => {
+              setShareTab("teams");
+              setShowShare(true);
+            }}
             onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
             onError={(m) => {
               if (m) toast.error(m);
@@ -2258,6 +2347,24 @@ export function DocumentEditor({
       )}
       {accessOffer && (
         <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
+      {!isNew && (
+        <ReasonDialog
+          open={showArchive}
+          onOpenChange={setShowArchive}
+          title={`Archive "${title || nodeId}"?`}
+          description="It leaves document lists, search and AI retrieval. Nothing is deleted: its history is kept, and a steward can restore it."
+          label="Why archive it?"
+          optionalReason
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel="Archive document"
+          onConfirm={async (reason) => {
+            await api.archiveNode(nestId, nodeId, reason || undefined);
+            toast.success("Archived");
+            setShowArchive(false);
+            onBack();
+          }}
+        />
       )}
       {!isNew && (
         <ReasonDialog
@@ -2375,7 +2482,11 @@ export function DocumentEditor({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           documentUrl={documentLink(window.location.origin, nestId, nodeId)}
-          onClose={() => setShowShare(false)}
+          initialTab={shareTab}
+          onClose={() => {
+            setShowShare(false);
+            setShareTab(undefined);
+          }}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
@@ -2387,6 +2498,7 @@ export function DocumentEditor({
           nestId={nestId}
           nodeId={nodeId}
           nodeTitle={title || nodeId}
+          initialTab={showPublish}
           onClose={() => setShowPublish(false)}
         />
       )}
@@ -2725,7 +2837,9 @@ export function DocumentEditor({
                   <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+              {/* Fits "human via agent · time" on one line; a long agent name
+                  truncates, and the hover title carries the full detail. */}
+              <DropdownMenuContent align="end" className="min-w-[14rem] max-w-[22rem] max-h-80 overflow-y-auto">
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
@@ -2761,10 +2875,18 @@ export function DocumentEditor({
                             to tell which past version you are reaching for.
                             Same editedAt Version History already renders. */}
                         <span
-                          className="ml-auto text-xs text-muted-foreground"
-                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                          className="ml-auto pl-3 min-w-0 truncate whitespace-nowrap text-xs text-muted-foreground"
+                          title={
+                            [
+                              v.editedAt ? formatServerDate(v.editedAt) : null,
+                              v.editedBy,
+                              clientTitle(v.client),
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || undefined
+                          }
                         >
-                          {[v.editedBySystem ?? v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                          {[versionAuthorShort(v), relTime(v.editedAt)]
                             .filter(Boolean)
                             .join(" · ")}
                         </span>
@@ -2882,6 +3004,34 @@ export function DocumentEditor({
               </Alert>
             )}
 
+            {archivedDoc && (
+              <Alert className="mb-4" data-testid="document-archived-banner">
+                <Archive className="h-4 w-4" />
+                <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>
+                    Archived by {archivedDoc.by} on {new Date(archivedDoc.at).toLocaleDateString()}
+                    {archivedDoc.reason ? `: ${archivedDoc.reason}` : "."} It is out of lists and retrieval.
+                  </span>
+                  <button
+                    type="button"
+                    className="font-medium underline underline-offset-2 hover:no-underline"
+                    data-testid="restore-archived-document"
+                    onClick={async () => {
+                      try {
+                        await api.unarchiveNode(nestId, nodeId);
+                        toast.success("Restored");
+                        await loadNode();
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Failed to restore");
+                      }
+                    }}
+                  >
+                    Restore
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
+
             {restoredDraftAt !== null && (
               <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
                 <AlertCircle className="h-4 w-4 text-amber-600" />
@@ -2928,6 +3078,7 @@ export function DocumentEditor({
                     nestId={nestId}
                     nodeId={nodeId}
                     pending={pendingChange}
+                    canDecide={canDecideExternalEdit}
                     onResolved={() => {
                       setPendingChange(null);
                       loadNode();
@@ -3288,9 +3439,10 @@ export function DocumentEditor({
                           ))}
                         </datalist>
                       )}
-                      {tags.length > 0 && (
+                      {visibleTags(tags).length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {tags.map((t) => {
+                          {/* The ticket tag shows as the task's ID, not a chip (PO-1231). */}
+                          {visibleTags(tags).map((t) => {
                             // View mode: chip click → filter nest by tag. Edit mode: X removes.
                             const tagClickable = mode === "view" && !!onTagClick;
                             return (
@@ -3452,11 +3604,40 @@ export function DocumentEditor({
                 {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
-                {!isNew && (author || collaborators.length > 0) && (
+                {!isNew && (author || lastEditBy || collaborators.length > 0) && (
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
                         Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                      </span>
+                    )}
+                    {/* Last edited by: the human, then the agent the write
+                        named — never the agent alone. Same type as Created by. */}
+                    {lastEditBy && (
+                      <span
+                        className="inline-flex flex-wrap items-center gap-x-1"
+                        data-testid="document-last-edited-by"
+                      >
+                        Last edited by{" "}
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                          {lastEditBy.human}
+                        </span>
+                        {lastEditBy.agent && (
+                          <>
+                            {" "}via{" "}
+                            <span
+                              className="font-medium text-foreground/80"
+                              title={clientTitle(lastEdit?.client)}
+                            >
+                              {lastEditBy.agent}
+                            </span>
+                          </>
+                        )}
+                        {lastEdit?.edited_at && (
+                          <span title={formatServerDate(lastEdit.edited_at)}>
+                            {" "}· {relTime(lastEdit.edited_at)}
+                          </span>
+                        )}
                       </span>
                     )}
                     {collaborators.length > 0 && (
@@ -4527,6 +4708,7 @@ export function DocumentEditor({
               nestId={nestId}
               nodeId={nodeId}
               readOnly={isViewOnly}
+              canPromote={canAuthorNew && !isViewOnly}
               pendingAnchor={pendingAnchor}
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}

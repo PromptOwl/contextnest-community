@@ -136,8 +136,14 @@ describe("team CRUD + membership", () => {
   });
 
   it("a member may view the team, an outsider may not", async () => {
+    // On a shared deployment only. Self-hosted lists every team: teams-deployment-scope.test.ts.
+    process.env.SHARED_DEPLOYMENT = "true";
+    try {
     expect((await jsonRequest(app, "GET", `/teams/${teamId}`, undefined, viewerU.apiKey)).status).toBe(200);
     expect((await jsonRequest(app, "GET", `/teams/${teamId}`, undefined, outsider.apiKey)).status).toBe(403);
+    } finally {
+      delete process.env.SHARED_DEPLOYMENT;
+    }
   });
 });
 
@@ -160,12 +166,18 @@ describe("sharing a team onto a nest", () => {
   });
 
   it("a nest admin cannot share a team they have no relationship to", async () => {
+    // On a shared deployment only. Self-hosted lets a nest admin share any team: teams-deployment-scope.test.ts.
+    process.env.SHARED_DEPLOYMENT = "true";
+    try {
     // outsider owns a team; owner administers the nest but isn't on that team.
     // Nest-admin alone must not be enough to attach someone else's team (it
     // would pull in their members and expose the roster via GET .../teams).
     const foreign = await jsonRequest(app, "POST", "/teams", { name: "Foreign" }, outsider.apiKey);
     const res = await jsonRequest(app, "POST", `/nests/${nestId}/teams`, { team_id: foreign.data.team.id }, owner.apiKey);
     expect(res.status).toBe(403);
+    } finally {
+      delete process.env.SHARED_DEPLOYMENT;
+    }
   });
 
   it("a non-admin cannot share a team", async () => {
@@ -175,6 +187,9 @@ describe("sharing a team onto a nest", () => {
   });
 
   it("a view-only team member cannot share the team even onto a nest they own", async () => {
+    // On a shared deployment only (see teams-deployment-scope.test.ts).
+    process.env.SHARED_DEPLOYMENT = "true";
+    try {
     // The abuse vector: on their OWN nest the viewer clears the nest-side admin
     // gate (they're the owner), so the team-side gate is the only defense. A
     // viewer projecting the whole roster — including its admins — onto a nest
@@ -182,6 +197,9 @@ describe("sharing a team onto a nest", () => {
     const own = await jsonRequest(app, "POST", "/nests", { name: "Viewer's own" }, viewerU.apiKey);
     const res = await jsonRequest(app, "POST", `/nests/${own.data.nest.id}/teams`, { team_id: teamId }, viewerU.apiKey);
     expect(res.status).toBe(403);
+    } finally {
+      delete process.env.SHARED_DEPLOYMENT;
+    }
   });
 
   it("an editor team member can share the team onto a nest they administer", async () => {

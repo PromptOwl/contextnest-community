@@ -21,6 +21,10 @@ import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from ".
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { safeJson } from "../shared/json.js";
 import { standingBlockFor, standingRefs, type StandingRef } from "../governance/always-include-service.js";
+import { CodedError } from "../shared/errors.js";
+import { parseStepDetail } from "./agent-event-schema.js";
+import { runTotals } from "./run-totals.js";
+import { idempotencyConflict, isUniqueViolation, VERDICT_RANK } from "./agent-event-schema.js";
 
 export const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -188,6 +192,44 @@ export async function resolveParentRun(
   return { depth };
 }
 
+/** What makes two run starts "the same request" for a replay. */
+export interface RunRequestShape {
+  agentNode: string;
+  inputs: string | null;
+  externalRef: string | null;
+  source: string;
+  parentRunId: string | null;
+  /** Only compared when the caller set it. */
+  startedAt: string | null;
+}
+
+export type StoredRun = RunRow & {
+  source?: string | null;
+  external_ref?: string | null;
+  idempotency_key?: string | null;
+  claimed_by?: string | null;
+};
+
+/**
+ * The run an earlier call with this key created, or null. Throws 409
+ * `idempotency_conflict` when the key was used for a different request.
+ */
+export async function replayableRun(nestId: string, key: string, req: RunRequestShape): Promise<StoredRun | null> {
+  const row = (await getDb().get("SELECT * FROM runs WHERE nest_id = ? AND idempotency_key = ?", [nestId, key])) as
+    | StoredRun
+    | undefined;
+  if (!row) return null;
+  const same =
+    row.agent_node === req.agentNode &&
+    (row.inputs ?? null) === req.inputs &&
+    (row.external_ref ?? null) === req.externalRef &&
+    (row.source ?? "runner") === req.source &&
+    (row.parent_run_id ?? null) === req.parentRunId &&
+    (req.startedAt === null || row.started_at === req.startedAt);
+  if (!same) throw idempotencyConflict("run");
+  return row;
+}
+
 /** Load one run row (no permission check — the caller gates). */
 export async function loadRun(runId: string): Promise<RunRow | undefined> {
   return (await getDb().get("SELECT * FROM runs WHERE id = ?", [runId])) as
@@ -230,7 +272,10 @@ export async function triggerRun(opts: {
   parentRunId?: unknown;
   /** The caller's user id: the standing instructions are what they may read. */
   userId: string;
-}): Promise<RunBundle> {
+  /** Agent event API (po-1186): one run per (nest, key); a repeat replays it. */
+  idempotencyKey?: string | null;
+  externalRef?: string | null;
+}): Promise<RunBundle & { idempotent_replay?: true }> {
   const { nestId, inputs, triggeredBy, storage } = opts;
   // SECURITY: agentNode is caller-supplied and untrusted (the MCP workflow_run
   // tool passes `args.agent` straight through). Validate containment BEFORE it
@@ -268,9 +313,24 @@ export async function triggerRun(opts: {
   const definitions = await referencedDefinitions(nestId, edges);
   const standing = await standingBlockFor(nestId, { userId: opts.userId, userEmail: triggeredBy });
 
-  const id = `run_${uuid()}`;
+  const idemKey = opts.idempotencyKey ?? null;
+  const req: RunRequestShape = {
+    agentNode,
+    inputs: inputs === undefined ? null : JSON.stringify(inputs),
+    externalRef: opts.externalRef ?? null,
+    source: "runner",
+    parentRunId,
+    startedAt: null,
+  };
+  let id = `run_${uuid()}`;
+  let replay = false;
+  const prior = idemKey ? await replayableRun(nestId, idemKey, req) : null;
+  if (prior) {
+    id = prior.id;
+    replay = true;
+  }
   const db = getDb();
-  await db.transaction(async (tx) => {
+  if (!replay) try { await db.transaction(async (tx) => {
     // Fan-out cap, enforced atomically against concurrent sibling spawns.
     // Depth bounds the tree's HEIGHT; this bounds its WIDTH — together they cap
     // total tree size so a runner can't fork-bomb the DB. The count+INSERT must
@@ -293,22 +353,31 @@ export async function triggerRun(opts: {
       }
     }
     await tx.run(
-      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
-       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, idempotency_key, external_ref)
+       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
       [
         id,
         nestId,
         agentNode,
         triggeredBy,
-        inputs === undefined ? null : JSON.stringify(inputs),
+        req.inputs,
         new Date().toISOString(),
         parentRunId,
         depth,
+        idemKey,
+        req.externalRef,
       ],
     );
-  });
+  }); } catch (err) {
+    // A concurrent start with the same key won the unique index: replay it.
+    const winner = idemKey && isUniqueViolation(err) ? await replayableRun(nestId, idemKey, req) : null;
+    if (!winner) throw err;
+    id = winner.id;
+    replay = true;
+  }
 
   return {
+    ...(replay ? { idempotent_replay: true as const } : {}),
     run_id: id,
     parent_run_id: parentRunId,
     depth,
@@ -334,7 +403,11 @@ export async function triggerRun(opts: {
   };
 }
 
-const STEP_ACTIONS = ["read", "write", "branch", "notify", "external"];
+const STEP_ACTIONS = ["read", "write", "branch", "notify", "external", "decision", "proposal", "outcome"];
+
+/** Verdict precedence: a run's ledger verdict is its strongest decision. */
+const VERDICT_RANK_SQL = (col: string) =>
+  `CASE ${col} WHEN 'escalate' THEN 4 WHEN 'propose' THEN 3 WHEN 'act' THEN 2 WHEN 'no_op' THEN 1 ELSE 0 END`;
 
 /**
  * Append a step to a run. seq is server-assigned inside a transaction (never
@@ -345,56 +418,118 @@ const STEP_ACTIONS = ["read", "write", "branch", "notify", "external"];
  * UNIQUE(run_id, seq) index (migration 017) backstops the seq assignment. The
  * per-run step count is capped at RUN_MAX_STEPS (checked inside the same tx) so
  * a runaway runner can't grow one run's trace without bound.
- * Throws ValidationError / ConflictError.
+ *
+ * Agent event API (po-1186): the typed actions `decision`, `proposal` and
+ * `outcome` have a validated `detail` (422 naming the field). A decision
+ * raises the run's ledger verdict (strongest wins) in the same transaction; a
+ * proposal must name a review in the run's own nest and back-links it
+ * (review_requests.run_id). `clientKey` makes the append idempotent per
+ * (run, key): a repeat returns the original seq with idempotent_replay.
+ * Throws ValidationError / ConflictError / CodedError(409/422).
  */
 export async function appendRunStep(
   runId: string,
   input: { action?: unknown; node_id?: unknown; edge_id?: unknown; detail?: unknown },
-): Promise<{ seq: number }> {
+  opts: { clientKey?: string | null; anyAction?: boolean } = {},
+): Promise<{ seq: number; idempotent_replay?: true }> {
   if (typeof input.action !== "string" || !input.action.trim()) {
     throw new ValidationError("action is required (read|write|branch|notify|external)");
   }
   const action = input.action.trim();
-  if (!STEP_ACTIONS.includes(action)) {
+  // REST historically accepted any action label; MCP the fixed set. Typed
+  // actions are validated on both.
+  if (!opts.anyAction && !STEP_ACTIONS.includes(action)) {
     throw new ValidationError(
-      "action must be read | write | branch | notify | external",
+      "action must be read | write | branch | notify | external | decision | proposal | outcome",
     );
   }
+  const parsedDetail = parseStepDetail(action, input.detail);
   const nodeId = typeof input.node_id === "string" ? input.node_id : null;
   const edgeId = typeof input.edge_id === "string" ? input.edge_id : null;
-  const detail = input.detail === undefined ? null : JSON.stringify(input.detail);
+  const detail = parsedDetail === undefined ? null : JSON.stringify(parsedDetail);
+  const clientKey = opts.clientKey ?? null;
 
   const db = getDb();
-  let seq = 0;
-  await db.transaction(async (tx) => {
-    const cur = (await tx.get("SELECT status FROM runs WHERE id = ?", [runId])) as
-      | { status: string }
-      | undefined;
-    if (!cur) throw new NotFoundError("Run not found");
-    if (cur.status !== "running") {
-      throw new ConflictError(
-        `Run is ${cur.status} — steps can't be appended`,
-      );
+  const replayOf = async (): Promise<{ seq: number; idempotent_replay: true } | null> => {
+    if (!clientKey) return null;
+    const prior = (await db.get(
+      "SELECT seq, action, node_id, edge_id, detail FROM run_steps WHERE run_id = ? AND client_key = ?",
+      [runId, clientKey],
+    )) as { seq: number; action: string; node_id: string | null; edge_id: string | null; detail: string | null } | undefined;
+    if (!prior) return null;
+    if (prior.action !== action || prior.node_id !== nodeId || prior.edge_id !== edgeId || prior.detail !== detail) {
+      throw idempotencyConflict("step");
     }
-    const last = (await tx.get(
-      "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
-      [runId],
-    )) as { m: number | null };
-    seq = (Number(last.m) || 0) + 1;
-    // Hard cap on the step log so a runaway/hostile runner can't grow a single
-    // run's trace unbounded. Checked inside the tx alongside the seq assignment
-    // so the bound holds under concurrent appends.
-    if (seq > config.RUN_MAX_STEPS) {
-      throw new ConflictError(
-        `Run has reached the step limit of ${config.RUN_MAX_STEPS} — no more steps can be appended`,
-      );
-    }
-    await tx.run(
-      `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [runId, seq, nodeId, edgeId, action, detail, new Date().toISOString()],
+    return { seq: Number(prior.seq), idempotent_replay: true };
+  };
+  const early = await replayOf();
+  if (early) return early;
+
+  // A proposal step claims a review: it must be one in the run's own nest.
+  if (action === "proposal") {
+    const reviewId = (parsedDetail as { review_id: string }).review_id;
+    const ok = await db.get(
+      // Only a review this run's own credential opened: an agent can't claim
+      // a person's (or another agent's) review as its proposal.
+      "SELECT 1 AS x FROM review_requests rr JOIN runs r ON r.nest_id = rr.nest_id WHERE r.id = ? AND rr.id = ? AND LOWER(rr.requested_by) = LOWER(r.triggered_by)",
+      [runId, reviewId],
     );
-  });
+    if (!ok) {
+      throw new CodedError(422, "detail.review_id: no review with that id opened by this run's credential in this nest", "invalid_field", {
+        field: "detail.review_id",
+      });
+    }
+  }
+
+  let seq = 0;
+  try {
+    await db.transaction(async (tx) => {
+      const cur = (await tx.get("SELECT status FROM runs WHERE id = ?", [runId])) as
+        | { status: string }
+        | undefined;
+      if (!cur) throw new NotFoundError("Run not found");
+      if (cur.status !== "running") {
+        throw new ConflictError(
+          `Run is ${cur.status} — steps can't be appended`,
+        );
+      }
+      const last = (await tx.get(
+        "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
+        [runId],
+      )) as { m: number | null };
+      seq = (Number(last.m) || 0) + 1;
+      // Hard cap on the step log so a runaway/hostile runner can't grow a single
+      // run's trace unbounded. Checked inside the tx alongside the seq assignment
+      // so the bound holds under concurrent appends.
+      if (seq > config.RUN_MAX_STEPS) {
+        throw new ConflictError(
+          `Run has reached the step limit of ${config.RUN_MAX_STEPS} — no more steps can be appended`,
+        );
+      }
+      await tx.run(
+        `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at, client_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [runId, seq, nodeId, edgeId, action, detail, new Date().toISOString(), clientKey],
+      );
+      if (action === "decision") {
+        const d = parsedDetail as { verdict: string; reason_code: string };
+        await tx.run(
+          `UPDATE runs SET verdict = ?, reason_code = ?
+            WHERE id = ? AND ${VERDICT_RANK_SQL("verdict")} <= ${VERDICT_RANK[d.verdict] ?? 0}`,
+          [d.verdict, d.reason_code, runId],
+        );
+      }
+    });
+  } catch (err) {
+    // Two concurrent appends with one key: the unique index admits one; the
+    // other replays it (or 409s on a different body).
+    if (clientKey && isUniqueViolation(err)) {
+      const r = await replayOf();
+      if (r) return r;
+    }
+    throw err;
+  }
+  if (action === "proposal") await linkRunArtifacts(runId, parsedDetail);
   return { seq };
 }
 
@@ -495,13 +630,19 @@ export async function closeRun(
     throw new ValidationError("status must be running | succeeded | failed | cancelled");
   }
   const terminal = status !== "running";
+  // The trace's cost and tokens go on the run too (po-1186), like the verdict,
+  // so the ledger sums them in SQL. No trace: keep what is stored.
+  const totals = input.trace === undefined ? null : runTotals(input.trace);
   const res = await getDb().run(
-    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
+    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?,
+            est_cost_micros = COALESCE(?, est_cost_micros), tokens = COALESCE(?, tokens)
       WHERE id = ? AND status = 'running'`,
     [
       status,
       input.trace === undefined ? null : JSON.stringify(input.trace),
       terminal ? new Date().toISOString() : null,
+      totals ? totals.costMicros : null,
+      totals ? totals.tokens : null,
       runId,
     ],
   );
@@ -567,6 +708,7 @@ export async function getRunTrace(
     run: {
       ...run,
       inputs: canSeeDetail ? safeJson(run.inputs) : null,
+      idempotency_key: canSeeDetail ? ((run as { idempotency_key?: string | null }).idempotency_key ?? null) : null,
       trace: canSeeDetail ? safeJson(run.trace) : null,
     },
     steps: steps.map((s) => ({
@@ -600,6 +742,7 @@ export async function listRuns(
     runs: rows.map((r) => ({
       ...r,
       inputs: opts.canSeeDetail ? safeJson(r.inputs) : null,
+      idempotency_key: opts.canSeeDetail ? ((r as { idempotency_key?: string | null }).idempotency_key ?? null) : null,
       trace: opts.canSeeDetail ? safeJson(r.trace) : null,
     })),
   };

@@ -79,7 +79,9 @@ export function useChannels(nestId: string, selected: string | null, threadId: s
     enabled: !!selected && !!threadId,
     staleTime: 0,
     refetchOnWindowFocus: "always",
-    queryFn: async (): Promise<ThreadState> => (await api.getChannelThread(nestId, selected!, threadId!)).thread,
+    // ponytail: first 200 replies (server max); page with offset if threads outgrow it.
+    queryFn: async (): Promise<ThreadState> =>
+      (await api.getChannelThread(nestId, selected!, threadId!, { limit: TIMELINE_MAX })).thread,
   });
 
   const { live, archived } = useMemo(() => splitChannels(list.data?.channels ?? []), [list.data]);

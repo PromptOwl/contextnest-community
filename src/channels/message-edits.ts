@@ -200,7 +200,7 @@ export async function deleteMessage(caller: ActingCaller, channel: unknown | nul
     );
     await tx.run("DELETE FROM comment_mentions WHERE comment_id = ?", [located.row.id]);
     await tx.run("DELETE FROM message_reactions WHERE comment_id = ?", [located.row.id]);
-    // Its pins and saves (node_pins, migration 088), and its earlier texts.
+    // Its pins and saves (node_pins, migration 097), and its earlier texts.
     await tx.run("DELETE FROM node_pins WHERE message_id = ?", [located.row.id]);
     await tx.run("DELETE FROM message_edits WHERE comment_id = ?", [located.row.id]);
     // The inbox rows its @mentions raised name the thread, never the text

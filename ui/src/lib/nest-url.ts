@@ -37,6 +37,36 @@ export function nestViewFromLocation(
   return new URLSearchParams(loc.search).get("view");
 }
 
+/**
+ * The address the page was opened on, when it names a nest or a document
+ * (path + query + hash), else null. Kept so the link can be opened again
+ * after a sign-in: an unresolved link is dropped from the address bar.
+ */
+export function entryDeepLink(
+  loc: { pathname: string; search: string; hash: string } = window.location,
+): string | null {
+  return nestIdFromLocation(loc) ? loc.pathname + loc.search + loc.hash : null;
+}
+
+/**
+ * A deep link wins over Home (PO-1391). Followed while signed out, a link to
+ * a private nest does not resolve and the sign-in form shows. Once the person
+ * signs in, the link is opened again, so they land on the nest or document
+ * they were sent and not on the nest list, the welcome screen, or a "no
+ * access" page for a nest they can in fact open. Returns the link to reopen,
+ * or null. `wasSignedIn` is null until the session has been read.
+ */
+export function deepLinkToRetryAfterSignIn(a: {
+  probeStatus: string;
+  entryLink: string | null;
+  wasSignedIn: boolean | null;
+  signedIn: boolean;
+}): string | null {
+  if (a.probeStatus !== "unreachable") return null;
+  if (a.wasSignedIn !== false || !a.signedIn) return null;
+  return a.entryLink;
+}
+
 export function nestPath(nestId: string | null | undefined, view?: string | null): string {
   if (!nestId) return "/";
   const base = `/nest/${encodeURIComponent(nestId)}`;

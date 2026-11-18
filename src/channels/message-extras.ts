@@ -125,7 +125,7 @@ export async function messageExtras(
   const marks = ids.map(() => "?").join(", ");
   const [reactions, pinned, saved] = await Promise.all([
     reactionsFor(caller.userId, ids),
-    // Pins and saves live in the document pin store (node_pins, migration 088).
+    // Pins and saves live in the document pin store (node_pins, migration 097).
     idSet(`SELECT message_id AS comment_id FROM node_pins WHERE nest_id = ? AND scope = 'nest' AND message_id IN (${marks})`, [caller.nestId, ...ids]),
     idSet(`SELECT message_id AS comment_id FROM node_pins WHERE scope = 'user' AND user_id = ? AND message_id IN (${marks})`, [caller.userId, ...ids]),
   ]);

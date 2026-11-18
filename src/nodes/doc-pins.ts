@@ -2,7 +2,7 @@
  * Document pins (CU-wdqcq02crw) — experimental, behind EXPERIMENTAL_DOC_PINS.
  *
  * Two kinds of pin on one table (node_pins, migration 071). Since migration
- * 088 the same table also holds a channel's pinned MESSAGES (scope 'nest' with
+ * 097 the same table also holds a channel's pinned MESSAGES (scope 'nest' with
  * `message_id` set) and a person's saved messages (scope 'user' with
  * `message_id` set; src/channels/pins.ts and saved.ts). Every query here is
  * `message_id IS NULL`: a document pin is a row without a message.
@@ -381,7 +381,7 @@ export function mergeEditorialOrder(full: string[], visibleOrder: string[]): str
 }
 
 /**
- * Drop someone's personal pins in a nest — their saved messages too (088) —
+ * Drop someone's personal pins in a nest — their saved messages too (097) —
  * once they no longer reach it at all.
  * One rule for leaving and for being removed as a collaborator: anyone who
  * still reaches the nest (a team share, a document/folder grant, its
