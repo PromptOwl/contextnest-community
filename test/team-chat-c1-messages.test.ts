@@ -1199,4 +1199,14 @@ describe("SEC-C1: review findings", () => {
     }
     await resetAuthRateLimit();
   });
+
+  it("SEC-C1-11 an @channel an edit adds is open for members even after they replied to the thread", async () => {
+    await resetAuthRateLimit();
+    const t = await open(alice, "an ordinary post");
+    await reply(rita, t.id, "rita replied", GENERAL);
+    await tick();
+    expect((await edit(alice, t.message_id, "an ordinary post, @channel please look")).status).toBe(200);
+    expect(mentionMessages(await work(rita, "?sections=mentions"))).toContain(t.message_id);
+    await resetAuthRateLimit();
+  });
 });

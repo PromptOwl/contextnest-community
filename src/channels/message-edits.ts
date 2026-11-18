@@ -73,7 +73,8 @@ export async function editMessage(
   if (!isAuthor(caller, located.row)) throw new ForbiddenError(NOT_YOURS);
   // An `@channel` the edit ADDS is bounded exactly as in a post; one already there costs nothing.
   const hadBroadcast = new Set(broadcastNames(located.row.body));
-  const broadcast = broadcastNames(body).some((n) => !hadBroadcast.has(n)) ? await broadcastRefusal(caller.nestId, body, caller.userId) : null;
+  const addsBroadcast = broadcastNames(body).some((n) => !hadBroadcast.has(n));
+  const broadcast = addsBroadcast ? await broadcastRefusal(caller.nestId, body, caller.userId) : null;
   if (broadcast) throw broadcast.status === 429 ? new RateLimitedError(broadcast.error, broadcast.retryAfter ?? 60) : new ValidationError(broadcast.error);
 
   const { nestId } = caller;
@@ -86,16 +87,19 @@ export async function editMessage(
     const message = await viewOf(caller, located);
     return { message, mentions: await outcomes(caller, nodeId, body, [], 0, new Map()) };
   }
-  {
-    await db.transaction(async (tx) => {
-      await tx.run(
-        `INSERT INTO message_edits (id, nest_id, comment_id, body, edited_by, client_json, replaced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ${nowMsExpr(db)})`,
-        [uuid(), nestId, located.row.id, previous, caller.userEmail, serializeClient(caller.client)],
-      );
-      await tx.run(`UPDATE annotation_comments SET body = ?, edited_at = ${nowMsExpr(db)} WHERE id = ?`, [body, located.row.id]);
-    });
-  }
+  await db.transaction(async (tx) => {
+    // A delete may land after assertNotDeleted: never write text into a tombstone.
+    const updated = await tx.run(
+      `UPDATE annotation_comments SET body = ?, edited_at = ${nowMsExpr(db)} WHERE id = ? AND deleted_at IS NULL`,
+      [body, located.row.id],
+    );
+    if (updated.changes === 0) throw new ConflictError("This message was deleted.");
+    await tx.run(
+      `INSERT INTO message_edits (id, nest_id, comment_id, body, edited_by, client_json, replaced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ${nowMsExpr(db)})`,
+      [uuid(), nestId, located.row.id, previous, caller.userEmail, serializeClient(caller.client)],
+    );
+  });
 
   // Re-index who it names from the new text. A name that was already there
   // keeps the message's own time, so an earlier "mark done" or reply still
@@ -113,7 +117,16 @@ export async function editMessage(
     authorEmail: caller.userEmail,
     at: (name) => (addedSet.has(name.toLowerCase()) && stamp?.edited_at ? stamp.edited_at : undefined),
   });
-  const reached = await indexBroadcast({ nestId, nodeId, threadId: located.row.thread_id, commentId: located.row.id, body, authorEmail: caller.userEmail });
+  const reached = await indexBroadcast({
+    nestId,
+    nodeId,
+    threadId: located.row.thread_id,
+    commentId: located.row.id,
+    body,
+    authorEmail: caller.userEmail,
+    // A broadcast the edit ADDED is open from the edit's time, like an added name.
+    at: addsBroadcast ? stamp?.edited_at : undefined,
+  });
   if (added.length) {
     await notifyComment({ nestId, nodeId, body, actorEmail: caller.userEmail, baseUrl, channel: true, onlyNames: added });
   }

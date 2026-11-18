@@ -96,6 +96,8 @@ export async function indexBroadcast(params: {
   commentId: string;
   body: string;
   authorEmail: string;
+  /** Row time; default the message's own (an edit that adds the broadcast passes its time). */
+  at?: string;
 }): Promise<number> {
   const { nestId, nodeId, threadId, commentId, body, authorEmail } = params;
   if (broadcastNames(body).length === 0) return 0;
@@ -125,7 +127,7 @@ export async function indexBroadcast(params: {
         `INSERT INTO comment_mentions
            (id, nest_id, node_id, thread_id, comment_id, mentioned_user_id, handle, author, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, nodeId, threadId, commentId, p.userId, p.email.toLowerCase(), author, msg.created_at],
+        [uuid(), nestId, nodeId, threadId, commentId, p.userId, p.email.toLowerCase(), author, params.at ?? msg.created_at],
       );
       n++;
     }
