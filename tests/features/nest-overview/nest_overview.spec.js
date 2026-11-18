@@ -392,9 +392,13 @@ test.describe('Nest overview', () => {
     await page.emptyAction('New document').click();
     await expect(page.editorTitle).toBeVisible(WRITE);
 
+    // Since #582 "Import files" opens the "New document" dialog (blank page or
+    // import), the same one as the top bar's New document; there is no
+    // separate "Import into this nest" dialog any more.
     await page.gotoNest(nest.id);
     await page.emptyAction('Import files').click();
     await expect(page.importDialog).toBeVisible();
+    await expect(page.importDialog.getByRole('button', { name: /^Whole vault/ })).toBeVisible();
     await page.page.keyboard.press('Escape');
     await expect(page.importDialog).toBeHidden();
 

@@ -1,13 +1,19 @@
 /**
  * Assign Steward Test Suite — CN-STEW-001 … CN-STEW-013
  *
- * Page under test: assigning stewards on a nest — "Assign Steward" in the
- * nest's ⋯ menu, the Stewards tab (owner row, list, scope and role filters,
- * each row's Edit Role / Remove), the "Assign Context Steward" and "Edit
- * steward" dialogs, the billing confirmation a paid role raises, and the
- * "Remove this steward?" confirmation — and what an assigned steward can then
- * do: approve or reject in their scope, edit as an Editor, see their Review
- * Queue and My Work, and what the author sees after a decision.
+ * Page under test: assigning stewards on a nest — the Stewards tab (owner
+ * row, list, its "Assign your first steward" / "Add Steward" button, scope and
+ * role filters, each row's Edit Role / Remove), the "Assign Context Steward"
+ * and "Edit steward" dialogs, the billing confirmation a paid role raises, and
+ * the "Remove this steward?" confirmation — and what an assigned steward can
+ * then do: approve or reject in their scope, edit as an Editor, see their
+ * reviews in My Work (and the nest's "Your Review Queue" count), and what the
+ * author sees after a decision.
+ *
+ * #582 removed the nest header's ⋯ menu, whose "Assign Steward" entry these
+ * cases used to open the dialog from, and the nest's Review Queue tab, whose
+ * reviews now live in My Work. The cases go through the Stewards tab and My
+ * Work instead.
  *
  * Conventions
  * -----------
@@ -27,8 +33,8 @@
  *   (`stewardsApi.deleteCreatedNests()`), and is in the entity registry for
  *   the teardown and the orphan sweeper. The notifications a nest raised are
  *   marked read first.
- * - CN-STEW-011 is a known bug (a tag or document Reviewer's My Work also
- *   lists documents outside their scope) and is skipped until it is fixed.
+ * - CN-STEW-011 was a known bug (a tag or document Reviewer's My Work also
+ *   listed documents outside their scope). PO-1404 fixed it, so it runs.
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
  */
 
@@ -100,12 +106,12 @@ test.describe('Assign Steward', () => {
 
   // ── Who can assign ─────────────────────────────────────────────────────────
 
-  test('CN-STEW-001: Verify that the owner and a nest Admin can open Assign Steward from the nest\'s ⋯ menu, that an empty Stewards tab shows "No delegated stewards yet…" with "Assign your first steward", and that the owner is shown as "Nest Owner" with "Implicit Authority"', async ({ primary_user, secondary_user, commonFunction }) => {
+  test('CN-STEW-001: Verify that the owner and a nest Admin can open Assign Steward from the nest\'s Stewards tab, that an empty Stewards tab shows "No delegated stewards yet…" with "Assign your first steward", and that the owner is shown as "Nest Owner" with "Implicit Authority"', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'stew-open');
     const { page, nest } = owner;
 
-    expect(await page.nestMenuItems(nest.id)).toContain('Assign Steward');
-    await page.openAssignFromMenu(nest.id);
+    expect(await page.canAssign(nest.id)).toBe(true);
+    await page.openAssign(nest.id);
     await expect(page.assignDialog).toBeVisible();
     await page.page.keyboard.press('Escape');
 
@@ -120,22 +126,22 @@ test.describe('Assign Steward', () => {
 
     // A nest Admin gets the same entry.
     const admin = await share(owner, secondary_user, 'admin');
-    expect(await admin.page.nestMenuItems(nest.id)).toContain('Assign Steward');
-    await admin.page.openAssignFromMenu(nest.id);
+    expect(await admin.page.canAssign(nest.id)).toBe(true);
+    await admin.page.openAssign(nest.id);
     await expect(admin.page.assignDialog).toBeVisible();
   });
 
   test('CN-STEW-002: Verify that Assign Steward and the Stewards tab aren\'t available when stewardship is off, in an archived nest, or to an Editor or Viewer', async ({ primary_user, secondary_user, commonFunction }) => {
     // Stewardship off.
     const off = await ownerNest(primary_user, commonFunction, 'stew-off', { governed: false });
-    expect(await off.page.nestMenuItems(off.nest.id)).not.toContain('Assign Steward');
+    expect(await off.page.canAssign(off.nest.id)).toBe(false);
     expect(await off.page.tabNames(off.nest.id)).not.toContain('Stewards');
 
     // An Editor and a Viewer.
     for (const permission of ['write', 'read']) {
       const owner = await ownerNest(primary_user, commonFunction, `stew-${permission}`);
       const member = await share(owner, secondary_user, permission);
-      expect(await member.page.nestMenuItems(owner.nest.id)).not.toContain('Assign Steward');
+      expect(await member.page.canAssign(owner.nest.id)).toBe(false);
       expect(await member.page.tabNames(owner.nest.id)).not.toContain('Stewards');
     }
 
@@ -143,7 +149,7 @@ test.describe('Assign Steward', () => {
     const archived = await ownerNest(primary_user, commonFunction, 'stew-archived');
     await archived.api.archiveNest(archived.nest.id);
     cleanups.push(() => archived.api.restoreNest(archived.nest.id));
-    expect(await archived.page.nestMenuItems(archived.nest.id)).not.toContain('Assign Steward');
+    expect(await archived.page.canAssign(archived.nest.id)).toBe(false);
     expect(await archived.page.tabNames(archived.nest.id)).not.toContain('Stewards');
   });
 
@@ -154,7 +160,7 @@ test.describe('Assign Steward', () => {
     const { page, api, nest } = owner;
     await api.createDoc(nest.id, { title: 'Tagged Doc', tags: ['qa'] });
 
-    await page.openAssignFromMenu(nest.id);
+    await page.openAssign(nest.id);
     await expect(page.scopeSelect()).toHaveText('Tag');
     await expect(page.roleSelect()).toContainText('Reviewer');
     const assign = page.assignDialog.getByRole('button', { name: 'Assign Steward', exact: true });
@@ -176,7 +182,7 @@ test.describe('Assign Steward', () => {
 
     // A nest with no tags starts on Entire Nest, and Tag can't be picked.
     const bare = await ownerNest(primary_user, commonFunction, 'stew-notags');
-    await bare.page.openAssignFromMenu(bare.nest.id);
+    await bare.page.openAssign(bare.nest.id);
     await expect(bare.page.scopeSelect()).toHaveText('Entire Nest', WRITE);
     await bare.page.scopeSelect().click();
     await expect(bare.page.page.getByRole('option', { name: 'Tag', exact: true })).toHaveAttribute('aria-disabled', 'true');
@@ -189,7 +195,7 @@ test.describe('Assign Steward', () => {
     const third = await thirdPerson(owner);
 
     // The owner.
-    await page.openAssignFromMenu(nest.id);
+    await page.openAssign(nest.id);
     await page.fillAssign({ email: primaryRole.email, scope: 'Entire Nest', role: 'Viewer' });
     await expect(page.ownerNote).toBeVisible();
     await page.submitAssign();
@@ -428,29 +434,33 @@ test.describe('Assign Steward', () => {
 
   // ── The Reviewer's side ────────────────────────────────────────────────────
 
-  test("CN-STEW-010: Verify that a tag or document Reviewer's Review Queue shows only the pending documents in their scope, with the count on the tab", async ({ primary_user, secondary_user, commonFunction }) => {
+  test("CN-STEW-010: Verify that a tag or document Reviewer's reviews (My Work, and the nest's \"Your Review Queue\" count) show only the pending documents in their scope", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Ported for #582: the nest's Review Queue tab, with its count, is gone.
+    // A Reviewer's reviews are in My Work, and the nest's Documents tab keeps
+    // the count as its "Your Review Queue" card.
     const owner = await ownerNest(primary_user, commonFunction, 'stew-queue');
     const { api, nest } = owner;
     const tagged = await pending(owner, 'Tagged', ['qa']);
     const one = await pending(owner, 'One');
     const plain = await pending(owner, 'Plain');
-    await openSecondary(owner, secondary_user);
+    const steward = await openSecondary(owner, secondary_user);
     await api.addSteward(nest.id, { email: secondaryRole.email, role: 'reviewer', scope: 'tag', tag: 'qa' });
     await api.addSteward(nest.id, { email: secondaryRole.email, role: 'reviewer', scope: 'document', nodeId: one.id });
 
-    const queue = secondary_user.reviewQueuePage;
-    await queue.goto(nest.id);
-    await expect(queue.row(tagged.title)).toHaveCount(1, WRITE);
-    await expect(queue.row(one.title)).toHaveCount(1);
-    await expect(queue.row(plain.title)).toHaveCount(0);
-    await expect(queue.reviewTab).toContainText('2');
+    const work = secondary_user.myWorkPage;
+    await work.goto();
+    await expect(work.workRow(tagged.title)).toHaveCount(1, WRITE);
+    await expect(work.workRow(one.title)).toHaveCount(1);
+    // Out of scope: neither My Work nor the nest's own count lists it.
+    await expect(work.workRow(plain.title)).toHaveCount(0);
+
+    await steward.page.gotoDocuments(nest.id);
+    await expect(steward.page.reviewCount).toHaveText('2', WRITE);
   });
 
-  test("CN-STEW-011: Verify that a tag or document Reviewer's My Work lists only the pending documents in their scope, with Approve and Reject (known bug: currently also lists out-of-scope documents)", async ({ primary_user, secondary_user, commonFunction }) => {
-    // Skipped: known bug. My Work decides "can review" for the whole nest, not
-    // per document, so it also lists documents outside the Reviewer's scope
-    // (and Approve on them fails). Remove this line once it is fixed.
-    test.skip(true, "Known bug: a tag/document Reviewer's My Work also lists out-of-scope documents");
+  test("CN-STEW-011: Verify that a tag or document Reviewer's My Work lists only the pending documents in their scope, with Approve and Reject", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Was skipped as a known bug: My Work decided "can review" per nest. Fixed
+    // in PO-1404 (per-document check in src/me/my-work.ts).
     const owner = await ownerNest(primary_user, commonFunction, 'stew-mywork');
     const { api, nest } = owner;
     const tagged = await pending(owner, 'Tagged', ['qa']);
@@ -480,10 +490,10 @@ test.describe('Assign Steward', () => {
     await steward.page.approveDialog.getByRole('button', { name: 'Approve', exact: true }).click();
     await expect.poll(async () => api.statusOf(nest.id, doc.id), WRITE).toBe('published');
 
-    const queue = secondary_user.reviewQueuePage;
-    await queue.goto(nest.id);
-    await queue.waitForQueueLoaded();
-    await expect(queue.row(doc.title)).toHaveCount(0);
+    // Their queue is My Work since #582 (the nest's Review Queue tab is gone).
+    const work = secondary_user.myWorkPage;
+    await work.goto();
+    await expect(work.workRow(doc.title)).toHaveCount(0, WRITE);
 
     await page.gotoDocument(nest.id, doc.id);
     await expect(page.publishedBadge).toBeVisible();
@@ -514,10 +524,10 @@ test.describe('Assign Steward', () => {
     await reject.click();
     await expect.poll(async () => api.statusOf(nest.id, doc.id), WRITE).toBe('rejected');
 
-    const queue = secondary_user.reviewQueuePage;
-    await queue.goto(nest.id);
-    await queue.waitForQueueLoaded();
-    await expect(queue.row(doc.title)).toHaveCount(0);
+    // Their queue is My Work since #582 (the nest's Review Queue tab is gone).
+    const work = secondary_user.myWorkPage;
+    await work.goto();
+    await expect(work.workRow(doc.title)).toHaveCount(0, WRITE);
 
     // The author.
     await page.gotoDocument(nest.id, doc.id);

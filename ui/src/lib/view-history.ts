@@ -24,7 +24,8 @@ export type HistoryWrite = "push" | "replace" | "stamp" | "none";
  *   channel for an address that named none);
  * - the address is already right: `stamp` the view onto an entry App did not
  *   write (a channel link opened directly), so the next move can push and
- *   Back can restore this view; `none` when there is nothing to do.
+ *   Back can restore this view; `replace` the editor's parked leave-guard
+ *   entry when the view left that node; `none` when there is nothing to do.
  */
 export function historyWrite(input: {
   next: string;
@@ -41,6 +42,12 @@ export function historyWrite(input: {
   if (input.next !== input.current) {
     return !input.forceReplace && historyWriteMode(input.prevKey, input.key, onAppEntry) === "push" ? "push" : "replace";
   }
+  // Leaving the document editor for a view at the same address (a new
+  // document saved from the top bar returns to /nest/<id>, where the editor
+  // already was): reuse the editor's parked leave-guard entry, as a move to
+  // any other address does. Left in place, the editor's dropParkedEntries would
+  // go Back onto the editor's own entry and reopen it (PO-1404).
+  if (isParkedEntry(input.state) && input.prevKey !== null && input.prevKey !== input.key) return "replace";
   return input.stampable && !onAppEntry && !isParkedEntry(input.state) ? "stamp" : "none";
 }
 

@@ -2,7 +2,7 @@
  * How It Works Test Suite — CN-HELP-001 … CN-HELP-009
  *
  * Page under test: ui/src/pages/app/guide/page.tsx (route `/guide`,
- * rail → Help → How it works).
+ * account menu → Help).
  *
  * Conventions
  * -----------
@@ -25,29 +25,32 @@ const secondaryRole = samples.secondary_user ?? null;
 test.describe('How it works', () => {
   test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
 
-  test('CN-HELP-001: "How it works" appears in the Help group of the sidebar and opens the page at /guide', async ({ primary_user }) => {
+  test('CN-HELP-001: "How it works" in the account menu opens the page at /guide', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page, nestsPage, howItWorksPage: hw } = primary_user;
     await nestsPage.goto();
-    await expect(hw.helpGroup).toBeVisible();
-    await expect(hw.helpGroup).toHaveText(/Help/i);
-    await expect(hw.railItemInHelp).toBeVisible();
-    await expect(hw.railItemInHelp).toHaveText(/How it works/);
-    await hw.railItemInHelp.click();
+    // Since #582 Help lives in the account menu, not in a sidebar group.
+    await expect(page.locator('[data-testid^="document-sidebar-group-"]')).toHaveCount(0);
+    await hw.userMenu.click();
+    await expect(hw.helpMenuItem).toBeVisible();
+    await expect(hw.helpMenuItem).toHaveText(/How it works/);
+    await hw.helpMenuItem.click();
     await expect(page).toHaveURL(/\/guide$/);
     await hw.waitLoaded();
   });
 
-  test('CN-HELP-002: the "How it works" sidebar item is highlighted as the current page while it is open', async ({ primary_user }) => {
+  test('CN-HELP-002: while How it works is open, no navigation item claims to be the current page', async ({ primary_user }) => {
     await primary_user.initialize();
-    const { page, nestsPage, howItWorksPage: hw } = primary_user;
-    await nestsPage.goto();
-    await expect(hw.railItem).not.toHaveAttribute('aria-current', 'page');
-    await hw.railItem.click();
+    const { page, howItWorksPage: hw, sidebarRailPage: rail } = primary_user;
+    // From My Work, which the header ribbon marks as current…
+    await rail.goto('/my-work');
+    await expect(rail.ribbonItem('my-work')).toHaveAttribute('aria-current', 'page');
+    // …to Help: the page is in no nav, so nothing stays highlighted.
+    await rail.openHelp();
     await hw.waitLoaded();
-    await expect(hw.railItem).toHaveAttribute('aria-current', 'page');
-    // It's the only current row.
-    await expect(page.locator('[data-testid^="document-sidebar-dashboard-"][aria-current="page"]')).toHaveCount(1);
+    await expect(page).toHaveURL(/\/guide$/);
+    await expect(rail.ribbonItem('my-work')).not.toHaveAttribute('aria-current', 'page');
+    await expect(rail.currentItems()).toHaveCount(0);
   });
 
   test('CN-HELP-003: the page opens directly from its URL and shows the breadcrumb "Home > How it works"', async ({ primary_user }) => {
@@ -73,9 +76,9 @@ test.describe('How it works', () => {
     test.skip(await secondary_user.teammatesApi.isServerAdmin(), 'secondary_user is a server admin on this server.');
     const { nestsPage, howItWorksPage: hw, page } = secondary_user;
     await nestsPage.goto();
-    await expect(page.getByTestId('document-sidebar-group-admin'), 'a non-admin has no Admin group').toHaveCount(0);
-    await expect(hw.railItemInHelp).toBeVisible();
-    await hw.railItemInHelp.click();
+    await secondary_user.sidebarRailPage.openSettings();
+    await expect(page.getByTestId('settings-nav-teammates'), 'a non-admin has no admin settings').toHaveCount(0);
+    await secondary_user.sidebarRailPage.openHelp();
     await hw.waitLoaded();
     await expect(page).toHaveURL(/\/guide$/);
     await expect(hw.sections).toHaveText(adminSections);

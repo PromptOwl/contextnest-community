@@ -62,7 +62,7 @@ async function openAsAdmin(role) {
 test.describe('Teammates', () => {
   test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
 
-  test('CN-TMATE-001: non admins see no rail row and are redirected to Nests by direct URL', async ({
+  test('CN-TMATE-001: non admins see no Workspace settings entry and are redirected to Nests by direct URL', async ({
     secondary_user,
   }) => {
     test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
@@ -70,11 +70,12 @@ test.describe('Teammates', () => {
     test.skip(await secondary_user.teammatesApi.isServerAdmin(), 'secondary_user is a server admin on this server, so it is not a non-admin.');
     const { page, nestsPage, teammatesPage: tm } = secondary_user;
 
-    // No rail row: the rail is drawn (Teams is there), Teammates isn't.
+    // Not in Workspace settings: the nav is drawn (Teams is there), Teammates isn't.
     await nestsPage.goto();
-    await expect(page.getByTestId('document-sidebar-dashboard-teams')).toBeVisible();
+    await secondary_user.sidebarRailPage.openSettings();
+    await expect(page.getByTestId('settings-nav-teams')).toBeVisible();
     await expect(tm.railItem).toHaveCount(0);
-    await expect(page.getByTestId('document-sidebar-dashboard-settings')).toHaveCount(0);
+    await expect(page.getByTestId('settings-nav-settings')).toHaveCount(0);
 
     // Direct URL: the Nests page is shown instead, and nothing of Teammates.
     await page.goto('/teammates');
@@ -100,6 +101,7 @@ test.describe('Teammates', () => {
 
     // ── The real directory, as the page received it ──
     await nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(tm.railItem).toBeVisible();
     const { teammates } = await tm.gotoAndReadTeammates(() => tm.railItem.click());
     await expect(tm.pageTitle).toContainText('Teammates');

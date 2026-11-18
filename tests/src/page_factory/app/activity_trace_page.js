@@ -28,8 +28,9 @@ class ActivityTracePage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail entry (ui/src/components/DocumentSidebar.tsx) ────────────────
-    this.railItem = page.getByTestId('document-sidebar-dashboard-trace');
+    // ── Nav entry: Workspace settings (ui/src/components/SettingsShell.tsx),
+    //    opened from the account menu (SidebarRailPage.openSettings) ─────────
+    this.railItem = page.getByTestId('settings-nav-trace');
 
     // ── Title row ─────────────────────────────────────────────────────────
     this.pageTitle = page.getByTestId('page-title');

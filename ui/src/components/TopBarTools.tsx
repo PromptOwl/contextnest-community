@@ -222,6 +222,9 @@ export function TopBarTools({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
+      {/* An archived nest is read-only and offers no Connect, as its own header
+          did before #582 moved Connect up here (PO-1404). */}
+      {!(nestId && isNestArchived((meta.data as any)?.nest)) && (
       <Button
         variant="ghost"
         size="sm"
@@ -234,6 +237,7 @@ export function TopBarTools({
         <Plug className="h-4 w-4 shrink-0" aria-hidden />
         <span className="hidden xl:inline">Connect</span>
       </Button>
+      )}
       {/* Same button on every screen. With no nest open it acts on the one you
           last had open. Hidden only where the open nest is read-only. */}
       {(!nestId || (caps && !caps.isReadOnly && !caps.isReaderView && caps.canEditDocs)) && (

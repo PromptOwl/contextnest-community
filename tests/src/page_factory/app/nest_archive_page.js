@@ -57,7 +57,8 @@ class NestArchivePage {
 
     // ── Reason dialogs (request removal, reject, approve) ─────────────────
     this.requestDialog = page.getByRole('dialog').filter({ hasText: 'Request removal of' });
-    this.rejectDialog = page.getByRole('dialog').filter({ hasText: 'Reject this request' });
+    // "Reject this request" in the nest's Review Queue; My Work says "Reject this archive request".
+    this.rejectDialog = page.getByRole('dialog').filter({ hasText: /Reject this (archive )?request/ });
     this.reasonInput = page.getByTestId('reason-dialog-input');
     this.reasonConfirm = page.getByTestId('reason-dialog-confirm');
     this.reasonSecondary = page.getByTestId('reason-dialog-secondary');
@@ -155,6 +156,11 @@ class NestArchivePage {
   /** The My Work row of one request, found by its reason. */
   requestRow(reason) {
     return this.requestRows.filter({ hasText: reason });
+  }
+
+  /** A My Work row's kind badge: "Archive" or "Deletion". */
+  requestKind(reason) {
+    return this.requestRow(reason).locator('span.uppercase').first();
   }
 
   /** The confirm dialog that honouring an archive request opens. */

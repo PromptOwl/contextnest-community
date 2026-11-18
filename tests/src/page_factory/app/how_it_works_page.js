@@ -2,7 +2,8 @@
  * How It Works Page Object Model
  *
  * Page location: ui/src/pages/app/guide/page.tsx (+ help-topics.ts)
- * Route: /guide (rail → Help → How it works, every signed-in user)
+ * Route: /guide (account menu → Help, every signed-in user; since #582 it is
+ * no longer a sidebar row)
  *
  * A text-only tour of the app in the order the sidebar shows it. One section
  * per <h2>; the only controls are the "Manage keys" button in the Workspace
@@ -41,11 +42,9 @@ class HowItWorksPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail (ui/src/components/DocumentSidebar.tsx) ──────────────────────
-    this.helpGroup = page.getByTestId('document-sidebar-group-help');
-    this.railItem = page.getByTestId('document-sidebar-dashboard-guide');
-    /** The rail item inside the Help group's own block. */
-    this.railItemInHelp = this.helpGroup.locator('xpath=..').getByTestId('document-sidebar-dashboard-guide');
+    // ── Account menu (ui/src/App.tsx UserMenu) → Help ─────────────────────
+    this.userMenu = page.getByTestId('user-menu-trigger');
+    this.helpMenuItem = page.getByTestId('user-menu-help');
 
     // ── Header (ui/src/App.tsx) ───────────────────────────────────────────
     this.breadcrumb = page.getByTestId('header-breadcrumb');

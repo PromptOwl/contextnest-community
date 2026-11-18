@@ -21,7 +21,7 @@
 import { listVisibleNests, nestAllowsSelfApprove } from "../nests/service.js";
 import { getReviewQueue, listDeletionRequests } from "../governance/review-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
-import { resolveUserRoles } from "../governance/stewardship-service.js";
+import { canUserApproveMany, resolveNestWideRoles, resolveUserRoles } from "../governance/stewardship-service.js";
 import { listNotifications } from "../governance/notify-service.js";
 import { canDecideAccessRequests, listAccessRequests } from "../governance/access-request-service.js";
 import { listAssignedTo } from "../nodes/assigned-service.js";
@@ -99,6 +99,19 @@ async function canApproveInNest(nestId: string, email: string): Promise<boolean>
   }
   approveCache.set(key, { ok, exp: now + APPROVE_CACHE_TTL_MS });
   return ok;
+}
+
+/**
+ * Whether the caller decides EVERY review in the nest: an admin or nest-wide
+ * reviewer, or the owner when self-approve is on. A reviewer whose role comes
+ * only from document or tag stewardship passes canApproveInNest (it reads the
+ * scoped steward rows too) but decides only those documents, so their rows are
+ * checked per document (PO-1404).
+ */
+async function approvesNestWide(nestId: string, email: string): Promise<boolean> {
+  const roles = await resolveNestWideRoles(nestId, email);
+  if (roles.includes("admin") || roles.includes("reviewer")) return true;
+  return roles.includes("owner") && (await nestAllowsSelfApprove(nestId));
 }
 
 /**
@@ -256,9 +269,10 @@ export async function buildMyWork(params: {
   // anywhere on the nest, or the owner with self-approve), so resolve it ONCE
   // per distinct nest — not per request — in parallel. Bounded by nest count,
   // not queue length, so no per-item latency blowup.
-  // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
-  // will see that whole nest's pending items, not just their scoped docs.
-  // Tighten to per-node canUserApprove if that over-inclusion ever matters.
+  // A reviewer scoped to documents or tags passes this nest-level check too,
+  // so those nests are narrowed per document below (PO-1404): since #582 My
+  // Work is the only review queue, and it must not list changes the server
+  // would refuse to let them decide.
   // Resolved for every nest the caller can SEE, not just nests that happen
   // to appear in this page of `requests` — pagination.total below needs
   // the full picture (a nest with pending reviews from someone else, on a
@@ -274,9 +288,41 @@ export async function buildMyWork(params: {
       ),
     ),
   );
-  const items: WorkItem[] = others
-    .filter((r) => nestApprove.get(r.nestId))
-    .map(toItem);
+  const nestWide = new Map<string, boolean>(
+    await Promise.all(
+      [...nestApprove].filter(([, ok]) => ok).map(
+        async ([nestId]): Promise<[string, boolean]> => [nestId, await approvesNestWide(nestId, me)],
+      ),
+    ),
+  );
+  const scopedNestIds = [...nestWide].filter(([, wide]) => !wide).map(([id]) => id);
+  // Every pending review someone else filed in a scoped nest that this caller
+  // may decide, checked with the same rule approve/reject enforce. Scoped
+  // nests are few and their pending lists short, so the whole list is read.
+  const scopedKey = (nestId: string, nodeId: string) => `${nestId}\u0000${nodeId}`;
+  const scopedDecidable = new Set<string>();
+  let scopedUrgent = 0;
+  if (wantQueue && scopedNestIds.length > 0) {
+    const { requests: pending } = await getReviewQueue({
+      status: "pending",
+      nestIds: scopedNestIds,
+      limit: 100_000,
+    });
+    const theirs = pending.filter((r) => r.requestedBy !== me);
+    for (const nestId of scopedNestIds) {
+      const inNest = theirs.filter((r) => r.nestId === nestId);
+      if (inNest.length === 0) continue;
+      const verdicts = await canUserApproveMany(nestId, inNest.map((r) => r.nodeId), me);
+      for (const r of inNest) {
+        if (!verdicts.get(r.nodeId)?.allowed) continue;
+        scopedDecidable.add(scopedKey(nestId, r.nodeId));
+        if (r.priority === "urgent") scopedUrgent++;
+      }
+    }
+  }
+  const canDecide = (r: { nestId: string; nodeId: string }) =>
+    nestWide.get(r.nestId) === true || scopedDecidable.has(scopedKey(r.nestId, r.nodeId));
+  const items: WorkItem[] = others.filter(canDecide).map(toItem);
   const waiting: WorkItem[] = requests
     .filter((r) => r.requestedBy === me)
     .map(toItem);
@@ -326,11 +372,13 @@ export async function buildMyWork(params: {
   // caller's own pending reviews elsewhere) — the same two conditions
   // items/waiting are built from — via two SQL counts rather than the raw,
   // unfiltered getReviewQueue total.
+  // Nests whose every review the caller decides are counted in SQL; scoped
+  // nests count only the documents decided above, plus the caller's own.
   const approvableNestIds = [...nestName.keys()].filter((id) =>
-    nestApprove.get(id),
+    nestWide.get(id) === true,
   );
   const restNestIds = [...nestName.keys()].filter(
-    (id) => !nestApprove.get(id),
+    (id) => nestWide.get(id) !== true,
   );
   const [
     { total: approvableReviewTotal },
@@ -351,7 +399,7 @@ export async function buildMyWork(params: {
       limit: 1,
     }),
   ]);
-  const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
+  const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal + scopedDecidable.size;
   // Deletion flags and access requests ride the same two buckets (above)
   // but aren't paginated (both lists fetch every pending one), so folding in
   // however many are actually shown keeps the total exact regardless of
@@ -426,7 +474,7 @@ export async function buildMyWork(params: {
         getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", limit: 1 }),
         getReviewQueue({ status: "pending", nestIds: approvableNestIds, priority: "urgent", requestedByEmail: me, limit: 1 }),
       ]);
-  const urgentReviewsTotal = urgentApprovable - urgentMine;
+  const urgentReviewsTotal = urgentApprovable - urgentMine + scopedUrgent;
   const cap = <T>(rows: T[]): T[] => (params.sectionLimit ? rows.slice(0, params.sectionLimit) : rows);
   // Team chat C2 (PO-1197): the app-wide unread summary, while chat is on.
   const chat =

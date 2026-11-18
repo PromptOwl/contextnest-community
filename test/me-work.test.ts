@@ -309,3 +309,40 @@ it("urgent_reviews_total counts urgent reviews the caller can decide, not the ca
   expect((await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey)).data.urgent_reviews_total).toBe(before.bob + 1);
   expect((await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey)).data.urgent_reviews_total).toBe(before.alice);
 });
+
+it("PO-1404: a document-scoped reviewer's inbox lists only the documents in their scope, and the total matches", async () => {
+  // Since #582 My Work is the only review queue. The approve check here was
+  // per nest, so a reviewer scoped to one document saw every pending review in
+  // the nest — rows they could not approve (the server refuses), and a count
+  // that disagreed with the nest's own queue. Reuses bob (registration is
+  // rate-limited).
+  const nestId = await governedNest(alice, "Scoped Nest");
+  const add = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/stewards`,
+    { scope: "document", nodePattern: "nodes/in-scope", email: bob.email, role: "reviewer" },
+    alice.apiKey,
+  );
+  expect(add.status).toBeLessThan(300);
+  await submitDoc(alice, nestId, "in-scope");
+  await submitDoc(alice, nestId, "out-of-scope");
+
+  const { status, data } = await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey);
+  expect(status).toBe(200);
+  const mine = data.items.filter((w: any) => w.nest_id === nestId).map((w: any) => w.node_id);
+  expect(mine).toEqual(["nodes/in-scope"]);
+  // The badge reads pagination.total: it counts what the two buckets show.
+  expect(data.pagination.total).toBe(
+    data.items.filter((w: any) => w.type !== "deletion" && w.type !== "access").length +
+      data.waiting.filter((w: any) => w.type !== "deletion" && w.type !== "access").length +
+      data.items.filter((w: any) => w.type === "deletion" || w.type === "access").length +
+      data.waiting.filter((w: any) => w.type === "deletion" || w.type === "access").length,
+  );
+
+  // The one in scope really is his to decide; the other is refused.
+  const ok = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/nodes/in-scope/approve`, {}, bob.apiKey);
+  expect(ok.status).toBe(200);
+  const no = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/nodes/out-of-scope/approve`, {}, bob.apiKey);
+  expect(no.status).toBe(403);
+});

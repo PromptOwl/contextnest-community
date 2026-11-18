@@ -1,10 +1,12 @@
 /**
  * Stewards Page Object Model
  *
- * Page under test: assigning stewards on a nest — the "Assign Steward" entry
- * in the nest's ⋯ menu, the Stewards tab (ui/src/components/nest/StewardsTab.tsx
- * and governance/StewardList.tsx) with its owner row, scope and role filters
- * and each row's ⋮ menu (Edit Role, Remove), the "Assign Context Steward" /
+ * Page under test: assigning stewards on a nest — the Stewards tab
+ * (ui/src/components/nest/StewardsTab.tsx and governance/StewardList.tsx) with
+ * its owner row, its "Assign your first steward" / "Add Steward" button (the
+ * way in to Assign Steward since #582 removed the nest header's ⋯ menu, which
+ * held it), scope and role filters and each row's ⋮ menu (Edit Role, Remove),
+ * the "Assign Context Steward" /
  * "Edit steward" dialog (governance/StewardModal.tsx), the billing
  * confirmation a paid role raises, and the "Remove this steward?" confirmation.
  *
@@ -31,14 +33,19 @@ class StewardsPage {
     // ── Nest page ──────────────────────────────────────────────────────────
     this.tabs = page.getByRole('tab');
     this.stewardsTab = page.getByRole('tab', { name: /^Stewards/ });
-    this.nestMenu = page.getByTitle('More actions').first();
-    this.assignStewardItem = page.getByRole('menuitem', { name: 'Assign Steward', exact: true });
+    // Documents tab's "Your Review Queue" card: how many pending documents
+    // this person may decide in the nest (stewardship on only).
+    this.reviewCard = page.getByTestId('nest-stat-review');
+    this.reviewCount = this.reviewCard.locator('.text-3xl');
 
     // ── Stewards tab ───────────────────────────────────────────────────────
     this.stewardsTitle = this.main.getByText('Stewards', { exact: true });
     this.ownerRow = page.getByTestId('steward-owner-row');
     this.emptyRoster = this.main.getByText(/No delegated stewards yet/);
     this.assignFirstButton = this.main.getByRole('button', { name: 'Assign your first steward' });
+    // The roster's own add button once it has a steward (governance/StewardList.tsx).
+    this.addStewardButton = this.main.getByRole('button', { name: 'Add Steward', exact: true });
+    this.assignButton = this.assignFirstButton.or(this.addStewardButton);
     this.roleFilter = this.main.getByRole('combobox').last();
     this.rosterRows = this.main.locator('div.p-2.rounded-lg.border.bg-card');
 
@@ -87,8 +94,8 @@ class StewardsPage {
   // ── Navigation ─────────────────────────────────────────────────────────────
 
   /**
-   * Open the nest page and wait for its tabs and its settings. The ⋯ menu and
-   * the Stewards tab depend on "stewardship on", which arrives with the
+   * Open the nest page and wait for its tabs and its settings. The Stewards
+   * tab depends on "stewardship on", which arrives with the
    * settings read after the page first draws; reading them earlier sees the
    * nest as ungoverned.
    */
@@ -119,6 +126,13 @@ class StewardsPage {
     await this.ownerRow.or(this.emptyRoster).first().waitFor({ state: 'visible' });
   }
 
+  /** Open the nest's Documents tab and wait for its "Your Review Queue" count. */
+  async gotoDocuments(nestId) {
+    this._log(`Opening the Documents tab of nest ${nestId}`);
+    await this.page.goto(`/nest/${nestId}?tab=documents`);
+    await this.reviewCount.filter({ hasText: /^\d+$/ }).waitFor({ state: 'visible', timeout: 60_000 });
+  }
+
   /** Open one document and wait for it to load. */
   async gotoDocument(nestId, nodeId) {
     this._log(`Opening ${nodeId}`);
@@ -127,34 +141,28 @@ class StewardsPage {
     await this.page.getByText('Loading document...').waitFor({ state: 'hidden' }).catch(() => {});
   }
 
-  // ── Nest ⋯ menu ────────────────────────────────────────────────────────────
+  // ── Assigning from the Stewards tab ──────────────────────────────────────
 
-  /** The entries of the nest's ⋯ menu, or [] when the nest offers no menu. */
-  async nestMenuItems(nestId) {
+  /**
+   * Whether this person can start Assign Steward on the nest: the Stewards tab
+   * is there and offers "Assign your first steward" or "Add Steward". (Before
+   * #582 this was the "Assign Steward" entry of the nest's ⋯ menu.)
+   */
+  async canAssign(nestId) {
     await this.gotoNest(nestId);
-    if (!(await this.nestMenu.isVisible())) return [];
-    await this.openNestMenu();
-    const items = (await this.page.getByRole('menuitem').allInnerTexts()).map((t) => t.trim());
-    await this.page.keyboard.press('Escape');
-    return items;
+    if ((await this.stewardsTab.count()) === 0) return false;
+    await this.stewardsTab.click();
+    await this.ownerRow.or(this.emptyRoster).first().waitFor({ state: 'visible' });
+    return this.assignButton.first().isVisible();
   }
 
-  /** Open the nest's ⋯ menu. The header can re-render as the nest loads, so retry. */
-  async openNestMenu() {
-    for (let i = 0; i < 4; i++) {
-      await this.nestMenu.click();
-      if (await this.page.getByRole('menuitem').first().isVisible().catch(() => false)) return;
-      await this.page.waitForTimeout(800);
-    }
-  }
-
-  /** Open "Assign Context Steward" from the nest's ⋯ menu. */
-  async openAssignFromMenu(nestId) {
-    this._log('Opening ⋯ → Assign Steward');
+  /** Open "Assign Context Steward" from the nest's Stewards tab. */
+  async openAssign(nestId) {
+    this._log('Opening Stewards → Assign Steward');
     await this.gotoNest(nestId);
-    await this.nestMenu.waitFor({ state: 'visible' });
-    await this.openNestMenu();
-    await this.assignStewardItem.click();
+    await this.stewardsTab.click();
+    await this.assignButton.first().waitFor({ state: 'visible' });
+    await this.assignButton.first().click();
     await this.assignDialog.waitFor({ state: 'visible' });
   }
 
@@ -212,7 +220,7 @@ class StewardsPage {
   /** Open the Assign dialog, fill it and submit it. */
   async assign(nestId, spec) {
     this._log(`Assigning ${spec.email} as ${spec.role ?? 'Reviewer'} (${spec.scope ?? 'Entire Nest'})`);
-    await this.openAssignFromMenu(nestId);
+    await this.openAssign(nestId);
     await this.fillAssign(spec);
     await this.submitAssign();
   }

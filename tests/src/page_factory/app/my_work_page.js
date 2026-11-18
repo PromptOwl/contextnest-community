@@ -8,10 +8,12 @@
  * deletion/archive requests waiting on the caller (with a batch bar over the
  * reviews), "Waiting on others" for what the caller handed off, and the pager.
  * It opens two dialogs of its own — ReviewActions (approve / reject one
- * review) and the governance ReasonDialog (requests and batch decisions).
+ * review) and the governance ReasonDialog (requests and batch decisions) —
+ * and, since #582, the review pane beside the list when a review row's title
+ * is clicked (ui/src/components/MyWorkReviewPane.tsx).
  *
- * The page carries three `data-testid`s (the batch bar's); everything else is
- * addressed by role, accessible name or visible text, as in nests_page.js.
+ * The batch bar and the review pane are addressed by `data-testid`; everything
+ * else by role, accessible name or visible text, as in nests_page.js.
  */
 
 import logger from '../../helper/logger/logger.js';
@@ -30,8 +32,9 @@ class MyWorkPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail entry (ui/src/components/DocumentSidebar.tsx) ────────────────
-    this.railItem = page.getByTestId('document-sidebar-dashboard-my-work');
+    // ── Nav entry: the header ribbon (ui/src/components/HeaderRibbon.tsx),
+    //    from tablet width up; on a phone it is a row in the sidebar drawer ──
+    this.railItem = page.getByTestId('header-ribbon-my-work');
     // The count pill only renders when something is pending.
     this.railBadge = this.railItem.locator('span.rounded-full');
 
@@ -86,6 +89,10 @@ class MyWorkPage {
     this.prevPage = this.root.getByRole('button', { name: 'Prev' });
     this.nextPage = this.root.getByRole('button', { name: 'Next' });
     this.pageIndicator = this.root.getByText(/^Page \d+ of \d+$/);
+
+    // ── Review pane: a review row opens it beside the list (#582) ──────────
+    //    (ui/src/components/MyWorkReviewPane.tsx → governance/ReviewPane.tsx)
+    this.reviewPane = page.getByTestId('my-work-review-pane').getByTestId('review-pane');
 
     // ── ReviewActions dialog (ui/src/components/governance/ReviewActions.tsx)
     this.approveDialog = page.getByRole('dialog', { name: 'Approve Document' });
@@ -143,9 +150,9 @@ class MyWorkPage {
     return work;
   }
 
-  /** Open My Work from the rail, the way a person gets there. */
+  /** Open My Work from the header ribbon, the way a person gets there. */
   async openFromRail() {
-    logger.info('Opening My Work from the rail');
+    logger.info('Opening My Work from the header ribbon');
     await this.railItem.click();
     await this.pageTitle.filter({ hasText: 'My Work' }).waitFor({ state: 'visible' });
   }

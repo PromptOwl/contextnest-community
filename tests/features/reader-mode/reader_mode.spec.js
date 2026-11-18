@@ -1,8 +1,9 @@
 /**
  * Reader Mode Test Suite — CN-READER-001 … CN-READER-006
  *
- * Page under test: Public Docs Reader Mode — the "Reader: On / Off" button in
- * the nest header and its "Public Docs Reader Mode" dialog
+ * Page under test: Public Docs Reader Mode — the "Reader mode: On / Off"
+ * button on the nest's Settings tab (in the nest header as "Reader: On / Off"
+ * until #582) and its "Public Docs Reader Mode" dialog
  * (ui/src/components/NestView.tsx), and what readers get with it on: the
  * in-app docs reader for a signed-in person who can only read the nest
  * (ui/src/components/ReaderView.tsx) and the docs site at /d/<key>/ for a
@@ -111,17 +112,18 @@ test.describe('Reader mode', () => {
 
   // ── Turning it on ──────────────────────────────────────────────────────────
 
-  test('CN-READER-001: Verify that the owner can turn Reader mode on in the “Public Docs Reader Mode” dialog, the header changes to “Reader: On”, and it stays after a reload', async ({ primary_user, commonFunction }) => {
+  test('CN-READER-001: Verify that the owner can turn Reader mode on in the “Public Docs Reader Mode” dialog, the Settings tab button changes to “Reader mode: On”, and it stays after a reload', async ({ primary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'reader-on');
 
+    // #582 moved the button from the nest header to the Settings tab.
     await owner.page.gotoAsManager(owner.nest.id);
-    await expect(owner.page.readerButton).toContainText('Reader: Off');
+    await expect(owner.page.readerButton).toContainText('Reader mode: Off');
     await owner.page.setReaderMode(true);
-    await expect(owner.page.readerButton).toContainText('Reader: On');
+    await expect(owner.page.readerButton).toContainText('Reader mode: On');
     await expect.poll(async () => (await owner.api.readerMode(owner.nest.id)).enabled, WRITE).toBe(true);
 
     await owner.page.gotoAsManager(owner.nest.id);
-    await expect(owner.page.readerButton).toContainText('Reader: On');
+    await expect(owner.page.readerButton).toContainText('Reader mode: On');
   });
 
   // ── What readers get ───────────────────────────────────────────────────────
@@ -201,9 +203,9 @@ test.describe('Reader mode', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'reader-roles');
     await owner.page.gotoAsManager(owner.nest.id);
 
-    // Viewer
+    // Viewer (the Reader button is on the Settings tab since #582)
     const member = await share(owner, secondary_user, 'read');
-    await member.page.gotoNest(owner.nest.id);
+    await member.page.gotoSettings(owner.nest.id);
     await expect(member.page.backToNests).toBeVisible(WRITE);
     await expect(member.page.readerButton).toHaveCount(0);
     expect((await member.api.tryReaderMode(owner.nest.id, true)).status).toBe(403);
@@ -212,6 +214,7 @@ test.describe('Reader mode', () => {
     await changeRole(owner, 'write');
     await member.page.gotoNest(owner.nest.id);
     await expect(member.page.newDocumentButton).toBeVisible(WRITE);
+    await member.page.gotoSettings(owner.nest.id);
     await expect(member.page.readerButton).toHaveCount(0);
     expect((await member.api.tryReaderMode(owner.nest.id, true)).status).toBe(403);
     expect((await owner.api.readerMode(owner.nest.id)).enabled).toBe(false);

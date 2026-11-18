@@ -26,6 +26,25 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `user-menu-trigger` | User menu button (post-login landmark) |
 | `user-menu-account` | User menu → Account item |
 | `user-menu-logout` | User menu → Logout item |
+| `user-menu-settings` | User menu → Settings (opens Workspace settings) |
+| `user-menu-help` | User menu → Help (How it works) |
+| `header-ribbon` | Header "Workspace" ribbon — `ui/src/components/HeaderRibbon.tsx` (md and up) |
+| `header-ribbon-my-work` / `header-ribbon-my-drafts` | Ribbon items; carry the count pill and `aria-current` |
+| `document-sidebar-all-nests` | Rail: All nests (Home) — `ui/src/components/DocumentSidebar.tsx` |
+| `document-sidebar-dashboard-<id>` | Rail "work" rows: Stream, Control room; My Work / My Drafts only below md (phone drawer) |
+| `settings-nav` / `settings-nav-<id>` | Workspace settings left nav and its items — `ui/src/components/SettingsShell.tsx` |
+
+## Nest page — Settings tab (`ui/src/components/NestView.tsx`)
+
+Since #582 the nest's own settings and actions live on its Settings tab (the header's ⋯ menu is gone).
+
+| Test ID | Element |
+|---|---|
+| `nest-settings-tab` | The nest's Settings tab trigger (not for grant-only readers) |
+| `nest-settings-governance` | Review and access → "Edit review settings" (opens Nest settings; owner/nest admin, not on an archived nest) |
+| `nest-settings-reader` | Review and access → "Reader mode: On / Off" (opens the Public Docs Reader Mode dialog) |
+| `nest-settings-delete` | Danger zone → "Delete nest" (owner) or "Request deletion" (editor/admin) |
+| `nest-stat-review` | Documents tab → "Your Review Queue" card: pending documents this person may decide |
 
 ## Nests Dashboard (`ui/src/pages/app/nests/page.tsx`)
 
@@ -49,7 +68,21 @@ Add a row here whenever you add a `data-testid` to the UI.
 
 | Test ID | Element |
 |---|---|
-| `document-sidebar-dashboard-my-work` | Rail entry for My Work (carries the pending-count badge) — `ui/src/components/DocumentSidebar.tsx` |
+| `header-ribbon-my-work` | Header ribbon entry for My Work (carries the pending-count badge) — `ui/src/components/HeaderRibbon.tsx` |
+| `my-work-filter-chips` | The filter row: nest filter and chips |
+| `my-work-nest-filter` | Filter by nest (only when the inbox spans two nests or more) |
+| `my-work-chip-<key>` | Chips: `all`, `reviews`, `tasks`, `notifications`, `requests`, `waiting`; each but All carries its count |
+| `my-work-mention` | One @mention row in the Mentions block — `ui/src/components/my-work/MentionRows.tsx` |
+| `my-work-review-pane` | Column holding the review pane a review row opens — `ui/src/components/MyWorkReviewPane.tsx` |
+| `review-pane` | The review pane itself — `ui/src/components/governance/ReviewPane.tsx` |
+| `review-pane-note` | The author's note on the change |
+| `review-pane-tab-<key>` | Pane tabs: `changes`, `preview` (Full draft), `published` (Live version) |
+| `review-pane-actions` | Decision bar (also shows decision errors) |
+| `review-pane-readonly` | Why the pane is read-only (own submission, outside steward scope) |
+| `review-pane-approve` | Approve & publish (Post comment & approve with a comment open) |
+| `review-pane-request-changes` | Request changes, then Send back to author |
+| `review-pane-reject` | Reject, then Reject with reason |
+| `review-pane-note-input` | Comment / reason textarea |
 | `work-select-all` | Batch bar: select every review checkbox |
 | `work-bulk-approve` | Batch bar: Approve N |
 | `work-bulk-reject` | Batch bar: Reject N |
@@ -111,3 +144,15 @@ Many more test IDs already exist across `ui/src/` (governance dialogs, document 
 | `graph-pull-hud` | Step readout over the canvas during a replay |
 | `graph-pull-edges` | The edges the replayed pull walked |
 | `graph-node` | A document node on the canvas (`data-node-id`, `data-pulled="true"` when lit) |
+
+## New document and editor actions (`ui/src/components/TopBarTools.tsx`, `NestView.tsx`, `DocumentEditor.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `top-bar-new-document` | Top bar → New document; opens the "New document" dialog on the open nest (hidden where the nest is read-only) |
+| `new-document-blank` | "New document" dialog → Blank document (opens the editor); Files / Upload PDF / Whole vault sit under it |
+| `nest-upload-pdf` | "New document" dialog → Upload PDF |
+| `document-editor-actions-top` | The editor's edit actions (Publish / Save draft / Submit for review) portalled into the top bar, md and up |
+| `document-editor-actions-bottom` | The same actions in a sticky bar at the foot of the editor, below md |
+| `document-editor-save` | The save button (reads Publish or Save draft) |
+| `document-editor-submit` | Submit for review (document bar in view mode, edit actions in edit mode) |

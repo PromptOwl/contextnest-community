@@ -799,16 +799,20 @@ test.describe('My Work', () => {
       await expect(page).toHaveURL(new RegExp(`/nest/${nest.id}`));
       expect(openDocument(page)).toBeNull();
 
-      // A flagged document and a review both open the document itself.
+      // A flagged document opens the document itself.
       await myWork.goto();
       await myWork.rowOpen(flagged.doc.title).click();
       await expect.poll(() => openDocument(page)).toBe(flagged.doc.id);
       expect(new URL(page.url()).pathname).toContain(`/nest/${nest.id}`);
 
+      // Since #582 a review row opens the change in the review pane beside the
+      // list (ui/src/components/MyWorkReviewPane.tsx), not the editor: My
+      // Work is where reviews are decided.
       await myWork.goto();
       await myWork.rowOpen(review.title).click();
-      await expect.poll(() => openDocument(page)).toBe(review.id);
-      expect(new URL(page.url()).pathname).toContain(`/nest/${nest.id}`);
+      await expect(myWork.reviewPane).toContainText(review.title);
+      await expect(myWork.reviewPane).toContainText(review.id);
+      expect(openDocument(page)).toBeNull();
     });
   });
 

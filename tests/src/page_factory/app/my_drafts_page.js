@@ -31,8 +31,9 @@ class MyDraftsPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // ── Rail entry (ui/src/components/DocumentSidebar.tsx) ────────────────
-    this.railItem = page.getByTestId('document-sidebar-dashboard-my-drafts');
+    // ── Nav entry: the header ribbon (ui/src/components/HeaderRibbon.tsx),
+    //    from tablet width up; on a phone it is a row in the sidebar drawer ──
+    this.railItem = page.getByTestId('header-ribbon-my-drafts');
     // The count pill only renders when there is at least one draft.
     this.railBadge = this.railItem.locator('span.rounded-full');
 
@@ -107,9 +108,9 @@ class MyDraftsPage {
     if (settle) await this.loader.waitFor({ state: 'hidden' });
   }
 
-  /** Open My Drafts from the rail, the way a person gets there. */
+  /** Open My Drafts from the header ribbon, the way a person gets there. */
   async openFromRail() {
-    logger.info('Opening My Drafts from the rail');
+    logger.info('Opening My Drafts from the header ribbon');
     await this.railItem.click();
     await this.pageTitle.filter({ hasText: 'My Drafts' }).waitFor({ state: 'visible' });
   }

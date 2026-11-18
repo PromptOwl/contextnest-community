@@ -319,6 +319,12 @@ test.describe('Nest documents', () => {
 
     await page.gotoDocuments(nest.id);
     await expect(page.row(ALPHA)).toBeVisible(WRITE);
+    // Since #582 the nest controls sit in an action row above the tabs, which
+    // pushes the Guides header below a 720px viewport. dragTo would then scroll
+    // it into view in the middle of the HTML5 drag, and the drop is lost (no
+    // move request is sent). Bring both ends on screen before the drag starts.
+    await page.folderHeader('guides').scrollIntoViewIfNeeded();
+    await expect(page.row(ALPHA)).toBeInViewport();
     await page.row(ALPHA).dragTo(page.folderHeader('guides'));
 
     const moved = page.toast('Moved to Guides');

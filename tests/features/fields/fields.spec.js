@@ -518,8 +518,12 @@ test.describe('Fields', () => {
 
     await page.gotoDocument(nest.id, task.id);
     await page.startEditing();
-    // The ticket tag has no Remove button.
-    await expect(page.page.getByText('ticket:qa-1', { exact: true }).first()).toBeVisible();
+    // Rewritten: the editor no longer lists the ticket tag among the removable
+    // tag chips at all (ui/src/lib/ticket.ts visibleTags); the number shows
+    // as the read-only ticket chip in Task details. So: the chip shows QA-1,
+    // and there is no `ticket:qa-1` tag to remove.
+    await expect(page.ticketChips.first()).toHaveText('QA-1');
+    await expect(page.page.getByText('ticket:qa-1', { exact: true })).toHaveCount(0);
     await expect(page.removeTagButton('ticket:qa-1')).toHaveCount(0);
 
     // Adding another ticket tag doesn't change the number. (Known issue: the
@@ -563,14 +567,16 @@ test.describe('Fields', () => {
     }
 
     // An empty prefix with numbering on: the card says to pick one, and
-    // nothing is saved. (Known issue: Save stays clickable — not asserted.)
+    // nothing is saved. Rewritten: the old known issue (Save stayed
+    // clickable, and the server's refusal showed as the error) is fixed —
+    // the card now catches it before Save (TaskNumberingCard draftProblem)
+    // and keeps Save disabled, so there is no refusal to read back.
     await test.step('an empty prefix with numbering on', async () => {
       await page.goto(nest.id);
       await expect(page.numberingSwitch).toHaveAttribute('aria-checked', 'true');
       await page.prefixInput.fill('');
       await expect(page.prefixWarning).toBeVisible();
-      await page.saveNumbering();
-      await expect(page.numberingError).toBeVisible(WRITE);
+      await expect(page.numberingSave).toBeDisabled();
       expect(JSON.stringify(await api.taskRules(nest.id))).toBe(before);
     });
   });

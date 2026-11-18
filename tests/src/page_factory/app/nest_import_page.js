@@ -1,9 +1,12 @@
 /**
  * Nest Import Page Object Model
  *
- * Page under test: the nest page's Import button and its "Import into this
- * nest" dialog (ui/src/components/NestView.tsx). The dialog offers Files,
- * Upload PDF and Whole vault; each opens a file chooser, and every chosen
+ * Page under test: the top bar's New document button
+ * (ui/src/components/TopBarTools.tsx) and the "New document" dialog it opens
+ * on the nest page (ui/src/components/NestView.tsx). Since #582 that one
+ * dialog replaces the nest header's Import button and its "Import into this
+ * nest" dialog: under Blank document it offers Files, Upload PDF and Whole
+ * vault. Each import option opens a file chooser, and every chosen
  * file becomes its own document in the nest. A single imported document
  * opens straight away; several leave you on the nest. The outcome is a
  * toast: "Added N items", "(skipped N unsupported)", or the reason a file was
@@ -26,11 +29,13 @@ class NestImportPage {
     this.main = page.locator('main');
 
     // ── Nest page ─────────────────────────────────────────────────────────
+    // Top bar → New document: the one entry to importing (was the header's Import).
     this.importButton = page.getByTestId('top-bar-new-document');
     this.contents = page.getByRole('navigation', { name: 'Contents' });
 
-    // ── "Import into this nest" dialog ────────────────────────────────────
-    this.dialog = page.getByRole('dialog', { name: 'Import into this nest' });
+    // ── "New document" dialog (was "Import into this nest") ──────────────
+    this.dialog = page.getByRole('dialog', { name: 'New document' });
+    this.blankOption = this.dialog.getByTestId('new-document-blank');
     this.filesOption = this.dialog.getByRole('button', { name: /^Files/ });
     this.uploadPdfOption = this.dialog.getByRole('button', { name: /^Upload PDF/ });
     this.wholeVaultOption = this.dialog.getByRole('button', { name: /^Whole vault/ });
@@ -62,15 +67,15 @@ class NestImportPage {
 
   // ── Import ──────────────────────────────────────────────────────────────
 
-  /** Import → the "Import into this nest" dialog. */
+  /** Top bar → New document → the "New document" dialog with its import options. */
   async openImport() {
-    this._log('Opening the Import dialog');
+    this._log('Opening the New document dialog');
     await this.importButton.click();
     await this.dialog.waitFor({ state: 'visible' });
   }
 
   /**
-   * Import → `option` (one of the dialog's option buttons) → choose `files`
+   * New document → `option` (one of the dialog's option buttons) → choose `files`
    * in the file chooser it opens: file payloads, or a folder path for Whole
    * vault.
    */
@@ -80,19 +85,19 @@ class NestImportPage {
     await chooser.setFiles(files);
   }
 
-  /** Import → Files → `files`. */
+  /** New document → Files → `files`. */
   async importFiles(files) {
     this._log(`Importing ${files.map((f) => f.name).join(', ')}`);
     await this.importVia(this.filesOption, files);
   }
 
-  /** Import → Upload PDF → `files`. */
+  /** New document → Upload PDF → `files`. */
   async uploadPdf(files) {
     this._log(`Uploading ${files.map((f) => f.name).join(', ')}`);
     await this.importVia(this.uploadPdfOption, files);
   }
 
-  /** Import → Whole vault → the folder at `dir`. */
+  /** New document → Whole vault → the folder at `dir`. */
   async importVault(dir) {
     this._log(`Importing the vault at ${dir}`);
     await this.importVia(this.wholeVaultOption, dir);

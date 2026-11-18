@@ -1,9 +1,12 @@
 /**
  * Nest Import Test Suite — CN-NIMP-001 … CN-NIMP-014
  *
- * Page under test: the nest page's Import button and its "Import into this
- * nest" dialog (ui/src/components/NestView.tsx) — Files, Upload PDF and
- * Whole vault, each through the browser's file chooser. Every chosen file
+ * Page under test: the top bar's New document button
+ * (ui/src/components/TopBarTools.tsx) and the "New document" dialog it opens
+ * on the nest page (ui/src/components/NestView.tsx) — Files, Upload PDF and
+ * Whole vault, each through the browser's file chooser. Since #582 this dialog
+ * replaces the nest header's Import button and its "Import into this nest"
+ * dialog; it also offers Blank document (the New Document suite covers that). Every chosen file
  * becomes its own document in the nest (Markdown frontmatter supplies the
  * title and tags: ui/src/lib/import-frontmatter.ts). What the import created
  * is read back through the REST API. The dashboard's Import Folder, which
@@ -79,7 +82,10 @@ test.describe('Nest import', () => {
   /** The document the page has open (`?doc=`), or null on the nest itself. */
   const openDocument = (page) => new URL(page.page.url()).searchParams.get('doc');
 
-  test('CN-NIMP-001: Verify that Import opens the "Import into this nest" dialog with Files, Upload PDF and Whole vault', async ({
+  // Rewritten for #582: the header's Import button and its "Import into this
+  // nest" dialog are gone. The top bar's New document opens one "New document"
+  // dialog that offers a blank page above the same three import options.
+  test('CN-NIMP-001: Verify that New document opens the "New document" dialog with Blank document, Files, Upload PDF and Whole vault', async ({
     primary_user,
     commonFunction,
   }) => {
@@ -87,7 +93,8 @@ test.describe('Nest import', () => {
 
     await page.openImport();
 
-    await expect(page.dialog).toContainText('Pick what to bring in.');
+    await expect(page.dialog).toContainText('Start with a blank page, or bring something in.');
+    await expect(page.blankOption).toContainText('Blank document');
     await expect(page.filesOption).toContainText('.md, .html, .pdf, .pptx, .docx or .xlsx — one or many');
     await expect(page.uploadPdfOption).toContainText('Becomes a PDF document with its text extracted');
     await expect(page.wholeVaultOption).toContainText('A folder, keeping its structure');
@@ -166,6 +173,9 @@ test.describe('Nest import', () => {
 
     await expect(page.toast(addedToast(2))).toBeVisible(WRITE);
     expect(await api.documentIds(nest.id)).toEqual(['nodes/guides/setup', 'nodes/team-notes/kickoff']);
+    // The top bar's New document switches the nest to its Documents tab (#582);
+    // the folder tree this checks is the Overview's Contents.
+    await page.tab('Overview').click();
     await expect(page.folderRow('Guides')).toBeVisible(WRITE);
     await expect(page.folderRow('Team Notes')).toBeVisible(WRITE);
   });
@@ -286,7 +296,10 @@ test.describe('Nest import', () => {
 
     await expect(page.toast(addedToast(1))).toBeVisible(WRITE);
     await expect.poll(() => openDocument(page), WRITE).toBe('nodes/gov-note');
-    await expect(page.main.getByRole('button', { name: 'Submit for review', exact: true })).toBeVisible(WRITE);
+    // Submit for review: in the document's own bar in view mode, in the top bar in edit mode (#582).
+    await expect(
+      page.page.getByTestId('document-editor-submit').filter({ visible: true }).first()
+    ).toHaveAccessibleName('Submit for review', WRITE);
 
     const doc = await api.findDocument(nest.id, 'nodes/gov-note');
     expect(doc?.status).toBe('draft');

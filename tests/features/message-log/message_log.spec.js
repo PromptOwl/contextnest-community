@@ -2,7 +2,7 @@
  * Message Log Test Suite — CN-MSG-001 … CN-MSG-029
  *
  * Page under test: ui/src/components/MessageLogPage.tsx (route `/messages`,
- * rail → Admin → Message log), over REST GET /admin/messages,
+ * Workspace settings → Message log), over REST GET /admin/messages,
  * /admin/messages/:id and /admin/messages/views.
  *
  * Conventions
@@ -111,7 +111,8 @@ test.describe('Message log', () => {
       if (!(await secondary_user.teammatesApi.isServerAdmin())) {
         const { page, nestsPage, messageLogPage: ml } = secondary_user;
         await nestsPage.goto();
-        await expect(page.getByTestId('document-sidebar-dashboard-teams')).toBeVisible();
+        await secondary_user.sidebarRailPage.openSettings();
+        await expect(page.getByTestId('settings-nav-teams')).toBeVisible();
         await expect(ml.railItem).toHaveCount(0);
         await page.goto('/messages');
         await expect(ml.pageTitle).toContainText('Nests');
@@ -128,6 +129,7 @@ test.describe('Message log', () => {
     await asAdmin(primary_user);
     const { nestsPage, messageLogPage: ml } = primary_user;
     await nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(ml.railItem).toBeVisible();
     const { query, body } = await ml.gotoAndRead(() => ml.railItem.click());
     await expect(ml.railItem).toHaveAttribute('aria-current', 'page');
@@ -707,6 +709,7 @@ test.describe('Message log', () => {
     const settings = await api.request('GET', '/admin/settings');
     expect(settings.status).toBe(200);
     await primary_user.nestsPage.goto();
+    await primary_user.sidebarRailPage.openSettings();
     await expect(primary_user.messageLogPage.railItem).toHaveCount(0);
   });
 
@@ -803,7 +806,7 @@ test.describe('Message log', () => {
     await ss.openTab('Basic');
     const card = ss.card('Message log');
     await expect(card).toContainText(
-      'Every email, Slack and Teams post, webhook, inbox notification and agent comment this server sends is logged for superadmins (Admin → Message log). Passwords, sign-in links, keys and webhook URLs are redacted before storage.'
+      'Every email, Slack and Teams post, webhook, inbox notification and agent comment this server sends is logged for superadmins (Workspace settings → Message log). Passwords, sign-in links, keys and webhook URLs are redacted before storage.'
     );
     await expect(card).toContainText('How long to keep messages. 0 keeps them forever. Who viewed the log is kept for a year regardless.');
     await expect(card).toContainText('Off keeps only who, when, where and whether it was delivered — no second copy of what people wrote.');

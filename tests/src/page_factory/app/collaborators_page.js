@@ -8,6 +8,11 @@
  * a team, change a person's role, remove them, and — with stewardship on —
  * the Reviewer switch.
  *
+ * Since #582 the nest's New document button is in the app top bar
+ * (ui/src/components/TopBarTools.tsx), the open document's Publish / Save
+ * draft sit there too, and Delete is on the nest's Settings tab (Danger zone)
+ * instead of the removed ⋯ menu.
+ *
  * Owners and admins get the whole tab. An editor gets only the add form, with
  * everyone's role shown read-only. A viewer doesn't get the tab at all.
  */
@@ -28,15 +33,19 @@ class CollaboratorsPage {
     this.backToNests = page.getByTitle('Back to nests');
     this.collaboratorsTab = page.getByRole('tab', { name: 'Collaborators', exact: true });
     this.overviewTab = page.getByRole('tab', { name: 'Overview', exact: true });
-    this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
+    this.newDocumentButton = page.getByTestId('top-bar-new-document');
     this.requestEditAccess = this.main.getByRole('button', { name: 'Request edit access' });
     this.editableBody = this.main.locator('[contenteditable="true"]');
     // Document page (ui/src/components/DocumentEditor.tsx)
     this.editButton = page.getByTestId('document-editor-start-edit');
     this.documentMenu = page.getByTestId('document-editor-more');
+    // Save / Publish / Save draft — one button, its label by outcome.
     this.saveButton = page.getByTestId('document-editor-save');
+    this.publishButton = page.getByRole('button', { name: 'Publish', exact: true });
     this.noAccess = page.getByText(/doesn.t exist or you don.t have access/);
-    this.moreActions = page.getByTitle('More actions').first();
+    // Settings tab → Danger zone: "Delete nest" (owner) or "Request deletion".
+    this.settingsTab = page.getByTestId('nest-settings-tab');
+    this.settingsDelete = page.getByTestId('nest-settings-delete');
     this.requestRemovalDialog = page.getByRole('dialog').filter({ hasText: 'Request removal of' });
     this.deleteNestDialog = page.getByRole('dialog', { name: 'Delete nest' });
 
@@ -129,6 +138,14 @@ class CollaboratorsPage {
   /** Open the nest page. */
   async gotoNest(nestId) {
     await this._open(`/nest/${nestId}`);
+  }
+
+  /** Open the nest's Settings tab and start Delete from its Danger zone. */
+  async startDeleteFromSettings(nestId) {
+    this._log('Settings → Danger zone → Delete');
+    await this.gotoNest(nestId);
+    await this.settingsTab.click();
+    await this.settingsDelete.click();
   }
 
   /** Open one document of a nest. */

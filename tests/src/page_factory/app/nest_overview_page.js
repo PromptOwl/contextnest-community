@@ -40,7 +40,8 @@ class NestOverviewPage {
     this.documentRows = this.main.locator('[data-testid^="document-row-"]');
     this.allDocumentsCrumb = this.main.getByRole('button', { name: 'All documents', exact: true });
     this.editorTitle = this.main.getByPlaceholder('Untitled');
-    this.importDialog = page.getByRole('dialog', { name: 'Import into this nest' });
+    // "Import files" opens the same "New document" dialog as the top bar (#582).
+    this.importDialog = page.getByRole('dialog', { name: 'New document' });
     this.addWithAiDialog = page.getByRole('dialog', { name: /^Generate & add context to / });
     this.dialogConfirm = page.getByTestId('reason-dialog-confirm');
 

@@ -11,6 +11,8 @@
  * Only this app's own `/nest/<id>…` paths are followed, so nothing stored or
  * crafted can turn this into an open redirect. Same shape as oauth-return.ts.
  */
+import { clearParkedDeepLink } from "./deep-link-return";
+
 const KEY = "cnst_nest_return";
 /** A parked link older than this is a visit the person walked away from. */
 const MAX_AGE_MS = 10 * 60_000;
@@ -48,5 +50,28 @@ export function takeNestReturn(store: Store = sessionStorage, now = Date.now()):
     return safeNestReturn(value);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Take the parked link to open after sign-in, and drop the other copy.
+ *
+ * A signed-out visitor's link is parked twice: here (PO-1189) and by
+ * deep-link-return.ts (PO-1391), which opens it after a sign-in that left the
+ * page. Whichever opens it first must use both up. Otherwise the copy left
+ * behind sends the person back to that document on their next visit Home.
+ */
+export function takeSignInReturn(store: Store = sessionStorage, now = Date.now()): string | null {
+  const link = takeNestReturn(store, now);
+  if (link) clearParkedDeepLink(store);
+  return link;
+}
+
+/** Drop this module's parked link: the PO-1391 copy was opened instead. */
+export function forgetSignInReturn(store: Store = sessionStorage): void {
+  try {
+    store.removeItem(KEY);
+  } catch {
+    /* nothing to clear */
   }
 }

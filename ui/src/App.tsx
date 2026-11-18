@@ -39,7 +39,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
-import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
+import { forgetSignInReturn, parkNestReturn, takeSignInReturn } from "./lib/sign-in-return";
 import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
@@ -681,6 +681,13 @@ export default function App() {
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
           tab: nestTabFromParam(params.get("tab")),
+          // ?tab=review&review=<node> → the change to open. The Review tab is
+          // My Work since #582, and the redirect below reads this, so a shared
+          // or bookmarked review link opened in a fresh page keeps its change
+          // (PO-1404).
+          ...(nestTabFromParam(params.get("tab")) === "review" && params.get("review")
+            ? { initialReview: params.get("review")! }
+            : {}),
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
@@ -707,7 +714,8 @@ export default function App() {
   }, [deepLinkProbe.status, loading, authenticated, authMode]);
   useEffect(() => {
     if (loading || !authenticated) return;
-    const back = takeNestReturn();
+    // Also uses up the PO-1391 copy of the same link (see takeSignInReturn).
+    const back = takeSignInReturn();
     if (!back || nestIdFromLocation()) return;
     window.history.replaceState(null, "", back);
     setDeepLinkProbe({ status: "loading" });
@@ -898,6 +906,7 @@ export default function App() {
     // Once: a second sign-in in this tab (another account) starts from Home.
     entryLinkRef.current = null;
     clearParkedDeepLink();
+    forgetSignInReturn();
     window.history.replaceState(window.history.state, "", open);
     setDeepLinkProbe({ status: "loading" });
     // deepLinkProbe.status is read, not watched: only a sign-in triggers this.

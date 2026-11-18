@@ -2,8 +2,11 @@
  * Reader Mode Page Object Model
  *
  * Page under test: Public Docs Reader Mode. The owner, a nest admin or a server
- * admin turns it on from the "Reader: On / Off" button in the nest header,
- * which opens the "Public Docs Reader Mode" dialog (ui/src/components/NestView.tsx).
+ * admin turns it on from the "Reader mode: On / Off" button
+ * (`nest-settings-reader`) under "Review and access" on the nest's Settings
+ * tab, which opens the "Public Docs Reader Mode" dialog
+ * (ui/src/components/NestView.tsx). Before #582 the button sat in the nest
+ * header as "Reader: On / Off".
  *
  * With it on, a reader gets a docs view instead of the nest page:
  *   - a signed-in person who can only read the nest gets the in-app reader
@@ -31,11 +34,13 @@ class ReaderModePage {
     this.backToNests = page.getByTitle('Back to nests');
     this.overviewTab = page.getByRole('tab', { name: 'Overview', exact: true });
     this.documentsTab = page.getByRole('tab', { name: 'Documents', exact: true });
-    this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
+    // New document lives in the app top bar since #582 (ui/src/components/TopBarTools.tsx).
+    this.newDocumentButton = page.getByTestId('top-bar-new-document');
+    this.settingsTab = page.getByTestId('nest-settings-tab');
     this.noAccess = page.getByText(/doesn.t exist or you don.t have access/);
 
-    // ── Reader button and dialog ───────────────────────────────────────────
-    this.readerButton = page.getByTitle(/^Public Docs Reader Mode/);
+    // ── Reader button (Settings tab) and dialog ────────────────────────────
+    this.readerButton = page.getByTestId('nest-settings-reader');
     this.readerDialog = page.getByRole('dialog', { name: 'Public Docs Reader Mode' });
     this.readerSwitch = page.getByRole('switch', { name: 'Toggle Public Docs Reader Mode' });
     this.readerDone = this.readerDialog.getByRole('button', { name: 'Done', exact: true });
@@ -71,13 +76,24 @@ class ReaderModePage {
     await this._open(`/nest/${nestId}`);
   }
 
-  /** Open the nest page and wait for the Reader button (owner, nest admin or server admin). */
-  async gotoAsManager(nestId) {
+  /** Open the nest page on its Settings tab, where the Reader button is. */
+  async gotoSettings(nestId) {
+    this._log(`Opening the Settings tab of nest ${nestId}`);
     await this.gotoNest(nestId);
+    await this.settingsTab.click();
+    await this.page.getByRole('heading', { name: 'Fields and task rules' }).waitFor({ state: 'visible' });
+  }
+
+  /**
+   * Open the nest's Settings tab and wait for the Reader button (owner, nest
+   * admin or server admin).
+   */
+  async gotoAsManager(nestId) {
+    await this.gotoSettings(nestId);
     await this.readerButton.waitFor({ state: 'visible', timeout: 60_000 });
   }
 
-  /** The Reader button's label: "Reader: On" or "Reader: Off". */
+  /** The Reader button's label: "Reader mode: On" or "Reader mode: Off". */
   async readerLabel() {
     return (await this.readerButton.innerText()).trim();
   }
