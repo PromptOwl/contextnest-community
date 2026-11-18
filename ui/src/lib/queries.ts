@@ -544,6 +544,8 @@ export function setChannelsOn(on: boolean): void {
   if (on === channelsOn) return;
   channelsOn = on;
   void activeClient?.invalidateQueries({ queryKey: keys.nests });
+  // Cross-nest search sits outside keys.nests.
+  void activeClient?.invalidateQueries({ queryKey: keys.search });
 }
 
 /**

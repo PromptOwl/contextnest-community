@@ -1788,6 +1788,8 @@ export async function getNest(nestId: string) {
       id: string;
       name: string;
       visibility: NestVisibility;
+      // Owner id; ANON_USER_ID marks an open-mode nest. Absent for a headless reader.
+      user_id?: string;
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;

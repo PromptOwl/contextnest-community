@@ -1069,11 +1069,9 @@ export default function App() {
         }
         void qc
           .fetchQuery(reads.nest(nestId))
-          .then((meta) => meta.permission === "owner")
-          .catch(() => false)
-          .then((isOwner) =>
-            setView({ page: "channels", nestId, nestName, isOwner, isAnonOwned: false, channel, thread }),
-          );
+          .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
+          .catch(() => ({ isOwner: false, isAnonOwned: false }))
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
       },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
