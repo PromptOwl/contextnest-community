@@ -4,6 +4,7 @@ import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres } from "../surfaces/schema-ddl-s3.js";
+import { onboardingDdl } from "../onboarding/schema-ddl.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 import { runTotals } from "../workflow/run-totals.js";
 
@@ -115,8 +116,18 @@ export const HISTORICAL_MIGRATIONS = [
   "081_surfaces_cards",
   "082_surfaces_seeds",
   "083_view_summaries",
+  "084_onboarding",
+  "085_comment_mentions",
   "086_control_room_ledger",
   "090_control_room_run_totals",
+  "093_access_pull_trace",
+  "094_annotation_comment_client",
+  "095_agent_webhooks",
+  "096_stream_marks",
+  "097_channel_message_actions",
+  "098_team_chat_c2",
+  "099_agent_profiles",
+  "100_hired_agents",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -489,6 +500,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created by an earlier build of 037 still gets them on upgrade.
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
+    -- PO-1365: the per-link switch for the "Make your own nest" strip (on by default).
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS show_invite INTEGER NOT NULL DEFAULT 1;
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
@@ -732,6 +745,15 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS version INTEGER;
     ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS agent TEXT;
     CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id);
+    -- migration 093 (po-1252): the rows of one call read back as one pull —
+    -- pull_id groups them, seq is payload order, hop/via the traversal, bytes
+    -- the size handed over.
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS pull_id TEXT;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS seq INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS hop INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS via TEXT;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS bytes INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_node_access_pull ON node_access_events(nest_id, pull_id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -1187,6 +1209,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    -- caller attribution on comment-thread messages (migration 094, PO-1179)
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS client_json TEXT;
     ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
@@ -1398,6 +1422,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       )
   `);
 
+  // review_requests.resolution_kind: "changes" or "reject" (NULL reads as changes).
+  await db.exec("ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS resolution_kind TEXT");
+
+  // Migration 084 parity: first-run onboarding (PO-1185).
+  await db.exec(onboardingDdl(NOW));
+  await db.exec("ALTER TABLE surface_oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT");
+
   // Migration 086 parity: agent control room ledger columns (see migrations.ts).
   await db.exec(`
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
@@ -1435,6 +1466,151 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       after = page[page.length - 1].id;
     }
   }
+  // Migration 085 parity: the @mention index My Work reads (PO-1180). Placed
+  // after 086/090 on purpose (085 was reserved); it depends on neither.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS comment_mentions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      mentioned_user_id TEXT,
+      handle TEXT NOT NULL,
+      author TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_user ON comment_mentions(mentioned_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_handle ON comment_mentions(handle) WHERE mentioned_user_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_comment_mentions_thread ON comment_mentions(thread_id);
+  `);
+
+  // Migration 095 parity: agent wake-up targets + delivery ledger (PO-1181).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_webhooks (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      url_enc TEXT NOT NULL,
+      secret_enc TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, handle)
+    );
+    CREATE TABLE IF NOT EXISTS agent_wake_deliveries (
+      idempotency_key TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      comment_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_handle ON agent_wake_deliveries(nest_id, handle, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_wake_thread ON agent_wake_deliveries(thread_id, handle, created_at);
+  `);
+
+  // Migration 087 parity: per-person stream marks (channel read state, mention
+  // marked done) and the final state of a wake-up delivery (PO-1190/PO-1189).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stream_marks (
+      user_id TEXT NOT NULL,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      at TEXT NOT NULL,
+      PRIMARY KEY (user_id, nest_id, kind, ref, subject)
+    );
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS finished_at TEXT;
+    ALTER TABLE agent_wake_deliveries ADD COLUMN IF NOT EXISTS event TEXT NOT NULL DEFAULT 'agent.mention';
+  `);
+
+  // Migration 097 parity: channel message actions (PO-1196) — message pins and
+  // saved messages on node_pins, tombstone columns on a message, and the two
+  // new tables (reactions, edit history). See migrations.ts.
+  await db.exec(`
+    ALTER TABLE node_pins ADD COLUMN IF NOT EXISTS message_id TEXT;
+    ALTER TABLE node_pins ADD COLUMN IF NOT EXISTS thread_id TEXT;
+    DROP INDEX IF EXISTS idx_node_pins_editorial;
+    DROP INDEX IF EXISTS idx_node_pins_personal;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+      ON node_pins(nest_id, node_id) WHERE scope = 'nest' AND message_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+      ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user' AND message_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_editorial
+      ON node_pins(nest_id, message_id) WHERE scope = 'nest' AND message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_message_personal
+      ON node_pins(nest_id, message_id, user_id) WHERE scope = 'user' AND message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_node_pins_message ON node_pins(message_id) WHERE message_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      author TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (comment_id, emoji, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_reactions_user ON message_reactions(user_id, created_at);
+    CREATE TABLE IF NOT EXISTS message_edits (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      comment_id TEXT NOT NULL REFERENCES annotation_comments(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      edited_by TEXT NOT NULL,
+      client_json TEXT,
+      replaced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_edits_comment ON message_edits(comment_id, replaced_at);
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS edited_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+  `);
+
+  // Migration 098 parity: the team chat harness, slice C2 (PO-1197) — the
+  // nest's own chat switch. Conversations, members, the private marker and
+  // notification levels live in existing tables (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS chat_enabled INTEGER NOT NULL DEFAULT 1;
+  `);
+
+  // Migration 099 parity: agent profiles — an admin-set description per
+  // agent handle (team chat C7, PO-1198).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_profiles (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL,
+      description TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, handle)
+    );
+  `);
+
+  await db.run("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')", []);
+
+  // Migration 100 parity: hired agents (PO-1201) — the row a hired Hootie
+  // has, and a key agent's marker (ref = its api_keys id); every other hire
+  // is derived from the existing tables.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hired_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      handle TEXT NOT NULL,
+      hired_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      ref TEXT,
+      PRIMARY KEY (nest_id, kind, handle)
+    );
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

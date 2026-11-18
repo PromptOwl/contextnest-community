@@ -17,7 +17,7 @@ describe("dashboard page registry", () => {
     const ids = appPages.map((p) => p.id);
     expect(ids).toEqual([
       "nests", "my-work", "my-drafts", "stream",
-      "teams", "api-keys", "connected-apps",
+      "teams", "api-keys", "connected-apps", "control-room",
       "teammates", "settings", "trace", "messages",
       "guide", "account",
     ]);
@@ -55,14 +55,29 @@ describe("dashboard rail groups", () => {
     expect(appRail({ isAdmin: true }).top.map((p) => p.id)).toEqual(["nests"]);
   });
 
-  it("shows the Admin group to admins only and keeps Account out of the rail", () => {
+  it("keeps Work, Workspace settings and Help as the only groups, and Account out of the rail", () => {
     const admin = appRail({ isAdmin: true });
     const member = appRail({ isAdmin: false });
-    expect(admin.groups.map((g) => g.id)).toEqual(["work", "workspace", "admin", "help"]);
-    expect(member.groups.map((g) => g.id)).toEqual(["work", "workspace", "help"]);
+    expect(admin.groups.map((g) => g.id)).toEqual(["work", "settings", "help"]);
+    expect(member.groups.map((g) => g.id)).toEqual(["work", "settings", "help"]);
     const listed = [...admin.top, ...admin.groups.flatMap((g) => g.pages)].map((p) => p.id);
     expect(listed).not.toContain("account");
     expect(appPageIdFromPath("/account")).toBe("account");
+  });
+
+  it("lists the admin pages inside Workspace settings for admins only", () => {
+    const settingsIds = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.find((g) => g.id === "settings")!.pages.map((p) => p.id);
+    expect(settingsIds({ isAdmin: true, isSuperadmin: true })).toEqual([
+      "teams",
+      "api-keys",
+      "teammates",
+      "settings",
+      "trace",
+      "messages",
+    ]);
+    // A member still gets their own pages (teams, API keys), never the admin ones.
+    expect(settingsIds({ isAdmin: false })).toEqual(["teams", "api-keys"]);
   });
 
   it("resolves a gated page to the default for a member, itself for an admin", () => {
@@ -90,6 +105,22 @@ describe("dashboard rail groups", () => {
     expect(visibleAppPage("connected-apps", { isAdmin: false, mcpOauthEnabled: true }).id).toBe(
       "connected-apps",
     );
+  });
+
+  it("lists the Control room to server admins and nest owners/admins, only while Surfaces is on (po-1186)", () => {
+    const ids = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.flatMap((g) => g.pages).map((p) => p.id);
+    expect(ids({ isAdmin: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: true, administersNest: false })).not.toContain("control-room");
+    // Decision 3 (2026-11-09): a nest owner/admin sees their nests in the Control room.
+    expect(ids({ isAdmin: false, surfacesEnabled: true, administersNest: true })).toContain("control-room");
+    expect(ids({ isAdmin: false, surfacesEnabled: false, administersNest: true })).not.toContain("control-room");
+    expect(ids({ isAdmin: true, surfacesEnabled: true })).toContain("control-room");
+    expect(appRail({ isAdmin: true, surfacesEnabled: true }).groups.find((g) => g.id === "work")?.pages.map((p) => p.id)).toContain("control-room");
+    expect(visibleAppPage("control-room", { isAdmin: true }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("control-room", { isAdmin: true, surfacesEnabled: true }).id).toBe("control-room");
+    expect(appPageIdFromPath("/control-room")).toBe("control-room");
   });
 
   it("lists the Stream only while the experimental doc stream is on", () => {

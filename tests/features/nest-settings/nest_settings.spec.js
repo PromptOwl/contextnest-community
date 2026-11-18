@@ -260,6 +260,8 @@ test.describe('Nest Settings', () => {
   });
 
   test('CN-NSET-008: Verify that turning stewardship off needs a confirmation tick, and removes stewards and pending reviews but keeps collaborators and review history', async ({ primary_user, secondary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'nset-off', { governed: true });
     const { page, api, nest } = owner;
     const reviewer = await share(owner, secondary_user, 'read');
@@ -299,6 +301,8 @@ test.describe('Nest Settings', () => {
   // ── Auto-publish owner & admin edits, prime documents ──────────────────────
 
   test("CN-NSET-009: Verify that with auto-publish on, the owner's and Admin's edits publish straight away, Editors still need review, and turning it off unpublishes nothing", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'nset-autopub');
     const { page, api, nest } = owner;
     // Published before stewardship is switched on.

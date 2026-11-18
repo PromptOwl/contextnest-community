@@ -147,9 +147,11 @@ test.describe('Activity trace', () => {
   });
 
   test('CN-TRACE-003: filtering by kind (All/API/MCP) works', async ({ primary_user }) => {
+    // Four reads of the whole server trace: on a loaded shared server, more than the default 2 minutes.
+    test.slow();
     await asAdmin(primary_user);
     const { activityTracePage: tr } = primary_user;
-    const all = await tr.gotoAndRead();
+    await tr.gotoAndRead();
     await expect(tr.kindSelect).toHaveText('All');
 
     const mcp = await tr.chooseKind('MCP');
@@ -167,11 +169,12 @@ test.describe('Activity trace', () => {
     await expectRowsMatch(tr, apiRead.body.events);
     for (let i = 0; i < apiRead.body.events.length; i++) await expect(tr.kindBadge(i)).toHaveText('api');
 
-    // API + MCP make up All (the trace only grows between reads).
-    expect(apiRead.body.total + mcp.body.total).toBeGreaterThanOrEqual(all.body.total);
-
     const back = await tr.chooseKind('All');
     expect(back.query.kind, 'All sends no kind filter').toBeNull();
+    // API and MCP together make up All: every row is one or the other. Totals
+    // read at different moments can't be compared — the trace grows with every
+    // request, and old rows roll off the retention window between reads.
+    expect(back.body.events.every((e) => e.kind === 'api' || e.kind === 'mcp'), 'every row is API or MCP').toBe(true);
     await expectRowsMatch(tr, back.body.events);
   });
 

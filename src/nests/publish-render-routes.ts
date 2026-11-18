@@ -2,9 +2,12 @@
  * Public render surface for published documents — mounted at top-level `/p`,
  * OUTSIDE the /nests auth chain, so it is reachable with no account.
  *
- *   GET  /p/:slug           → the document, a gate form, or (when comments are
- *                             on) the reader shell that frames the document
+ *   GET  /p/:slug           → the document, a gate form, or the reader shell
+ *                             that frames the document (comments on, or an
+ *                             author's HTML page that carries our strip)
  *   GET  /p/:slug/view      → the document itself, always sandboxed
+ *   GET  /p/:slug/og-image  → the link-preview image: the nest's logo, or the
+ *                             default card
  *   POST /p/:slug/gate      → submit a code, or request a magic link by email
  *   GET  /p/:slug/verify    → consume a magic link → set session cookie → open
  *   POST /p/:slug/comments  → file a comment (JSON), from the shell's modal
@@ -16,6 +19,7 @@
  * flags. So anything interactive (the gate form, the comment modal) is ordinary
  * HTML on a separate page or on the shell that frames the document.
  */
+import { isChannelNode } from "../channels/channel-service.js";
 import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
 import { normalizeEmail } from "../shared/email.js";
@@ -42,8 +46,27 @@ import {
   publishBrandCssVars,
   type NestBranding,
 } from "../shared/branding.js";
+import {
+  CTA_CSS,
+  GATE_CTA_CSS,
+  ctaStrip,
+  excerptOf,
+  gateCta,
+  previewMetaTags,
+  PUBLISH_ROBOTS,
+  withHeadTags,
+} from "./publish-share.js";
+import { DEFAULT_OG_IMAGE_PNG_BASE64 } from "./publish-og-image.js";
 
 export const publishRenderRoutes = new Hono();
+
+// No /p response is for search engines (PUBLISH_ROBOTS): the header covers
+// what a meta tag cannot reach, the sandboxed /view document, the preview
+// image and the "no longer available" page.
+publishRenderRoutes.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("X-Robots-Tag", PUBLISH_ROBOTS);
+});
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
@@ -55,6 +78,9 @@ const GATE_LIMIT = { max: 10, windowMs: 10 * 60_000 };
 // Comments are an anonymous write path, so they get their own (tighter) clamp.
 const COMMENT_LIMIT = { max: 5, windowMs: 10 * 60_000 };
 const COMMENT_MAX_CHARS = 4000;
+
+// The link-preview image, per link per IP.
+const OG_IMAGE_LIMIT = { max: 120, windowMs: 10 * 60_000 };
 
 // Markdown nodes are rendered server-side so a published document reads like the
 // editor rather than as raw source. `html: false` keeps inline HTML escaped —
@@ -278,6 +304,72 @@ function brandFooter(brand: PublishBrand | null): string {
   return parts.length ? `<footer class="cn-foot">${parts.join("")}</footer>` : "";
 }
 
+// ── Sharing (PO-1365): link previews and the "Make your own nest" strip ─────
+//
+// Both belong to GET /p/:slug only — the page a person lands on and a crawler
+// reads. /p/:slug/view serves the document's own bytes and gets neither, so
+// the document under the sandbox is exactly what it was.
+
+/** What GET /p/:slug adds around a document. `null` everywhere else. */
+interface PageChrome {
+  /** This deployment's own origin (PUBLIC_BASE_URL, or the request's). */
+  baseUrl: string;
+}
+
+function chromeOf(c: any): PageChrome {
+  return { baseUrl: requestBaseUrl(c.req.url) };
+}
+
+/** Whether this link's page carries the "Make your own nest" strip. Two
+ *  switches, either of which turns it off: the link's own `show_invite` (set
+ *  by whoever manages the link — a proposal sent to a client, say), and the
+ *  nest's white-label setting (hide_powered_by, a server-admin setting — the
+ *  same rule as the "Secured by" line), which a link cannot override. With it
+ *  off, the page is served as it was before the strip existed: nothing added
+ *  to the body, and an author's HTML page not framed. */
+function showsCta(row: PublishRow, brand: PublishBrand | null): boolean {
+  return row.show_invite !== 0 && !brand?.b.hide_powered_by;
+}
+
+/** The link-preview tags for a publish. `doc` is what may be said about the
+ *  document: nothing on a gated page, which gets the gate's own title. */
+function previewTags(
+  row: PublishRow,
+  brand: PublishBrand | null,
+  chrome: PageChrome,
+  doc: { title: string; description?: string } | null,
+): string {
+  const url = `${chrome.baseUrl}/p/${row.slug}`;
+  const logoUrl = brand?.b.logo_url ?? "";
+  // An external https logo is already a public image: point at it. A logo
+  // uploaded to the nest is not reachable by a crawler (the nest may be
+  // private), so /og-image serves it — the same bytes the page inlines.
+  const external = /^https:\/\//i.test(logoUrl) && !nestAssetName(logoUrl, row.nest_id);
+  const hasLogo = external || !!brand?.logo;
+  return previewMetaTags({
+    title: doc?.title ?? "Protected document",
+    description: doc?.description,
+    url,
+    siteName: brand?.b.site_title || "ContextNest",
+    image: external ? logoUrl : `${url}/og-image`,
+    card: hasLogo ? "summary" : "summary_large_image",
+  });
+}
+
+/** The excerpt a preview may quote: from the approved body only, and not at
+ *  all when the owner asked us to discourage copying. */
+function previewExcerpt(row: PublishRow, body: string, isHtml: boolean, title: string): string | undefined {
+  if (row.no_download === 1) return undefined;
+  return excerptOf(body, isHtml, title) || undefined;
+}
+
+/** The strip on a page that scrolls as one document (markdown, a view): fixed
+ *  to the bottom of the window, with room left under the last line. */
+const PAGE_CTA_CSS = `${CTA_CSS}
+  .cn-cta{position:fixed;left:0;right:0;bottom:0;z-index:10}
+  body{padding-bottom:56px}
+`;
+
 /**
  * The no-download overlay: everything a browser lets us refuse.
  *
@@ -343,16 +435,6 @@ function overlayMarkup(row: PublishRow, viewerEmail: string | null): string {
   return parts.join("");
 }
 
-/** The document's title, for the reader shell's tab label. Falls back to the
- *  node id rather than failing the page over a label. */
-async function publishedTitle(row: PublishRow): Promise<string> {
-  try {
-    return (await readArtifact(row.nest_id, row.node_id)).title || row.node_id;
-  } catch {
-    return row.node_id;
-  }
-}
-
 /** Splice the overlays in just before `</body>` so they sit above the document,
  *  falling back to an append for bodies that ship no closing tag. */
 function withOverlays(html: string, extra: string): string {
@@ -371,7 +453,12 @@ function withOverlays(html: string, extra: string): string {
  *  content, from the surface whose whole premise is governance. It also gives us
  *  readArtifact's fence normalization for free (a fenced artifact body would
  *  otherwise render as literal text). */
-async function renderPublished(c: any, row: PublishRow, viewerEmail: string | null) {
+async function renderPublished(
+  c: any,
+  row: PublishRow,
+  viewerEmail: string | null,
+  chrome: PageChrome | null = null,
+) {
   let artifact: Awaited<ReturnType<typeof readArtifact>>;
   try {
     artifact = await readArtifact(row.nest_id, row.node_id);
@@ -387,10 +474,34 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   const type = String(artifact.type ?? "document");
   const body = artifact.html ?? "";
   const isHtml = isHtmlBody(type, body);
+  // Branding wraps the markdown shell, and decides the strip and the preview
+  // on /p/:slug. An HTML/artifact body served at /view needs none of it.
+  // So: load it for every /p/:slug render (chrome), and for a markdown body
+  // wherever it is served; skip it for an HTML body or a view at /view.
+  const brand = chrome || (!isHtml && type !== "view") ? await loadBrand(row) : null;
+  const cta = !!chrome && showsCta(row, brand);
+
+  // An author's HTML page is a complete document we never edit, so our strip
+  // cannot go in it. /p/:slug frames it instead — the reader shell the comment
+  // controls already use — and /view (the frame) logs the view and applies the
+  // sandbox, so nothing is logged twice.
+  if (chrome && cta && isHtml && type !== "view") {
+    const title = artifact.title || row.node_id;
+    const tags = previewTags(row, brand, chrome, {
+      title,
+      description: previewExcerpt(row, body, true, title),
+    });
+    return shellResponse(c, row, title, viewerEmail, brand, {
+      comments: false,
+      head: tags,
+      cta: ctaStrip(chrome.baseUrl),
+    });
+  }
 
   await publish.logView(row.id, viewerEmail);
   applyArtifactSandboxHeaders(c);
   const overlays = overlayMarkup(row, viewerEmail);
+  const strip = chrome && cta ? `<style>${PAGE_CTA_CSS}</style>${ctaStrip(chrome.baseUrl)}` : "";
   // A §1.12 view: its own approved intro and one neutral placeholder per
   // block. /p has no nest-user viewer, so it never resolves another node,
   // never frames an artifact and never carries nest-data.
@@ -406,13 +517,31 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
     } catch {
       blockCount = 0;
     }
-    const page = renderPublicViewPage({ title, intro: body, blockCount });
-    return c.body(withOverlays(page, overlays), 200, {
+    let page = renderPublicViewPage({ title, intro: body, blockCount });
+    if (chrome) {
+      page = withHeadTags(
+        page,
+        previewTags(row, brand, chrome, { title, description: previewExcerpt(row, body, false, title) }),
+      );
+    }
+    return c.body(withOverlays(page, strip + overlays), 200, {
       "Content-Type": "text/html; charset=utf-8",
     });
   }
   if (isHtml) {
-    return c.body(withOverlays(body, overlays), 200, {
+    // Only reached on /p/:slug when the strip is off — the link's show_invite
+    // or a white-label nest — so there is nothing to frame it for:
+    // the author's page as before, plus the preview tags in its own <head>.
+    const page = chrome
+      ? withHeadTags(
+          body,
+          previewTags(row, brand, chrome, {
+            title: artifact.title || row.node_id,
+            description: previewExcerpt(row, body, true, artifact.title || row.node_id),
+          }),
+        )
+      : body;
+    return c.body(withOverlays(page, overlays), 200, {
       "Content-Type": "text/html; charset=utf-8",
     });
   }
@@ -422,12 +551,17 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   const heading = /^\s*#\s/.test(body) ? "" : `<h1>${title}</h1>`;
   // Branding wraps only this markdown shell. An HTML/artifact body above is
   // the author's own complete page and is served untouched.
-  const brand = await loadBrand(row);
+  const preview = chrome
+    ? previewTags(row, brand, chrome, {
+        title: artifact.title || row.node_id,
+        description: previewExcerpt(row, body, false, artifact.title || row.node_id),
+      })
+    : "";
   const docTitle = brand?.b.site_title ? `${title} · ${esc(brand.b.site_title)}` : title;
   const brandCss = brand
     ? `body{background:var(--cn-page-bg,#fff)}h1,h2,h3,h4,a{color:var(--cn-accent-text,#142a80)}`
     : "";
-  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${docTitle}</title><style>${PROSE_CSS}</style>${brandHead(brand, brandCss)}</head><body>${brandBar(brand)}${brandHero(brand)}<main>${heading}${markdown.render(body)}</main>${brandFooter(brand)}${overlays}</body></html>`;
+  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${docTitle}</title>${preview}<style>${PROSE_CSS}</style>${brandHead(brand, brandCss)}</head><body>${brandBar(brand)}${brandHero(brand)}<main>${heading}${markdown.render(body)}</main>${brandFooter(brand)}${strip}${overlays}</body></html>`;
   return c.body(shell, 200, { "Content-Type": "text/html; charset=utf-8" });
 }
 
@@ -483,7 +617,17 @@ function gateBrandFoot(brand: PublishBrand | null): string {
 }
 
 /** The gate form (ordinary HTML — NOT sandboxed, so its form can post). */
-function gatePage(row: PublishRow, message?: string, brand: PublishBrand | null = null): string {
+function gatePage(
+  row: PublishRow,
+  message?: string,
+  brand: PublishBrand | null = null,
+  chrome: PageChrome | null = null,
+): string {
+  // The preview of a gated link says what the gate says, and no more: no
+  // document title, no excerpt. The strip is an invitation to the product and
+  // carries nothing about the document either.
+  const preview = chrome ? previewTags(row, brand, chrome, null) : "";
+  const invite = chrome && showsCta(row, brand) ? gateCta(chrome.baseUrl) : "";
   const wantsCode = row.access_mode === "code";
   // A passcode is typed from a slide, a QR, or someone reading it aloud, so
   // let the reader check what they typed before submitting.
@@ -500,7 +644,7 @@ function gatePage(row: PublishRow, message?: string, brand: PublishBrand | null 
   const err = message
     ? `<p class="err">${esc(message)}</p>`
     : "";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Protected document</title><style>
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Protected document</title>${preview}<style>
     :root{--indigo:#142a80;--owl:#FF6500}
     body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
     .card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:380px;width:calc(100% - 32px)}
@@ -516,10 +660,10 @@ function gatePage(row: PublishRow, message?: string, brand: PublishBrand | null 
     button.eye svg{width:18px;height:18px;display:block}
     .err{color:#be123c;font-weight:600}
     .brand{font-size:12px;color:#a8a29e;margin:18px 0 0;text-align:center}
-  </style>${brandHead(brand, GATE_BRAND_CSS)}</head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/gate">
+  ${invite ? GATE_CTA_CSS : ""}</style>${brandHead(brand, GATE_BRAND_CSS)}</head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/gate">
     ${gateBrandTop(brand)}<h1>Protected document</h1><p>${esc(note)}</p>${err}${field}
     <button type="submit">${cta}</button>
-    ${brand?.b.hide_powered_by ? "" : `<p class="brand">Secured by PromptOwl · ContextNest</p>`}${gateBrandFoot(brand)}
+    ${brand?.b.hide_powered_by ? "" : `<p class="brand">Secured by PromptOwl · ContextNest</p>`}${invite}${gateBrandFoot(brand)}
   </form>${wantsCode ? GATE_EYE_SCRIPT : ""}</body></html>`;
 }
 
@@ -546,9 +690,10 @@ function sentPage(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Check your email</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:380px;text-align:center}h1{font-size:20px;color:#142a80;margin:0 0 6px}p{color:#78716c;margin:0;font-size:14px}</style></head><body><div class="card"><h1>Check your email</h1><p>If your address has access, a one-time link to open this document is on its way.</p></div></body></html>`;
 }
 
-/** The reader shell for a commentable publish: the document itself in a
- *  full-bleed same-origin iframe, with our comment button and modal alongside
- *  it.
+/** The reader shell: the document itself in a full-bleed same-origin iframe,
+ *  with our own controls alongside it — the comment button and modal when the
+ *  link allows comments, the "Make your own nest" strip under an author's HTML
+ *  page (PO-1365), or both.
  *
  *  The controls cannot live inside the document. That document is served under
  *  the artifact sandbox (opaque origin, `form-action 'none'`, `connect-src
@@ -561,12 +706,26 @@ function readerShell(
   title: string,
   viewerEmail: string | null,
   brand: PublishBrand | null = null,
+  // Defaults are the shell as it was before the strip existed: comments on,
+  // nothing added.
+  opts: { comments?: boolean; head?: string; cta?: string } = {},
 ): string {
+  const comments = opts.comments !== false;
+  const cta = opts.cta ?? "";
+  // With the strip, the frame gives up one row at the bottom instead of being
+  // covered by it, and the comment button moves up clear of it.
+  const ctaCss = cta
+    ? `${CTA_CSS}
+    body{display:flex;flex-direction:column}
+    #cn-frame{flex:1 1 auto;height:auto;min-height:0}
+    .cn-cta{flex:none}
+    #cn-open{bottom:66px}`
+    : "";
   // A gated viewer is already identified; anyone else names themselves.
   const emailField = viewerEmail
     ? `<p class="who">Commenting as <strong>${esc(viewerEmail)}</strong></p>`
     : `<label>Your email<input id="cn-email" type="email" autocomplete="email" required></label>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title><style>
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title>${opts.head ?? ""}<style>
     html,body{margin:0;height:100%}
     #cn-frame{border:0;width:100%;height:100%;display:block}
     #cn-open{position:fixed;right:18px;bottom:18px;z-index:20;background:#142a80;color:#fff;font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:11px 16px;border:0;border-radius:9999px;cursor:pointer;box-shadow:0 4px 14px rgba(20,42,128,.32)}
@@ -584,9 +743,16 @@ function readerShell(
     button.ghost{background:#f5f5f4;color:#44403c}
     button[disabled]{opacity:.6;cursor:default}
     .msg{font-weight:600;margin:0 0 14px;font-size:14px}
-    .msg.err{color:#be123c}.msg.ok{color:#15803d}
+    .msg.err{color:#be123c}.msg.ok{color:#15803d}${ctaCss}
   </style>${brand ? `<style>${publishBrandCssVars(brand.b)}#cn-open,#cn-send{background:var(--cn-accent,#142a80);color:var(--cn-accent-fg,#fff)}.card h2{color:var(--cn-accent-text,#142a80)}</style>` : ""}</head><body>
-    <iframe id="cn-frame" src="/p/${esc(row.slug)}/view" title="${esc(title)}"></iframe>
+    <iframe id="cn-frame" src="/p/${esc(row.slug)}/view" title="${esc(title)}"></iframe>${cta}${
+      comments ? commentControls(row, emailField) : ""
+    }${row.no_download === 1 ? SHELL_PRINT_BLANK : ""}</body></html>`;
+}
+
+/** The comment button, its modal and the script that posts it. */
+function commentControls(row: PublishRow, emailField: string): string {
+  return `
     <button id="cn-open" type="button">Leave a comment</button>
     <div id="cn-back"><div class="card" role="dialog" aria-modal="true" aria-label="Leave a comment">
       <h2>Leave a comment</h2>
@@ -637,7 +803,7 @@ function readerShell(
         .then(function () { send.disabled = false; });
     });
   })();
-  </script>${row.no_download === 1 ? SHELL_PRINT_BLANK : ""}</body></html>`;
+  </script>`;
 }
 
 /** CSP for the reader shell. The shell is our own markup, so it is NOT
@@ -651,6 +817,36 @@ const SHELL_CSP = [
   "frame-src 'self'",
   "connect-src 'self'",
 ].join("; ");
+
+/** Answer with the reader shell under its own CSP. */
+function shellResponse(
+  c: any,
+  row: PublishRow,
+  title: string,
+  viewerEmail: string | null,
+  brand: PublishBrand | null,
+  opts: { comments?: boolean; head?: string; cta?: string },
+) {
+  c.header("Content-Security-Policy", SHELL_CSP);
+  c.header("Referrer-Policy", "no-referrer");
+  return c.html(readerShell(row, title, viewerEmail, brand, opts));
+}
+
+/** What GET /p/:slug says about a document it frames for comments: its title,
+ *  and an excerpt of the approved body when there is one. */
+async function framedPreview(row: PublishRow): Promise<{ title: string; description?: string }> {
+  try {
+    const artifact = await readArtifact(row.nest_id, row.node_id);
+    const title = artifact.title || row.node_id;
+    // No approved version: /view will show nothing, so quote nothing.
+    if (artifact.version == null) return { title };
+    const body = artifact.html ?? "";
+    const isHtml = isHtmlBody(String(artifact.type ?? "document"), body);
+    return { title, description: previewExcerpt(row, body, isHtml, title) };
+  } catch {
+    return { title: row.node_id };
+  }
+}
 
 /** Who is allowed to see this publish right now, and who they are. `null` means
  *  the gate has not been passed. A public viewer is allowed but anonymous. */
@@ -672,16 +868,48 @@ publishRenderRoutes.get("/:slug", async (c) => {
   const row = await publish.getPublishBySlug(slug);
   if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
 
+  const chrome = chromeOf(c);
   const viewer = await resolveViewer(c, row);
-  if (!viewer) return c.html(gatePage(row, undefined, await loadBrand(row)));
-  if (row.comments_enabled !== 1) return renderPublished(c, row, viewer.email);
+  if (!viewer) return c.html(gatePage(row, undefined, await loadBrand(row), chrome));
+  if (row.comments_enabled !== 1) return renderPublished(c, row, viewer.email, chrome);
 
   // The shell frames /view, which is what logs the view and applies the
   // sandbox — nothing is logged twice.
-  const title = await publishedTitle(row);
-  c.header("Content-Security-Policy", SHELL_CSP);
-  c.header("Referrer-Policy", "no-referrer");
-  return c.html(readerShell(row, title, viewer.email, await loadBrand(row)));
+  const brand = await loadBrand(row);
+  const doc = await framedPreview(row);
+  return shellResponse(c, row, doc.title, viewer.email, brand, {
+    comments: true,
+    head: previewTags(row, brand, chrome, doc),
+    cta: showsCta(row, brand) ? ctaStrip(chrome.baseUrl) : "",
+  });
+});
+
+// GET /p/:slug/og-image — the image a link preview shows: the nest's logo when
+// it uploaded one, otherwise the default card. Open on a gated link too: the
+// gate page already shows the same logo, and neither says anything about the
+// document.
+publishRenderRoutes.get("/:slug/og-image", async (c) => {
+  const slug = c.req.param("slug");
+  // Look the link up first, as the gate does: a bucket is keyed by slug, so a
+  // made-up slug must not get one (that would let anyone grow the limiter's
+  // table with random slugs). A live link is then clamped like the other
+  // anonymous /p routes, since each call reads the nest's branding. Generous,
+  // because unfurlers share addresses.
+  const row = await publish.getPublishBySlug(slug);
+  if (!publish.isLivePublish(row)) return c.body(null, 404);
+  if (!tryConsume(`publish-og:${slug}:${clientIp(c)}`, OG_IMAGE_LIMIT)) return c.body(null, 429);
+  // `logo` is a data: URI built by inlineAsset, which only ever produces the
+  // raster types in IMAGE_MIME (png, jpeg, gif, webp) — never SVG or HTML.
+  const logo = (await loadBrand(row))?.logo ?? null;
+  const m = logo ? /^data:([^;]+);base64,(.*)$/s.exec(logo) : null;
+  const bytes = Buffer.from(m ? m[2] : DEFAULT_OG_IMAGE_PNG_BASE64, "base64");
+  return c.body(bytes, 200, {
+    "Content-Type": m ? m[1] : "image/png",
+    "Cache-Control": "public, max-age=3600",
+    "X-Content-Type-Options": "nosniff",
+    // An image, and nothing else: were it ever opened as a document, it runs nothing.
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+  });
 });
 
 // GET /p/:slug/view — the document itself, always sandboxed. Framed by the
@@ -727,6 +955,12 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
     return c.json({ error: "Write a comment first." }, 400);
   }
 
+  // A channel (PO-1179) takes posts from its nest's writers only; a docs-site
+  // visitor is never one, whatever the publication allows.
+  if (await isChannelNode(row.nest_id, row.node_id)) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
   // Lands as an unanchored annotation thread — the same list the document's
   // Comments panel already renders, so a steward actually sees it. A public
   // reader can never open-write onto the document itself.
@@ -744,7 +978,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
   // oracle against a human-chosen passcode, and the email branch is an open
   // relay that mails any address an attacker supplies.
   if (!tryConsume(`publish-gate:${slug}:${clientIp(c)}`, GATE_LIMIT)) {
-    return c.html(gatePage(row, "Too many attempts. Try again in a few minutes.", await loadBrand(row)), 429);
+    return c.html(gatePage(row, "Too many attempts. Try again in a few minutes.", await loadBrand(row), chromeOf(c)), 429);
   }
 
   // A public link has no gate to pass, so a POST here is either a stale form or
@@ -755,7 +989,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
 
   if (row.access_mode === "code") {
     if (!(await publish.verifyCode(row, String(form.code ?? "")))) {
-      return c.html(gatePage(row, "That code is not correct.", await loadBrand(row)), 401);
+      return c.html(gatePage(row, "That code is not correct.", await loadBrand(row), chromeOf(c)), 401);
     }
     setSessionCookie(c, slug, await publish.createSession(row.id, null));
     return c.redirect(`/p/${slug}`);
@@ -763,7 +997,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
 
   const email = normalizeEmail(String(form.email ?? ""));
   if (!isEmailish(email)) {
-    return c.html(gatePage(row, "Enter a valid email address.", await loadBrand(row)), 400);
+    return c.html(gatePage(row, "Enter a valid email address.", await loadBrand(row), chromeOf(c)), 400);
   }
   // Invite mode: only allow-listed addresses get a link. Both branches must
   // cost the same, not just look the same — returning early on a rejection
@@ -792,7 +1026,7 @@ publishRenderRoutes.get("/:slug/verify", async (c) => {
   if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
   const email = await publish.consumeMagicLink(row.id, c.req.query("token") ?? "");
   if (!email) {
-    return c.html(gatePage(row, "That link is invalid or has expired. Request a new one.", await loadBrand(row)), 401);
+    return c.html(gatePage(row, "That link is invalid or has expired. Request a new one.", await loadBrand(row), chromeOf(c)), 401);
   }
   setSessionCookie(c, slug, await publish.createSession(row.id, email));
   return c.redirect(`/p/${slug}`);

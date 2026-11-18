@@ -19,7 +19,14 @@ import {
   resolveNodeGrant,
   listUserGrants,
   grantCoversNode,
+  grantRoleForNode,
 } from "./grants-service.js";
+import { isChannelDoc, isChannelId, isChannelNode } from "../channels/channel-node.js";
+import { ownsWorkingDraft, ownWorkingDraftIds } from "./org-contribution.js";
+// Team chat harness C2 (PO-1197): conversations and private channels have a
+// member list that decides reads; everything else keeps its usual rule.
+import { containerReadVerdict, hiddenContainersFor, isConversationId } from "../chat/containers.js";
+import { resolveNestAccess } from "../shared/access.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -33,6 +40,18 @@ export async function resolveCallerEmail(userId: string | undefined): Promise<st
     [userId],
   ) as { email: string } | undefined;
   return row?.email || "admin@localhost";
+}
+
+/**
+ * `canReadNode` for a caller known only by id: resolves the email so route
+ * handlers don't each repeat the lookup. Use this at the route layer.
+ */
+export async function callerCanReadNode(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+): Promise<boolean> {
+  return canReadNode(nestId, nodeId, userId, await resolveCallerEmail(userId));
 }
 
 /**
@@ -56,6 +75,18 @@ export async function canReadNode(
   // A pending Surfaces draft (a new document proposed from chat) is unseen
   // until approved, except by the nest's editors and admins (AC-JDG-13).
   if (isHidden(await hiddenSurfaceDrafts(nestId), nodeId) && !(await seesSurfaceDrafts(nestId, userId))) return false;
+  // A conversation or a private channel (C2): the node's own shares decide
+  // (its grants rows are its member list) — and the reader must still be a
+  // person added to the nest, so a share outliving their access opens
+  // nothing. A conversation's node is then readable on the share alone.
+  const chat = await containerReadVerdict(nestId, nodeId, userId);
+  if (chat === false) return false;
+  if (chat === true) {
+    const access = await resolveNestAccess(nestId, userId);
+    const member = access.permission !== "none" && !access.isPublicReader;
+    if (!member) return false;
+    if (isConversationId(nodeId)) return true;
+  }
   return canReadNodeBase(nestId, nodeId, userId, userEmail);
 }
 
@@ -66,11 +97,61 @@ async function canReadNodeBase(
   userEmail: string,
 ): Promise<boolean> {
   if (await isPublicReader(nestId, userId)) {
-    return (await getApprovedVersion(nestId, nodeId)) !== null;
+    // Channels are members-only (PO-1190, AC-AX-10): someone who reaches the
+    // nest only because it is public (or org-visible) never reads a channel
+    // node, its purpose or its threads, approved or not.
+    if (await isChannelNode(nestId, nodeId)) return false;
+    return (
+      (await getApprovedVersion(nestId, nodeId)) !== null ||
+      (await seesOwnDraft(nestId, nodeId, userId, userEmail))
+    );
   }
   if (!(await isStewardshipEnabled(nestId))) return true;
   if ((await canUserAccess(nestId, nodeId, userEmail)).allowed) return true;
   return (await resolveNodeGrant(nestId, userId, nodeId)) !== null;
+}
+
+/**
+ * A visibility-only reader (org/public nest, no collaborator row) normally sees
+ * approved content only. Two exceptions, both for ONE document: they hold a
+ * `write` share grant on it (they can edit it, so they must see the draft they
+ * edit), or its working copy is their own unreviewed draft (an org
+ * contributor's proposal). Neither widens what they see elsewhere in the nest.
+ */
+export async function seesOwnDraft(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+): Promise<boolean> {
+  if ((await resolveNodeGrant(nestId, userId, nodeId)) === "write") return true;
+  return !!userEmail && (await ownsWorkingDraft(nestId, nodeId, userEmail));
+}
+
+/**
+ * List form of `seesOwnDraft`: of `nodes`, the ids a visibility-only reader
+ * sees as the live draft rather than the approved snapshot. Two queries for the
+ * whole list, not one per node. Surfaces drafts stay hidden as in `canReadNode`.
+ */
+export async function ownDraftIds(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  nodes: Array<{ id: string }>,
+): Promise<Set<string>> {
+  const grants = (await listUserGrants(nestId, userId)).filter((g) => g.role === "write");
+  const owned = userEmail ? await ownWorkingDraftIds(nestId, userEmail) : new Set<string>();
+  const hidden = await hiddenSurfaceDrafts(nestId);
+  const hideSurface = anyHidden(hidden) && !(await seesSurfaceDrafts(nestId, userId));
+  return new Set(
+    nodes
+      .filter(
+        (n) =>
+          (owned.has(n.id) || grantRoleForNode(grants, n.id) === "write") &&
+          !(hideSurface && isHidden(hidden, n.id)),
+      )
+      .map((n) => n.id),
+  );
 }
 
 /**
@@ -161,7 +242,11 @@ export async function filterAccessible<T extends { id: string }>(
     anyHidden(hidden) && nodes.some((n) => isHidden(hidden, n.id)) && !(await seesSurfaceDrafts(nestId, userId))
       ? nodes.filter((n) => !isHidden(hidden, n.id))
       : nodes;
-  return filterAccessibleBase(nestId, userId, userEmail, visible, approvedVersions);
+  // Private channels and conversations this caller is not a member of are
+  // not listed (C2): the node's shares are its member list.
+  const hiddenChat = await hiddenContainersFor(nestId, userId, visible.map((n) => n.id));
+  const shown = hiddenChat.size ? visible.filter((n) => !hiddenChat.has(n.id)) : visible;
+  return filterAccessibleBase(nestId, userId, userEmail, shown, approvedVersions);
 }
 
 async function filterAccessibleBase<T extends { id: string }>(
@@ -175,7 +260,17 @@ async function filterAccessibleBase<T extends { id: string }>(
     // One scan of the nest, not a sequential lookup per node — and none at all
     // when the caller has already read the map for its own use.
     const approved = approvedVersions ?? (await getApprovedVersions(nestId));
-    return nodes.filter((n) => approved.has(n.id));
+    // …and never a channel (see canReadNodeBase). Only ids under
+    // nodes/channels/ are looked at; a listing row carries its tags, anything
+    // else is read once.
+    const channels = new Set<string>();
+    for (const n of nodes) {
+      if (!isChannelId(n.id) || !approved.has(n.id)) continue;
+      const fm = (n as { frontmatter?: { tags?: unknown } }).frontmatter;
+      const tagged = Array.isArray(fm?.tags) ? isChannelDoc({ id: n.id, frontmatter: fm }) : await isChannelNode(nestId, n.id);
+      if (tagged) channels.add(n.id);
+    }
+    return nodes.filter((n) => approved.has(n.id) && !channels.has(n.id));
   }
   const grants = await listUserGrants(nestId, userId);
   if (!(await isStewardshipEnabled(nestId))) {
@@ -196,5 +291,32 @@ async function filterAccessibleBase<T extends { id: string }>(
   if (coverage.nestWide) return nodes;
   return nodes.filter(
     (n) => coverage.nodeIds.has(n.id) || grantCoversNode(grants, n.id),
+  );
+}
+
+/**
+ * The deletion requests this caller may see. A request names what it targets
+ * and carries who asked and why, so it follows its target: a document's
+ * request is for callers who can read that document (`filterAccessible`), and
+ * a folder's or the nest's own is for callers who read the whole nest.
+ *
+ * Lives here so the REST queue and MCP `context_deletion_queue` share one rule.
+ */
+export async function readableDeletionRequests<
+  T extends { nodeId: string; targetType: string },
+>(nestId: string, userId: string, userEmail: string, requests: T[]): Promise<T[]> {
+  if (requests.length === 0) return requests;
+  const documents = [
+    ...new Set(requests.filter((r) => r.targetType === "document").map((r) => r.nodeId)),
+  ].map((id) => ({ id }));
+  const readable = new Set(
+    (await filterAccessible(nestId, userId, userEmail, documents)).map((n) => n.id),
+  );
+  const whole =
+    documents.length < requests.length &&
+    requests.some((r) => r.targetType !== "document") &&
+    (await readsWholeNest(nestId, userId, userEmail));
+  return requests.filter((r) =>
+    r.targetType === "document" ? readable.has(r.nodeId) : whole,
   );
 }

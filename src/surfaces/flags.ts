@@ -11,6 +11,10 @@ export function surfacesEnabled(): boolean {
   return config.FEATURE_SURFACES && config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION;
 }
 
+/** Hosted one-click Slack install (PromptOwl's app). Lives here, not in the
+ *  Slack route module, so core routes don't import an adapter's routes. */
+export const hostedEnabled = (): boolean => surfacesEnabled() && config.FEATURE_SURFACES_SLACK_HOSTED;
+
 /** Community is one organization per deployment; Surfaces rows carry this id
  *  so a multi-org host can partition later without a migration. */
 export const ORG_ID = "default";

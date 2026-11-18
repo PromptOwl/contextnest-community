@@ -1,0 +1,106 @@
+# e2e-pr-build.yml — Playwright e2e against the pull request's own build.
+#
+# The other e2e workflow (contextnest-community-tests.yml) drives the deployed
+# nest-dev server, so it tests what is deployed, not the PR. This one builds the
+# PR, starts that build on localhost in the runner with a fresh database, seeds
+# the accounts the suites expect, and runs Playwright against it.
+#
+# - No shared server, so no turnstile: every PR runs at once.
+# - No secrets: the accounts below exist only on the throwaway server, and its
+#   license check is answered inside the runner (tests/e2e-server/start.mjs).
+#   Fork PRs can run it.
+# - Every CN_EXPECT_* is 1: a spec that would skip because "the server under
+#   test does not ship this yet" fails instead. Here the server IS the PR.
+
+name: E2E (PR build)
+
+on:
+  pull_request:
+    branches: [ "main", "development" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new commit on a PR supersedes that PR's run. Nothing is shared between PRs.
+concurrency:
+  group: e2e-pr-build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-pr-build:
+    name: e2e (PR build)
+    runs-on: ubuntu-latest
+    # About 8 minutes when healthy. A hung server or browser must not hold a runner.
+    timeout-minutes: 30
+
+    env:
+      BASE_URL: http://localhost:3838
+      # Throwaway accounts on the throwaway server. Not secrets.
+      TEST_ACCOUNT1_ALIAS: primary_user
+      TEST_ACCOUNT1_USER: e2e-admin@example.com
+      TEST_ACCOUNT1_PW: E2e-local-Admin-1!
+      TEST_ACCOUNT2_ALIAS: secondary_user
+      TEST_ACCOUNT2_USER: e2e-member@example.com
+      TEST_ACCOUNT2_PW: E2e-local-Member-1!
+      # The server under test is this PR, so "not deployed here" is a failure.
+      CN_EXPECT_ACCESS_REQUESTS: '1'
+      CN_EXPECT_BRIDGE: '1'
+      CN_EXPECT_CONTROL_ROOM: '1'
+      CN_EXPECT_STREAM_FEED: '1'
+      CN_EXPECT_NEST_HOME: '1'
+      CN_EXPECT_PULL_REPLAY: '1'
+      CN_EXPECT_SHARE_LINK: '1'
+      CN_EXPECT_INVITED_ONBOARDING: '1'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Node 22, the version the production image runs (Dockerfile).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the server and the UI
+        run: npm run build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Start the PR's build on localhost
+        run: |
+          node tests/e2e-server/start.mjs > e2e-server.log 2>&1 &
+          node tests/e2e-server/start.mjs wait || { cat e2e-server.log; exit 1; }
+          curl -fsS "$BASE_URL/health" | head -c 400; echo
+
+      - name: Run Playwright tests
+        run: npx playwright test --project=test-suite
+
+      - name: Generate CI Dashboard
+        if: always()
+        continue-on-error: true
+        env:
+          TEST_URL: http://localhost:3838 (this PR's build)
+          PLAYWRIGHT_PROJECT: test-suite
+        run: node tests/scripts/generate-ci-summary.js
+
+      - name: Show the server log
+        if: failure()
+        run: tail -n 300 e2e-server.log || true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-pr-build
+          path: |
+            tests/test-results/
+            e2e-server.log
+          retention-days: 14
+          if-no-files-found: warn

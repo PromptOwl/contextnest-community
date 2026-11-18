@@ -24,7 +24,8 @@ import {
 } from "./helpers";
 import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 
-const HOOTIE = { agent: "hootie" };
+// Any agent name but a reserved one (hootie, nest, … are dropped from `client`, C7).
+const AGENT = { agent: "scribe" };
 
 /** A write a person made in the web UI: nothing about it names an agent.
  *  (A session-cookie write derives no agent; with an API key the key label
@@ -125,9 +126,9 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   afterAll(() => env.cleanup());
 
   it("lists what an agent did — create and update — with the agent, document and version", async () => {
-    const made = await create("Pricing", "# Pricing\n\nhuman-approved v1", HOOTIE);
+    const made = await create("Pricing", "# Pricing\n\nhuman-approved v1", AGENT);
     const id = made.data.node.id;
-    await edit(id, "# Pricing\n\nagent rewrite v2", HOOTIE);
+    await edit(id, "# Pricing\n\nagent rewrite v2", AGENT);
 
     const { status, data } = await activity();
     expect(status).toBe(200);
@@ -135,7 +136,7 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
     expect(mine.map((i: any) => i.kind)).toEqual(["update", "create"]);
     expect(mine[0]).toEqual(
       expect.objectContaining({
-        agent: "hootie",
+        agent: "scribe",
         actor: "owner@acme.com",
         title: "Pricing",
         version: 2,
@@ -168,9 +169,9 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   });
 
   it("undoes an agent's published update by restoring the previous version as a new one", async () => {
-    const made = await create("Roadmap", "# Roadmap\n\nthe real plan", HOOTIE);
+    const made = await create("Roadmap", "# Roadmap\n\nthe real plan", AGENT);
     const id = made.data.node.id;
-    await edit(id, "# Roadmap\n\nJACKED by the agent", HOOTIE);
+    await edit(id, "# Roadmap\n\nJACKED by the agent", AGENT);
 
     const { status, data } = await undo(id, 2);
     expect(status).toBe(200);
@@ -191,7 +192,7 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   });
 
   it("undoes an agent's create by removing the document", async () => {
-    const made = await create("Spam Doc", "the agent should not have made this", HOOTIE);
+    const made = await create("Spam Doc", "the agent should not have made this", AGENT);
     const id = made.data.node.id;
 
     const { status, data } = await undo(id, 1);
@@ -201,9 +202,9 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   });
 
   it("refuses to undo when the document changed since, naming who changed it — nothing is overwritten", async () => {
-    const made = await create("Contract", "# Contract\n\nv1", HOOTIE);
+    const made = await create("Contract", "# Contract\n\nv1", AGENT);
     const id = made.data.node.id;
-    await edit(id, "# Contract\n\nagent v2", HOOTIE);
+    await edit(id, "# Contract\n\nagent v2", AGENT);
     await asHuman(() => edit(id, "# Contract\n\nhuman fixed it v3"));
 
     const { status, data } = await undo(id, 2);
@@ -214,7 +215,7 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   });
 
   it("refuses an undo for a version that isn't there", async () => {
-    const made = await create("Lonely", "only one version", HOOTIE);
+    const made = await create("Lonely", "only one version", AGENT);
     const { status } = await undo(made.data.node.id, 7);
     expect(status).toBe(409);
     const missing = await undo("nodes/never-existed", 1);
@@ -224,17 +225,17 @@ describe("agent activity: stream + undo (ungoverned nest)", () => {
   it("shows an agent's deletion, attributed, but not undoable", async () => {
     const made = await create("Doomed", "to be deleted");
     const id = made.data.node.id;
-    await callTool(app, nestId, owner.apiKey, "context_delete", { id, client: HOOTIE });
+    await callTool(app, nestId, owner.apiKey, "context_delete", { id, client: AGENT });
 
     const { data } = await activity();
     const row = data.items.find((i: any) => i.nodeId === id && i.kind === "delete");
-    expect(row).toEqual(expect.objectContaining({ agent: "hootie", actor: "owner@acme.com" }));
+    expect(row).toEqual(expect.objectContaining({ agent: "scribe", actor: "owner@acme.com" }));
     expect(row.undo.available).toBe(false);
     expect(row.undo.reason).toMatch(/can't be undone/i);
   });
 
   it("gives an editor (not an owner or steward) no stream and no undo", async () => {
-    const made = await create("Editor Can See", "but not undo", HOOTIE);
+    const made = await create("Editor Can See", "but not undo", AGENT);
     const id = made.data.node.id;
 
     const list = await activity("", editor.apiKey);
@@ -328,14 +329,14 @@ describe("agent activity: undo respects review rules (governed nest)", () => {
       app,
       "PATCH",
       `/nests/${nestId}/nodes/${id}`,
-      { content: "# Policy\n\nagent draft", client: HOOTIE },
+      { content: "# Policy\n\nagent draft", client: AGENT },
       writer.apiKey,
     );
     expect(draft.status).toBe(200);
 
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/agent-activity`, undefined, owner.apiKey);
     const row = list.data.items.find((i: any) => i.nodeId === id);
-    expect(row).toEqual(expect.objectContaining({ status: "draft", agent: "hootie" }));
+    expect(row).toEqual(expect.objectContaining({ status: "draft", agent: "scribe" }));
     expect(row.undo).toEqual(expect.objectContaining({ available: true, effect: "discard" }));
 
     const res = await jsonRequest(
@@ -357,12 +358,12 @@ describe("agent activity: undo respects review rules (governed nest)", () => {
       jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "In Review", content: "v1" }, owner.apiKey),
     );
     const id = made.data.node.id;
-    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "agent v2", client: HOOTIE }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "agent v2", client: AGENT }, writer.apiKey);
     const submitted = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/submit-review`, {}, writer.apiKey);
     expect(submitted.status).toBeLessThan(300);
 
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/agent-activity`, undefined, owner.apiKey);
-    const row = list.data.items.find((i: any) => i.nodeId === id && i.agent === "hootie");
+    const row = list.data.items.find((i: any) => i.nodeId === id && i.agent === "scribe");
     expect(row.undo.available).toBe(false);
     expect(row.undo.reason).toMatch(/review/i);
 
@@ -468,9 +469,9 @@ documents:
 
     // The one document rev stewards is the OLDEST agent change; eight newer
     // agent changes land on documents rev can't undo.
-    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Covered", content: "c", client: HOOTIE }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Covered", content: "c", client: AGENT }, owner.apiKey);
     for (let i = 0; i < 8; i++) {
-      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: `Other ${i}`, content: "o", client: HOOTIE }, owner.apiKey);
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: `Other ${i}`, content: "o", client: AGENT }, owner.apiKey);
     }
   });
 
@@ -513,9 +514,9 @@ describe("agent activity: a change that lands between the check and the write is
     jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey);
 
   it("refuses a restore when a person edited after the undo was planned", async () => {
-    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Doc", content: "v1", client: HOOTIE }, owner.apiKey);
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Doc", content: "v1", client: AGENT }, owner.apiKey);
     const id = made.data.node.id;
-    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "agent v2", client: HOOTIE }, owner.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "agent v2", client: AGENT }, owner.apiKey);
 
     const plan = await svc.planUndo({ nestId, nodeId: id, version: 2, userEmail: "owner@race.com" });
     expect(plan.effect).toBe("restore");
@@ -528,7 +529,7 @@ describe("agent activity: a change that lands between the check and the write is
   });
 
   it("refuses to delete a created document that a person edited after the undo was planned", async () => {
-    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Create", content: "agent made", client: HOOTIE }, owner.apiKey);
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Create", content: "agent made", client: AGENT }, owner.apiKey);
     const id = made.data.node.id;
 
     const plan = await svc.planUndo({ nestId, nodeId: id, version: 1, userEmail: "owner@race.com" });
@@ -578,13 +579,13 @@ describe("agent activity: a rejected agent draft can be undone", () => {
       jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Handbook", content: "# Handbook\n\npublished" }, owner.apiKey),
     );
     const id = made.data.node.id;
-    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "# Handbook\n\nagent draft", client: HOOTIE }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "# Handbook\n\nagent draft", client: AGENT }, writer.apiKey);
     await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/submit-review`, {}, writer.apiKey);
     const rejected = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/reject`, { note: "no" }, owner.apiKey);
     expect(rejected.status).toBeLessThan(300);
 
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/agent-activity`, undefined, owner.apiKey);
-    const row = list.data.items.find((i: any) => i.nodeId === id && i.agent === "hootie");
+    const row = list.data.items.find((i: any) => i.nodeId === id && i.agent === "scribe");
     expect(row.status).toBe("rejected");
     expect(row.undo).toEqual(expect.objectContaining({ available: true, effect: "discard" }));
 
@@ -629,7 +630,7 @@ documents:
   afterAll(() => env.cleanup());
 
   it("403s a read-tier reviewer undoing a document outside their coverage, and leaves it alone", async () => {
-    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Not Theirs", content: "keep", client: HOOTIE }, owner.apiKey);
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Not Theirs", content: "keep", client: AGENT }, owner.apiKey);
     const id = made.data.node.id;
     const res = await jsonRequest(app, "POST", `/nests/${nestId}/agent-activity/undo`, { nodeId: id, version: 1 }, rev.apiKey);
     expect(res.status).toBe(403);

@@ -4,17 +4,19 @@
  * Page under test: the nest page (ui/src/components/NestView.tsx) at
  * /nest/<id>, and the document view inside it (/nest/<id>?doc=<docId>).
  *
- * Archiving lives behind the nest page's More actions → Delete entry:
+ * Archiving lives in the nest's Settings tab → Danger zone (Delete nest, or
+ * Request deletion for an editor):
  * - the owner gets the Delete nest dialog (ui/src/components/DeleteNestDialog.tsx),
  *   whose "Archive instead" archives without the type-to-confirm;
  * - an editor gets "Request removal of …" (ui/src/components/governance/ReasonDialog.tsx),
  *   whose "Request archive" raises an archive request for an owner or admin.
  * A pending request shows as the "Archive requested" badge in the header; the
  * requester withdraws it by clicking the badge. The owner decides it in the
- * nest's Review Queue tab (ui/src/components/nest/ReviewTab.tsx).
+ * My Work inbox (ui/src/pages/app/my-work/page.tsx), the one review queue
+ * for every nest.
  *
  * An archived nest is read-only: the write actions, the governance tabs and
- * the nest menu are withheld, and documents open without an editor.
+ * the Settings actions are withheld, and documents open without an editor.
  */
 
 import logger from '../../helper/logger/logger.js';
@@ -33,17 +35,19 @@ class NestArchivePage {
     this.backToNests = page.getByTitle('Back to nests');
     // The innermost row holding the back button: name, badges and actions.
     this.header = this.main.locator('div.justify-between').filter({ has: this.backToNests }).last();
-    this.moreActions = this.header.getByTitle('More actions');
+    // Settings tab (ui/src/components/NestView.tsx): the nest's own actions.
+    this.settingsDelete = page.getByTestId('nest-settings-delete');
+    this.settingsGovernance = page.getByTestId('nest-settings-governance');
     // A pending deletion or archive request on the nest.
     this.flagBadge = page.getByTestId('nest-deletion-flag');
 
     // ── Write actions (hidden on an archived nest) ────────────────────────
-    this.connectButton = this.main.getByRole('button', { name: 'Connect', exact: true });
+    this.connectButton = this.page.getByTestId('top-bar-connect');
     this.addWithAiButton = this.main.getByRole('button', { name: 'Add with AI', exact: true });
-    this.shareButton = this.main.getByRole('button', { name: 'Share', exact: true });
+    this.shareButton = this.main.getByRole('button', { name: 'Invite', exact: true });
     this.newFolderButton = this.main.getByRole('button', { name: 'New Folder', exact: true });
-    this.importButton = this.main.getByRole('button', { name: 'Import', exact: true });
-    this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
+    this.importButton = this.page.getByTestId('top-bar-new-document');
+    this.newDocumentButton = this.page.getByTestId('top-bar-new-document');
 
     // ── Delete nest dialog (owner) ────────────────────────────────────────
     this.deleteDialog = page.getByRole('dialog', { name: 'Delete nest' });
@@ -58,8 +62,10 @@ class NestArchivePage {
     this.reasonConfirm = page.getByTestId('reason-dialog-confirm');
     this.reasonSecondary = page.getByTestId('reason-dialog-secondary');
 
-    // ── Review Queue tab ──────────────────────────────────────────────────
-    this.requestRows = page.getByTestId('deletion-request-item');
+    // ── My Work inbox rows (one per request, across nests) ────────────────
+    this.requestRows = page
+      .locator('main div.group')
+      .filter({ has: page.locator('span.uppercase') });
 
     // ── Document view ─────────────────────────────────────────────────────
     this.editableContent = this.main.locator('[contenteditable="true"]');
@@ -87,7 +93,7 @@ class NestArchivePage {
     await this.page.goto(`/nest/${nestId}?doc=${encodeURIComponent(docId)}`);
   }
 
-  /** A nest tab, by the name it starts with (Review Queue carries a count). */
+  /** A nest tab, by the name it starts with . */
   tab(name) {
     return this.page.getByRole('tab', { name: new RegExp(`^${name}`) });
   }
@@ -97,42 +103,32 @@ class NestArchivePage {
     return this.main.getByText(value, { exact: true });
   }
 
-  // ── Nest menu ───────────────────────────────────────────────────────────
+  // ── Settings tab ────────────────────────────────────────────────────────
+
+  /** Open the nest's Settings tab. */
+  async openSettings() {
+    this._log('Opening the Settings tab');
+    await this.tab('Settings').click();
+  }
 
   /**
-   * Open More actions. The first click on a freshly loaded page can land
-   * before the menu is wired, so it is retried until the items show.
+   * The write actions the Settings tab offers right now, by name. Empty when
+   * the nest has none (an archived nest, or an editor with a request pending).
    */
-  async openMoreActions() {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      await this.moreActions.click();
-      const opened = await this.page
-        .getByRole('menuitem')
-        .first()
-        .waitFor({ state: 'visible', timeout: 3000 })
-        .then(() => true)
-        .catch(() => false);
-      if (opened) return;
-      await this.page.keyboard.press('Escape');
-    }
-    throw new Error('The nest menu (More actions) did not open');
+  async settingsActions() {
+    if ((await this.tab('Settings').count()) === 0) return [];
+    await this.openSettings();
+    const found = [];
+    if (await this.settingsGovernance.count()) found.push('Edit review settings');
+    if (await this.settingsDelete.count()) found.push('Delete');
+    return found;
   }
 
-  /** The nest menu's entries; empty when the nest page shows no menu. */
-  async menuItems() {
-    if ((await this.moreActions.count()) === 0) return [];
-    await this.openMoreActions();
-    const items = (await this.page.getByRole('menuitem').allInnerTexts()).map((t) => t.trim());
-    await this.page.keyboard.press('Escape');
-    await this.page.getByRole('menuitem').first().waitFor({ state: 'hidden' });
-    return items;
-  }
-
-  /** Pick one entry of the nest menu. */
-  async chooseMenu(name) {
-    this._log(`Nest menu → ${name}`);
-    await this.openMoreActions();
-    await this.page.getByRole('menuitem', { name, exact: true }).click();
+  /** Start the delete / request-removal flow from the Danger zone. */
+  async startDelete() {
+    this._log('Settings → Delete');
+    await this.openSettings();
+    await this.settingsDelete.click();
   }
 
   // ── Archive / request ───────────────────────────────────────────────────
@@ -140,22 +136,23 @@ class NestArchivePage {
   /** Editor: Delete → "Request removal of …" → reason → Request archive. */
   async requestArchive(reason) {
     this._log('Requesting an archive of the nest');
-    await this.chooseMenu('Delete');
+    await this.startDelete();
     await this.requestDialog.waitFor({ state: 'visible' });
     await this.reasonInput.fill(reason);
     await this.reasonSecondary.click();
     await this.requestDialog.waitFor({ state: 'hidden', timeout: 60_000 });
   }
 
-  // ── Review Queue ────────────────────────────────────────────────────────
+  // ── My Work ─────────────────────────────────────────────────────────────
 
-  /** Open the nest's Review Queue tab. */
+  /** Open My Work, where every nest's requests are decided. */
   async openReviewQueue() {
-    this._log('Opening the Review Queue tab');
-    await this.tab('Review Queue').click();
+    this._log('Opening My Work');
+    await this.page.goto('/my-work');
+    await this.page.getByTestId('my-work-filter-chips').waitFor({ state: 'visible' });
   }
 
-  /** The Review Queue row of one request, found by its reason. */
+  /** The My Work row of one request, found by its reason. */
   requestRow(reason) {
     return this.requestRows.filter({ hasText: reason });
   }
@@ -165,7 +162,7 @@ class NestArchivePage {
     return this.page.getByRole('dialog').filter({ hasText: `Archive "${nestName}"?` });
   }
 
-  /** Reject a request from its Review Queue row, with a note. */
+  /** Reject a request from its My Work row, with a note. */
   async rejectRequest(reason, note) {
     this._log('Rejecting an archive request');
     await this.requestRow(reason).getByRole('button', { name: 'Reject', exact: true }).click();
@@ -175,7 +172,7 @@ class NestArchivePage {
     await this.rejectDialog.waitFor({ state: 'hidden', timeout: 60_000 });
   }
 
-  /** Approve an archive request from its Review Queue row and confirm it. */
+  /** Approve an archive request from its My Work row and confirm it. */
   async approveRequest(reason, nestName) {
     this._log('Approving an archive request');
     await this.requestRow(reason).getByRole('button', { name: 'Approve', exact: true }).click();

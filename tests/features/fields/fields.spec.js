@@ -223,6 +223,8 @@ test.describe('Fields', () => {
   // ── Task numbering ─────────────────────────────────────────────────────────
 
   test('CN-FIELD-004: Verify that a lowercase prefix is saved in capitals, Start at 100 gives the next tasks QA-100 and QA-101, and turning numbering off means new tasks get no number', async ({ primary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-numbering');
     const { page, api, nest } = owner;
 
@@ -591,6 +593,15 @@ test.describe('Fields', () => {
         await checks();
       }).toPass(WRITE);
 
+    // Pick an item from Add field. The click sits inside the same retry: the
+    // list refresh after an add can close the menu between the checks above
+    // and the click (seen on a fast server, where the refresh lands at once).
+    const pick = (item) =>
+      expect(async () => {
+        await page.openAddFieldMenu();
+        await item.click(SHORT);
+      }).toPass(WRITE);
+
     await page.goto(nest.id);
     await expect(page.emptyFields).toBeVisible();
     await menuShows(async () => {
@@ -599,7 +610,7 @@ test.describe('Fields', () => {
       }
     });
 
-    await page.estimatePointsItem.click();
+    await pick(page.estimatePointsItem);
     await expectToast(page, 'Estimate added');
     await expect(page.row('Estimate')).toContainText('points', WRITE);
 
@@ -608,7 +619,7 @@ test.describe('Fields', () => {
       await disabled(page.estimateHoursItem);
       await enabled(page.timeInStatusItem);
     });
-    await page.timeInStatusItem.click();
+    await pick(page.timeInStatusItem);
     await expectToast(page, 'Time in status added');
     await expect(page.row('Time in status')).toBeVisible(WRITE);
 
@@ -627,7 +638,7 @@ test.describe('Fields', () => {
       await enabled(page.estimatePointsItem);
       await enabled(page.estimateHoursItem);
     });
-    await page.estimateHoursItem.click();
+    await pick(page.estimateHoursItem);
     await expect(page.row('Estimate')).toContainText('hours', WRITE);
 
     await menuShows(async () => {
@@ -709,6 +720,8 @@ test.describe('Fields', () => {
   });
 
   test('CN-FIELD-016: Verify that a Number field with a Scale, a Person field and a Date field can be set on a task and are kept after a reload, and the board card shows the Number with its unit', async ({ primary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-types');
     const { page, api, nest } = owner;
     await api.createField(nest.id, { label: 'Owner', key: 'owner', type: 'user' });
@@ -759,6 +772,8 @@ test.describe('Fields', () => {
   });
 
   test("CN-FIELD-018: Verify that a nest-wide Reviewer can add and manage fields, and an archived nest's Fields tab and task values are read-only", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Many steps on a shared server: more than the default 2 minutes when it is busy.
+    test.slow();
     const owner = await ownerNest(primary_user, commonFunction, 'fields-reviewer');
     const { api, nest } = owner;
     await api.createField(nest.id, { label: 'Customer', key: 'customer', type: 'text' });

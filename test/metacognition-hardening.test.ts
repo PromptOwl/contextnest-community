@@ -472,6 +472,8 @@ describe("failures, timeouts and cost", () => {
 describe("scheduled runs into an unchanged nest", () => {
   it("skip without calling the model, and run again once something changes", async () => {
     await jsonRequest(app, "PUT", `/nests/${nestId}/metacognition/nodes/quiet-agent`, CONFIG, owner.apiKey);
+    // The settings save counts as a change until the first run starts a second later.
+    await new Promise((r) => setTimeout(r, 1100)); // second-resolution timestamps
     const { startMetacognitionRun } = await import("../src/metacognition/service.js");
     const start = async () =>
       waitForRun(

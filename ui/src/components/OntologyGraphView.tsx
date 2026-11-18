@@ -15,11 +15,16 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, ListChecks } from "lucide-react";
-import { getNestGraph, type NestGraph } from "../lib/api";
+import { getNestGraph, getPulls, type ContextPull, type NestGraph, type PullPage } from "../lib/api";
+import { asDocumentGraph } from "../lib/queries";
+import { replayFrame } from "../lib/pull-replay";
+import { useMediaQuery } from "../lib/use-media-query";
+import { PullList, PullTrace } from "./PullLog";
 import { CopyButton } from "@/components/ui/copy-button";
 import { categoryCoverageEmpty } from "../lib/coverage-gaps";
 import { Button } from "./ui/button";
 import { NestPageHeader } from "./NestPageHeader";
+import { prettyFolder } from "./FolderTree";
 
 interface Props {
   nestId: string;
@@ -80,6 +85,13 @@ function linkStroke(kind: GLink["kind"]): string {
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+/** Replay (po-1252): one step lights per beat, so a 6-document pull plays in
+ *  about three seconds — slow enough to follow the path, short enough to
+ *  watch twice. */
+const REPLAY_STEP_MS = 520;
+const PULLED = "#ea580c"; // orange-600: the one accent the replay uses
+const PULLED_SOFT = "#fdba74"; // orange-300
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 5;
 
@@ -138,6 +150,19 @@ export function OntologyGraphView({
   // see highlighted is what the query pulls.
   const [hopDepth, setHopDepth] = useState(1);
 
+  // ── Context pull log + replay (po-1252) ──
+  const [pullPage, setPullPage] = useState<PullPage | null>(null);
+  const [pullsLoading, setPullsLoading] = useState(false);
+  const [pullsError, setPullsError] = useState<string | null>(null);
+  const [panel, setPanel] = useState<"pulls" | "coverage">("pulls");
+  // The pull being replayed, the last step lit, and whether the clock runs.
+  // `run` restarts the clock on Replay even when the step is unchanged.
+  const [replay, setReplay] = useState<{ pull: ContextPull; step: number; playing: boolean; run: number } | null>(null);
+  // Camera glide to a pull's documents — only for that move, so panning and
+  // zooming stay direct.
+  const [cameraGlide, setCameraGlide] = useState(false);
+  const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 560 });
@@ -170,7 +195,7 @@ export function OntologyGraphView({
 
   // Fit the laid-out graph into the viewport (centred, padded). Used on first
   // layout and via the Fit button so a large graph never spills off-screen.
-  const fitView = (nodes: GNode[], w: number, h: number) => {
+  const fitView = (nodes: GNode[], w: number, h: number, maxK = 1.5) => {
     const pts = nodes.filter((n) => n.x != null && n.y != null);
     if (!pts.length) return setView({ x: w / 2, y: h / 2, k: 1 });
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -183,7 +208,7 @@ export function OntologyGraphView({
     const pad = 48;
     const gw = maxX - minX || 1;
     const gh = maxY - minY || 1;
-    const k = clamp(Math.min((w - 2 * pad) / gw, (h - 2 * pad) / gh), MIN_ZOOM, 1.5);
+    const k = clamp(Math.min((w - 2 * pad) / gw, (h - 2 * pad) / gh), MIN_ZOOM, maxK);
     setView({
       x: w / 2 - ((minX + maxX) / 2) * k,
       y: h / 2 - ((minY + maxY) / 2) * k,
@@ -195,6 +220,7 @@ export function OntologyGraphView({
   // the world point under the anchor fixed.
   const zoomBy = (factor: number, ax = size.w / 2, ay = size.h / 2) => {
     userMoved.current = true;
+    setCameraGlide(false);
     setView((v) => {
       const k = clamp(v.k * factor, MIN_ZOOM, MAX_ZOOM);
       const wx = (ax - v.x) / v.k;
@@ -223,6 +249,7 @@ export function OntologyGraphView({
   // Pointer down on empty canvas → pan. Capture on the svg so moves keep
   // routing here even when the cursor leaves a node during a drag.
   const onPanStart = (e: ReactPointerEvent) => {
+    setCameraGlide(false);
     svgRef.current?.setPointerCapture?.(e.pointerId);
     drag.current = { mode: "pan", px: e.clientX, py: e.clientY };
     setPanning(true);
@@ -267,6 +294,8 @@ export function OntologyGraphView({
     let cancelled = false;
     setLoading(true);
     getNestGraph(nestId)
+      // Channels are conversations, not documents: not drawn here while on.
+      .then((g) => asDocumentGraph(nestId, g))
       .then((g) => {
         if (cancelled) return;
         // A different graph: no viewport worth keeping, so let it fit.
@@ -280,11 +309,53 @@ export function OntologyGraphView({
     };
   }, [nestId]);
 
+  // The page stays mounted when the nest changes, so a late answer for the
+  // previous nest must not land in this one.
+  const pullsNest = useRef(nestId);
+  pullsNest.current = nestId;
+  const loadPulls = (before?: string) => {
+    const forNest = nestId;
+    const current = () => pullsNest.current === forNest;
+    setPullsLoading(true);
+    setPullsError(null);
+    getPulls(nestId, { limit: 25, before })
+      .then((page) =>
+        current() &&
+        setPullPage((cur) =>
+          before && cur ? { ...page, pulls: [...cur.pulls, ...page.pulls] } : page,
+        ),
+      )
+      .catch((e) => current() && setPullsError(e?.message || "Couldn't load pulls"))
+      .finally(() => current() && setPullsLoading(false));
+  };
+  useEffect(() => {
+    setPullPage(null);
+    setReplay(null);
+    loadPulls();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nestId]);
+
+  // The replay clock: while a replay plays, light the next step each beat.
+  // It starts only from a click (a pull, or Replay) and stops at the last step.
+  useEffect(() => {
+    if (!replay?.playing) return;
+    const last = replay.pull.steps.length - 1;
+    if (replay.step >= last) {
+      setReplay((r) => (r ? { ...r, playing: false } : r));
+      return;
+    }
+    const t = setTimeout(
+      () => setReplay((r) => (r && r.playing ? { ...r, step: r.step + 1 } : r)),
+      REPLAY_STEP_MS,
+    );
+    return () => clearTimeout(t);
+  }, [replay?.playing, replay?.step, replay?.run, replay?.pull]);
+
   useEffect(() => {
     if (!wrapRef.current) return;
     const el = wrapRef.current;
     const apply = () =>
-      setSize({ w: el.clientWidth, h: Math.max(420, el.clientHeight) });
+      setSize({ w: el.clientWidth, h: Math.max(320, el.clientHeight) });
     // Set the real size synchronously at mount — the observer fires async, so
     // without this the first simulation runs at the 800px default and clips
     // the layout on narrower viewports until a resize nudges it.
@@ -357,7 +428,7 @@ export function OntologyGraphView({
           const fid = `folder:${acc}`;
           if (!seenFolder.has(fid)) {
             seenFolder.add(fid);
-            nodes.push({ id: fid, name: seg, kind: "folder", color: COLORS.folder, val: 2 });
+            nodes.push({ id: fid, name: prettyFolder(seg), kind: "folder", color: COLORS.folder, val: 2 });
           }
           addStruct(prev, fid);
           prev = fid;
@@ -475,6 +546,55 @@ export function OntologyGraphView({
     [sim.nodes],
   );
 
+  // ── Replay ──
+  // Document-to-document links, whatever layers are on: a pull walks the
+  // link graph, not the drawing.
+  const linkPairs = useMemo<Array<[string, string]>>(
+    () => (graph?.links ?? []).map((l) => [l.source, l.target] as [string, string]),
+    [graph],
+  );
+  const frame = useMemo(
+    () => (replay ? replayFrame(replay.pull, linkPairs, replay.step) : null),
+    [replay, linkPairs],
+  );
+  const drawnIds = useMemo(() => new Set(sim.nodes.map((n) => n.id)), [sim.nodes]);
+  const titleOf = (id: string) =>
+    nodesById.get(id)?.name ?? graph?.nodes.find((n) => n.id === id)?.title ?? id.split("/").pop() ?? id;
+
+  const startReplay = (pull: ContextPull) => {
+    setSelected(null);
+    setPanel("pulls");
+    // Frame the documents this pull touched, gliding there unless motion is
+    // reduced. Not when none of them is drawn (a truncated graph).
+    const touched = pull.steps
+      .map((s) => nodesById.get(s.nodeId))
+      .filter((n): n is GNode => !!n);
+    if (touched.length) {
+      userMoved.current = true;
+      setCameraGlide(!reduceMotion);
+      fitView(touched, size.w, size.h, 1.6);
+    }
+    // On a phone the log sits under the canvas: bring the canvas up so the
+    // replay is seen, not missed below the fold.
+    const top = wrapRef.current?.getBoundingClientRect().top;
+    if (top != null && top < 0) {
+      wrapRef.current!.scrollIntoView({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
+    }
+    const last = pull.steps.length - 1;
+    setReplay((r) => ({
+      pull,
+      step: reduceMotion ? last : 0,
+      playing: !reduceMotion && last > 0,
+      run: (r?.run ?? 0) + 1,
+    }));
+  };
+  const jumpTo = (i: number) =>
+    setReplay((r) => (r ? { ...r, step: i, playing: false } : r));
+  const endReplay = () => {
+    setReplay(null);
+    setCameraGlide(false);
+  };
+
   // A layer toggle with nothing behind it is noise: a nest with no stewards
   // gets no Stewardship switch (or legend row), and likewise for categories
   // and links. Structure is always there — the nest node is.
@@ -485,7 +605,7 @@ export function OntologyGraphView({
   return (
     <div className="space-y-4">
       <NestPageHeader nestName={nestName} onBack={onBack}>
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
           {(
             [
               ["structure", "Structure", ListChecks, true],
@@ -519,10 +639,10 @@ export function OntologyGraphView({
         </div>
       </NestPageHeader>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
         <div
           ref={wrapRef}
-          className="border border-border rounded-lg bg-card overflow-hidden h-[560px] relative"
+          className="border border-border rounded-lg bg-card overflow-hidden h-[380px] lg:h-[600px] relative"
         >
           {loading && (
             <div className="absolute inset-0 flex items-center justify-center text-muted-foreground">
@@ -554,15 +674,22 @@ export function OntologyGraphView({
                 onPointerUp={onPanEnd}
                 onPointerLeave={onPanEnd}
               >
-                <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+                <g
+                  style={{
+                    transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})`,
+                    transformOrigin: "0 0",
+                    transition: cameraGlide ? "transform 600ms cubic-bezier(0.2, 0.7, 0.2, 1)" : undefined,
+                  }}
+                >
                   <g>
                     {sim.links.map((l, i) => {
                       const s = l.source as GNode;
                       const t = l.target as GNode;
                       if (s?.x == null || t?.x == null) return null;
-                      const inHood =
-                        !neighborhood ||
-                        (neighborhood.has(s.id) && neighborhood.has(t.id));
+                      const inHood = frame
+                        ? false
+                        : !neighborhood ||
+                          (neighborhood.has(s.id) && neighborhood.has(t.id));
                       return (
                         <line
                           key={i}
@@ -572,16 +699,42 @@ export function OntologyGraphView({
                           y2={t.y}
                           stroke={linkStroke(l.kind)}
                           strokeWidth={(inHood && neighborhood ? 1.6 : 1) / view.k}
-                          opacity={inHood ? 1 : 0.15}
+                          opacity={frame ? 0.1 : inHood ? 1 : 0.15}
                         >
                           {l.type && <title>{typedLinkLabel(l)}</title>}
                         </line>
                       );
                     })}
                   </g>
+                  {/* The path the replayed pull walked, drawn in step order.
+                      Keyed by step so each edge draws once, when it lights. */}
+                  {frame && (
+                    <g data-testid="graph-pull-edges">
+                      {frame.edges.map((e, i) => {
+                        const a = nodesById.get(e.from);
+                        const b = nodesById.get(e.to);
+                        if (a?.x == null || b?.x == null) return null;
+                        return (
+                          <line
+                            key={`${replay!.run}-${e.from}-${e.to}-${i}`}
+                            className="pull-edge-draw"
+                            pathLength={1}
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke={PULLED}
+                            strokeWidth={2.25 / view.k}
+                            strokeLinecap="round"
+                          />
+                        );
+                      })}
+                    </g>
+                  )}
                   <g>
                     {sim.nodes.map((n) => {
-                      const inHood = !neighborhood || neighborhood.has(n.id);
+                      const lit = frame?.lit.has(n.id) ?? false;
+                      const inHood = frame ? lit : !neighborhood || neighborhood.has(n.id);
                       return (
                         <g
                           key={n.id}
@@ -594,24 +747,57 @@ export function OntologyGraphView({
                             if (n.kind === "doc") onOpenDocument?.(n.id);
                           }}
                           style={{ cursor: "grab" }}
-                          opacity={inHood ? 1 : 0.25}
+                          opacity={inHood ? 1 : frame ? 0.18 : 0.25}
+                          data-pulled={lit ? "true" : undefined}
+                          data-testid={n.kind === "doc" ? "graph-node" : undefined}
+                          data-node-id={n.id}
                         >
                           {n.kind === "doc" && onOpenDocument && (
                             <title>{`Double-click to open "${n.name}"`}</title>
                           )}
+                          {lit && frame?.current === n.id && (
+                            <circle
+                              key={`pulse-${replay!.run}-${replay!.step}`}
+                              className="pull-node-pulse"
+                              r={radius(n) + 2}
+                              fill={PULLED}
+                            />
+                          )}
                           <circle
-                            r={radius(n)}
-                            fill={n.color}
+                            r={lit ? radius(n) + 1.5 : radius(n)}
+                            fill={lit ? PULLED : n.color}
                             stroke={
-                              selected?.id === n.id
-                                ? "#111827"
-                                : inHood && neighborhood
-                                  ? "#111827aa"
+                              lit
+                                ? frame?.current === n.id
+                                  ? PULLED_SOFT
                                   : "#ffffff"
+                                : selected?.id === n.id
+                                  ? "#111827"
+                                  : inHood && neighborhood
+                                    ? "#111827aa"
+                                    : "#ffffff"
                             }
-                            strokeWidth={selected?.id === n.id ? 2 : 1}
+                            strokeWidth={lit && frame?.current === n.id ? 3 : selected?.id === n.id ? 2 : 1}
                           />
-                          <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
+                          {lit && (
+                            <text
+                              x={0}
+                              y={-(radius(n) + 5)}
+                              textAnchor="middle"
+                              fontSize={9}
+                              fontWeight={700}
+                              fill={PULLED}
+                            >
+                              {frame!.order.get(n.id)}
+                            </text>
+                          )}
+                          <text
+                            x={radius(n) + 3}
+                            y={3}
+                            fontSize={9}
+                            fontWeight={lit ? 600 : 400}
+                            fill={lit ? "#0f172a" : "#475569"}
+                          >
                             {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
                           </text>
                         </g>
@@ -620,6 +806,34 @@ export function OntologyGraphView({
                   </g>
                 </g>
               </svg>
+              {/* Replay readout: which step is lit, over a thin progress bar.
+                  Lives on the canvas so a phone sees it without scrolling. */}
+              {replay && frame && (
+                <div
+                  className="absolute left-2 bottom-2 z-10 max-w-[calc(100%-3.5rem)] rounded-md border border-border bg-card/95 px-2.5 py-1.5 shadow-sm backdrop-blur"
+                  data-testid="graph-pull-hud"
+                  aria-live="polite"
+                >
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-semibold tabular-nums" style={{ color: PULLED }}>
+                      {Math.min(replay.step + 1, replay.pull.steps.length)} / {replay.pull.steps.length}
+                    </span>
+                    <span className="truncate font-medium">
+                      {frame.current ? titleOf(frame.current) : ""}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-0.5 w-40 max-w-full overflow-hidden rounded bg-muted">
+                    <div
+                      className="h-full rounded"
+                      style={{
+                        background: PULLED,
+                        width: `${((replay.step + 1) / Math.max(1, replay.pull.steps.length)) * 100}%`,
+                        transition: reduceMotion ? undefined : `width ${REPLAY_STEP_MS}ms linear`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
               {/* Zoom controls */}
               <div className="absolute bottom-2 right-2 z-10 flex flex-col gap-1">
                 <ZoomCtl label="Zoom in" onClick={() => zoomBy(1.25)}>
@@ -636,8 +850,64 @@ export function OntologyGraphView({
           )}
         </div>
 
-        <div className="space-y-4">
-          <div className="border border-border rounded-lg bg-card p-3">
+        <div className="min-w-0 space-y-4">
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
+            {/* Pulls first: what agents actually retrieved is the live
+                question; coverage is the standing audit. */}
+            <div role="tablist" aria-label="Side panel" className="flex gap-1 border-b border-border p-1">
+              {(
+                [
+                  ["pulls", "Pulls", pullPage ? pullPage.pulls.length + (pullPage.hasMore ? "+" : "") : null],
+                  ["coverage", "Coverage", null],
+                ] as const
+              ).map(([key, label, count]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={panel === key}
+                  onClick={() => setPanel(key)}
+                  className={
+                    "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium transition-colors " +
+                    (panel === key ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground")
+                  }
+                >
+                  {label}
+                  {count != null && <span className="text-xs tabular-nums text-muted-foreground">{count}</span>}
+                </button>
+              ))}
+            </div>
+            {panel === "pulls" ? (
+              <div className="lg:max-h-[556px] lg:overflow-y-auto">
+                {replay ? (
+                  <PullTrace
+                    pull={replay.pull}
+                    step={replay.step}
+                    playing={replay.playing}
+                    drawn={drawnIds}
+                    titleOf={titleOf}
+                    onBack={endReplay}
+                    onReplay={() => startReplay(replay.pull)}
+                    onJump={jumpTo}
+                    onOpenDocument={onOpenDocument}
+                  />
+                ) : (
+                  <PullList
+                    pulls={pullPage?.pulls ?? []}
+                    loading={pullsLoading}
+                    error={pullsError}
+                    accessLogEnabled={pullPage?.accessLogEnabled ?? true}
+                    identities={pullPage?.identities ?? false}
+                    hasMore={!!pullPage?.hasMore}
+                    selectedId={null}
+                    onSelect={startReplay}
+                    onLoadMore={() => pullPage?.nextBefore && loadPulls(pullPage.nextBefore)}
+                    onRefresh={() => loadPulls()}
+                  />
+                )}
+              </div>
+            ) : (
+          <div className="p-3">
             <div className="flex items-center gap-1.5 font-medium text-sm mb-2">
               {/* An empty nest is not a coverage gap — the warning icon is
                   reserved for real ones (CU-wdqcq00x8x). */}
@@ -692,6 +962,8 @@ export function OntologyGraphView({
               </div>
             )}
           </div>
+            )}
+          </div>
 
           {selected && (
             <NodeDetail
@@ -708,6 +980,7 @@ export function OntologyGraphView({
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
+            {replay && <Legend color={PULLED} label="Pulled, numbered in order" />}
             <Legend color={COLORS.root} label="Nest" />
             <Legend color={COLORS.folder} label="Folder" />
             <Legend color={COLORS.doc} label="Document" />

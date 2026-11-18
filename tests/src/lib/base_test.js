@@ -103,6 +103,10 @@ import StewardsApi from './stewards_api.js';
 import NestSettingsPage from '../page_factory/app/nest_settings_page.js';
 // REST helper used to arrange Nest Settings preconditions (settings, API keys, Systems)
 import NestSettingsApi from './nest_settings_api.js';
+// Public Docs Reader Mode (Reader button and dialog, the in-app reader, the /d/ docs site)
+import ReaderModePage from '../page_factory/app/reader_mode_page.js';
+// REST helper used to arrange Reader Mode preconditions (Reader mode, visibility, shares)
+import ReaderModeApi from './reader_mode_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -529,6 +533,20 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get nestSettingsApi() {
         if (!this._nestSettingsApi) this._nestSettingsApi = new NestSettingsApi(this.page);
         return this._nestSettingsApi;
+      },
+
+      // Nest page → Public Docs Reader Mode (Reader button, docs reader, docs site)
+      get readerModePage() {
+        return new ReaderModePage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Reader Mode suite. One instance per role and
+       * test, so the nests it remembers for cleanup belong to that test alone.
+       */
+      get readerModeApi() {
+        if (!this._readerModeApi) this._readerModeApi = new ReaderModeApi(this.page);
+        return this._readerModeApi;
       },
 
       /**

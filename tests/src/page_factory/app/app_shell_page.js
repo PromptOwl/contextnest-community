@@ -22,7 +22,7 @@ class AppShellPage {
 
     // Header chrome (ui/src/App.tsx)
     this.breadcrumb = page.getByTestId('header-breadcrumb');
-    this.globalSearchTrigger = page.getByTestId('global-search-trigger');
+    this.globalSearchTrigger = page.locator('[data-testid="document-sidebar-search"], [data-testid="global-search-trigger"]').locator('visible=true').first();
     this.sidebarExpand = page.getByTestId('nest-sidebar-expand');
 
     // User menu

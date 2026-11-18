@@ -5,7 +5,7 @@ export const meta: NestPageMeta = {
   path: "plugins",
   label: "Plugins",
   icon: Plug,
-  order: 6,
+  order: 7,
   viewPage: "plugins",
   beta: true,
   // Behind the server's plugins flag (FEATURE_PLUGINS). Everyone who works in

@@ -26,6 +26,12 @@ export interface NestPageCaps {
   workflowPlaneEnabled: boolean;
   /** The server has Nest Plugins on (FEATURE_PLUGINS, from /health). */
   pluginsEnabled?: boolean;
+  /** Experimental channels (/health experimental.agent_stream, PO-1179). */
+  agentStreamEnabled?: boolean;
+  /** The caller is a person added to the nest (GET /nests/:id `member`), not
+   *  someone who reaches it only through its visibility or a document share.
+   *  Unknown reads as "not a member": a page gated on it stays hidden. */
+  isMember?: boolean;
 }
 
 export interface NestPageMeta {
@@ -36,7 +42,7 @@ export interface NestPageMeta {
   /** Sidebar / tab-strip order, ascending. */
   order: number;
   /** The App view this page renders as. */
-  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "plugins";
+  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure" | "plugins" | "channels";
   beta?: boolean;
   /** Who gets the page listed and reachable. Reader mode hides every nest
    *  view regardless (see nest-caps isViewBlockedInReaderMode); this gate

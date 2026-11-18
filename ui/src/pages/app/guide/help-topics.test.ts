@@ -8,8 +8,8 @@ import { PAGE_GROUPS } from "../../../lib/pages";
 
 // The in-app Help (How it works) must let an admin find single sign-on, and
 // every UI location it names must be one the app actually renders — the SSO
-// docs went stale once already when the admin pages moved into the rail.
-const adminGroup = PAGE_GROUPS.find((g) => g.id === "admin")!.label;
+// docs went stale once already when the admin pages moved into the rail, and again when they moved under the account menu.
+const adminGroup = PAGE_GROUPS.find((g) => g.id === "settings")!.label;
 const settingsSource = readFileSync(
   fileURLToPath(new URL("../settings/page.tsx", import.meta.url)),
   "utf8",
@@ -23,7 +23,7 @@ describe("in-app help: single sign-on", () => {
     expect(sso.steps.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("points at the real Admin → Server settings → Single sign-on location", () => {
+  it("points at the real Workspace settings → Server settings → Single sign-on location", () => {
     const sso = helpTopic("sso");
     expect(sso.where).toBe(`${adminGroup} → ${settingsMeta.label} → Single sign-on`);
     // The tab label must exist on the settings page.

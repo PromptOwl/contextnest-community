@@ -17,7 +17,7 @@ import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
-import { defaultTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
+import { defaultTaskRules, newNestTaskRules, parseTaskRules, serializeTaskRules, type TaskRules } from "../nodes/task-rules.js";
 
 /**
  * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
@@ -732,8 +732,8 @@ export async function createNest(
   const visibility = userId === ANON_USER_ID ? "public" : "private";
 
   await db.run(
-    "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, userId, trimmed, slug, description || null, visibility],
+    "INSERT INTO nests (id, user_id, name, slug, description, visibility, task_rules) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, userId, trimmed, slug, description || null, visibility, serializeTaskRules(newNestTaskRules(trimmed))],
   );
 
   const path = resolveNestPath(id);
@@ -976,24 +976,19 @@ async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
   });
 }
 
-export async function listSharedNests(userId: string): Promise<Nest[]> {
+/**
+ * Nests someone else owns that this person was let into: a collaborator grant,
+ * an active steward assignment, a share grant on one document or folder, a
+ * headless access key, or a team shared onto the nest. Live nests only.
+ *
+ * Every row here is a grant somebody made to this person. Reading a nest
+ * through its visibility (public, org) is not in it, and neither is the
+ * anonymous commons a server admin is shown: listSharedNests adds that. First
+ * run onboarding asks exactly this question (PO-1391), so it is its own
+ * function and the dashboard list is built on top of it.
+ */
+export async function listNestsGrantedTo(userId: string): Promise<Nest[]> {
   const db = getDb();
-  // A server admin is NOT auto-shown every nest here. Administering a nest
-  // (resolveNestPermission → 'admin') still grants ACCESS via a direct link,
-  // but it must not surface another user's private nest in the admin's
-  // dashboard — an admin only sees nests actually shared with them (below),
-  // plus their own and the public/anonymous commons (listNests/listPublicNests).
-  // Shared = collaborator grant OR active steward assignment (matched by
-  // email, since steward rows may predate the account) OR a share grant on one
-  // document/folder OR membership of a team shared onto the nest. Independent
-  // paths to a nest the user doesn't own.
-  //
-  // Share grants join in here so a person shared ONE document finds it by
-  // logging in instead of needing the direct link someone sent them — the nest
-  // is listed, and every read past the card stays scoped to their grants
-  // (middleware in app.ts + listNodesForCaller). Deliberately NOT added to
-  // listVisibleNests: that feeds the work inbox and stats, where a nest-wide
-  // review queue would surface documents the grantee cannot read.
   const direct = (await db.all(
     `SELECT DISTINCT n.* FROM nests n
        LEFT JOIN nest_collaborators nc
@@ -1024,6 +1019,29 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
       seen.add(n.id);
     }
   }
+  return direct;
+}
+
+export async function listSharedNests(userId: string): Promise<Nest[]> {
+  const db = getDb();
+  // A server admin is NOT auto-shown every nest here. Administering a nest
+  // (resolveNestPermission → 'admin') still grants ACCESS via a direct link,
+  // but it must not surface another user's private nest in the admin's
+  // dashboard — an admin only sees nests actually shared with them (below),
+  // plus their own and the public/anonymous commons (listNests/listPublicNests).
+  // Shared = collaborator grant OR active steward assignment (matched by
+  // email, since steward rows may predate the account) OR a share grant on one
+  // document/folder OR membership of a team shared onto the nest. Independent
+  // paths to a nest the user doesn't own.
+  //
+  // Share grants join in here so a person shared ONE document finds it by
+  // logging in instead of needing the direct link someone sent them — the nest
+  // is listed, and every read past the card stays scoped to their grants
+  // (middleware in app.ts + listNodesForCaller). Deliberately NOT added to
+  // listVisibleNests: that feeds the work inbox and stats, where a nest-wide
+  // review queue would surface documents the grantee cannot read.
+  const direct = await listNestsGrantedTo(userId);
+  const seen = new Set(direct.map((n) => n.id));
 
   // Server admins additionally see the anonymous commons — nests owned by the
   // ANON user (the ungoverned shared workspace), even if a commons nest was
