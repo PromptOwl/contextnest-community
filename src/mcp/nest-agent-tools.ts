@@ -10,6 +10,9 @@
  *                     (handle), or set its description (owner/admin).
  *   context_handoff   hand a thread to a person or an agent (create), or
  *                     accept / done one.
+ *   context_propose   an agent's own approve card in a thread: its plan as a
+ *                     draft under review; the decision wakes it
+ *                     (agents/agent-proposals.ts).
  *
  * Proposals are decided with the existing `context_approve` / `context_reject`
  * (the review queue lists them under requested_by "hootie"); no tool here.
@@ -18,7 +21,7 @@
  * nothing else here (`context_ask_nest` spends model credits).
  *
  * Inline schemas: Community-only features over the comment-thread store
- * (scripts/check-mcp-schemas.mjs baseline 125->128, documented there).
+ * (scripts/check-mcp-schemas.mjs baseline 125->128, and 132->133 for context_propose, documented there).
  */
 import { config } from "../config.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -79,6 +82,24 @@ export const NEST_AGENT_TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: "context_propose",
+    description:
+      "Put an approve card in front of your own work (an agent's gate): files `content` (your plan, markdown) as a draft titled `title`, submits it to the review queue under your login, " +
+      "and posts a card in the channel thread `thread` that a writer approves (context_approve) or rejects (context_reject) — from the thread, on any device. " +
+      "Declare yourself (client.agent, your @handle): the decision then wakes you with an `agent.proposal.decided` webhook carrying the thread, so you continue only after a person decides. " +
+      "Nothing is published by this call. Members who can create in the nest only; title at most 200 characters, content at most 20,000; folder defaults to \"plans\".",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        thread: { type: "string", description: "The channel thread (post id) the card goes in — the one you were woken in." },
+        title: { type: "string", description: 'What is being approved, e.g. "Plan: add a health check".' },
+        content: { type: "string", description: "The plan, markdown. It becomes the draft's body and the card's preview." },
+        folder: { type: "string", description: 'Folder under nodes/ for the draft (default "plans").' },
+      },
+      required: ["thread", "title", "content"],
+    },
+  },
 ];
 
 const NAMES = new Set(NEST_AGENT_TOOL_DEFINITIONS.map((t) => t.name));
@@ -135,6 +156,14 @@ export async function runNestAgentTool(toolName: string, args: Record<string, an
         return { text: handoffText(data.handoff), data };
       }
       return toolError(`Unknown action "${action}" — use create, accept or done.`, "VALIDATION_FAILED");
+    }
+    if (toolName === "context_propose") {
+      if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
+      const who = { ...caller, client: messageClient(ctx.client, args.client, ctx.apiKeyLabel) };
+      // Loaded on use: the review queue + node write path it pulls in stays off the app's startup graph.
+      const { proposeInThread, proposalCardText } = await import("../agents/agent-proposals.js");
+      const data = await proposeInThread(who, args.thread, { title: args.title, content: args.content, folder: args.folder });
+      return { text: proposalCardText(data.proposal), data };
     }
     return toolError(`Unknown tool: ${toolName}`, "VALIDATION_FAILED");
   } catch (err) {

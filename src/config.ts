@@ -915,6 +915,21 @@ export const config = {
    * switchable live under Settings → Features
    * (`experimental_agent_stream_enabled`). May change or disappear.
    */
+  /**
+   * Internal agent runners (chat as orchestration): bare host names, comma
+   * separated, that an agent wake-up target may use even though they resolve
+   * to a private address — e.g. `runner` for a compose service on this
+   * server's own network (ai-os-reference). http or https, exact host match,
+   * no userinfo. IP literals and localhost are ignored: name the service.
+   * Unset (the default) → only public https targets, as before.
+   */
+  get AGENT_WEBHOOK_INTERNAL_HOSTS(): string[] {
+    return (process.env.AGENT_WEBHOOK_INTERNAL_HOSTS || "")
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter((h) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(h))
+      .filter((h) => h !== "localhost" && !h.endsWith(".localhost") && !/^[0-9.]+$/.test(h));
+  },
   get EXPERIMENTAL_AGENT_STREAM(): boolean {
     // An alias of TEAM_CHAT_ENABLED since the team chat harness (PO-1197):
     // either name turns the same thing on. Kept so existing deploys and

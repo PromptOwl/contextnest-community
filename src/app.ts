@@ -2999,7 +2999,7 @@ export function createApp(): Hono<AuthEnv> {
       parts[1] === "ask" ||
       parts[1] === "agent-profiles" ||
       parts[1] === "handoffs" ||
-      (parts[1] === "threads" && parts.length === 4 && parts[3] === "handoff");
+      (parts[1] === "threads" && parts.length === 4 && (parts[3] === "handoff" || parts[3] === "propose"));
     if (isConversationRoute && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }

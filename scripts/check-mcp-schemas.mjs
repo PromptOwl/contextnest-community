@@ -131,7 +131,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   131->132 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
 //   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
-const BASELINE = 132;
+//   132->133 context_propose (chat as orchestration, epic recipes-and-the-central-harness, src/mcp/nest-agent-tools.ts) —
+//   twin of POST /nests/:id/threads/:threadId/propose. An agent's approve card over the Community-only comment-thread
+//   store and review queue (the C7 proposal path), behind EXPERIMENTAL_AGENT_STREAM; the engine has no operation to
+//   import a descriptor from. Same maintainer decision 2026-10-24 (Community-only MCP tools ship inline).
+const BASELINE = 133;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
