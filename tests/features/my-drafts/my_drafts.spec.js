@@ -240,7 +240,7 @@ test.describe('My Drafts', () => {
       await expectBadgeMatchesServer(() => primary_user.nestsPage.goto());
       await expect(drafts.railItem).toContainText('My Drafts');
       // Muted: a list to tidy, not the primary pill of an inbox waiting on you.
-      await expect(drafts.railBadge).toHaveClass(/bg-muted-foreground\/15/);
+      await expect(drafts.railBadge).toHaveClass(/\bbg-muted\b/);
       await expect(drafts.railBadge).not.toHaveClass(/bg-primary/);
 
       // The badge follows the list: the seeded draft discarded, and the count

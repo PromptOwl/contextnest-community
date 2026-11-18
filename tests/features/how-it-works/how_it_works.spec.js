@@ -25,7 +25,7 @@ const secondaryRole = samples.secondary_user ?? null;
 test.describe('How it works', () => {
   test.skip(!primaryRole, 'primary_user is not configured. See tests/env.template.');
 
-  test('CN-HELP-001: "Help" in the account menu opens How it works at /guide', async ({ primary_user }) => {
+  test('CN-HELP-001: "How it works" in the account menu opens the page at /guide', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page, nestsPage, howItWorksPage: hw } = primary_user;
     await nestsPage.goto();
@@ -33,7 +33,7 @@ test.describe('How it works', () => {
     await expect(page.locator('[data-testid^="document-sidebar-group-"]')).toHaveCount(0);
     await hw.userMenu.click();
     await expect(hw.helpMenuItem).toBeVisible();
-    await expect(hw.helpMenuItem).toHaveText(/Help/);
+    await expect(hw.helpMenuItem).toHaveText(/How it works/);
     await hw.helpMenuItem.click();
     await expect(page).toHaveURL(/\/guide$/);
     await hw.waitLoaded();
