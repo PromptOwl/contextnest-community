@@ -33,8 +33,8 @@
  *   (`stewardsApi.deleteCreatedNests()`), and is in the entity registry for
  *   the teardown and the orphan sweeper. The notifications a nest raised are
  *   marked read first.
- * - CN-STEW-011 is a known bug (a tag or document Reviewer's My Work also
- *   lists documents outside their scope) and is skipped until it is fixed.
+ * - CN-STEW-011 was a known bug (a tag or document Reviewer's My Work also
+ *   listed documents outside their scope). PO-1404 fixed it, so it runs.
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
  */
 
@@ -451,19 +451,16 @@ test.describe('Assign Steward', () => {
     await work.goto();
     await expect(work.workRow(tagged.title)).toHaveCount(1, WRITE);
     await expect(work.workRow(one.title)).toHaveCount(1);
-    // My Work also lists the out-of-scope "Plain" today — the known bug
-    // CN-STEW-011 tracks (skipped until fixed), so it isn't asserted here. The
-    // scope check is the nest's own count, which leaves "Plain" out.
+    // Out of scope: neither My Work nor the nest's own count lists it.
+    await expect(work.workRow(plain.title)).toHaveCount(0);
 
     await steward.page.gotoDocuments(nest.id);
     await expect(steward.page.reviewCount).toHaveText('2', WRITE);
   });
 
-  test("CN-STEW-011: Verify that a tag or document Reviewer's My Work lists only the pending documents in their scope, with Approve and Reject (known bug: currently also lists out-of-scope documents)", async ({ primary_user, secondary_user, commonFunction }) => {
-    // Skipped: known bug. My Work decides "can review" for the whole nest, not
-    // per document, so it also lists documents outside the Reviewer's scope
-    // (and Approve on them fails). Remove this line once it is fixed.
-    test.skip(true, "Known bug: a tag/document Reviewer's My Work also lists out-of-scope documents");
+  test("CN-STEW-011: Verify that a tag or document Reviewer's My Work lists only the pending documents in their scope, with Approve and Reject", async ({ primary_user, secondary_user, commonFunction }) => {
+    // Was skipped as a known bug: My Work decided "can review" per nest. Fixed
+    // in PO-1404 (per-document check in src/me/my-work.ts).
     const owner = await ownerNest(primary_user, commonFunction, 'stew-mywork');
     const { api, nest } = owner;
     const tagged = await pending(owner, 'Tagged', ['qa']);
