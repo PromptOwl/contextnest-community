@@ -86,13 +86,13 @@ export const NEST_AGENT_TOOL_DEFINITIONS = [
     name: "context_propose",
     description:
       "Put an approve card in front of your own work (an agent's gate): files `content` (your plan, markdown) as a draft titled `title`, submits it to the review queue under your login, " +
-      "and posts a card in the channel thread `thread` that a writer approves (context_approve) or rejects (context_reject) — from the thread, on any device. " +
+      "and posts a card in the channel or conversation thread `thread` that a writer approves (context_approve) or rejects (context_reject) — from the thread, on any device. " +
       "Declare yourself (client.agent, your @handle): the decision then wakes you with an `agent.proposal.decided` webhook carrying the thread, so you continue only after a person decides. " +
       "Nothing is published by this call. Members who can create in the nest only; title at most 200 characters, content at most 20,000; folder defaults to \"plans\".",
     inputSchema: {
       type: "object" as const,
       properties: {
-        thread: { type: "string", description: "The channel thread (post id) the card goes in — the one you were woken in." },
+        thread: { type: "string", description: "The channel or conversation thread (post id) the card goes in — the one you were woken in." },
         title: { type: "string", description: 'What is being approved, e.g. "Plan: add a health check".' },
         content: { type: "string", description: "The plan, markdown. It becomes the draft's body and the card's preview." },
         folder: { type: "string", description: 'Folder under nodes/ for the draft (default "plans").' },

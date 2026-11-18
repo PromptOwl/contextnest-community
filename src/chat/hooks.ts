@@ -2,7 +2,7 @@
  * What the message write path calls after a message lands (team chat C2,
  * PO-1197) — the two lines in channels/post-message.ts:
  *
- *   - `indexConversationAgents`: in a conversation, every AGENT member the
+ *   - `indexConversationAgents`: in a DM, every AGENT member the
  *     message doesn't already name gets a mention row, so the agent's My
  *     Work lists it and the wake-up goes out (a message to an agent in its
  *     dm is addressed to it). Runs between the mention index and the wake.
