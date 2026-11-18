@@ -49,7 +49,8 @@ export function seedItemKindsRebuildSqlite(now: string): string {
 export function seedItemKindsPostgres(): string {
   return `
     DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'surface_seed_items_kind_check'
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'surface_seed_items'::regclass
+                  AND conname = 'surface_seed_items_kind_check'
                   AND pg_get_constraintdef(oid) NOT LIKE '%task_rules%') THEN
         ALTER TABLE surface_seed_items DROP CONSTRAINT surface_seed_items_kind_check;
         ALTER TABLE surface_seed_items ADD CONSTRAINT surface_seed_items_kind_check CHECK (kind IN (${SEED_ITEM_KINDS_SQL}));
