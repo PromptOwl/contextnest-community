@@ -109,3 +109,19 @@ describe("counts ignore finished tasks", () => {
     expect(nothingWaitingOnMe({ items: [], assigned: [assigned[1]] })).toBe(true);
   });
 });
+
+describe("the urgent filter behind the red count", () => {
+  it("keeps exactly the tasks the red count counts, and is not the default", async () => {
+    const { matchesTaskFilters: matches, DEFAULT_TASK_FILTERS: base, isDefaultTaskFilters: isDefault } = await import("./my-work-tasks");
+    const items = [
+      task({ node_id: "a", priority: "urgent" }),
+      task({ node_id: "b", due: "2020-01-01" }),
+      task({ node_id: "c", priority: "low" }),
+      task({ node_id: "d", priority: "urgent", done: true }),
+    ];
+    const f = { ...base, urgent: true };
+    expect(items.filter((i) => matches(i, f, TODAY)).map((i) => i.node_id)).toEqual(["a", "b"]);
+    expect(items.filter((i) => isUrgentTask(i, TODAY)).length).toBe(2);
+    expect(isDefault(f)).toBe(false);
+  });
+});

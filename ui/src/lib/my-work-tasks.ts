@@ -17,6 +17,8 @@ export interface TaskFilters {
   stage: string;
   priority: PriorityFilter;
   due: DueFilter;
+  /** Only the pressing ones: urgent by priority, or overdue. */
+  urgent: boolean;
   search: string;
 }
 
@@ -26,6 +28,7 @@ export const DEFAULT_TASK_FILTERS: TaskFilters = {
   stage: "all",
   priority: "all",
   due: "all",
+  urgent: false,
   search: "",
 };
 
@@ -35,6 +38,7 @@ export function isDefaultTaskFilters(f: TaskFilters): boolean {
     f.stage === "all" &&
     f.priority === "all" &&
     f.due === "all" &&
+    !f.urgent &&
     f.search.trim() === ""
   );
 }
@@ -70,6 +74,7 @@ export function matchesTaskFilters(a: AssignedItem, f: TaskFilters, today: strin
   if (f.status === "open" && a.done) return false;
   if (f.status === "done" && !a.done) return false;
   if (f.stage !== "all" && taskStage(a.tags) !== f.stage) return false;
+  if (f.urgent && !isUrgentTask(a, today)) return false;
   if (f.priority !== "all") {
     if (f.priority === "none" ? !!a.priority : a.priority !== f.priority) return false;
   }

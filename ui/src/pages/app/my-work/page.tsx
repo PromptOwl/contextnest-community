@@ -33,6 +33,8 @@ import { keyOfConversationId } from "../../../lib/chat-live";
 import { AssignedTasks } from "../../../components/my-work/AssignedTasks";
 import { openTasks, type TaskStatusFilter } from "../../../lib/my-work-tasks";
 
+type WorkTab = "all" | "approvals" | "tasks" | "mentions" | "notifications" | "waiting";
+
 export default function MyWorkPage() {
   const { openNest: onSelectNest, openReview: onOpenReview, openChannel, goBack, initialReview } = useAppNav();
   const { adminStatus } = useAuth();
@@ -91,6 +93,8 @@ export default function MyWorkPage() {
   const qc = useQueryClient();
   // "Waiting on others" needs nothing from you, so it starts folded.
   const [waitingOpen, setWaitingOpen] = useState(false);
+  // Which part of the inbox is showing. "all" is the whole page, in order.
+  const [tab, setTab] = useState<WorkTab>("all");
   // Finished tasks load only when the Tasks filter asks for Done or All.
   const [withDone, setWithDone] = useState(false);
   const [loadingDone, setLoadingDone] = useState(false);
@@ -248,6 +252,14 @@ export default function MyWorkPage() {
     if (idx >= 0) dropWorkItem(reviewItems[idx]);
     setOpenRev(next ? { nestId: next.nest_id, nodeId: next.node_id } : null);
   };
+
+  // Skip: the next approval after the open one, wrapping round. Only your own
+  // approvals count, so it never lands on a row you cannot decide.
+  const skipTarget = (() => {
+    if (!openRev || reviewItems.length < 2) return null;
+    const i = reviewItems.findIndex((w) => w.nest_id === openRev.nestId && w.node_id === openRev.nodeId);
+    return i === -1 ? null : reviewItems[(i + 1) % reviewItems.length]!;
+  })();
 
   // The cap is per call and a call is per nest, so what matters is the biggest
   // per-nest group, not the total selection. How many to deselect, or 0.
@@ -453,6 +465,18 @@ export default function MyWorkPage() {
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
+  const mentionCount = work.mentions_pagination?.total ?? work.mentions?.length ?? 0;
+  const workTabs: Array<{ key: WorkTab; label: string; count: number | null }> = [
+    { key: "all", label: "All", count: null },
+    { key: "approvals", label: "Approvals", count: work.pagination?.total ?? listItems.length },
+    { key: "tasks", label: "Tasks", count: openTaskCount },
+    { key: "mentions", label: "Mentions", count: mentionCount },
+    { key: "notifications", label: "Notifications", count: work.notifications?.length ?? 0 },
+    { key: "waiting", label: "Waiting on others", count: work.waiting.length },
+  ];
+  const show = (t: Exclude<WorkTab, "all">) => tab === "all" || tab === t;
+  const tabIsEmpty = tab !== "all" && (workTabs.find((t) => t.key === tab)?.count ?? 0) === 0;
+
   return (
     <div className="space-y-4">
       <PageTitle
@@ -476,17 +500,38 @@ export default function MyWorkPage() {
         data-testid="my-work-filter-chips"
       >
         {!workLoading && (
-          <p className="text-sm text-muted-foreground" data-testid="my-work-summary">
-            {[
-              [work.items.length, "approval"],
-              [openTaskCount, "open task"],
-              [work.mentions_pagination?.total ?? work.mentions?.length ?? 0, "mention"],
-              [work.notifications?.length ?? 0, "notification"],
-            ]
-              .filter(([n]) => (n as number) > 0)
-              .map(([n, label]) => `${n} ${label}${n === 1 ? "" : "s"}`)
-              .join(" · ") || "Nothing waiting on you"}
-          </p>
+          <div role="tablist" aria-label="My Work" className="flex flex-wrap items-center gap-1.5" data-testid="my-work-tabs">
+            {workTabs.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === t.key}
+                onClick={() => setTab(t.key)}
+                data-testid={`my-work-tab-${t.key}`}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition-colors ${
+                  tab === t.key
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                {t.label}
+                {t.count !== null && (
+                  <span
+                    className={`rounded-full px-1.5 text-xs font-semibold ${
+                      tab === t.key
+                        ? "bg-primary-foreground/20"
+                        : t.count > 0 && t.key !== "waiting"
+                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                          : "bg-muted"
+                    }`}
+                  >
+                    {t.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         )}
         {nestOptions.length > 1 && (
           <select
@@ -514,6 +559,7 @@ export default function MyWorkPage() {
           row clicks straight to the document (circular nav), approve/reject
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
           <div className="space-y-5">
+            {show("approvals") && (<>
             {/* Approvals — what a reviewer has to decide now. First on the page,
                 so it is never pushed below a long task list. */}
             <section aria-labelledby="my-work-approvals-heading" data-testid="my-work-approvals" className="space-y-2">
@@ -759,9 +805,10 @@ export default function MyWorkPage() {
                 </Button>
               </div>
             )}
+            </>)}
             {/* Tasks assigned to you, across nests: open ones by default,
                 most pressing first, filterable. */}
-            {!workLoading && (
+            {!workLoading && show("tasks") && (
               <AssignedTasks
                 items={work.assigned ?? []}
                 today={localToday()}
@@ -773,7 +820,7 @@ export default function MyWorkPage() {
             {/* Open threads that @mention you, in channels and on documents,
                 waiting on your reply (PO-1180). Reply, resolve or mark done
                 and the row goes. Newest first; click jumps to the thread. */}
-            <MentionRows
+            {show("mentions") && (<MentionRows
               mentions={work.mentions ?? []}
               viewer={adminStatus?.me ?? null}
               pagination={work.mentions_pagination}
@@ -782,8 +829,8 @@ export default function MyWorkPage() {
               onOpen={openMention}
               onDone={markMentionDone}
               onPage={goToMentionsPage}
-            />
-              {(work.notifications?.length ?? 0) > 0 && (
+            />)}
+              {show("notifications") && (work.notifications?.length ?? 0) > 0 && (
                 <div className="rounded-lg border border-amber-300/50 bg-amber-500/5">
                   <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
                     <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
@@ -875,7 +922,7 @@ export default function MyWorkPage() {
                   )}
                 </div>
               )}
-            {work.waiting.length > 0 && (
+            {show("waiting") && work.waiting.length > 0 && (
               <div>
                 <button
                   type="button"
@@ -892,7 +939,7 @@ export default function MyWorkPage() {
                     {work.waiting.length}
                   </span>
                 </button>
-                {waitingOpen && (
+                {(waitingOpen || tab === "waiting") && (
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {work.waiting.map((w) => (
                     <div
@@ -977,6 +1024,15 @@ export default function MyWorkPage() {
                 )}
               </div>
             )}
+            {!workLoading && tabIsEmpty && tab !== "approvals" && tab !== "tasks" && (
+              <p className="px-1 text-sm text-muted-foreground" data-testid="my-work-tab-empty">
+                {tab === "mentions"
+                  ? "No mentions waiting on you."
+                  : tab === "notifications"
+                    ? "No notifications."
+                    : "You are not waiting on anyone."}
+              </p>
+            )}
           </div>
           {openRev && (
             <div className="min-w-0" data-testid="my-work-review-pane">
@@ -986,6 +1042,11 @@ export default function MyWorkPage() {
                 nodeId={openRev.nodeId}
                 currentUser={currentUserEmail?.toLowerCase()}
                 onDecided={afterDecision}
+                onSkip={
+                  skipTarget
+                    ? () => setOpenRev({ nestId: skipTarget.nest_id, nodeId: skipTarget.node_id })
+                    : undefined
+                }
                 onOpenDocument={(id) => {
                   const w = [...reviewItems, ...work.waiting].find((x) => x.node_id === id);
                   onOpenReview(openRev.nestId, w?.nest_name ?? "", id);
