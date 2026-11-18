@@ -38,6 +38,7 @@
 
 ### Patch Changes
 
+- Break an import cycle that could crash the agent feed fetch on load. The SSRF fence helpers (`isForbiddenConnectorHost`, `embeddedIPv4` and the private-range checks) move from `src/notify/dispatch.ts` to a dependency-free `src/notify/host-guard.ts`; `dispatch.ts` re-exports them, so callers are unchanged. Before, `metacognition/net.ts` reached `metacognition/tools.ts` through the team chat modules and, when loaded first, failed with `TypeError: __name is not a function`. CI on Node 20 skipped the test that shows it.
 - a0d3d73: The activity and comment reads now answer only for documents the caller can read. `GET /nests/:id/activity` leaves out entries for documents the caller can't open, and `GET …/nodes/:id/activity`, `GET …/nodes/:id/comments` and `GET …/nodes/:id/task-log` answer with an empty list for such a document, the same as for one that doesn't exist. This affects people who reach a nest only because it is public or org-visible (they get approved documents' entries only) and callers below write for a document proposed from chat that is still pending. People added to the nest see what they saw before.
 - 8b84e14: Agents now get a link a person can open. `nest_index` and `GET /index` give each nest a `web_url`, and `context_get`, `context_create`, `context_update`, `context_list`, `context_search` and `context_upload` include the document's web app address in their result. REST create and update responses carry `web_url` too. A browser that opens `/nests/<id>` is sent to `/nest/<id>` instead of getting JSON or a 404.
 
