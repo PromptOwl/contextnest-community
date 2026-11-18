@@ -78,9 +78,7 @@ test.describe('How it works', () => {
     await nestsPage.goto();
     await secondary_user.sidebarRailPage.openSettings();
     await expect(page.getByTestId('settings-nav-teammates'), 'a non-admin has no admin settings').toHaveCount(0);
-    await hw.userMenu.click();
-    await expect(hw.helpMenuItem).toBeVisible();
-    await hw.helpMenuItem.click();
+    await secondary_user.sidebarRailPage.openHelp();
     await hw.waitLoaded();
     await expect(page).toHaveURL(/\/guide$/);
     await expect(hw.sections).toHaveText(adminSections);

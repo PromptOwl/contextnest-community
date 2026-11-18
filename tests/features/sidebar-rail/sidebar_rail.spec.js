@@ -76,9 +76,8 @@ test.describe('Sidebar rail', () => {
     await rail.userMenu.click();
     await expect(rail.userMenuSettings).toBeVisible();
     await expect(rail.userMenuHelp).toBeVisible();
-    await page.keyboard.press('Escape');
 
-    // Workspace settings: the pages everyone has.
+    // Workspace settings (from the open menu): the pages everyone has.
     await rail.openSettings();
     expect(await rail.settingsIds()).toEqual(['teams', 'api-keys']);
   });

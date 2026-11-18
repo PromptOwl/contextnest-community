@@ -81,10 +81,11 @@ test.describe('Teams', () => {
     // account exists — an unknown address would leave a placeholder account).
     if (secondaryRole) await teamsApi.addMember(team.id, secondaryRole.email, 'editor');
 
+    // Account menu → Settings opens Workspace settings on its first page,
+    // Teams, so that click is the one that loads the list.
     await primary_user.nestsPage.goto();
-    await primary_user.sidebarRailPage.openSettings();
+    const { teams: listed } = await teams.gotoAndReadTeams(() => primary_user.sidebarRailPage.openSettings());
     await expect(teams.railItem).toBeVisible();
-    const { teams: listed } = await teams.gotoAndReadTeams(() => teams.railItem.click());
     await expect(teams.railItem).toHaveAttribute('aria-current', 'page');
     await expect(teams.pageTitle).toContainText('Teams');
     await expect(teams.newTeam).toBeVisible();

@@ -120,10 +120,32 @@ class SidebarRailPage {
       .evaluateAll((els) => els.map((e) => e.dataset.testid.replace('settings-nav-', '')));
   }
 
+  /**
+   * Show the account menu's `item`. Clicking the trigger of an open (or still
+   * closing) menu closes it, so open it only when the item is not on screen,
+   * and try again if a click landed on a menu that was closing.
+   */
+  async openMenuItem(item) {
+    // A menu closed by the previous step (an item clicked) fades out: let it go
+    // first. A menu that is meant to be open stays visible and is used as is.
+    await item.waitFor({ state: 'hidden', timeout: 1500 }).catch(() => {});
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await item.isVisible()) return;
+      await this.userMenu.click();
+      try {
+        await item.waitFor({ state: 'visible', timeout: 5000 });
+        return;
+      } catch {
+        /* the click closed a menu that was still open: go round again */
+      }
+    }
+    await item.waitFor({ state: 'visible' });
+  }
+
   /** Account menu → Settings: the Workspace settings page. */
   async openSettings() {
     logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Opening Workspace settings from the account menu`);
-    await this.userMenu.click();
+    await this.openMenuItem(this.userMenuSettings);
     await this.userMenuSettings.click();
     await this.settingsNav.waitFor({ state: 'visible' });
   }
@@ -131,7 +153,7 @@ class SidebarRailPage {
   /** Account menu → Help: How it works. */
   async openHelp() {
     logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Opening Help from the account menu`);
-    await this.userMenu.click();
+    await this.openMenuItem(this.userMenuHelp);
     await this.userMenuHelp.click();
   }
 }

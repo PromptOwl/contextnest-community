@@ -81,9 +81,14 @@ test.describe('Review Queue', () => {
   }
 
   /** Share the nest read-only with secondary_user and open their session. */
-  async function addReader(owner, secondary) {
+  async function addReader(owner, secondary, { reviewer = false } = {}) {
     test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
     await owner.api.addCollaborator(owner.nest.id, secondaryRole.email, 'read');
+    // A reviewer is made one before their session starts: My Work caches
+    // "can approve in this nest?" for 30 seconds (src/me/my-work.ts), so a
+    // read made while they were only a reader would hide the nest's reviews
+    // from them for that long.
+    if (reviewer) await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email });
     await secondary.initialize();
     const api = secondary.reviewQueueApi;
     await api.settleInvitesFor(owner.nest.id);
@@ -93,9 +98,7 @@ test.describe('Review Queue', () => {
 
   /** Make secondary_user a reviewer of the whole nest. */
   async function addNestReviewer(owner, secondary) {
-    const reviewer = await addReader(owner, secondary);
-    await owner.api.addSteward(owner.nest.id, { email: secondaryRole.email });
-    return reviewer;
+    return addReader(owner, secondary, { reviewer: true });
   }
 
   /**
