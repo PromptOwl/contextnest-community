@@ -6,8 +6,8 @@
  * Inside a nest, Views lists that nest's views and the two review surfaces
  * (Review queue, External edits). On the dashboard there is no nest yet, so
  * the same menu stays live and starts with a nest picker instead of going dead.
- * Connect is one quiet labelled item here and nowhere else. New document is the
- * one filled button on the bar.
+ * Connect is one quiet labelled item here and nowhere else. An open document's
+ * edit actions (Publish, Save draft, Submit) follow New document.
  *
  * Gated exactly like the sidebar rows it replaced (see nestSidebarViews).
  */
@@ -238,8 +238,9 @@ export function TopBarTools({
           last had open. Hidden only where the open nest is read-only. */}
       {(!nestId || (caps && !caps.isReadOnly && !caps.isReaderView && caps.canEditDocs)) && (
         <Button
+          variant="ghost"
           size="sm"
-          className="ml-1 h-9 gap-1.5 px-2 xl:px-3"
+          className="h-9 gap-1.5 px-2 text-muted-foreground hover:text-accent-foreground xl:px-2.5"
           onClick={onNewDocument}
           title="New document — start blank or import files"
           aria-label="New document"
@@ -249,6 +250,9 @@ export function TopBarTools({
           <span className="hidden xl:inline">New document</span>
         </Button>
       )}
+      {/* The open document's edit actions (Publish, Save draft, Submit) land
+          here through a portal from DocumentEditor. */}
+      <div id="top-bar-doc-actions" className="contents" />
     </div>
   );
 }
