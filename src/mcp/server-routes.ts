@@ -78,6 +78,7 @@ import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./a
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
 import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
+import { logTraceEvent } from "../telemetry/trace-log.js";
 import { APPEARANCE_READ_TOOL_NAMES, APPEARANCE_TOOL_DEFINITIONS, APPEARANCE_TOOL_NAMES, handleAppearanceTool } from "./appearance-tools.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 import { nestWebUrl } from "../shared/web-links.js";
@@ -522,8 +523,23 @@ async function handleServerToolCall(
 
   // Server appearance (PO-1430): reads for anyone, writes for a server admin
   // (checked inside, the same gate as PATCH /admin/settings).
+  // The write is audited like PATCH /admin/settings: one MCP row on the
+  // activity trace (these tools don't go through handleToolCall's logger).
   if (APPEARANCE_TOOL_NAMES.has(toolName)) {
-    return handleAppearanceTool(toolName, args ?? {}, { userId, nestScope });
+    const started = Date.now();
+    const out = await handleAppearanceTool(toolName, args ?? {}, { userId, nestScope });
+    const err = typeof out !== "string" && out.isError ? (out.data as { code?: string }) : null;
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: null,
+      userId,
+      userEmail,
+      status: err ? (err.code === "UNAUTHORIZED_ACTION" ? 403 : 400) : 200,
+      durationMs: Date.now() - started,
+      client,
+    });
+    return out;
   }
 
   if (ONBOARDING_TOOL_NAMES.has(toolName)) {

@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, authed } from "./helpers.js";
+import { DEFAULT_NAV_COLOR, NAV_COLOR_ERROR } from "../src/shared/appearance.js";
+import * as ui from "../ui/src/lib/nav-color.js";
 
 const MCP_HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 let rpc = 1;
@@ -154,5 +156,46 @@ describe("nav color over MCP (server-level /mcp)", () => {
     expect(write?.annotations?.readOnlyHint).toBe(false);
     expect(write?.inputSchema?.properties?.nav_color?.type).toBe("string");
     expect(write?.inputSchema?.required).toContain("nav_color");
+  });
+});
+
+describe("nav color: server and UI agree", () => {
+  it("share the default and the error wording; the UI's default navy is that hex", () => {
+    expect(ui.DEFAULT_NAV_COLOR).toBe(DEFAULT_NAV_COLOR);
+    expect(ui.NAV_COLOR_ERROR).toBe(NAV_COLOR_ERROR);
+    // navRail(null) draws hsl(228 73% 24%); its hex is the shared default.
+    expect(ui.navRail(null).background).toBe("hsl(228 73% 24%)");
+    expect(ui.navRail(DEFAULT_NAV_COLOR).background).toBe(DEFAULT_NAV_COLOR);
+  });
+});
+
+describe("nav color MCP write: credential gates and audit", () => {
+  it("refuses a read-only key and an admin's nest-scoped key", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "N" }, admin.apiKey);
+    const nestId = nest.data.nest.id;
+    const mint = async (extra: Record<string, unknown>) => {
+      const r = await jsonRequest(app, "POST", "/auth/keys", { label: `k-${rpc++}`, nest_id: nestId, ...extra }, admin.apiKey);
+      expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+      return r.data.key ?? r.data.apiKey ?? r.data.api_key;
+    };
+    const ro = await mcp(app, await mint({ capability: "read" }), "context_appearance_update", { nav_color: "#0f766e" });
+    expect(ro.isError).toBe(true);
+    const scoped = await mcp(app, await mint({}), "context_appearance_update", { nav_color: "#0f766e" });
+    expect(scoped.isError).toBe(true);
+    expect(scoped.content[0].text).toMatch(/server admin/i);
+    expect((await health(app)).nav_color).toBeNull();
+  });
+
+  it("leaves an MCP row on the activity trace, like the REST write does", async () => {
+    await mcp(app, admin.apiKey, "context_appearance_update", { nav_color: "#14532d" });
+    let row: any;
+    for (let i = 0; i < 40 && !row; i++) {
+      const t = await jsonRequest(app, "GET", "/admin/trace?kind=mcp", undefined, admin.apiKey);
+      row = t.data.events.find((e: any) => e.tool === "context_appearance_update");
+      if (!row) await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(row).toBeTruthy();
+    expect(row.caller).toBe("admin@acme.com");
+    expect(row.status).toBe(200);
   });
 });
