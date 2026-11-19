@@ -23,6 +23,7 @@ import {
   createNest,
   createSlackInstall,
   createSurfacesBinding,
+  disconnectSurfacesInstall,
   getSlackInstall,
   getSurfacesSeedStatus,
   getSurfacesSettings,
@@ -366,7 +367,7 @@ function downloadJson(name: string, data: unknown) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
+export function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
   const inst = state.install;
   const connected = inst?.status === "active";
   const hosted = !!state.status?.slack_hosted;
@@ -445,6 +446,22 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
     if (inst) window.location.assign(slackOAuthStartUrl(inst.id));
   };
 
+  const [confirmOff, setConfirmOff] = useState(false);
+  const disconnect = async () => {
+    if (!inst) return;
+    setBusy(true);
+    try {
+      const r = await disconnectSurfacesInstall(inst.id);
+      toast.success(r.withdrawn ? `Disconnected Slack. ${r.withdrawn} pending item(s) withdrawn.` : "Disconnected Slack.");
+      setConfirmOff(false);
+      await state.reload();
+    } catch (e) {
+      toast.error(errText(e, "Couldn't disconnect Slack."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <StepHeading
@@ -455,6 +472,29 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
+          <div className="mt-2">
+            <Button variant="outline" className={small} onClick={() => setConfirmOff(true)} disabled={busy} data-testid="setup-disconnect">
+              Disconnect Slack
+            </Button>
+          </div>
+          <Dialog open={confirmOff} onOpenChange={(o) => !busy && setConfirmOff(o)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Disconnect Slack?</DialogTitle>
+                <DialogDescription>
+                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. You can connect again later.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" onClick={disconnect} disabled={busy} data-testid="setup-disconnect-confirm">
+                  Disconnect
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </Note>
       ) : (
         <div className="rounded-lg border p-4">
