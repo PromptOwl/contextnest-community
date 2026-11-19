@@ -2,16 +2,29 @@
  * Server settings → Basic → Navigation color (PO-1430).
  *
  * A curated palette, a custom hex (validated inline), and a live preview of
- * the rail drawn with the same tokens the real rail uses (navRail), so what
- * the admin sees here is what everyone gets after Save.
+ * the rail built from the real rail's parts (RailParts, WorkShortcuts) on the
+ * same tokens (navRail), so what the admin sees here is what everyone gets
+ * after Save, and the preview can't drift from the rail.
  */
-import { Check, Inbox, LayoutGrid, Pencil, Search, Users } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { BookOpen, Check, LayoutGrid } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { normalizeHex } from "../../../lib/branding";
-import { DEFAULT_NAV_COLOR, NAV_PALETTE, RAIL_IDLE_TEXT, navColorError, navRail, navRailStyle } from "../../../lib/nav-color";
+import { reads } from "../../../lib/queries";
+import { useAuth } from "../../../auth/AuthContext";
+import { VisibilityGlyph, WorkShortcuts } from "@/components/DocumentSidebar";
+import {
+  ACCOUNT_TRIGGER_SIDEBAR,
+  AccountTriggerBody,
+  RailBrand,
+  RailFooter,
+  RailNestHeading,
+  RailRow,
+} from "@/components/rail/RailParts";
+import { DEFAULT_NAV_COLOR, NAV_PALETTE, navColorError, navRail, navRailStyle } from "../../../lib/nav-color";
 
 export function NavColorField({
   value,
@@ -31,6 +44,15 @@ export function NavColorField({
   // An invalid draft previews the color last typed validly — i.e. the default.
   const valid = inlineError ? null : normalizeHex(value.trim());
   const rail = navRail(valid);
+  const { isAdmin, authMode, adminStatus } = useAuth();
+  const displayName = adminStatus?.me?.name?.trim() || adminStatus?.me?.email || "You";
+  // The admin's own nests (the rail's list, already cached), a few of them.
+  const nests = useQuery({ ...reads.nestList() });
+  const list: any[] = nests.data?.nests ?? [];
+  const sampleNests = (list.length ? list : [{ id: "sample", name: "Your nest", visibility: "private" }])
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .slice(0, 3);
   return (
     <div className="grid gap-5 sm:grid-cols-[1fr_15rem]" data-testid="settings-nav-color">
       <div className="space-y-4">
@@ -113,67 +135,42 @@ export function NavColorField({
         </div>
       </div>
 
-      {/* Preview: a slice of the rail, built with the real rail's tokens. */}
+      {/* Preview: the real rail's parts (RailParts + WorkShortcuts) on the
+          chosen tokens, so it shows exactly what everyone will see. inert:
+          a picture, not a second set of controls. */}
       <figure className="space-y-1.5">
         <figcaption className="text-xs font-medium text-muted-foreground">Preview</figcaption>
         <div
-          className="overflow-hidden rounded-lg border text-sm text-foreground shadow-sm"
+          className="flex h-[26rem] flex-col overflow-hidden rounded-lg border text-sm text-foreground shadow-sm"
           style={navRailStyle(valid)}
           aria-hidden
+          {...{ inert: "" }}
           data-testid="nav-color-preview"
           data-nav-color={rail.custom ? rail.background : "default"}
         >
-          <div className="flex h-12 items-center gap-2 border-b border-border px-3">
-            <img src={logoUrl} alt="" className="h-6 w-6 rounded bg-white object-contain p-0.5" />
-            <span className="font-semibold">ContextNest</span>
-            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
-              Community
-            </Badge>
-          </div>
-          <div className="space-y-0.5 p-2">
-            <div className="relative mb-1.5">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <div className="h-7 rounded-md border border-border bg-background pl-7 text-xs leading-7 text-muted-foreground">
-                Filter nests
+          <RailBrand logoUrl={logoUrl} preview />
+          <WorkShortcuts active={null} isAdmin={isAdmin} isSuperadmin={isAdmin && authMode !== "open"} preview />
+          <RailRow icon={LayoutGrid} label="All nests" active className="mx-2 mt-1.5 w-auto" />
+          <div className="min-h-0 flex-1 overflow-hidden px-2 pb-4 pt-1">
+            {sampleNests.map((n: any, i: number) => (
+              <div key={n.id ?? i} className="mb-1">
+                <RailNestHeading
+                  name={n.name}
+                  open={false}
+                  current={false}
+                  glyphs={<VisibilityGlyph visibility={n.visibility} />}
+                />
               </div>
-            </div>
-            <PreviewRow icon={LayoutGrid} label="All nests" />
-            <PreviewRow icon={Inbox} label="My Work" active count={3} />
-            <PreviewRow icon={Pencil} label="My Drafts" />
-            <PreviewRow icon={Users} label="Teams" />
-            <p className="px-2.5 pt-2 text-[11px] uppercase tracking-wide text-muted-foreground">Workspace</p>
+            ))}
           </div>
+          <RailFooter preview>
+            <RailRow icon={BookOpen} label="Docs" />
+            <Button variant="ghost" size="sm" className={ACCOUNT_TRIGGER_SIDEBAR}>
+              <AccountTriggerBody displayName={displayName} inSidebar />
+            </Button>
+          </RailFooter>
         </div>
       </figure>
-    </div>
-  );
-}
-
-function PreviewRow({
-  icon: Icon,
-  label,
-  active,
-  count,
-}: {
-  icon: typeof Inbox;
-  label: string;
-  active?: boolean;
-  count?: number;
-}) {
-  return (
-    <div
-      className={cn(
-        "flex items-center gap-2 rounded-md px-2.5 py-1.5",
-        active ? "bg-muted font-medium text-foreground" : RAIL_IDLE_TEXT,
-      )}
-    >
-      <Icon className="h-4 w-4 shrink-0" />
-      <span className="truncate">{label}</span>
-      {count ? (
-        <span className="ml-auto rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold tabular-nums text-primary-foreground">
-          {count}
-        </span>
-      ) : null}
     </div>
   );
 }

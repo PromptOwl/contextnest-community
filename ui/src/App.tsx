@@ -55,7 +55,7 @@ import {
 import hootieIcon from "./assets/hootie.svg";
 import { ReaderBrandFooter } from "./components/ReaderBrandFooter";
 import { brandingToCssVars, isBranded, type NestBranding } from "./lib/branding";
-import { RAIL_IDLE_TEXT } from "./lib/nav-color";
+import { ACCOUNT_TRIGGER_SIDEBAR, AccountTriggerBody, ROW, ROW_ICON, ROW_IDLE } from "./components/rail/RailParts";
 import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound, Settings } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
@@ -1589,10 +1589,10 @@ export default function App() {
                           type="button"
                           onClick={() => setView({ page: "docs" })}
                           title="API, MCP & CLI docs for agents"
-                          className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm ${RAIL_IDLE_TEXT} hover:bg-muted hover:text-foreground`}
+                          className={`${ROW} ${ROW_IDLE}`}
                           data-testid="document-sidebar-docs"
                         >
-                          <BookOpen className="h-4 w-4 shrink-0" />
+                          <BookOpen className={ROW_ICON} />
                           Docs
                         </button>
                       )}
@@ -2407,22 +2407,10 @@ function UserMenu({
         <Button
           variant="ghost"
           size="sm"
-          className={inSidebar ? "group h-10 w-full justify-start gap-2 px-2" : "group h-9 gap-2 px-2"}
+          className={inSidebar ? ACCOUNT_TRIGGER_SIDEBAR : "group h-9 gap-2 px-2"}
           data-testid="user-menu-trigger"
         >
-          <Avatar className="h-[1.8rem] w-[1.8rem] rounded-sm shrink-0">
-            <AvatarFallback className="rounded-sm">{initial}</AvatarFallback>
-          </Avatar>
-          <span
-            className={
-              inSidebar
-                ? "min-w-0 flex-1 truncate text-left text-sm font-medium"
-                : "hidden sm:inline max-w-[140px] truncate text-sm font-medium"
-            }
-          >
-            {displayName}
-          </span>
-          <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground ${inSidebar ? "rotate-180" : ""}`} />
+          <AccountTriggerBody displayName={displayName} inSidebar={inSidebar} />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

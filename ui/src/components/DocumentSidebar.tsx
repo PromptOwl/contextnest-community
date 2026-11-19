@@ -30,7 +30,8 @@ import { reads } from "../lib/queries";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { useAuth } from "../auth/AuthContext";
-import { RAIL_IDLE_TEXT, navRail, navRailStyle } from "../lib/nav-color";
+import { navRail, navRailStyle } from "../lib/nav-color";
+import { ROW, ROW_ACTIVE, ROW_ICON, ROW_IDLE, RailBrand, RailFooter, RailNestHeading, RailRow } from "./rail/RailParts";
 import {
   folderAncestors,
   groupNodesByFolder,
@@ -70,12 +71,6 @@ interface Props {
   footer?: ReactNode;
 }
 
-/* One row style for both rails (app pages and a nest's views / tree) so the
-   sidebar reads the same wherever you are: same text size, icon, height. */
-const ROW = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted";
-const ROW_IDLE = `${RAIL_IDLE_TEXT} hover:text-foreground`;
-const ROW_ACTIVE = "bg-muted font-medium text-foreground";
-const ROW_ICON = "h-4 w-4 shrink-0";
 /* Group / nest-name headings above a set of rows. */
 const HEADING = "flex w-full items-center gap-1.5 rounded px-2.5 py-1 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground";
 
@@ -144,32 +139,7 @@ export function DocumentSidebar({
       {/* Brand row — the same logo + badge the app header shows, so the rail
           and the header read as one surface (the header hides its own copy
           while the rail is open). Clicking it goes home. */}
-      <div className="flex h-16 shrink-0 items-center justify-between gap-1 border-b border-border px-4">
-        <button
-          type="button"
-          onClick={onOpenDashboard}
-          className="flex min-w-0 items-center gap-2 hover:opacity-80"
-          title="Dashboard"
-          data-testid="document-sidebar-brand"
-        >
-          {/* The owl is navy, so it sits on a white tile against the colored rail. */}
-          <img src={logoUrl} alt="ContextNest" className="h-8 w-8 rounded-md bg-white object-contain p-1" />
-          <span className="font-semibold">ContextNest</span>
-          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-            Community
-          </Badge>
-        </button>
-        <button
-          type="button"
-          onClick={onCollapse}
-          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="Hide sidebar"
-          aria-label="Hide sidebar"
-          data-testid="document-sidebar-collapse"
-        >
-          <PanelLeftClose className="h-4 w-4" />
-        </button>
-      </div>
+      <RailBrand logoUrl={logoUrl} onOpen={onOpenDashboard} onCollapse={onCollapse} />
       {/* Work shortcuts: the ribbon carries My Work and My Drafts from
           tablet width up, so they only appear here in the phone drawer. */}
       <WorkShortcuts
@@ -180,21 +150,15 @@ export function DocumentSidebar({
       />
       {/* The nests page (create, import, archive, connect) is one row away
           from every page, in or out of a nest. */}
-      <button
-        type="button"
+      <RailRow
+        icon={LayoutGrid}
+        label="All nests"
+        active={nestId === null && dashboardTab === "nests"}
         onClick={onOpenDashboard}
-        aria-current={nestId === null && dashboardTab === "nests" ? "page" : undefined}
-        className={cn(
-          ROW,
-          nestId === null && dashboardTab === "nests" ? ROW_ACTIVE : ROW_IDLE,
-          "mx-2 mt-1.5 w-auto",
-        )}
+        className="mx-2 mt-1.5 w-auto"
         title="All nests"
         data-testid="document-sidebar-all-nests"
-      >
-        <LayoutGrid className={ROW_ICON} />
-        All nests
-      </button>
+      />
       {(nests.data?.nests?.length ?? 0) > 1 && (
         <div className="relative mx-2 mt-1 mb-2">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -220,61 +184,45 @@ export function DocumentSidebar({
           const relation = nestRelation(n);
           return (
             <div key={n.id} className={cn("mb-1", current && "mb-3")}>
-              <div
-                className={cn(
-                  "group flex items-center gap-1 rounded px-1.5 py-1",
-                  current ? "text-foreground" : "text-muted-foreground",
-                )}
-              >
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenNests((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(n.id)) next.delete(n.id);
-                      else next.add(n.id);
-                      return next;
-                    })
-                  }
-                  className="rounded p-0.5 hover:bg-muted"
-                  aria-label={open ? `Collapse ${n.name}` : `Expand ${n.name}`}
-                  aria-expanded={open}
-                >
-                  {open ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onOpenNest(nestTarget(n))}
-                  className={cn(
-                    "flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-xs font-semibold uppercase tracking-wide hover:text-foreground",
-                    // Readable only through its visibility tier — not mine, not shared.
-                    relation === "discovered" && "italic opacity-70",
-                  )}
-                  title={[`Open ${n.name}`, nestRelationText(n)].filter(Boolean).join(" — ")}
-                  data-relation={relation}
-                >
-                  <span className="truncate">{n.name}</span>
-                  {relation === "shared" && (
-                    <Users className="h-3 w-3 shrink-0 text-blue-600" aria-label="Shared with you" />
-                  )}
-                  <VisibilityGlyph visibility={n.visibility} />
-                </button>
-                {current && onNewDocument && (
-                  <button
-                    type="button"
-                    onClick={() => onNewDocument()}
-                    className="rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100 focus:opacity-100"
-                    title="New document"
-                    aria-label="New document"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
+              <RailNestHeading
+                name={n.name}
+                open={open}
+                current={current}
+                onToggle={() =>
+                  setOpenNests((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(n.id)) next.delete(n.id);
+                    else next.add(n.id);
+                    return next;
+                  })
+                }
+                onOpen={() => onOpenNest(nestTarget(n))}
+                // Readable only through its visibility tier — not mine, not shared.
+                nameClassName={relation === "discovered" ? "italic opacity-70" : undefined}
+                title={[`Open ${n.name}`, nestRelationText(n)].filter(Boolean).join(" — ")}
+                nameProps={{ "data-relation": relation }}
+                glyphs={
+                  <>
+                    {relation === "shared" && (
+                      <Users className="h-3 w-3 shrink-0 text-blue-600" aria-label="Shared with you" />
+                    )}
+                    <VisibilityGlyph visibility={n.visibility} />
+                  </>
+                }
+                extra={
+                  current && onNewDocument ? (
+                    <button
+                      type="button"
+                      onClick={() => onNewDocument()}
+                      className="rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100 focus:opacity-100"
+                      title="New document"
+                      aria-label="New document"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null
+                }
+              />
               {open && (
                 <NestTree
                   nestId={n.id}
@@ -287,14 +235,7 @@ export function DocumentSidebar({
           );
         })}
       </div>
-      {footer && (
-        <div
-          className="shrink-0 space-y-0.5 border-t border-border p-2"
-          data-testid="document-sidebar-footer"
-        >
-          {footer}
-        </div>
-      )}
+      {footer && <RailFooter>{footer}</RailFooter>}
     </nav>
   );
 }
@@ -307,16 +248,19 @@ const RIBBON_PAGE_IDS = new Set(["my-work", "my-drafts"]);
  *  header ribbon on tablets and up, so the rail lists them for phones only;
  *  any other work page (the Stream, when on) stays here on every screen.
  *  Settings and help pages live under the account menu, not here. */
-function WorkShortcuts({
+export function WorkShortcuts({
   active,
   isAdmin,
   isSuperadmin,
   onOpen,
+  preview = false,
 }: {
   active: string | null;
   isAdmin: boolean;
   isSuperadmin: boolean;
   onOpen?: (id: string) => void;
+  /** In the settings preview (PO-1430): no test ids, so the rail's stay unique. */
+  preview?: boolean;
 }) {
   const { mcpOauthEnabled, docStreamEnabled, surfacesEnabled } = useAuth();
   // The Control room is listed for nest owners/admins too (po-1186 CR2); the
@@ -329,7 +273,7 @@ function WorkShortcuts({
   return (
     <div
       className={cn("mx-2 mt-3 space-y-0.5", !alwaysShown && "md:hidden")}
-      data-testid="document-sidebar-dashboard"
+      data-testid={preview ? undefined : "document-sidebar-dashboard"}
     >
       {pages.map((page) => (
         <AppPageRow
@@ -337,6 +281,7 @@ function WorkShortcuts({
           page={page}
           active={page.id === active}
           onOpen={onOpen}
+          preview={preview}
           className={RIBBON_PAGE_IDS.has(page.id) ? "md:hidden" : undefined}
         />
       ))}
@@ -349,7 +294,9 @@ function AppPageRow({
   indent = false,
   onOpen,
   className,
+  preview = false,
 }: {
+  preview?: boolean;
   page: AppPage;
   active: boolean;
   onOpen?: (id: string) => void;
@@ -364,39 +311,21 @@ function AppPageRow({
     enabled: !!page.badge,
   });
   const count = page.badge ? page.badge.count(badge.data) : 0;
-  const Icon = page.icon;
   return (
-    <button
-      type="button"
+    <RailRow
+      icon={page.icon}
+      label={page.label}
+      active={active}
+      count={count}
+      tone={page.badge?.tone === "primary" ? "primary" : "muted"}
       onClick={() => onOpen?.(page.id)}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        ROW,
-        indent && "pl-7",
-        active ? ROW_ACTIVE : ROW_IDLE,
-        className,
-      )}
-      data-testid={`document-sidebar-dashboard-${page.id}`}
-    >
-      <Icon className={ROW_ICON} />
-      <span className="truncate">{page.label}</span>
-      {count > 0 && (
-        <span
-          className={cn(
-            "ml-auto rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
-            page.badge?.tone === "primary"
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted-foreground/15 text-muted-foreground",
-          )}
-        >
-          {count}
-        </span>
-      )}
-    </button>
+      className={cn(indent && "pl-7", className)}
+      data-testid={preview ? undefined : `document-sidebar-dashboard-${page.id}`}
+    />
   );
 }
 
-function VisibilityGlyph({ visibility }: { visibility?: string }) {
+export function VisibilityGlyph({ visibility }: { visibility?: string }) {
   if (visibility === "public")
     return <Globe className="h-3 w-3 shrink-0 text-green-600" aria-label="Public" />;
   if (visibility === "org")
