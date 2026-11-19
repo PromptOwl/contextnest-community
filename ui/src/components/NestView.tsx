@@ -53,6 +53,7 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+import { NestPinButton } from "./NestPinButton";
 import { DocumentsHome, EmptyNest } from "./nest/DocumentsHome";
 import { DEFAULT_NEST_TAB, nestTabOpening, nestViewMenuItems } from "../lib/nest-tabs";
 // Each tab is its own chunk, loaded when first opened.
@@ -1438,6 +1439,8 @@ export function NestView({
         }
         badges={
           <>
+            {/* Pin this nest to the top of the rail (PO-1441). */}
+            <NestPinButton nestId={nestId} variant="header" />
             {/* Visibility — a read-only badge for everyone who can't manage
               the nest (owner/admin get the menu in the action row). Gated on !initialLoad (not `loading`,
               which flips on every background refetch too — see its

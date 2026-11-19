@@ -38,6 +38,8 @@ import {
   groupNodesByFolder,
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
+import { NestPinButton } from "./NestPinButton";
+import { railNestRows } from "../lib/nest-pin";
 import { appRail, type AppPage } from "../lib/pages";
 import { useAdministersNest } from "../lib/administers-nest";
 import { cn } from "@/lib/utils";
@@ -127,18 +129,11 @@ export function DocumentSidebar({
 
   // Nest-name filter; the current nest always stays so its tree never vanishes.
   const [nestFilter, setNestFilter] = useState("");
-  const rows = useMemo(() => {
-    const list: any[] = nests.data?.nests ?? [];
-    const q = nestFilter.trim().toLowerCase();
-    // Current nest first so the tree you're in is never below the fold.
-    return list
-      .filter((n) => !q || n.id === nestId || String(n.name).toLowerCase().includes(q))
-      .sort((a, b) => {
-        if (a.id === nestId) return -1;
-        if (b.id === nestId) return 1;
-        return String(a.name).localeCompare(String(b.name));
-      });
-  }, [nests.data, nestId, nestFilter]);
+  // Pinned nests first (PO-1441), then the rest; the current nest leads its group.
+  const rows = useMemo(
+    () => railNestRows<any>(nests.data?.nests ?? [], nestId, nestFilter),
+    [nests.data, nestId, nestFilter],
+  );
 
   return (
     <nav
@@ -305,6 +300,7 @@ export function DocumentSidebar({
                     <Plus className="h-3.5 w-3.5" />
                   </button>
                 )}
+                <NestPinButton nestId={n.id} nest={n} variant="rail" />
               </div>
               {open && onOpenChat && nestChat(chat.data, n.id) && (
                 <div className="ml-2 border-l border-border/60 pl-1">
