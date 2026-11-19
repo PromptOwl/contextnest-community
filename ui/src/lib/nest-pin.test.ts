@@ -3,7 +3,7 @@
  * draws, and the optimistic toggle every pin control shares.
  */
 import { describe, it, expect, vi } from "vitest";
-import { railNestRows, withNestPinned, toggleNestPin } from "./nest-pin";
+import { railNestRows, withNestPinned, toggleNestPin, createPinGuard } from "./nest-pin";
 
 const nest = (id: string, name: string, pinned = false) => ({ id, name, pinned });
 
@@ -96,5 +96,30 @@ describe("toggleNestPin — optimistic, with rollback", () => {
     });
     expect(ok).toBe(false);
     expect(calls).toEqual(["patch:false", "patch:true", "error:boom"]);
+  });
+});
+
+describe("createPinGuard — one in-flight write per nest across every control", () => {
+  it("refuses a second claim on the same nest (rail, then header) until released", () => {
+    const guard = createPinGuard();
+    const seen: number[] = [];
+    guard.subscribe(() => seen.push(guard.snapshot().size));
+    expect(guard.claim("a")).toBe(true);
+    expect(guard.claim("a")).toBe(false);
+    expect(guard.claim("b")).toBe(true);
+    expect([...guard.snapshot()].sort()).toEqual(["a", "b"]);
+    guard.release("a");
+    expect(guard.claim("a")).toBe(true);
+    expect(seen).toEqual([1, 2, 1, 2]);
+  });
+
+  it("hands out a new snapshot on every change, so subscribers re-render", () => {
+    const guard = createPinGuard();
+    const before = guard.snapshot();
+    guard.claim("a");
+    expect(guard.snapshot()).not.toBe(before);
+    const held = guard.snapshot();
+    guard.claim("a"); // refused: no change, same snapshot
+    expect(guard.snapshot()).toBe(held);
   });
 });

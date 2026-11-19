@@ -7,7 +7,7 @@
  * module is what the left rail, the nest header and the grid share, so every
  * pin control moves the same cached row the same way.
  */
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { reads } from "./queries";
@@ -86,25 +86,54 @@ export async function toggleNestPin({
   }
 }
 
-/** Nests with a pin write in flight, across EVERY control: the rail row and
- *  the header both toggle the same nest, so the guard can't be per instance
- *  (a rollback from one would overwrite the other's optimistic state). */
-const inFlight = new Set<string>();
+/**
+ * Nests with a pin write in flight, shared by EVERY control: the rail row and
+ * the header toggle the same nest, so the guard can't be per instance (a
+ * rollback from one would overwrite the other's optimistic state), and every
+ * control for that nest shows as busy while it lasts.
+ */
+export function createPinGuard() {
+  let inFlight = new Set<string>();
+  const listeners = new Set<() => void>();
+  const emit = () => listeners.forEach((l) => l());
+  return {
+    /** Claim the nest; false when a write for it is already in flight. */
+    claim(nestId: string): boolean {
+      if (inFlight.has(nestId)) return false;
+      inFlight = new Set(inFlight).add(nestId);
+      emit();
+      return true;
+    },
+    release(nestId: string) {
+      if (!inFlight.has(nestId)) return;
+      inFlight = new Set(inFlight);
+      inFlight.delete(nestId);
+      emit();
+    },
+    snapshot: (): ReadonlySet<string> => inFlight,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+const pinGuard = createPinGuard();
 
 /**
  * The pin toggle every control uses (All nests card, rail row, nest header).
  * It patches the live nest list the rail and the grid both read; the write's
- * own invalidation (`/pin` → nestList, queries.ts) then reconciles it. A second
- * click on the same nest, from any control, while the first is in flight is
- * ignored. `busy` is this control's own in-flight set, for disabling it.
+ * own invalidation (`/pin` → nestList, queries.ts) then reconciles it. While a
+ * write for a nest is in flight, every control for that nest is busy and a
+ * further click, from any of them, is ignored.
  */
 export function useNestPin() {
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<Set<string>>(() => new Set());
+  const busy = useSyncExternalStore(pinGuard.subscribe, pinGuard.snapshot, pinGuard.snapshot);
   const toggle = async (nestId: string, pinned: boolean) => {
-    if (inFlight.has(nestId)) return;
-    inFlight.add(nestId);
-    setBusy((prev) => new Set(prev).add(nestId));
+    if (!pinGuard.claim(nestId)) return;
     try {
       await toggleNestPin({
         nestId,
@@ -116,12 +145,7 @@ export function useNestPin() {
           toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`),
       });
     } finally {
-      inFlight.delete(nestId);
-      setBusy((prev) => {
-        const next = new Set(prev);
-        next.delete(nestId);
-        return next;
-      });
+      pinGuard.release(nestId);
     }
   };
   return { toggle, busy };

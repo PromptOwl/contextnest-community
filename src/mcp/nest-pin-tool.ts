@@ -17,7 +17,7 @@ export const NEST_PIN_TOOL = "nest_pin";
 
 /** Its MCP JSON schema is generated from this (no inline literal, lint:mcp-schemas). */
 export const NestPinInput = z.object({
-  nest: z.string().describe("Target nest — id, or exact name/slug (case-insensitive)."),
+  nest: z.string().trim().min(1).describe("Target nest — id, or exact name/slug (case-insensitive)."),
   pinned: z
     .boolean()
     .optional()
@@ -53,8 +53,7 @@ export async function nestPinToolResult(
       "INVALID_INPUT",
     );
   }
-  const ref = parsed.data.nest.trim();
-  if (!ref) return failure("`nest` is required: a nest id, name or slug.", "INVALID_INPUT");
+  const ref = parsed.data.nest;
   const pinned = parsed.data.pinned !== false;
   const nest = await ctx.resolveNest(ref);
   // One answer for "no such nest", "can't read it" and "outside this key's
