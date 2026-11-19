@@ -788,6 +788,7 @@ describe("po-1431: server webhook and nest connectors vs Slack binding", () => {
     const raw = JSON.parse(sent(HOOK)[0].body);
     expect(raw.kind).toBe("run_failed");
     expect(raw.subject_id).toBeNull();
+    expect(raw.actor).toBeNull();
   });
 
   it("AC 4: a bound nest's digest carries a count only", async () => {
