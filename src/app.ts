@@ -84,6 +84,7 @@ import {
   storedHootieSettings,
   validateHootieBrandFields,
 } from "./hootie/brand.js";
+import { navColor, validateAppearanceFields } from "./shared/appearance.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -832,6 +833,9 @@ export function createApp(): Hono<AuthEnv> {
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
       // renders before sign-in, and none of it is secret.
+      // The navigation rail's color (PO-1430): the admin's hex, or null for
+      // the built-in navy. Public: the rail renders before sign-in too.
+      nav_color: navColor(),
       hootie_brand: effectiveHootieBrand(),
       hootie_branding_available: hootieBrandingAvailable(),
       // Own model key / gateway allowed (licence feature byok, Enterprise).
@@ -1045,6 +1049,8 @@ export function createApp(): Hono<AuthEnv> {
     manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
     community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
+    // Navigation rail color (PO-1430); "" = the default navy.
+    nav_color: navColor() ?? "",
     telemetry_enabled: config.TELEMETRY_ENABLED,
     posthog_key: config.POSTHOG_KEY,
     posthog_host: config.POSTHOG_HOST,
@@ -1453,6 +1459,7 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
+    pending.push(...validateAppearanceFields(body, addError));
     // The server's own model gateway (byok, gated above): an http(s) URL with
     // no trailing slash, so the SDK joins /v1/messages onto it; empty clears.
     if ("anthropic_base_url" in body) {

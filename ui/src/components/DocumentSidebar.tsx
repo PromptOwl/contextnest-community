@@ -9,7 +9,7 @@
  * ancestors) over the body-free node listing, so it costs no extra shape and
  * stays consistent with the Documents tab.
  */
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -30,6 +30,7 @@ import { reads } from "../lib/queries";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { useAuth } from "../auth/AuthContext";
+import { navRail, navRailStyle } from "../lib/nav-color";
 import {
   folderAncestors,
   groupNodesByFolder,
@@ -72,7 +73,8 @@ interface Props {
 /* One row style for both rails (app pages and a nest's views / tree) so the
    sidebar reads the same wherever you are: same text size, icon, height. */
 const ROW = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted";
-const ROW_IDLE = "text-foreground/80 hover:text-foreground";
+// Idle text at 80% (--rail-idle: 1 on a mid-tone custom rail, PO-1430).
+const ROW_IDLE = "text-[hsl(var(--foreground)/var(--rail-idle,0.8))] hover:text-foreground";
 const ROW_ACTIVE = "bg-muted font-medium text-foreground";
 const ROW_ICON = "h-4 w-4 shrink-0";
 /* Group / nest-name headings above a set of rows. */
@@ -103,7 +105,8 @@ export function DocumentSidebar({
   // One rail everywhere: the nest list is the same on the dashboard as inside
   // a nest. Only the current nest is unfolded.
   const nests = useQuery({ ...reads.nestList() });
-  const { isAdmin, authMode } = useAuth();
+  const { isAdmin, authMode, navColor } = useAuth();
+  const rail = navRail(navColor);
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -132,8 +135,11 @@ export function DocumentSidebar({
   return (
     <nav
       aria-label="Nests and documents"
-      className="flex h-full flex-col bg-[hsl(228_73%_24%)] text-sm text-foreground"
-      style={NAVY_RAIL_TOKENS}
+      className="flex h-full flex-col text-sm text-foreground"
+      // The rail's color: the admin's (Server settings → Basic, PO-1430) or
+      // the default navy. One color re-points every token the rail reads.
+      style={navRailStyle(navColor)}
+      data-nav-color={rail.custom ? rail.background : "default"}
       data-testid="document-sidebar"
     >
       {/* Brand row — the same logo + badge the app header shows, so the rail
@@ -147,7 +153,7 @@ export function DocumentSidebar({
           title="Dashboard"
           data-testid="document-sidebar-brand"
         >
-          {/* The owl is navy, so it sits on a white tile against the navy rail. */}
+          {/* The owl is navy, so it sits on a white tile against the colored rail. */}
           <img src={logoUrl} alt="ContextNest" className="h-8 w-8 rounded-md bg-white object-contain p-1" />
           <span className="font-semibold">ContextNest</span>
           <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
@@ -294,28 +300,6 @@ export function DocumentSidebar({
   );
 }
 
-/**
- * The rail is navy, like PromptOwl's. Every control inside reads the shared
- * color tokens, so re-pointing them here (light text, translucent-looking
- * hover and border surfaces, a brighter blue for the active item) restyles the
- * whole rail without touching each row. Menus portaled out of the rail keep
- * the normal light theme.
- */
-const NAVY_RAIL_TOKENS = {
-  "--foreground": "0 0% 100%",
-  "--muted-foreground": "228 60% 84%",
-  "--background": "228 73% 20%",
-  "--muted": "228 60% 33%",
-  "--accent": "228 60% 33%",
-  "--accent-foreground": "0 0% 100%",
-  "--secondary": "228 60% 36%",
-  "--secondary-foreground": "0 0% 100%",
-  "--border": "228 55% 34%",
-  "--input": "228 55% 34%",
-  "--primary": "228 80% 48%",
-  "--primary-foreground": "0 0% 100%",
-  "--ring": "228 90% 75%",
-} as CSSProperties;
 
 /** Pages that only show in the rail where the ribbon is hidden. */
 const RIBBON_PAGE_IDS = new Set(["my-work", "my-drafts"]);

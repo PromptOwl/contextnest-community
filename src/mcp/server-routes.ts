@@ -78,6 +78,7 @@ import { AGENT_ORG_TOOL_DEFINITIONS, isAgentOrgTool, runAgentOrgTool } from "./a
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
 import { ONBOARDING_READ_TOOL_NAMES, ONBOARDING_TOOL_DEFINITIONS, ONBOARDING_TOOL_NAMES, handleOnboardingTool } from "./onboarding-tools.js";
+import { APPEARANCE_READ_TOOL_NAMES, APPEARANCE_TOOL_DEFINITIONS, APPEARANCE_TOOL_NAMES, handleAppearanceTool } from "./appearance-tools.js";
 import { isInitializeRequest, serverConnectInstructions } from "./connect-instructions.js";
 import { nestWebUrl } from "../shared/web-links.js";
 
@@ -410,6 +411,8 @@ export const SERVER_TOOL_DEFINITIONS = [
   }),
   // First-run onboarding (PO-1185): the person's own state, server-level only.
   ...ONBOARDING_TOOL_DEFINITIONS,
+  // Server appearance (PO-1430): the navigation rail color, server-level only.
+  ...APPEARANCE_TOOL_DEFINITIONS,
   // Agent control room (po-1186): org-wide ledger + rollups (GET /ledger,
   // GET /rollups twins). Advertised only while the workflow plane is on.
   ...AGENT_ORG_TOOL_DEFINITIONS,
@@ -429,6 +432,7 @@ export const SERVER_TOOL_DEFINITIONS = [
 const READ_ONLY_SERVER_TOOLS = new Set([
   "nest_index",
   ...ONBOARDING_READ_TOOL_NAMES,
+  ...APPEARANCE_READ_TOOL_NAMES,
   "context_agent_ledger_org",
   "context_agent_rollups_org",
   "context_query",
@@ -514,6 +518,12 @@ async function handleServerToolCall(
   // (past the Free tier, suspended, or offline-locked). Same predicate here.
   if (SERVER_LICENSED_READ_TOOLS.has(toolName) && !(await licensedReadsAllowed())) {
     return readOnlyMessage(userId, "version history is unavailable");
+  }
+
+  // Server appearance (PO-1430): reads for anyone, writes for a server admin
+  // (checked inside, the same gate as PATCH /admin/settings).
+  if (APPEARANCE_TOOL_NAMES.has(toolName)) {
+    return handleAppearanceTool(toolName, args ?? {}, { userId, nestScope });
   }
 
   if (ONBOARDING_TOOL_NAMES.has(toolName)) {

@@ -59,6 +59,8 @@ import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
+import { NavColorField } from "./NavColorField";
+import hootieIcon from "../../../assets/hootie.svg";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -102,6 +104,7 @@ const TABS: {
       "community_name",
       "public_base_url",
       "logo_url",
+      "nav_color",
       "manual_sign_in",
       "promptowl_sign_in_gate",
       "posthog_key",
@@ -939,6 +942,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     default.
                   </p>
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Navigation color</CardTitle>
+                <CardDescription>
+                  The color of the left navigation, for everyone on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <NavColorField
+                  value={draft.nav_color ?? ""}
+                  error={fieldErrors.nav_color}
+                  logoUrl={draft.logo_url || hootieIcon}
+                  onChange={(v) => set({ nav_color: v })}
+                />
               </CardContent>
             </Card>
 

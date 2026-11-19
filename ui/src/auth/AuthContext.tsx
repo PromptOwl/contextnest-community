@@ -87,6 +87,9 @@ export interface AuthContextValue {
   /** The assistant's name/logo/colour/greeting from /health — the admin's
    *  custom identity on an enterprise licence, the default Hootie otherwise. */
   hootieBrand: HootieBrand;
+  /** The navigation rail color from /health (PO-1430): the admin's hex, or
+   *  null for the default navy. */
+  navColor: string | null;
   /** Whether the server holds an Anthropic key (presence only, from /health).
    *  Hootie stays visible without one — it explains what's missing instead. */
   runnerKeyConfigured: boolean;
@@ -146,6 +149,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [docPinsEnabled, setDocPinsEnabled] = useState(false);
   const [agentStreamEnabled, setAgentStreamEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
+  const [navColor, setNavColor] = useState<string | null>(null);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
@@ -192,6 +196,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       // The read layer keeps channel nodes out of document listings while on.
       setChannelsOn(h.experimental?.agent_stream === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
+      setNavColor(typeof h.nav_color === "string" ? h.nav_color : null);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
       setNestPublicVisibility(h.nest_public_visibility === "admins" ? "admins" : "owners");
@@ -248,6 +253,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         // The read layer keeps channel nodes out of document listings while on.
         setChannelsOn(h.experimental?.agent_stream === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
+        setNavColor(typeof h.nav_color === "string" ? h.nav_color : null);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
         setNestPublicVisibility(h.nest_public_visibility === "admins" ? "admins" : "owners");
@@ -438,6 +444,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         docPinsEnabled,
         agentStreamEnabled,
         hootieBrand,
+        navColor,
         runnerKeyConfigured,
         sharedDeployment,
         nestPublicVisibility,

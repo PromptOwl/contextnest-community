@@ -1588,7 +1588,7 @@ export default function App() {
                           type="button"
                           onClick={() => setView({ page: "docs" })}
                           title="API, MCP & CLI docs for agents"
-                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-foreground/80 hover:bg-muted hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-[hsl(var(--foreground)/var(--rail-idle,0.8))] hover:bg-muted hover:text-foreground"
                           data-testid="document-sidebar-docs"
                         >
                           <BookOpen className="h-4 w-4 shrink-0" />

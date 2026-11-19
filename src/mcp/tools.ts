@@ -493,6 +493,8 @@ export interface McpToolContext {
  * read-tier workflow-plane tools.
  */
 export const MCP_READ_TOOLS = new Set<string>([
+  // Server appearance (PO-1430): the navigation rail color.
+  "context_appearance",
   // Surfaces read models (S2b): My pending, proposals, the commit audit, budget.
   ...SURFACES_READ_TOOL_NAMES,
   // Agent control room reads (po-1186): ledger, trace, export, rollups.

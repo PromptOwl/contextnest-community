@@ -19,9 +19,10 @@ const pathOf = (url) => {
 /**
  * Serve `GET /health` from the real server with the given fields overridden.
  * @param {import('@playwright/test').Page} page
- * @param {{ mcpOauthEnabled?: boolean, docStream?: boolean }} overrides
+ * @param {{ mcpOauthEnabled?: boolean, docStream?: boolean, navColor?: string | null }} overrides
+ *   navColor: the navigation rail color (`nav_color`, PO-1430); null = default.
  */
-export async function stubHealth(page, { mcpOauthEnabled, docStream } = {}) {
+export async function stubHealth(page, { mcpOauthEnabled, docStream, navColor } = {}) {
   await page.route(
     (url) => pathOf(url) === '/health',
     async (route, request) => {
@@ -31,6 +32,7 @@ export async function stubHealth(page, { mcpOauthEnabled, docStream } = {}) {
         const body = await res.json();
         if (mcpOauthEnabled !== undefined) body.mcp_oauth_enabled = mcpOauthEnabled;
         if (docStream !== undefined) body.experimental = { ...(body.experimental ?? {}), doc_stream: docStream };
+        if (navColor !== undefined) body.nav_color = navColor;
         await route.fulfill({ response: res, json: body });
       } catch {
         // Aborted by a navigation — nothing to answer.
