@@ -1,13 +1,6 @@
 /**
- * Why a judge run failed, in one fixed code (po-1407).
- *
- * A throw out of the judge ends the window as `error` with one of these
- * codes on the window and on its failed run, so the Control room ledger, the
- * trace and the MCP ledger tools can say why. The codes sit beside the
- * judge's own (`no_listener`, `no_model`, `nest_unreadable`, …).
- *
- * Nothing here keeps an error's message: model and Slack errors can carry a
- * key fragment or chat text. Only the class name and the HTTP status leave.
+ * Why a judge run failed, as one fixed code on the window and its failed run (po-1407).
+ * Never keeps an error's message (it can carry a key or chat text): only class name and HTTP status.
  */
 import { SlackApiError } from "../adapters/slack/api.js";
 import { SurfaceRateLimited } from "../contract.js";
@@ -49,19 +42,14 @@ export interface JudgeUsage {
 export class JudgeRunError extends Error {
   constructor(
     public readonly usage: JudgeUsage,
-    public readonly cause: unknown,
+    cause: unknown,
   ) {
-    super(cause instanceof Error ? cause.name : "judge run failed");
+    super(cause instanceof Error ? cause.name : "judge run failed", { cause });
     this.name = "JudgeRunError";
   }
 }
 
-/**
- * An out-of-credit / billing refusal. Anthropic answers 400 "Your credit
- * balance is too low to access the Anthropic API"; LiteLLM's BadRequestError
- * wraps that body in its own message; other providers say 402 or "quota".
- * Only matched here, never kept or logged.
- */
+/** Out-of-credit refusal: Anthropic's 400 "credit balance is too low" (raw or LiteLLM-wrapped), 402, or "quota". Matched only, never kept. */
 const BILLING_RE = /credit balance|billing|insufficient[_ ](?:quota|funds|credit)|exceeded your current quota|out of credit|payment required/i;
 
 /** Every message the error carries (the SDK puts the API's under error.error.message). */

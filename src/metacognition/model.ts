@@ -70,23 +70,18 @@ export async function createTurn(params: {
     tools: request.tools,
   };
   if (request.temperature !== undefined) {
-    // Current Claude models (Sonnet 5, Opus 4.7 and later) answer any
-    // non-default temperature with a 400. Asking for one must not fail the
-    // call (po-1407: every Surfaces judge run failed this way): a model that
-    // refuses it is retried once at its default and remembered, like
-    // plainModels. Any other 400 is a real error and is thrown.
+    // Current Claude models 400 on a non-default temperature (po-1407): retry once
+    // at the default and remember the model. Any other 400 is thrown.
     if (!noTemperatureModels.has(key)) {
       try {
         return (await client.messages.create({ ...base, temperature: request.temperature }, { signal })) as TurnResult;
       } catch (err) {
         const e = err as { status?: number; error?: { error?: { message?: string } }; message?: string };
         const msg = `${e?.error?.error?.message ?? ""} ${e?.message ?? ""}`.toLowerCase();
-        // Matches the API's invalid_request_error naming the parameter
-        // ("temperature: …" / "sampling parameters …"); a gateway that
-        // forwards it keeps the wording.
+        // The API's invalid_request_error names the parameter; gateways keep the wording.
         if (e?.status !== 400 || !/temperature|sampling/.test(msg)) throw err;
         const res = (await client.messages.create(base, { signal })) as TurnResult;
-        noTemperatureModels.add(key);
+        if (noTemperatureModels.size < 100) noTemperatureModels.add(key); // hard bound; one entry per configured model
         return res;
       }
     }

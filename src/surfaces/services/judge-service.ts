@@ -204,12 +204,9 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
         { status: "judged", verdict: "error", reason_code: failure.code, model: progress.model, cost_micros: progress.cost },
         Date.now(),
       ).catch(() => false);
-      // The failed attempt as a run, so the ledger trace has a run to follow.
-      // recordRun is best effort (it catches and logs its own DB errors); the
-      // .catch keeps this error handler from ever rejecting. The cost is the
-      // final attempt's: the first attempt's spend is settled on the nest's
-      // budget but, as before, not added to the window.
-      if (ended && progress.nestId && progress.agentNode) {
+      // The failed attempt as a run, so the trace has one to follow. A commit-stage
+      // throw already recorded its run (succeeded), so it gets no second one.
+      if (ended && progress.stage !== "commit" && progress.nestId && progress.agentNode) {
         await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure).catch(() => undefined);
       }
       if (ended && failure.code === "model_billing" && progress.nestId) {
@@ -812,24 +809,31 @@ async function recordRun(
   }
 }
 
-/**
- * po-1407: the model account behind this nest is out of credit, so every
- * window fails until someone tops it up. Counts-only admin alert, at most
- * once a day per nest (the credential is the nest's or the server's, not the
- * conversation's).
- */
+/** Nests with a billing alert in flight, so a forced run and the tick loop can't both send one. */
+const billingAlerting = new Set<string>();
+
+/** po-1407: counts-only admin alert that the nest's model account is out of credit, at most once a day per nest. */
 async function alertModelBilling(nestId: string, bindingId: string): Promise<void> {
-  const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-  if (await getDb().get("SELECT 1 AS x FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ? AND created_at > ?", [nestId, since])) return;
-  await recordNotice({
-    kind: "model_billing",
-    audience: "admins",
-    bindingId,
-    nestId,
-    detail: { windows: 1 },
-    subject: "Nest's model account is out of credit",
-    text: "Nest's listener couldn't judge a conversation because the model account it uses is out of credit, so nothing is being kept from bound conversations. Top up the account (or change the model key in Server settings); windows are judged again once the model answers.",
-  });
+  // ponytail: per-process guard; two servers on one Postgres can still both send. Unique per-nest-per-day key if that matters.
+  if (billingAlerting.has(nestId)) return;
+  billingAlerting.add(nestId);
+  try {
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    if (await getDb().get("SELECT 1 AS x FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ? AND created_at > ?", [nestId, since])) return;
+    const nest = (await getDb().get("SELECT name FROM nests WHERE id = ?", [nestId])) as { name?: string } | undefined;
+    const label = nest?.name ? `"${nest.name}"` : "a nest";
+    await recordNotice({
+      kind: "model_billing",
+      audience: "admins",
+      bindingId,
+      nestId,
+      detail: { windows: 1 },
+      subject: `Nest's model account is out of credit (${label})`,
+      text: `Nest's listener for ${label} couldn't judge a conversation because the model account it uses is out of credit, so nothing is being kept from bound conversations. Top up the account (or change the model key in Server settings); windows are judged again once the model answers.`,
+    });
+  } finally {
+    billingAlerting.delete(nestId);
+  }
 }
 
 /** Round 10 (§14): the owner's notice when their unseeded private nest can't take a DM proposal. */

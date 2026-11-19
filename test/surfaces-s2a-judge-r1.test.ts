@@ -896,6 +896,32 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(led.data.entries.find((x: any) => x.entry_id === `win_${a.w.id}`).verdict.reason_code).toBe("model_billing");
   });
 
+  it("a throw after the run is recorded (commit stage) adds no failed run: the window keeps its succeeded run", async () => {
+    setChannel("C412", ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C412", nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    modelImpl = () => submit(noop());
+    await tick(30); // flush other open windows first
+    const failedBefore = (await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length;
+    // Both attempts' commit finalize throws; the error handler's finalize then succeeds.
+    let reads = 0;
+    Object.defineProperty(S.judge.judgeTestHooks, "failPurge", { configurable: true, get: () => reads++ < 2 });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await say("C412", "U_BOB", "we agreed the cutover moves to friday after the review meeting today");
+      await tick(21);
+      await tick(21);
+    } finally {
+      delete (S.judge.judgeTestHooks as { failPurge?: boolean }).failPurge;
+      spy.mockRestore();
+    }
+    const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+    expect(reads).toBe(3);
+    expect(w.verdict).toBe("error");
+    expect((await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length).toBe(failedBefore);
+    expect((await one("SELECT status FROM runs WHERE id = ?", [w.run_id])).status).toBe("succeeded");
+  });
+
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {
     const limited = await failWindow("C408", () => {
       throw Object.assign(new Error("rate limited"), { status: 429 });
