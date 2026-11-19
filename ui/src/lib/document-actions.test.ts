@@ -48,6 +48,16 @@ describe("documentActions — the document-page ⋮ menu", () => {
     expect(keys({ ...owner, includeVersionHistory: false })).toContain("share-link");
   });
 
+  // PO-1396: on a slow server the ⋮ menu opened while "Loading document…" was
+  // showing, and Share public link published at once and toasted
+  // "“Untitled” is now public". It waits for the document; the rest stays.
+  it("withholds Share public link while the document is loading, and only that", () => {
+    const loading = keys({ ...owner, isLoading: true });
+    expect(loading).not.toContain("share-link");
+    expect(loading).toEqual(keys(owner).filter((k) => k !== "share-link"));
+    expect(keys({ ...owner, isLoading: false })).toContain("share-link");
+  });
+
   it("parity: an HTML artifact gets the same sharing actions as markdown", () => {
     // The artifact viewer already carries its own History button.
     const artifact = keys({ ...owner, includeVersionHistory: false });
