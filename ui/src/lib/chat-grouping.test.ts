@@ -46,7 +46,9 @@ describe("AC-C3-03 grouping", () => {
     expect(continuesGroup(msg("1", "a@x", base, "grok"), msg("2", "a@x", base, "grok"))).toBe(true);
   });
   it("a group never crosses midnight", () => {
-    expect(continuesGroup(msg("1", "a@x", "2026-11-09T23:58:00.000Z"), msg("2", "a@x", "2026-11-10T00:01:00.000Z"))).toBe(false);
+    // Built from local times: the split is the reader's midnight, so this holds in any timezone.
+    const local = (d: number, h: number, m: number) => new Date(2026, 10, d, h, m).toISOString();
+    expect(continuesGroup(msg("1", "a@x", local(9, 23, 58)), msg("2", "a@x", local(10, 0, 1)))).toBe(false);
   });
   it("marks the first and last message of each group", () => {
     const rows = buildConversation(

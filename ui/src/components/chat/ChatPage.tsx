@@ -104,8 +104,8 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
   const mentions = useMemo(() => mentionsForNest(mentionsQuery.data?.mentions, nestId), [mentionsQuery.data, nestId]);
   // C1: who may delete whose message, and the saved count for the sidebar.
   const meta = useQuery(reads.nest(nestId));
-  const permission = (meta.data as { permission?: string } | undefined)?.permission ?? null;
-  const roles = (meta.data as { roles?: string[] } | undefined)?.roles ?? [];
+  const permission = meta.data?.permission ?? null;
+  const roles = meta.data?.roles ?? [];
   // The nest's owner or an admin makes a channel private or public (C2).
   const nestAdmin = permission === "owner" || permission === "admin" || roles.includes("owner") || roles.includes("admin");
   const qc = useQueryClient();

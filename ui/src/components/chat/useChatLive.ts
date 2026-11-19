@@ -1,14 +1,6 @@
 /**
- * The live side of the harness (PO-1200 AC-C3-12, C2 PO-1197): one event
- * stream per nest while the tab is visible, with polling as the source of
- * truth underneath; presence heartbeats and the list of who is around; the
- * typing signal out and the typing line in. The rules are in
- * lib/chat-live.ts; this file is the browser plumbing around them.
- *
- * The stream is read with `fetch` rather than `EventSource` so the server's
- * `: ping` comments are visible: 45 s of silence means the connection is
- * dead and is reopened. A failed open backs off (5 s, 10 s, … 60 s) and the
- * usual poll carries on meanwhile.
+ * Browser plumbing for live chat (PO-1200): one SSE stream per visible nest (read with `fetch` so `: ping` feeds a 45 s watchdog;
+ * backoff 5 s → 60 s), presence heartbeats, typing. Polling stays the source of truth; the rules live in lib/chat-live.ts.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -88,7 +80,6 @@ export function useChatEvents(nestId: string | null, enabled: boolean, onEffects
           return;
         }
         setConnected(true);
-        backoff = 5_000;
         alive();
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -96,6 +87,8 @@ export function useChatEvents(nestId: string | null, enabled: boolean, onEffects
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
+          // Reset the backoff only once data flows, so open-then-close still slows down.
+          backoff = 5_000;
           alive();
           buffer += decoder.decode(value, { stream: true });
           const parsed = parseSse(buffer);
@@ -115,6 +108,9 @@ export function useChatEvents(nestId: string | null, enabled: boolean, onEffects
       } catch {
         /* aborted or dropped: reopen below */
       }
+      // This stream is over; its watchdog must not abort the next open.
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = null;
       setConnected(false);
       if (!stopped) later();
     };

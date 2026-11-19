@@ -113,7 +113,7 @@ export function ChatSidebar(p: ChatSidebarProps) {
           }
         >
           {live.length === 0 && (
-            <p className="px-2 py-1 text-xs text-muted-foreground">{query ? "No channel matches." : p.canManage ? "No channels yet." : "No channels yet."}</p>
+            <p className="px-2 py-1 text-xs text-muted-foreground">{query ? "No channel matches." : "No channels yet."}</p>
           )}
           {live.map((c) => {
             const active = c.name === p.selected;

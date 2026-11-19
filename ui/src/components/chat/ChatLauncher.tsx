@@ -66,7 +66,7 @@ export function ChatLauncher(p: ChatLauncherProps) {
   const summary = useChatSummary();
   // In a nest: the nest's own answer (`chat`: switch, its setting, membership).
   const target = p.nestId
-    ? chatOn(meta.data as { chat?: boolean; member?: boolean } | undefined, agentStreamEnabled)
+    ? chatOn(meta.data, agentStreamEnabled)
       ? { nestId: p.nestId, nestName: p.nestName ?? "" }
       : null
     : railChatTarget(summary.data, null);

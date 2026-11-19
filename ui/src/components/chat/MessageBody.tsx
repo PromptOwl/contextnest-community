@@ -1,10 +1,6 @@
 /**
- * The parts every message shares (PO-1200): who wrote it, as an avatar
- * (initials for a person, the bot mark for an agent) and the body rendered
- * with the same markdown renderer as document comments (`CommentBody`).
- * Mentions take the message's own `mentions` list, so a person reads by
- * display name, an agent handle as an agent, and a name that matched nobody
- * as unresolved. A `[[wikilink]]` into this nest opens in the app.
+ * Shared message parts (PO-1200): the author avatar and the body via `CommentBody`. Mentions resolve from the
+ * message's own `mentions` list; a `[[wikilink]]` into this nest opens in the app.
  */
 import { memo, useCallback } from "react";
 import { Bot } from "lucide-react";

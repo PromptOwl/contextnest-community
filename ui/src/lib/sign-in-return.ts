@@ -22,8 +22,9 @@ export function safeNestReturn(value: string | null | undefined): string | null 
   if (!value) return null;
   // The fixed prefix rules out `//host` and `/\host`; no scheme can precede it.
   if (!/^\/nest\/[^/?#\\]+(?:[/?#][^\\]*)?$/.test(value)) return null;
-  // No `.` or `..` path segment: the address must stay under /nest/<id>.
+  // No `.` or `..` segment, plain or encoded (`%2e`): it must stay under /nest/<id>.
   const path = value.split(/[?#]/)[0];
+  if (/%2e/i.test(path)) return null;
   return path.split("/").some((seg) => seg === "." || seg === "..") ? null : value;
 }
 

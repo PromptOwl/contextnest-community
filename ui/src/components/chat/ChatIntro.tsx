@@ -17,11 +17,12 @@ const POINTS = [
 ];
 
 export function ChatIntro({ me }: { me: string | null }) {
-  const [shown, setShown] = useState(() => !!me && !introSeen(browserStore(), me));
-  if (!shown || !me) return null;
+  // Read on render, not frozen at mount: `me` may still be loading then.
+  const [dismissed, setDismissed] = useState(false);
+  if (!me || dismissed || introSeen(browserStore(), me)) return null;
   const dismiss = () => {
     markIntroSeen(browserStore(), me);
-    setShown(false);
+    setDismissed(true);
   };
   return (
     <section className="mx-4 mt-3 shrink-0 rounded-lg border bg-muted/30 px-4 py-3" aria-label="About team chat" data-testid="chat-intro">

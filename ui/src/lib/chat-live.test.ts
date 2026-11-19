@@ -86,6 +86,12 @@ describe("AC-C3-12 SSE frames", () => {
     expect(next.frames).toEqual([{ id: null, event: "typing", data: '{"b":2}' }]);
     expect(next.rest).toBe("");
   });
+
+  it("reads CRLF line endings", () => {
+    const r = parseSse('id: 2\r\nevent: hello\r\ndata: {"a":1}\r\n\r\n');
+    expect(r.frames).toEqual([{ id: "2", event: "hello", data: '{"a":1}' }]);
+    expect(r.rest).toBe("");
+  });
 });
 
 describe("AC-C3-12 typing and presence", () => {

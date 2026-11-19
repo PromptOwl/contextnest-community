@@ -94,7 +94,7 @@ export function TopBarTools({
   // Channels are for people added to the nest; a share-only grantee or a
   // public reader gets no entry (GET /nests/:id `member`).
   const isMember = (meta.data as any)?.member === true;
-  const chatOn = typeof (meta.data as any)?.chat === "boolean" ? ((meta.data as any).chat as boolean) : undefined;
+  const chatOn = meta.data?.chat;
   const views = useMemo(
     () =>
       caps

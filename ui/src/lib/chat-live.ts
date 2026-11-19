@@ -155,7 +155,7 @@ export interface SseFrame {
 export function parseSse(buffer: string): { frames: SseFrame[]; rest: string; heartbeats: number } {
   const frames: SseFrame[] = [];
   let heartbeats = 0;
-  const parts = buffer.split(/\n\n/);
+  const parts = buffer.replace(/\r\n?/g, "\n").split(/\n\n/);
   const rest = parts.pop() ?? "";
   for (const block of parts) {
     let id: string | null = null;
@@ -174,10 +174,6 @@ export function parseSse(buffer: string): { frames: SseFrame[]; rest: string; he
       else if (field === "data") data.push(value);
     }
     if (data.length) frames.push({ id, event, data: data.join("\n") });
-  }
-  // A lone comment with no frame after it still counts as life.
-  if (rest.startsWith(":") && !rest.includes("\n")) {
-    /* kept in `rest` until its newline arrives */
   }
   return { frames, rest, heartbeats };
 }
@@ -237,7 +233,8 @@ export function applyPresence(active: readonly PresenceRow[], e: { email: string
 
 // ─── Notification levels ─────────────────────────────────────────────────
 
-export type NotifyLevel = "all" | "mentions" | "none";
+export type { ChatNotifyLevel as NotifyLevel } from "./api";
+import type { ChatNotifyLevel as NotifyLevel } from "./api";
 
 export const LEVELS: Array<{ level: NotifyLevel; label: string; detail: string }> = [
   { level: "all", label: "Every message", detail: "Each new message also lands in your bell." },

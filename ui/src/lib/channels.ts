@@ -204,13 +204,8 @@ export function mentionNotice(outcomes: PostedMention[] | undefined): string | n
 }
 
 /**
- * One "what is new" pull per timeline at a time (PO-1200, from the review of
- * PR #552): a pull asked for while one runs on the SAME timeline makes that
- * run go once more when it finishes, so a post that overlaps a pull is never
- * dropped; a pull on ANOTHER timeline (the channel changed mid-pull) runs on
- * its own. `start` returns null when a run is already going (and marks it to
- * go again); otherwise the mark for the new run. `shouldRepeat` reads and
- * clears the mark at the end of a loop.
+ * One "what is new" pull per timeline at a time (PO-1200). A pull asked for mid-run on the same timeline re-runs it once
+ * after; another timeline runs on its own. `start` returns null when busy; `shouldRepeat` reads and clears the re-run mark.
  */
 export class PullGuard {
   private runs = new Map<string, { again: boolean }>();
