@@ -302,6 +302,9 @@ export async function getHealth() {
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
+    /** The navigation rail color (PO-1430): the admin's hex, or null for the
+     *  default navy. Server settings → Basic. */
+    nav_color?: string | null;
     /** Whether custom assistant identity is allowed (enterprise licence). */
     hootie_branding_available?: boolean;
     /** Own model key / gateway allowed (licence feature byok, Enterprise). */
@@ -347,6 +350,8 @@ export interface AdminSettings {
   manual_sign_in_open_with_sso?: boolean;
   community_name: string | null;
   logo_url: string | null;
+  /** Navigation rail color (PO-1430): a hex, or "" for the default navy. */
+  nav_color?: string;
   telemetry_enabled: boolean;
   /** PostHog project key ("" = analytics off) and ingestion host. */
   posthog_key: string;

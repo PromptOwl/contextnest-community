@@ -41,6 +41,8 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   // ─── Server level ───────────────────────────────────────────────────────
   nest_index: read("List nests", "Lists the nests these credentials can read."),
   // First-run onboarding (PO-1185).
+  context_appearance: read("View appearance", "Returns the server's navigation rail color; changes nothing."),
+  context_appearance_update: overwrite("Set navigation color", "Replaces the server-wide navigation rail color for every user (an empty value restores the default)."),
   context_onboarding: read("Onboarding status", "Reads the caller's welcome-screen state, the activity trace and the caller's own distill job; changes nothing."),
   context_onboarding_update: add("Update onboarding", "Flips the caller's own welcome-screen flag, or adds the caller's nest; never removes anything."),
   context_distill: addOutside("Distill a source", "Fetches a public URL from the open internet and adds draft documents (and the ontology document) to a nest; never overwrites or publishes model output."),

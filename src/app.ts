@@ -84,6 +84,7 @@ import {
   storedHootieSettings,
   validateHootieBrandFields,
 } from "./hootie/brand.js";
+import { navColor, validateAppearanceFields } from "./shared/appearance.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -177,6 +178,7 @@ import {
   isNestArchived,
   permissionLevel,
   isServerAdminUserId,
+  serverAdminAllowed as serverAdminAllowedFor,
   type NestPermission,
 } from "./shared/access.js";
 import {
@@ -227,7 +229,7 @@ import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, licensedReadsAllowed, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
-import { persistSetting } from "./db/settings.js";
+import { applySettings } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { documentWebPath, nestWebPath } from "./shared/web-links.js";
@@ -832,6 +834,9 @@ export function createApp(): Hono<AuthEnv> {
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
       // renders before sign-in, and none of it is secret.
+      // The navigation rail's color (PO-1430): the admin's hex, or null for
+      // the built-in navy. Public: the rail renders before sign-in too.
+      nav_color: navColor(),
       hootie_brand: effectiveHootieBrand(),
       hootie_branding_available: hootieBrandingAvailable(),
       // Own model key / gateway allowed (licence feature byok, Enterprise).
@@ -1026,9 +1031,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Server-admin guard shared by the /admin/* operator surfaces: open mode,
   // the license admin, or a superadmin (access.yaml ∪ DB grants).
-  const serverAdminAllowed = async (c: any) =>
-    config.AUTH_MODE === "open" ||
-    (await isServerAdminUserId(c.get("userId")));
+  const serverAdminAllowed = (c: any) => serverAdminAllowedFor(c.get("userId"));
 
   // /admin/settings — server-wide settings the admin edits from the Settings
   // page. Each setting takes effect live (config getters read process.env) and
@@ -1045,6 +1048,8 @@ export function createApp(): Hono<AuthEnv> {
     manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
     community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
+    // Navigation rail color (PO-1430); "" = the default navy.
+    nav_color: navColor() ?? "",
     telemetry_enabled: config.TELEMETRY_ENABLED,
     posthog_key: config.POSTHOG_KEY,
     posthog_host: config.POSTHOG_HOST,
@@ -1453,6 +1458,7 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
+    pending.push(...validateAppearanceFields(body, addError));
     // The server's own model gateway (byok, gated above): an http(s) URL with
     // no trailing slash, so the SDK joins /v1/messages onto it; empty clears.
     if ("anthropic_base_url" in body) {
@@ -2153,20 +2159,16 @@ export function createApp(): Hono<AuthEnv> {
           .map((p) => authOrEmailSetting(p.name)!),
       ),
     ];
-    for (const { name, value } of pending) {
-      try {
-        await persistSetting(name, value);
-      } catch (e) {
-        return c.json(
-          {
-            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}`,
-            settings: currentServerSettings(),
-          },
-          500
-        );
-      }
-      if (value === null) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      await applySettings(pending);
+    } catch (e) {
+      return c.json(
+        {
+          error: e instanceof Error ? e.message : String(e),
+          settings: currentServerSettings(),
+        },
+        500
+      );
     }
     // Round 9: queued once the save has committed (the outbox delivers and
     // retries in the background; the Slack DM doesn't depend on mail settings).

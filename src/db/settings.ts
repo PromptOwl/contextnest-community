@@ -82,6 +82,31 @@ export async function persistSetting(
 }
 
 /**
+ * Save a validated batch of settings and make them live: each is persisted
+ * first, then set in process.env, so a failed write never leaves a live
+ * value that was never stored. Throws SettingPersistError naming the setting
+ * that failed (earlier ones stay saved, as before). The one apply path for
+ * PATCH /admin/settings and the MCP settings tools (PO-1430).
+ */
+export class SettingPersistError extends Error {
+  constructor(readonly setting: string, cause: unknown) {
+    super(`Could not persist ${setting}: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
+export async function applySettings(pending: Array<{ name: string; value: string | null }>): Promise<void> {
+  for (const { name, value } of pending) {
+    try {
+      await persistSetting(name, value);
+    } catch (e) {
+      throw new SettingPersistError(name, e);
+    }
+    if (value === null) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
+/**
  * Boot step: overlay durable settings onto process.env so the config getters
  * (which read process.env) see them. MUST run after initDb() and BEFORE
  * anything reads config — in particular before validateLicense(), since the
