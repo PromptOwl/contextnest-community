@@ -79,7 +79,8 @@ export async function fanOutPostedMessage(params: {
   // the named rows, which it skips). Never wakes anyone.
   const reached =
     channel && commentId ? await indexBroadcast({ nestId, nodeId, threadId: thread.id, commentId, body, authorEmail }) : 0;
-  // An agent member of a conversation is addressed by every message in it (C2).
+  // An agent member of a DM is addressed by every message in it (C2; a group
+  // needs an explicit @mention).
   if (conversation) await indexConversationAgents({ nestId, nodeId, thread, authorEmail });
   // Reads the index rows just written, so it runs after them.
   const wakes = await wakeForPostedMessage({ nestId, nodeId, thread, authorEmail });
