@@ -173,6 +173,31 @@ test.describe('Control room: setup', () => {
     await expect(page.getByTestId('setup-check-ok')).toContainText('#revops');
   });
 
+  test('CN-CR-008 / po-1432: channel members who cannot read the nest are offered "Add to nest"; adding them checks the channel again', async ({ primary_user }) => {
+    await primary_user.initialize();
+    const { page } = primary_user;
+    await stubSurfacesOn(page);
+    const fake = await stubSurfaces(page, { install: 'active' });
+    const cr = new ControlRoomPage(page);
+    await cr.goto('setup');
+    await expect(cr.stepPane(2)).toBeVisible();
+    await page.getByLabel('Listen in #revops').check();
+    const guard = page.getByTestId('guard-C_REVOPS');
+    await expect(guard).toContainText('Proposals only');
+
+    await guard.getByTestId('add-to-nest-revops').click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText("can't read");
+    await expect(dialog.getByRole('checkbox', { name: 'Add Carol' })).toBeChecked();
+    await expect(dialog.getByRole('checkbox', { name: 'Add Xavier' })).toBeDisabled();
+    await expect(dialog).toContainText('no account');
+    await dialog.getByRole('button', { name: 'Add to nest (1)' }).click();
+
+    await expect(guard).toContainText('Cards can show existing records');
+    const adds = fake.calls.filter((c) => c.method === 'POST' && /\/collaborators$/.test(c.path));
+    expect(adds.map((c) => c.body)).toEqual([{ user_id: 'u_carol', permission: 'read' }]);
+  });
+
   test('CN-CR-004 / AC-CR-02: "Create a nest for this channel" makes a nest the channel can save into', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
