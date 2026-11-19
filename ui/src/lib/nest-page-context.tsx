@@ -13,6 +13,8 @@ export interface NestPageContext {
   isArchived?: boolean;
   /** Open a document of this nest. */
   openDocument: (nodeId: string) => void;
+  /** Open a document with one of its comment threads focused (a mention). */
+  openDocumentThread?: (nodeId: string, threadId: string) => void;
   /** Back to the nest page, optionally pre-scoped to tags. */
   openNest: (opts?: { tags?: string[] }) => void;
   /** Leave the nest entirely (the pages' back arrow). */

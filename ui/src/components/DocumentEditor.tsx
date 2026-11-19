@@ -2214,6 +2214,8 @@ export function DocumentEditor({
       // Owner / nest admin (or server admin) — the people GET /activity-log
       // lets in; the server refuses everyone else regardless.
       canSeeActivity: isAdmin || canSeeActivityLog(permission),
+      // A document that failed to load has no title to name either.
+      isLoading: loading || loadFailed,
     }).map((a) => {
       const base = {
         label: a.label,

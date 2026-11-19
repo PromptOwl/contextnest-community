@@ -120,6 +120,8 @@ export interface GuardView {
   label: string;
   /** One sentence with the counts, or null. */
   note: string | null;
+  /** po-1432: channel members who can't read the nest (the "Add to nest" popup). */
+  add?: MemberToAdd[];
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -131,6 +133,34 @@ const NON_USER: Record<string, string> = {
   support: "support access",
   anon: "anonymous readers",
 };
+
+type AbsentReader = NonNullable<SurfacesBindingPreview["people"]>["absent_readers"][number];
+
+/** "A", "A and B", "A, B and C". */
+function listNames(names: string[]): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** po-1432: who blocks the pair, by name, one sentence per reason. */
+function absentNote(absent: AbsentReader[], nest: string, ch: string): string {
+  const out: string[] = [];
+  for (const r of absent.filter((r) => r.reason === "no_slack_link")) {
+    out.push(`${r.name ? `${r.name} (${r.email})` : r.email} can read ${nest}, but no Slack user in this workspace is linked to that email.`);
+  }
+  const missing = absent.filter((r) => r.reason === "not_in_channel").map((r) => r.name ?? r.email ?? "Someone");
+  if (missing.length) {
+    out.push(`${listNames(missing)} can read ${nest} but ${missing.length === 1 ? "isn't" : "aren't"} in ${ch}. Add them in Slack, then check again.`);
+  }
+  for (const r of absent.filter((r) => r.reason === "no_account")) out.push(`${r.email} can read ${nest} but has no account on this server yet.`);
+  return out.join(" ");
+}
+
+export type MemberToAdd = NonNullable<SurfacesBindingPreview["people"]>["members_not_readers"][number] & { addable: boolean };
+
+/** po-1432: channel members who can't read the nest; only those with an account can be added. */
+export function membersToAdd(p: SurfacesBindingPreview): MemberToAdd[] {
+  return (p.people?.members_not_readers ?? []).map((m) => ({ ...m, addable: !!m.community_user_id }));
+}
 
 /**
  * What the binding preview means for one channel → nest pair. Counts only,
@@ -150,11 +180,23 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
   }
   if (!p.would_bind) {
     let note: string;
+    const absent = p.people?.absent_readers ?? [];
+    const cause = p.people?.universe_cause;
     if (!p.guard.members_known) note = `We couldn't list who is in ${ch}, so we refuse rather than guess.`;
-    else if (d.universe) note = `${ctx.nest} can be read by anyone with the link, so anything saved from ${ch} would be public.`;
+    else if (d.universe && cause === "public") note = `${ctx.nest} is public, so anything saved from ${ch} would be readable by anyone.`;
+    else if (d.universe && cause === "link") {
+      note = `${ctx.nest} has a live public link, so anything saved from ${ch} could be read by anyone with it. Revoke the link or pick another nest.`;
+    } else if (d.universe && cause === "shared_deployment") {
+      note = `${ctx.nest} is visible to every organization on this shared server, so anything saved from ${ch} would be too. Make the nest private or pick another nest.`;
+    } else if (d.universe) note = `${ctx.nest} can be read by anyone with the link, so anything saved from ${ch} would be public.`;
     else if (d.non_user_principals.length) {
       note = `${ctx.nest} is also read by ${d.non_user_principals.map((k) => NON_USER[k] ?? k).join(", ")}, which aren't in ${ch}.`;
     } else if (d.org_wide) note = `${ctx.nest} is readable by everyone on this server, and only ${plural(d.members_total, "person", "people")} ${d.members_total === 1 ? "is" : "are"} in ${ch}.`;
+    else if (absent.length) {
+      // The server names at most 20; the counts say how many more there are.
+      const more = d.readers_absent - absent.length;
+      note = absentNote(absent, ctx.nest, ch) + (more > 0 ? ` ${plural(more, "more reader")} ${more === 1 ? "isn't" : "aren't"} in ${ch} either.` : "");
+    }
     else note = `${ctx.nest} is readable by ${plural(d.readers_total, "person", "people")}, and ${d.readers_absent} of them ${d.readers_absent === 1 ? "isn't" : "aren't"} in ${ch}.`;
     return { state: "refused", label: "Can't listen here", note };
   }

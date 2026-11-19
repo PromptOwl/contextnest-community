@@ -6,6 +6,7 @@ import {
   dryRunTree,
   fixOptions,
   guardView,
+  membersToAdd,
   nestNameForChannel,
   neverList,
   pickInstall,
@@ -205,5 +206,95 @@ describe("noticeParagraphs: the wizard's preview matches the notice the server p
     const { noticeParagraphs } = await import("./control-room-setup");
     expect(noticeParagraphs("Revenue", 12).join(" ")).toMatch(/messages are cleared within 12 hours/);
     expect(noticeParagraphs("Revenue", 24).join(" ")).toMatch(/messages are cleared within 24 hours/);
+  });
+});
+
+describe("po-1432: the wizard names who blocks a pair and offers to add channel members to the nest", () => {
+  type People = NonNullable<SurfacesBindingPreview["people"]>;
+  const withPeople = (p: SurfacesBindingPreview, people: Partial<People>): SurfacesBindingPreview => ({
+    ...p,
+    people: { absent_readers: [], members_not_readers: [], universe_cause: null, ...people },
+  });
+  const refused = (people: Partial<People>, detail: Partial<SurfacesBindingPreview["guard"]["detail"]> = { readers_total: 7, readers_absent: 1 }) =>
+    withPeople(preview({ would_bind: false, detail }), people);
+  const ctx = { channel: "testnest", nest: "PO - Engineering Ops" };
+
+  it("AC 1: a reader no Slack user is linked to is named with the email", () => {
+    const v = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" }] }), ctx);
+    expect(v.state).toBe("refused");
+    expect(v.note).toBe("Misha (misha@promptowl.ai) can read PO - Engineering Ops, but no Slack user in this workspace is linked to that email.");
+  });
+
+  it("AC 2: readers not in the channel are named, with a message only", () => {
+    const one = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }), ctx);
+    expect(one.note).toBe("Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again.");
+    expect(fixOptions(one)).toEqual(["create_nest", "other_nest", "leave_off"]);
+    const many = guardView(
+      refused({
+        absent_readers: [
+          { user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" },
+          { user_id: "u2", name: null, email: "taimur@x.ai", reason: "not_in_channel" },
+          { user_id: "u3", name: "Qaish", email: "qaish@x.ai", reason: "not_in_channel" },
+        ],
+      }),
+      ctx,
+    );
+    expect(many.note).toBe("Sam, taimur@x.ai and Qaish can read PO - Engineering Ops but aren't in #testnest. Add them in Slack, then check again.");
+  });
+
+  it("a reader without an account is named by email", () => {
+    const v = guardView(refused({ absent_readers: [{ user_id: null, name: null, email: "new@x.ai", reason: "no_account" }] }), ctx);
+    expect(v.note).toBe("new@x.ai can read PO - Engineering Ops but has no account on this server yet.");
+  });
+
+  it("AC 6: a public nest and a live public link name their cause", () => {
+    expect(guardView(refused({ universe_cause: "public" }, { universe: true }), ctx).note).toBe(
+      "PO - Engineering Ops is public, so anything saved from #testnest would be readable by anyone.",
+    );
+    expect(guardView(refused({ universe_cause: "link" }, { universe: true }), ctx).note).toBe(
+      "PO - Engineering Ops has a live public link, so anything saved from #testnest could be read by anyone with it. Revoke the link or pick another nest.",
+    );
+  });
+
+  it("an older server without people keeps the counts message", () => {
+    expect(guardView(preview({ would_bind: false, detail: { readers_total: 7, readers_absent: 1 } }), ctx).note).toBe(
+      "PO - Engineering Ops is readable by 7 people, and 1 of them isn't in #testnest.",
+    );
+  });
+
+  it("AC 3, 5: channel members who can't read the nest are offered; those without an account can't be added", () => {
+    const p = withPeople(preview({ surface_ok: false, detail: { members_total: 3, members_not_readers: 2 } }), {
+      members_not_readers: [
+        { surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" },
+        { surface_user_id: "SX", name: "Xavier", community_user_id: null, email: null },
+      ],
+    });
+    expect(membersToAdd(p)).toEqual([
+      { surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai", addable: true },
+      { surface_user_id: "SX", name: "Xavier", community_user_id: null, email: null, addable: false },
+    ]);
+    expect(membersToAdd(preview())).toEqual([]);
+  });
+});
+
+describe("po-1432 review: shared-deployment cause and capped name lists", () => {
+  const ctx = { channel: "testnest", nest: "PO - Engineering Ops" };
+  const people = (over: Partial<NonNullable<SurfacesBindingPreview["people"]>>) => ({ absent_readers: [], members_not_readers: [], universe_cause: null, ...over });
+
+  it("a nest visible to every organization on a shared server says so, not 'revoke the link'", () => {
+    const p = { ...preview({ would_bind: false, detail: { universe: true } }), people: people({ universe_cause: "shared_deployment" }) };
+    expect(guardView(p, ctx).note).toBe(
+      "PO - Engineering Ops is visible to every organization on this shared server, so anything saved from #testnest would be too. Make the nest private or pick another nest.",
+    );
+  });
+
+  it("when the server names fewer readers than are absent, the note adds how many more", () => {
+    const p = {
+      ...preview({ would_bind: false, detail: { readers_total: 312, readers_absent: 22 } }),
+      people: people({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }),
+    };
+    expect(guardView(p, ctx).note).toBe(
+      "Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again. 21 more readers aren't in #testnest either.",
+    );
   });
 });

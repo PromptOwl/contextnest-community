@@ -25,11 +25,15 @@
  *   the teardown and the orphan sweeper. The notifications a nest raised are
  *   marked read first.
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
+ * - Since po-1213 Reader mode is an item in the nest header's ⋯ menu and
+ *   Overview is folded into Documents. Each case probes the server once
+ *   (`nestHomeShipped`) and the page object drives that build's control.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
 import ReaderModePage from '../../src/page_factory/app/reader_mode_page.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 const secondaryRole = samples.secondary_user ?? null;
@@ -70,7 +74,10 @@ test.describe('Reader mode', () => {
     const next = await api.createDoc(nest.id, { title: NEXT_TITLE, content: `# ${NEXT_TITLE}\n\n${NEXT_BODY}\n` });
     if (visibility !== 'private') await api.setVisibility(nest.id, visibility);
     if (reader) await api.setReaderMode(nest.id, true);
-    return { api, nest, home, next, page: role.readerModePage };
+    const nestHome = await nestHomeShipped(api, commonFunction);
+    const page = role.readerModePage; // a new page object on every read
+    page.nestHome = nestHome;
+    return { api, nest, home, next, nestHome, page };
   }
 
   /** Open secondary_user's session, settling any invite the nest raised. */
@@ -80,7 +87,9 @@ test.describe('Reader mode', () => {
     const api = secondary.readerModeApi;
     await api.settleInvitesFor(owner.nest.id).catch(() => {});
     cleanups.push(() => api.settleNotificationsFor(owner.nest.id));
-    return { api, page: secondary.readerModePage };
+    const page = secondary.readerModePage;
+    page.nestHome = owner.nestHome;
+    return { api, page };
   }
 
   /**
@@ -115,13 +124,15 @@ test.describe('Reader mode', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'reader-on');
 
     await owner.page.gotoAsManager(owner.nest.id);
-    await expect(owner.page.readerButton).toContainText('Reader: Off');
+    expect(await owner.page.readerState()).toBe('Off');
     await owner.page.setReaderMode(true);
-    await expect(owner.page.readerButton).toContainText('Reader: On');
+    await expect.poll(() => owner.page.readerState(), WRITE).toBe('On');
+    // po-1213: while it is on, the header says so with a badge.
+    if (owner.nestHome) await expect(owner.page.readerBadge).toBeVisible();
     await expect.poll(async () => (await owner.api.readerMode(owner.nest.id)).enabled, WRITE).toBe(true);
 
     await owner.page.gotoAsManager(owner.nest.id);
-    await expect(owner.page.readerButton).toContainText('Reader: On');
+    expect(await owner.page.readerState()).toBe('On');
   });
 
   // ── What readers get ───────────────────────────────────────────────────────
@@ -164,15 +175,18 @@ test.describe('Reader mode', () => {
     const owner = await ownerNest(primary_user, commonFunction, 'reader-authors', { reader: true });
 
     await owner.page.gotoNest(owner.nest.id);
-    await expect(owner.page.overviewTab).toBeVisible(WRITE);
-    await expect(owner.page.documentsTab).toBeVisible();
+    await expect(owner.page.documentsTab).toBeVisible(WRITE);
+    // Overview is folded into Documents since po-1213.
+    if (owner.nestHome) await expect(owner.page.overviewTab).toHaveCount(0);
+    else await expect(owner.page.overviewTab).toBeVisible();
     await expect(owner.page.newDocumentButton).toBeVisible();
     await expect(owner.page.readerSearch).toHaveCount(0);
 
     const editor = await share(owner, secondary_user, 'write');
     await editor.page.gotoNest(owner.nest.id);
-    await expect(editor.page.overviewTab).toBeVisible(WRITE);
-    await expect(editor.page.documentsTab).toBeVisible();
+    await expect(editor.page.documentsTab).toBeVisible(WRITE);
+    if (owner.nestHome) await expect(editor.page.overviewTab).toHaveCount(0);
+    else await expect(editor.page.overviewTab).toBeVisible();
     await expect(editor.page.newDocumentButton).toBeVisible();
     await expect(editor.page.readerSearch).toHaveCount(0);
   });
@@ -205,14 +219,14 @@ test.describe('Reader mode', () => {
     const member = await share(owner, secondary_user, 'read');
     await member.page.gotoNest(owner.nest.id);
     await expect(member.page.backToNests).toBeVisible(WRITE);
-    await expect(member.page.readerButton).toHaveCount(0);
+    expect(await member.page.readerControlCount()).toBe(0);
     expect((await member.api.tryReaderMode(owner.nest.id, true)).status).toBe(403);
 
     // Editor
     await changeRole(owner, 'write');
     await member.page.gotoNest(owner.nest.id);
     await expect(member.page.newDocumentButton).toBeVisible(WRITE);
-    await expect(member.page.readerButton).toHaveCount(0);
+    expect(await member.page.readerControlCount()).toBe(0);
     expect((await member.api.tryReaderMode(owner.nest.id, true)).status).toBe(403);
     expect((await owner.api.readerMode(owner.nest.id)).enabled).toBe(false);
 

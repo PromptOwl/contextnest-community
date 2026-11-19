@@ -139,7 +139,7 @@ test.describe('Nest archive', () => {
     }
     // The governance tabs are withheld too, and Settings keeps no write
     // action (Delete, review settings).
-    await expect(page.tab('Overview')).toBeVisible();
+    await expect(page.tab('Documents')).toBeVisible(); // Overview merged into Documents (po-1213)
     for (const tab of ['External Edits', 'Collaborators', 'Activity']) {
       await expect(page.tab(tab)).toHaveCount(0);
     }

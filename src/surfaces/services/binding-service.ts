@@ -20,7 +20,7 @@ import { ORG_ID } from "../flags.js";
 import { getInstall, homeTenant, installRef, type InstallRow } from "./install-store.js";
 import { safeMembers } from "./members.js";
 import { effectiveReaders } from "./readers.js";
-import { resolveIdentity } from "./identity-service.js";
+import { getProfile, resolveIdentity } from "./identity-service.js";
 import { runPauseHooks, runSurfaceOkLostHooks, type PauseReason } from "./pause-hooks.js";
 import { recordNotice } from "./notices.js";
 
@@ -133,6 +133,7 @@ interface Evaluation {
   guard: GuardResult;
   fingerprint: string;
   dmOwner: string | null;
+  readers: Awaited<ReturnType<typeof effectiveReaders>>;
 }
 
 async function evaluate(input: {
@@ -189,6 +190,7 @@ async function evaluate(input: {
     guard,
     fingerprint: readers.fingerprint,
     dmOwner,
+    readers,
   };
 }
 
@@ -350,7 +352,63 @@ export async function previewBinding(input: BindInput) {
     is_ext_shared: ev.conversation?.is_ext_shared ?? null,
     ext_capture_enabled: !!input.extCaptureEnabled,
     disclosure: SERVER_ADMIN_DISCLOSURE,
+    people: await previewPeople(input.nestId, ev),
   };
+}
+
+/**
+ * Who blocks the pair and who in the conversation can't read the nest, by
+ * name (po-1432). Preview only: its caller already sees the nest's readers
+ * (nest admin) and the conversation (assertMayInspect). Never stored.
+ */
+const PEOPLE_CAP = 20;
+
+async function previewPeople(nestId: string, ev: Evaluation) {
+  const db = getDb();
+  const { readers, install } = ev;
+  const nest = (await db.get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as { visibility: string } | undefined;
+  const universe_cause = !readers.universe ? null : nest?.visibility === "public" ? "public" : nest?.visibility === "org" ? "shared_deployment" : "link";
+  if (!ev.members.known) return { absent_readers: [], members_not_readers: [], universe_cause };
+
+  const people = ev.mapped.filter((m) => !m.is_bot && !m.is_guest && !m.is_external);
+  const present = new Set(people.map((m) => m.community_user_id).filter(Boolean));
+  // At most PEOPLE_CAP names per list; guard.detail keeps the full counts.
+  const absentIds = readers.users.filter((u) => !present.has(u)).slice(0, PEOPLE_CAP);
+  const outsiders = people
+    .filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id)))
+    .slice(0, PEOPLE_CAP);
+  const ids = [...absentIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
+  const users = new Map(
+    (ids.length
+      ? ((await db.all(`SELECT id, name, email FROM users WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) as Array<{ id: string; name: string | null; email: string }>)
+      : []
+    ).map((u) => [u.id, u]),
+  );
+
+  const absent_readers = [];
+  for (const id of absentIds) {
+    if (id.includes(":")) {
+      // team:<id>:<email> / email:<email> — a reader with no account here.
+      const email = id.split(":").pop()!;
+      if (email.includes("@")) absent_readers.push({ user_id: null, name: null, email, reason: "no_account" as const });
+      continue;
+    }
+    const u = users.get(id);
+    const known = await db.get(
+      `SELECT 1 AS hit FROM surface_identity_links WHERE install_id = ? AND community_user_id = ? AND status = 'active'
+       UNION SELECT 1 AS hit FROM surface_users_cache WHERE install_id = ? AND LOWER(email) = LOWER(?) AND deleted = 0`,
+      [install.id, id, install.id, u?.email ?? ""],
+    );
+    absent_readers.push({ user_id: id, name: u?.name ?? null, email: u?.email ?? null, reason: known ? ("not_in_channel" as const) : ("no_slack_link" as const) });
+  }
+
+  const members_not_readers = [];
+  for (const m of outsiders) {
+    const u = m.community_user_id ? users.get(m.community_user_id) : undefined;
+    const name = u?.name ?? (await getProfile(install.id, m.surface_user_id).catch(() => null))?.display_name ?? null;
+    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null });
+  }
+  return { absent_readers, members_not_readers, universe_cause };
 }
 
 /** Create (or re-create a removed) binding. Refused (409) unless capture_ok. */

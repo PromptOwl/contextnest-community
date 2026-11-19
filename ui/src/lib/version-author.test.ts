@@ -4,6 +4,7 @@ import {
   versionAuthorShort,
   clientTitle,
   lastEditParts,
+  rowLastEdit,
 } from "./version-author";
 
 describe("versionAgent", () => {
@@ -107,5 +108,65 @@ describe("lastEditParts (the document byline)", () => {
     expect(lastEditParts(null, people)).toBeNull();
     expect(lastEditParts(undefined, people)).toBeNull();
     expect(lastEditParts({ edited_by: "" }, people)).toBeNull();
+  });
+});
+
+// po-1213: every Documents row and feed item names its last editor.
+describe("AC-NH-03/04: rowLastEdit (Documents rows and the feed)", () => {
+  const people = [{ email: "priya@larkspur.example", name: "Priya Raman" }];
+
+  it("Given an agent wrote the latest version, then it reads '<human> via <agent>', human first", () => {
+    const r = rowLastEdit(
+      {
+        updated_at: "2026-11-01T00:00:00Z",
+        last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-02T00:00:00Z", client: { agent: "mkt-amplifier" } },
+      },
+      people,
+    );
+    // The time is updated_at: the key the list and the feed sort on.
+    expect(r).toEqual({ at: "2026-11-01T00:00:00Z", editor: "Priya Raman via mkt-amplifier" });
+  });
+
+  it("Given no updated_at, then the time falls back to the version's edited_at", () => {
+    const r = rowLastEdit({ last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-02T00:00:00Z" } }, people);
+    expect(r?.at).toBe("2026-11-02T00:00:00Z");
+  });
+
+  it("Given no agent, then it reads as the human alone", () => {
+    const r = rowLastEdit({ last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-02T00:00:00Z" } }, people);
+    expect(r?.editor).toBe("Priya Raman");
+  });
+
+  it("Given no last_edit (a public reader), then it keeps the time and names nobody", () => {
+    expect(rowLastEdit({ updated_at: "2026-11-01T00:00:00Z" }, people)).toEqual({ at: "2026-11-01T00:00:00Z", editor: null });
+  });
+
+  it("Given neither a time nor an editor, then there is nothing to show", () => {
+    expect(rowLastEdit({}, people)).toBeNull();
+  });
+
+  // A move rewrites updated_at without sealing a version, so last_edit is an
+  // OLDER write than the time the row shows. Naming that editor next to the
+  // newer time would credit them with a change they did not make.
+  it("Given the document changed after its last sealed edit (a move), then the time stays and nobody is named", () => {
+    const r = rowLastEdit(
+      {
+        updated_at: "2026-11-10T12:00:00.000Z",
+        last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-03 09:00:00", client: { agent: "deal-desk" } },
+      },
+      people,
+    );
+    expect(r).toEqual({ at: "2026-11-10T12:00:00.000Z", editor: null });
+  });
+
+  it("Given the version and updated_at are the same write (SQL timestamp, seconds apart), then the editor is named", () => {
+    const r = rowLastEdit(
+      {
+        updated_at: "2026-11-10T12:00:00.400Z",
+        last_edit: { edited_by: "priya@larkspur.example", edited_at: "2026-11-10 12:00:02", client: { agent: "deal-desk" } },
+      },
+      people,
+    );
+    expect(r?.editor).toBe("Priya Raman via deal-desk");
   });
 });

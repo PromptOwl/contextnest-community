@@ -15,11 +15,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
+  addCollaborator,
   applySurfacesSeed,
   createNest,
   createSlackInstall,
   createSurfacesBinding,
+  disconnectSurfacesInstall,
   getSlackInstall,
   getSurfacesSeedStatus,
   getSurfacesSettings,
@@ -48,6 +52,7 @@ import {
   dryRunTree,
   fixOptions,
   guardView,
+  membersToAdd,
   nestNameForChannel,
   neverList,
   noticeParagraphs,
@@ -56,6 +61,7 @@ import {
   willList,
   type ChannelPick,
   type GuardView,
+  type MemberToAdd,
   type SetupProgress,
 } from "../../../lib/control-room-setup";
 
@@ -361,7 +367,7 @@ function downloadJson(name: string, data: unknown) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
+export function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
   const inst = state.install;
   const connected = inst?.status === "active";
   const hosted = !!state.status?.slack_hosted;
@@ -440,6 +446,22 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
     if (inst) window.location.assign(slackOAuthStartUrl(inst.id));
   };
 
+  const [confirmOff, setConfirmOff] = useState(false);
+  const disconnect = async () => {
+    if (!inst) return;
+    setBusy(true);
+    try {
+      const r = await disconnectSurfacesInstall(inst.id);
+      toast.success(r.withdrawn ? `Disconnected Slack. ${r.withdrawn} pending item(s) withdrawn.` : "Disconnected Slack.");
+      setConfirmOff(false);
+      await state.reload();
+    } catch (e) {
+      toast.error(errText(e, "Couldn't disconnect Slack."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <StepHeading
@@ -450,6 +472,29 @@ function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
+          <div className="mt-2">
+            <Button variant="outline" className={small} onClick={() => setConfirmOff(true)} disabled={busy} data-testid="setup-disconnect">
+              Disconnect Slack
+            </Button>
+          </div>
+          <Dialog open={confirmOff} onOpenChange={(o) => !busy && setConfirmOff(o)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Disconnect Slack?</DialogTitle>
+                <DialogDescription>
+                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. You can connect again later.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" onClick={disconnect} disabled={busy} data-testid="setup-disconnect-confirm">
+                  Disconnect
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </Note>
       ) : (
         <div className="rounded-lg border p-4">
@@ -555,7 +600,7 @@ function usePreviews(state: SetupState) {
       inflight.current.add(k);
       setViews((v) => ({ ...v, [k]: "loading" }));
       previewSurfacesBinding({ install_id: inst.id, conversation_id: p.channelId, nest_id: p.nestId, ext_capture_enabled: !!p.extCapture })
-        .then((r) => guardView(r, { channel: p.channelName, nest: nestName(p.nestId), orgName: state.status?.org_name }))
+        .then((r) => ({ ...guardView(r, { channel: p.channelName, nest: nestName(p.nestId), orgName: state.status?.org_name }), add: membersToAdd(r) }))
         .catch((e): GuardView => ({ state: "refused", label: "Can't listen here", note: errText(e, "The check failed.") }))
         .then((g) => setViews((v) => ({ ...v, [k]: g })))
         .finally(() => inflight.current.delete(k));
@@ -564,6 +609,12 @@ function usePreviews(state: SetupState) {
   }, [state.picks, state.install, views, nestName, state.status?.org_name]);
 
   const viewFor = (p: ChannelPick): GuardView | "loading" | undefined => views[keyOf(p)];
+  /** Drop a pick's cached check so the effect above runs it again. */
+  const recheck = (p: ChannelPick) =>
+    setViews((v) => {
+      const { [keyOf(p)]: _gone, ...rest } = v;
+      return rest;
+    });
   const byChannel = (): Record<string, GuardView | undefined> => {
     const out: Record<string, GuardView | undefined> = {};
     for (const p of state.picks) {
@@ -572,10 +623,97 @@ function usePreviews(state: SetupState) {
     }
     return out;
   };
-  return { viewFor, byChannel };
+  return { viewFor, byChannel, recheck };
 }
 
-function GuardCell({ view, channel }: { view: GuardView | "loading" | undefined; channel: SurfacesChannel }) {
+/** po-1432: give channel members who can't read the nest read access, then check again. */
+function AddToNest({ members, nestId, nestName, channel, onAdded }: { members: MemberToAdd[]; nestId: string; nestName: string; channel: string; onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  // Re-check only once the dialog closes: a re-check unmounts this row's popup.
+  const [addedSome, setAddedSome] = useState(false);
+  const close = (o: boolean) => {
+    setOpen(o);
+    if (!o && addedSome) {
+      setAddedSome(false);
+      onAdded();
+    }
+  };
+  const addable = members.filter((m) => m.addable);
+  if (!addable.length) return null;
+  const show = () => {
+    setPicked(new Set(addable.map((m) => m.community_user_id!)));
+    setOpen(true);
+  };
+  const add = async () => {
+    setBusy(true);
+    const ids = [...picked];
+    const results = await Promise.allSettled(ids.map((user_id) => addCollaborator(nestId, { user_id, permission: "read" })));
+    setBusy(false);
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    if (failed.length) {
+      // Keep the dialog open with only the ones that failed ticked, so a retry is one click.
+      toast.error(`Couldn't add ${failed.length} of ${ids.length} to ${nestName}.`);
+      setPicked(new Set(failed));
+      if (failed.length < ids.length) setAddedSome(true);
+    } else {
+      toast.success(`Added ${ids.length} to ${nestName} with read access.`);
+      setOpen(false);
+      setAddedSome(false);
+      onAdded();
+    }
+  };
+  return (
+    <>
+      <Button variant="outline" size="sm" className="self-start" onClick={show} data-testid={`add-to-nest-${channel}`}>
+        Add to nest…
+      </Button>
+      <Dialog open={open} onOpenChange={close}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add channel members to {nestName}?</DialogTitle>
+            <DialogDescription>
+              These people are in #{channel} but can't read {nestName}. Ticked people get read access.
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="flex flex-col gap-2">
+            {members.map((m) => (
+              <li key={m.surface_user_id} className={cn("flex items-center gap-2 text-sm", !m.addable && "text-muted-foreground")}>
+                <Checkbox
+                  aria-label={`Add ${m.name ?? m.surface_user_id}`}
+                  disabled={!m.addable || busy}
+                  checked={!!m.community_user_id && picked.has(m.community_user_id)}
+                  onCheckedChange={(v) =>
+                    setPicked((s) => {
+                      const next = new Set(s);
+                      if (v === true) next.add(m.community_user_id!);
+                      else next.delete(m.community_user_id!);
+                      return next;
+                    })
+                  }
+                />
+                <span>{m.name ?? m.surface_user_id}</span>
+                {m.email && <span className="text-muted-foreground">{m.email}</span>}
+                {!m.addable && <span className="italic">no account</span>}
+              </li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => close(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button onClick={add} disabled={busy || !picked.size}>
+              {busy ? "Adding…" : `Add to nest (${picked.size})`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function GuardCell({ view, channel, addTo }: { view: GuardView | "loading" | undefined; channel: SurfacesChannel; addTo?: ReactNode }) {
   if (view === "loading") return <span className="text-sm text-muted-foreground">Checking…</span>;
   if (!view) {
     if (channel.is_ext_shared)
@@ -595,6 +733,7 @@ function GuardCell({ view, channel }: { view: GuardView | "loading" | undefined;
           {view.label}
         </span>
         {view.note && <span className="text-muted-foreground">{view.note}</span>}
+        {addTo}
       </div>
     );
   }
@@ -609,6 +748,7 @@ function GuardCell({ view, channel }: { view: GuardView | "loading" | undefined;
         {view.label}
       </span>
       {view.note && <span className="text-muted-foreground">{view.note}</span>}
+      {addTo}
     </div>
   );
 }
@@ -624,7 +764,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
   const [truncated, setTruncated] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const { viewFor } = usePreviews(state);
+  const { viewFor, recheck } = usePreviews(state);
 
   // One request at a time: "Check again" is disabled while a list is loading,
   // so repeated clicks can't stack up Slack calls.
@@ -721,7 +861,15 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
                       {bound.status === "active" ? "Listening" : "Paused"}
                     </span>
                   ) : (
-                    <GuardCell view={p?.on ? viewFor(p) : undefined} channel={ch} />
+                    <GuardCell
+                      view={p?.on ? viewFor(p) : undefined}
+                      channel={ch}
+                      addTo={(() => {
+                        const v = p?.on ? viewFor(p) : undefined;
+                        if (!p || !v || v === "loading" || !v.add?.length) return null;
+                        return <AddToNest members={v.add} nestId={p.nestId} nestName={nestName(p.nestId)} channel={ch.name ?? ch.id} onAdded={() => recheck(p)} />;
+                      })()}
+                    />
                   )}
                 </div>
               </div>

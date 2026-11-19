@@ -141,6 +141,17 @@ const REASON_TEXT: Record<string, string> = {
   stale_source: "Source out of date",
   escalated: "Escalated to a person",
   model_timeout: "The model call timed out",
+  // Why a listener's judge run failed (po-1407).
+  model_auth: "The model key was refused",
+  model_billing: "The model account is out of credit",
+  model_rate_limited: "The model is rate-limited",
+  model_rejected: "The model refused the request",
+  model_error: "The model call failed",
+  slack_fetch_failed: "Couldn't reach Slack",
+  nest_read_failed: "Couldn't read the nest",
+  invalid_output: "The model's answer couldn't be read",
+  db_error: "Database error",
+  unknown_error: "Unexpected error (see server log)",
 };
 
 export function reasonLabel(code: string | null | undefined): string {

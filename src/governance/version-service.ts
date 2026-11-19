@@ -30,6 +30,15 @@ export function hashContent(content: string): string {
  */
 export const SYSTEM_AUTHOR_PREFIX = "system:auto-publish:";
 
+/** `prefix` as a LIKE … ESCAPE '\\' pattern: the prefix matched literally (a
+ *  `_` or `%` in it is not a wildcard), then anything. */
+export function likePrefixPattern(prefix: string): string {
+  return `${prefix.replace(/([\\%_])/g, "\\$1")}%`;
+}
+
+/** Bound with `author NOT LIKE ? ESCAPE '\\'` to skip auto-publish bump rows. */
+export const SYSTEM_AUTHOR_LIKE = likePrefixPattern(SYSTEM_AUTHOR_PREFIX);
+
 /** Wrap a real user email as a system-author marker. */
 export function systemAuthor(email: string): string {
   return `${SYSTEM_AUTHOR_PREFIX}${email}`;
@@ -173,7 +182,10 @@ export async function getVersion(
 /**
  * Who sealed one version — the human (`editedBy`, with the system account's
  * name when it is one) and the call's `client` block — without its body.
- * `version` omitted means the latest row. Backs the "last edited by" line on
+ * `version` omitted means the latest row that is an edit; with `version`,
+ * the edit that produced it — that row, or the edit beneath it when it is an
+ * auto-publish bump (bump rows are skipped, as in getCurrentVersion).
+ * Backs the "last edited by" line on
  * the node detail and on context_get, so both name the same two writers the
  * version list does.
  */
@@ -188,12 +200,96 @@ export async function getVersionAttribution(
        FROM node_versions nv
        LEFT JOIN users u ON u.email = nv.author
        LEFT JOIN system_accounts sa ON sa.user_id = u.id
-      WHERE nv.nest_id = ? AND nv.node_id = ?${version === undefined ? "" : " AND nv.version = ?"}
+      WHERE nv.nest_id = ? AND nv.node_id = ? AND nv.author NOT LIKE ? ESCAPE '\\'${version === undefined ? "" : " AND nv.version <= ?"}
       ORDER BY nv.version DESC
       LIMIT 1`,
-    version === undefined ? [nestId, nodeId] : [nestId, nodeId, version],
+    version === undefined
+      ? [nestId, nodeId, SYSTEM_AUTHOR_LIKE]
+      : [nestId, nodeId, SYSTEM_AUTHOR_LIKE, version],
   )) as any;
   return row ? rowToVersion(row) : null;
+}
+
+/** Binds getLatestVersionAttributions spends once per query: nest_id twice
+ *  and the bump-row LIKE prefix. */
+export const ATTRIBUTION_FIXED_BINDS = 3;
+/** Binds it may spend on ids, keeping a chunk well under SQLite's old
+ *  999-variable cap with the fixed binds on top. */
+const ATTRIBUTION_ID_BIND_BUDGET = 750;
+
+/** Ids per query: the IN list takes one bind per id, and a bound adds
+ *  (node_id, version), so three. A bind added to the query belongs here, and
+ *  the chunk shrinks with it instead of overflowing the cap. */
+export function attributionChunkSize(bounded: boolean): number {
+  const bindsPerId = bounded ? 3 : 1;
+  return Math.floor(ATTRIBUTION_ID_BIND_BUDGET / bindsPerId);
+}
+
+/**
+ * getVersionAttribution's latest row for each of `nodeIds`, in one query per
+ * chunk of ids — the Documents list, the "Recently edited" feed and
+ * context_list name the same two writers the node detail does, without a
+ * read per row. Auto-publish bump rows (SYSTEM_AUTHOR_PREFIX) are skipped, as
+ * in getCurrentVersions: they are not an edit. A node with no row is absent.
+ *
+ * `upTo` bounds each node to the version the caller is served (the approved
+ * one, under stewardship), as getVersionAttribution's `version` does: the
+ * latest edit at or below it. With `upTo`, a node it does not list is absent
+ * — there is no served version to name.
+ */
+export async function getLatestVersionAttributions(
+  nestId: string,
+  nodeIds: string[],
+  upTo?: Map<string, number>,
+): Promise<Map<string, DocumentVersion>> {
+  const out = new Map<string, DocumentVersion>();
+  const ids = upTo ? nodeIds.filter((id) => upTo.has(id)) : nodeIds;
+  const CHUNK = attributionChunkSize(!!upTo);
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    // The IN list is what lets the planner seek (nest_id, node_id) per node;
+    // the bound alone (an OR chain) only narrows to the nest.
+    const inList = `node_id IN (${chunk.map(() => "?").join(",")})`;
+    const match = upTo
+      ? `${inList} AND (${chunk.map(() => "(node_id = ? AND version <= ?)").join(" OR ")})`
+      : inList;
+    const matchArgs = upTo ? [...chunk, ...chunk.flatMap((id) => [id, upTo.get(id)!])] : chunk;
+    const rows = (await getDb().all(
+      `SELECT nv.node_id, nv.version, nv.author, nv.created_at, nv.change_note, nv.status,
+              nv.client_json, sa.name AS system_name
+         FROM node_versions nv
+         JOIN (SELECT node_id, MAX(version) AS v
+                 FROM node_versions
+                WHERE nest_id = ? AND ${match}
+                  AND author NOT LIKE ? ESCAPE '\\'
+                GROUP BY node_id) latest
+           ON latest.node_id = nv.node_id AND latest.v = nv.version
+         LEFT JOIN users u ON u.email = nv.author
+         LEFT JOIN system_accounts sa ON sa.user_id = u.id
+        WHERE nv.nest_id = ?`,
+      [nestId, ...matchArgs, SYSTEM_AUTHOR_LIKE, nestId],
+    )) as any[];
+    for (const row of rows) out.set(row.node_id, rowToVersion(row));
+  }
+  return out;
+}
+
+/** The `last_edit` block a read serves: the version's human and agent. Same
+ *  shape on the node detail, the list, the census feed and context_list. */
+export function toLastEdit(v: DocumentVersion): {
+  version: number;
+  edited_by: string;
+  edited_by_system?: string;
+  edited_at: string;
+  client?: ClientMetadata;
+} {
+  return {
+    version: v.version,
+    edited_by: v.editedBy,
+    ...(v.editedBySystem ? { edited_by_system: v.editedBySystem } : {}),
+    edited_at: v.editedAt,
+    ...(v.client ? { client: v.client } : {}),
+  };
 }
 
 /** getCurrentVersion for many nodes of one nest, in one query. Missing → 0. */
@@ -206,9 +302,9 @@ export async function getCurrentVersions(
   const rows = (await getDb().all(
     `SELECT node_id, MAX(version) as v FROM node_versions
         WHERE nest_id = ? AND node_id IN (${nodeIds.map(() => "?").join(",")})
-          AND author NOT LIKE ?
+          AND author NOT LIKE ? ESCAPE '\\'
         GROUP BY node_id`,
-    [nestId, ...nodeIds, `${SYSTEM_AUTHOR_PREFIX}%`],
+    [nestId, ...nodeIds, SYSTEM_AUTHOR_LIKE],
   )) as Array<{ node_id: string; v: number | null }>;
   for (const r of rows) out.set(r.node_id, r.v || 0);
   return out;
@@ -222,8 +318,8 @@ export async function getCurrentVersion(
   const row = (await db.get(
     `SELECT MAX(version) as v FROM node_versions
         WHERE nest_id = ? AND node_id = ?
-          AND author NOT LIKE ?`,
-    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+          AND author NOT LIKE ? ESCAPE '\\'`,
+    [nestId, nodeId, SYSTEM_AUTHOR_LIKE],
   )) as { v: number | null };
   return row?.v || 0;
 }
@@ -239,8 +335,8 @@ export async function getTrackedNodeIds(nestId: string): Promise<Set<string>> {
   const db = getDb();
   const rows = (await db.all(
     `SELECT DISTINCT node_id FROM node_versions
-        WHERE nest_id = ? AND author NOT LIKE ?`,
-    [nestId, `${SYSTEM_AUTHOR_PREFIX}%`],
+        WHERE nest_id = ? AND author NOT LIKE ? ESCAPE '\\'`,
+    [nestId, SYSTEM_AUTHOR_LIKE],
   )) as Array<{ node_id: string }>;
   return new Set(rows.map((r) => r.node_id));
 }
@@ -481,10 +577,10 @@ export async function checkConflict(
     `SELECT version, content_hash, author, created_at
          FROM node_versions
         WHERE nest_id = ? AND node_id = ?
-          AND author NOT LIKE ?
+          AND author NOT LIKE ? ESCAPE '\\'
         ORDER BY version DESC
         LIMIT 1`,
-    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+    [nestId, nodeId, SYSTEM_AUTHOR_LIKE],
   )) as
     | {
         version: number;
