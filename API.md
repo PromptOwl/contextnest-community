@@ -1259,7 +1259,7 @@ Optional query params, applied before the per-node enrichment:
 - `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
 - `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
-- `last_edit` (single-node GET only) — who sealed the latest version: `{ version, edited_by, edited_by_system?, edited_at, client? }`. `edited_by` is the human; `client` is the write's caller attribution (§9.4), so `client.agent` is the agent that made the call. `client` is omitted when the write carried none. Over MCP, `context_get` reports the same two names as a `**Last edited by:** <human> via <agent> (vN)` prose line, for the version it serves (the approved one under stewardship). Not sent to public readers or headless keys.
+- `last_edit` — who sealed the latest version: `{ version, edited_by, edited_by_system?, edited_at, client? }`, on every list row and on the single-node GET below. `edited_by` is the human; `client` is the write's caller attribution (§9.4), so `client.agent` is the agent that made the call. `client` is omitted when the write carried none. One query serves the whole list. Over MCP, `context_get` reports the same two names as a `**Last edited by:** <human> via <agent> (vN)` prose line, for the version it serves (the approved one under stewardship); `context_list` ends each prose row with ` · edited by <human> via <agent>, YYYY-MM-DD` (UTC). MCP carries it in prose only until the engine catalog has a provenance field. That prose is for reading, not a stable wire format: a client that needs the fields should use REST `last_edit` (or `structuredContent` once the catalog carries it). On REST, `last_edit` names the latest edit, draft included, because a member reads the live document there. A caller served approved content (`context_get`, `context_list` under stewardship, `?approved_only=1`) gets the approved version's writers instead, never a hidden draft's. Auto-publish bump versions are not edits and are skipped. `last_edit` is the latest *sealed* version, so it can be older than `updated_at`: a move rewrites `updated_at` without sealing one. The Documents page shows `updated_at` as the time (the key the list and feed sort on) and names `last_edit`'s editor only when `edited_at` is within a minute of it, so a newer time is never paired with an older write's editor. Not sent to public readers or headless keys.
 - Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` or `last_edit` — the fields are omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
 ### POST `/nests/:nestId/nodes`
@@ -1295,6 +1295,8 @@ Response (201): `{ "node": { ... }, "stewards": [...] }`. A `table` node with a 
 
 ### GET `/nests/:nestId/nodes/:nodeId`
 Full node content. 403 if no steward access (when stewardship on). Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
+
+`last_edit` (the list row's block, above) names the edit that produced the version served: the latest edit for a member, the approved version's edit when the approved body is served (a public reader's view, `?approved_only=1`). It is omitted for public readers and for headless access keys. For a headless key that is not new: a key reads as a public reader whenever headless reads are on (and cannot read at all when they are off), so the earlier public-reader gate already left it out. When the served version is an auto-publish bump, `last_edit.version` is the edit beneath it, so it can be lower than the node's `version`. `context_get`'s `(vN)` reports that same edit's version.
 
 **Direct raw fetch** — `?format=raw` returns the node **body** as plain text (no JSON envelope, no synthesized frontmatter):
 
@@ -2565,7 +2567,7 @@ Creates a folder with nothing in it — the directory is created in the vault ca
 Returns 201 with the path actually created.
 
 ### GET `/nests/:nestId/census`
-One call for everything a nest overview needs to describe the *whole* nest, whatever folder is open — counts by tag, type and status, the folder tree, the author roster, and the recently-edited strip. Gated by the same `filterAccessible` pass as the listing, so the numbers describe what this caller can actually reach.
+One call for everything the Documents page needs to describe the *whole* nest, whatever folder is open — counts by tag, type and status, the folder tree, the author roster, and the recently-edited strip. Gated by the same `filterAccessible` pass as the listing, so the numbers describe what this caller can actually reach.
 
 ```json
 {
@@ -2578,10 +2580,14 @@ One call for everything a nest overview needs to describe the *whole* nest, what
     "aiReady": 31,
     "authors": ["a@x.com"],
     "editedLast7d": 5,
-    "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
+    "recent": [{
+      "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "...",
+      "last_edit": { "version": 3, "edited_by": "a@x.com", "edited_at": "...", "client": { "agent": "mkt-amplifier" } }
+    }]
   }
 }
 ```
+`recent` is the "Recently edited" feed on the Documents page: up to 5 documents, newest first. Each item carries `last_edit` (the list row's block: the human, then the agent in `client.agent`), naming the latest edit, draft included, as a member's list does: the census has no approved-content mode. `last_edit` is the latest *sealed* version, so after a move `updated_at` is newer than `last_edit.edited_at` and the two are different writes; a client that pairs them should name the editor only when the times agree (the Documents page allows a minute). `last_edit` is omitted for public readers and headless keys.
 `aiReady` counts documents with a published version agents are served, whatever the status of their latest version — so it can exceed `statuses.approved`: a document with v2 published and v3 in review counts once here and once under `pending_review`.
 
 ### POST `/nests/:nestId/reindex` (write+)

@@ -45,7 +45,7 @@ export function TopBarTools({
   /** The open nest, or undefined on the dashboard and other workspace pages. */
   nestId?: string;
   isOwner: boolean;
-  /** "overview" / "review" / "external-edits" for the nest page's tabs, else a registry page id. */
+  /** "documents" / "review" / "external-edits" for the nest page's tabs, else a registry page id. */
   activeView: string | null;
   /** The document on screen, so its user view highlights. */
   currentNodeId: string | null;
@@ -167,7 +167,7 @@ export function TopBarTools({
           {nestId && (
             <>
               {views
-                .filter((v) => v.id === "overview")
+                .filter((v) => v.id === "documents")
                 .map((v) => (
                   <DropdownMenuItem
                     key={v.id}
@@ -176,7 +176,7 @@ export function TopBarTools({
                     data-testid={`top-bar-view-${v.id}`}
                   >
                     <Home className="mr-2 h-3.5 w-3.5" />
-                    Overview
+                    Documents
                   </DropdownMenuItem>
                 ))}
               {grouped.map((v) => {
