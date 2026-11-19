@@ -13,7 +13,7 @@
  */
 import { z } from "zod";
 import { normalizeHex, readableForeground } from "./branding.js";
-import { persistSetting } from "../db/settings.js";
+import { applySettings } from "../db/settings.js";
 
 export const NAV_COLOR_SETTING = "NAV_COLOR";
 
@@ -89,9 +89,8 @@ export const AppearanceUpdateInput = z.object({
 
 /**
  * Apply an appearance change (the MCP write; REST applies it inside the
- * /admin/settings batch). Persist first, then the live env — the same order
- * as PATCH /admin/settings, so a failed write never leaves a live value that
- * was never stored.
+ * /admin/settings batch). Both go through applySettings (db/settings.ts):
+ * persist first, then the live env.
  */
 export async function updateAppearance(
   body: Record<string, unknown>,
@@ -99,10 +98,6 @@ export async function updateAppearance(
   const fieldErrors: Record<string, string> = {};
   const pending = validateAppearanceFields(body, (f, m) => (fieldErrors[f] = m));
   if (Object.keys(fieldErrors).length) return { ok: false, fieldErrors };
-  for (const { name, value } of pending) {
-    await persistSetting(name, value);
-    if (value === null) delete process.env[name];
-    else process.env[name] = value;
-  }
+  await applySettings(pending);
   return { ok: true, appearance: currentAppearance() };
 }

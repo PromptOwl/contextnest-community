@@ -53,25 +53,34 @@ function describe(a: Appearance): string {
     : `Navigation color: the default (${a.default_nav_color}). No custom color is set.`;
 }
 
+/** A tool result plus the HTTP status REST would answer, for the trace row. */
+export interface AppearanceToolOutcome {
+  result: ToolResult;
+  status: 200 | 400 | 403;
+}
+
 export async function handleAppearanceTool(
   name: string,
   args: Record<string, any>,
   ctx: { userId: string; nestScope: string | null },
-): Promise<ToolResult> {
+): Promise<AppearanceToolOutcome> {
+  const ok = (result: ToolResult): AppearanceToolOutcome => ({ result, status: 200 });
+  const refused = (text: string): AppearanceToolOutcome => ({ result: toolError(text, "UNAUTHORIZED_ACTION"), status: 403 });
+  const invalid = (text: string): AppearanceToolOutcome => ({ result: toolError(text, "VALIDATION_FAILED"), status: 400 });
   if (name === APPEARANCE_READ_TOOL) {
     const a = currentAppearance();
-    return { text: describe(a), data: a };
+    return ok({ text: describe(a), data: a });
   }
   if (name === APPEARANCE_UPDATE_TOOL) {
     // The same gate as PATCH /admin/settings.
     const admin = await serverAdminAllowed(ctx.userId);
     if (!admin || ctx.nestScope)
-      return toolError("Only a server admin can change the navigation color, with a credential that isn't scoped to one nest.", "UNAUTHORIZED_ACTION");
+      return refused("Only a server admin can change the navigation color, with a credential that isn't scoped to one nest.");
     if (typeof args.nav_color !== "string")
-      return toolError('nav_color is required: a hex color like "#1e40af", or "" for the default.', "VALIDATION_FAILED");
+      return invalid('nav_color is required: a hex color like "#1e40af", or "" for the default.');
     const out = await updateAppearance({ nav_color: args.nav_color });
-    if (!out.ok) return toolError(out.fieldErrors.nav_color ?? "Invalid appearance.", "VALIDATION_FAILED");
-    return { text: `Saved. ${describe(out.appearance)}`, data: out.appearance };
+    if (!out.ok) return invalid(out.fieldErrors.nav_color ?? "Invalid appearance.");
+    return ok({ text: `Saved. ${describe(out.appearance)}`, data: out.appearance });
   }
-  return toolError(`Unknown appearance tool "${name}".`, "VALIDATION_FAILED");
+  return invalid(`Unknown appearance tool "${name}".`);
 }

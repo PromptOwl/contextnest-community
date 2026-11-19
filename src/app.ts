@@ -229,7 +229,7 @@ import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, licensedReadsAllowed, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
-import { persistSetting } from "./db/settings.js";
+import { applySettings } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { documentWebPath, nestWebPath } from "./shared/web-links.js";
@@ -2159,20 +2159,16 @@ export function createApp(): Hono<AuthEnv> {
           .map((p) => authOrEmailSetting(p.name)!),
       ),
     ];
-    for (const { name, value } of pending) {
-      try {
-        await persistSetting(name, value);
-      } catch (e) {
-        return c.json(
-          {
-            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}`,
-            settings: currentServerSettings(),
-          },
-          500
-        );
-      }
-      if (value === null) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      await applySettings(pending);
+    } catch (e) {
+      return c.json(
+        {
+          error: e instanceof Error ? e.message : String(e),
+          settings: currentServerSettings(),
+        },
+        500
+      );
     }
     // Round 9: queued once the save has committed (the outbox delivers and
     // retries in the background; the Slack DM doesn't depend on mail settings).

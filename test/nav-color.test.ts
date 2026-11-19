@@ -39,6 +39,15 @@ async function toolsList(app: any, key: string): Promise<Array<{ name: string; i
 
 const health = async (app: any) => (await app.request("/health")).json();
 
+/** The NAV_COLOR row in the durable settings store (null = tombstone or none). */
+async function storedNavColor(): Promise<string | null | undefined> {
+  const { getDb } = await import("../src/db/client.js");
+  const row = (await getDb().get("SELECT value FROM server_settings WHERE key = ?", ["NAV_COLOR"])) as
+    | { value: string | null }
+    | undefined;
+  return row ? row.value : undefined;
+}
+
 let app: any;
 let admin: { apiKey: string };
 let member: { apiKey: string };
@@ -67,6 +76,7 @@ describe("nav color over REST", () => {
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     expect(r.data.settings.nav_color).toBe("#0f766e");
     expect((await health(app)).nav_color).toBe("#0f766e");
+    expect(await storedNavColor()).toBe("#0f766e");
     // A 3-digit hex expands.
     await jsonRequest(app, "PATCH", "/admin/settings", { nav_color: "#fd0" }, admin.apiKey);
     expect((await health(app)).nav_color).toBe("#ffdd00");
@@ -129,10 +139,13 @@ describe("nav color over MCP (server-level /mcp)", () => {
     const r = await mcp(app, admin.apiKey, "context_appearance_update", { nav_color: "#7C3AED" });
     expect(r.isError, r.content?.[0]?.text).toBeFalsy();
     expect(r.structuredContent.nav_color).toBe("#7c3aed");
+    // Durably stored, not only set live: the settings row holds it.
+    expect(await storedNavColor()).toBe("#7c3aed");
     expect((await health(app)).nav_color).toBe("#7c3aed");
 
     const reset = await mcp(app, admin.apiKey, "context_appearance_update", { nav_color: "" });
     expect(reset.structuredContent.nav_color).toBeNull();
+    expect(await storedNavColor()).toBeNull();
     expect((await health(app)).nav_color).toBeNull();
   });
 

@@ -527,15 +527,14 @@ async function handleServerToolCall(
   // activity trace (these tools don't go through handleToolCall's logger).
   if (APPEARANCE_TOOL_NAMES.has(toolName)) {
     const started = Date.now();
-    const out = await handleAppearanceTool(toolName, args ?? {}, { userId, nestScope });
-    const err = typeof out !== "string" && out.isError ? (out.data as { code?: string }) : null;
+    const { result: out, status } = await handleAppearanceTool(toolName, args ?? {}, { userId, nestScope });
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,
       nestId: null,
       userId,
       userEmail,
-      status: err ? (err.code === "UNAUTHORIZED_ACTION" ? 403 : 400) : 200,
+      status,
       durationMs: Date.now() - started,
       client,
     });
