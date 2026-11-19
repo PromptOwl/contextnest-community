@@ -5668,6 +5668,9 @@ export const putSlackCredentials = (id: string, creds: { client_id?: string; cli
     method: "PUT",
     body: JSON.stringify(creds),
   });
+/** Admin disconnect: revokes the token, drops bindings; approved nodes and the audit stay. */
+export const disconnectSurfacesInstall = (id: string) =>
+  request<{ disconnected: boolean; withdrawn: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
 /** Browser navigations (the server answers with a redirect to Slack). */
 export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
 export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
