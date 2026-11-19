@@ -2895,10 +2895,9 @@ Every route `404`s unless `FEATURE_SURFACES`, `FEATURE_WORKFLOW_PLANE` and `FEAT
 - team members, stewards and share-grant holders;
 - org/service keys (`key`);
 - other agents (`agent`);
-- outbound connectors, including the server-wide Slack/Teams webhooks (`connector`);
 - public, org or link-shared visibility (`universe`).
 
-Personal keys and MCP tokens act as their user, so they add no reader. Server administrators can read every nest and can't be removed. They are left out of the check, and every response carries `disclosure: "This server's administrators can read every nest."`. `surface_ok` means that everyone in the conversation can read the nest. Nest text is posted only when it holds. Guard detail is counts only, with no names.
+Personal keys and MCP tokens act as their user, so they add no reader. Outbound connectors and the server-wide Slack/Teams webhooks are not readers: once a nest is bound, everything they post for it is content-free (`Review requested — open ContextNest`, a digest of `N updates — open ContextNest`, raw webhooks with `subject_id: null`), and so is the team-inbox email (`NOTIFY_EMAIL_TO`). Server administrators can read every nest and can't be removed. They are left out of the check, and every response carries `disclosure: "This server's administrators can read every nest."`. `surface_ok` means that everyone in the conversation can read the nest. Nest text is posted only when it holds. Guard detail is counts only, with no names.
 
 Binding states: `active | paused_guard | paused_by_member | removed`.
 - The guard re-checks every 30 s, so a membership or permission change applies within 60 s at most.
@@ -2914,7 +2913,7 @@ Binding states: `active | paused_guard | paused_by_member | removed`.
   - `409 { code: "guard_refused", guard, guard_detail }` when capture isn't safe, or when the members can't be read.
   - `422` for `explicit_public_bind` on a private, DM or externally shared conversation.
   - `ext_capture_enabled` defaults to false.
-  - `explicit_public_bind` is server-admin only (`403` otherwise). It relaxes only the rule that every person who reads the nest is in the channel: a public or link-shared nest, outbound connectors, org/service keys and other agents still refuse it. A nest with `org` visibility is allowed (on a single-company server).
+  - `explicit_public_bind` is server-admin only (`403` otherwise). It relaxes only the rule that every person who reads the nest is in the channel: a public or link-shared nest, org/service keys and other agents still refuse it. A nest with `org` visibility is allowed (on a single-company server).
   - `listener_agent_node_id` is never accepted from a client (`422`). The server records the binding's own listener when Surfaces creates it.
 - `GET /surfaces/bindings/:id`, `PATCH /surfaces/bindings/:id` `{ explicit_public_bind?, ext_capture_enabled?, listener_agent_node_id?, conversation_name? }` (re-runs the guard), `DELETE /surfaces/bindings/:id` (→ `removed`): nest owner/admin.
 - `POST /surfaces/bindings/:id/recheck`, `POST /surfaces/bindings/:id/resume` (nest owner/admin). Resume returns `409` while the guard fails, or while the member who removed Nest is still present without consent.
