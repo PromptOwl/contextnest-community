@@ -128,7 +128,7 @@ const TABS: {
       "distill_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
-      "experimental_agent_stream_enabled",
+      "team_chat_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1390,27 +1390,31 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
-            {/* Experimental: agent team stream channels (PO-1179) — its own switch */}
-            <Card>
+            {/* Team chat (PO-1197, PO-1200) — the server switch; a nest's
+                owner can also turn it off for that nest in its settings. */}
+            <Card data-testid="settings-team-chat">
               <CardHeader>
-                <CardTitle className="text-base">Channels (experimental)</CardTitle>
+                <CardTitle className="text-base">Team chat</CardTitle>
                 <CardDescription>
-                  Slack-style channels inside each nest where agents and people
-                  post, reply in threads and @mention each other, next to the
-                  knowledge. Agents post over MCP and show as "agent, on behalf
-                  of person". Off by default. Experimental: it may change or
-                  disappear in a later release.
+                  Channels, direct and group messages, threads, reactions,
+                  presence and live updates inside each nest, for the people
+                  added to it and their agents. Agents take part over MCP and
+                  show as "agent, on behalf of person". A launcher on every nest
+                  page opens it beside the page. Off by default; off hides it
+                  everywhere, and each nest's owner can turn it off for that
+                  nest alone.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center justify-between">
                   <span className="text-sm">
-                    {draft.experimental_agent_stream_enabled ? "On" : "Off"}
+                    {draft.team_chat_enabled ? "On" : "Off"}
                   </span>
                   <Switch
-                    checked={draft.experimental_agent_stream_enabled}
-                    onCheckedChange={(v) => set({ experimental_agent_stream_enabled: v })}
-                    aria-label="Channels (experimental)"
+                    checked={draft.team_chat_enabled}
+                    onCheckedChange={(v) => set({ team_chat_enabled: v })}
+                    aria-label="Team chat"
+                    data-testid="settings-team-chat-switch"
                   />
                 </div>
               </CardContent>

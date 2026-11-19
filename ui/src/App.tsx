@@ -28,6 +28,7 @@ import { ribbonTarget, type RibbonKey } from "./lib/header-ribbon";
 import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
+import { ChatLauncher } from "./components/chat/ChatLauncher";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -39,7 +40,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { DEFAULT_NEST_TAB, NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
-import { parkNestReturn, takeNestReturn } from "./lib/sign-in-return";
+import { nextFromSearch, parkNestReturn, signInAddress, takeNestReturn } from "./lib/sign-in-return";
 import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
@@ -562,13 +563,13 @@ export default function App() {
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
     // Channels are gated on a /health flag the same way.
-    if (loading && (nestViewFromLocation() === "workflows" || nestViewFromLocation() === "channels")) return;
+    if (loading && ["workflows", "channels", "chat"].includes(nestViewFromLocation() ?? "")) return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission, roles, myStewards, member } = await qc.fetchQuery(reads.nest(nestId));
+        const { nest, permission, roles, myStewards, member, chat } = await qc.fetchQuery(reads.nest(nestId));
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
@@ -631,7 +632,7 @@ export default function App() {
         const subMeta = nestPageForPath(sub);
         const subPage =
           subMeta
-            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true })
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled, agentStreamEnabled, isMember: member === true, chatOn: chat })
               ? null
               : subMeta.viewPage
             : sub === "trace" ? "nest-trace"
@@ -702,12 +703,18 @@ export default function App() {
   );
   useEffect(() => {
     if (deepLinkProbe.status !== "unreachable" || loading || authenticated || authMode !== "key") return;
-    if (landedOnRef.current) parkNestReturn(landedOnRef.current);
+    if (landedOnRef.current) {
+      parkNestReturn(landedOnRef.current);
+      // Keep the link in the address bar as ?next= (PO-1200): a reload, a new
+      // tab or a sign-in that leaves the page still finds it.
+      const at = signInAddress(landedOnRef.current);
+      if (at !== "/" && !nextFromSearch(window.location.search)) window.history.replaceState(window.history.state, "", at);
+    }
     landedOnRef.current = null;
   }, [deepLinkProbe.status, loading, authenticated, authMode]);
   useEffect(() => {
     if (loading || !authenticated) return;
-    const back = takeNestReturn();
+    const back = takeNestReturn() ?? nextFromSearch(window.location.search);
     if (!back || nestIdFromLocation()) return;
     window.history.replaceState(null, "", back);
     setDeepLinkProbe({ status: "loading" });
@@ -976,9 +983,12 @@ export default function App() {
   // Whether the caller is a person added to the nest (GET /nests/:id member):
   // Channels are listed for members only. null = not resolved yet.
   const [nestIsMember, setNestIsMember] = useState<boolean | null>(null);
+  // The nest's own chat answer (GET /nests/:id chat, C2); undefined on an older server.
+  const [nestChat, setNestChat] = useState<boolean | undefined>(undefined);
   useEffect(() => {
     setNestCanEdit(null);
     setNestIsMember(null);
+    setNestChat(undefined);
     setNestIsReaderView(null);
     setNestBranding(null);
     if (!nestScopedId) return;
@@ -996,6 +1006,7 @@ export default function App() {
         });
         setNestCanEdit(caps.canEditDocs);
         setNestIsMember(meta?.member === true);
+        setNestChat(typeof meta?.chat === "boolean" ? meta.chat : undefined);
         setNestIsReaderView(caps.isReaderView);
         setNestBranding(meta?.nest?.branding ?? null);
       })
@@ -1137,7 +1148,7 @@ export default function App() {
           .fetchQuery(reads.nest(nestId))
           .then((meta) => ({ isOwner: meta.permission === "owner", isAnonOwned: meta.nest.user_id === ANON_USER_ID }))
           .catch(() => ({ isOwner: false, isAnonOwned: false }))
-          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel, thread }));
+          .then((caps) => setView({ page: "channels", nestId, nestName, ...caps, channel: channel ?? undefined, thread: thread ?? undefined }));
       },
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
@@ -1581,6 +1592,10 @@ export default function App() {
                     if (tab === "my-work") window.dispatchEvent(new Event("my-work:home"));
                     setView({ page: "dashboard", tab });
                   }}
+                  chatNestId={cur.page === "channels" ? cur.nestId : null}
+                  onOpenChat={(t) =>
+                    setView({ page: "channels", nestId: t.nestId, nestName: t.nestName, isOwner: t.isOwner, isAnonOwned: t.isAnonOwned })
+                  }
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -1935,7 +1950,7 @@ export default function App() {
                 {NEST_VIEWS.filter((v) => {
                   // Each registry page carries its own gate (meta.visible).
                   const meta = nestPageForView(v.page);
-                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true });
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled, agentStreamEnabled, isMember: nestIsMember === true, chatOn: nestChat });
                 })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring
@@ -2016,7 +2031,7 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar && !isDocPage ? "px-8 py-6" : ""}>
+        <div className={withSidebar && !isDocPage && view.page !== "channels" ? "px-8 py-6" : ""}>
         {/* One boundary for every lazily loaded page: the shell (header, rail)
             stays put while a page chunk arrives. */}
         <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -2297,6 +2312,8 @@ export default function App() {
             openDocument: (nodeId: string) =>
               // returnTo: Back, and publishing a draft, come back to this view (the Board).
               setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, returnTo: v }),
+            openDocumentThread: (nodeId: string, threadId: string) =>
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialThreadId: threadId, returnTo: v }),
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
@@ -2338,7 +2355,7 @@ export default function App() {
           block — so the version line held Save and Discard off the bottom of
           the window at full scroll. The build version is a footnote; a write
           action reaching the edge of the screen is not. */}
-      {view.page !== "document" && (
+      {view.page !== "document" && view.page !== "channels" && (
         readerBrand ? (
           <ReaderBrandFooter branding={readerBrand} className={`${shellWidth} mt-auto`} />
         ) : (
@@ -2359,6 +2376,30 @@ export default function App() {
           onOpenSettings={
             isAdmin ? () => setView({ page: "dashboard", tab: "settings" }) : undefined
           }
+        />
+      )}
+      {/* The chat launcher (PO-1200): on every nest page for a member while
+          the switch is on; opens the chat as a slide-over beside Hootie's. */}
+      {(authenticated || authMode === "open") && view.page !== "docs" && (
+        <ChatLauncher
+          nestId={"nestId" in view ? view.nestId : null}
+          nestName={"nestId" in view ? view.nestName : null}
+          onChatPage={view.page === "channels"}
+          onOpenFull={(t, channel, thread) => {
+            const here = "nestId" in view && view.nestId === t.nestId ? view : null;
+            // Off a nest: the nav's own route, which reads ownership first.
+            if (!here) return appNav.openChannel(t.nestId, t.nestName, channel, thread);
+            setView({
+              page: "channels",
+              nestId: t.nestId,
+              nestName: t.nestName,
+              isOwner: here ? here.isOwner : false,
+              isAnonOwned: here ? here.isAnonOwned : false,
+              channel: channel ?? undefined,
+              thread: thread ?? undefined,
+            });
+          }}
+          onOpenNode={(nestId, nodeId) => void openNodeFromHootie(nestId, nodeId)}
         />
       )}
       {showConnect && "nestId" in view && (

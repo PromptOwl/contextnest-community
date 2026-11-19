@@ -29,7 +29,8 @@ export interface AppNav {
    *  a nest's old Review tab, or See changes on a document). */
   initialReview?: { nestId: string; nodeId: string } | null;
   /** Open a channel with one thread open (a My Work channel mention), in-app. */
-  openChannel: (nestId: string, nestName: string, channel: string, thread: string) => void;
+  /** A nest's chat, at a channel or conversation and thread when given. */
+  openChannel: (nestId: string, nestName: string, channel?: string | null, thread?: string | null) => void;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
   /** Return to the page this one was opened from (the header bell), if any. */
