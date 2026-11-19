@@ -54,7 +54,7 @@ export function NavColorField({
     .sort((a, b) => String(a.name).localeCompare(String(b.name)))
     .slice(0, 3);
   return (
-    <div className="grid gap-5 sm:grid-cols-[1fr_15rem]" data-testid="settings-nav-color">
+    <div className="grid gap-5 sm:grid-cols-[1fr_16rem]" data-testid="settings-nav-color">
       <div className="space-y-4">
         <div className="space-y-2">
           <Label id="nav-color-palette-label">Color</Label>
@@ -141,7 +141,7 @@ export function NavColorField({
       <figure className="space-y-1.5">
         <figcaption className="text-xs font-medium text-muted-foreground">Preview</figcaption>
         <div
-          className="flex h-[26rem] flex-col overflow-hidden rounded-lg border text-sm text-foreground shadow-sm"
+          className="flex h-[26rem] w-64 max-w-full flex-col overflow-hidden rounded-lg border text-sm text-foreground shadow-sm"
           style={navRailStyle(valid)}
           aria-hidden
           {...{ inert: "" }}
