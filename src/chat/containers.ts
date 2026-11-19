@@ -23,7 +23,9 @@
  * node (`containerReadVerdict`, the one hook the access guard calls). An
  * agent reads with the key it runs on, so the person behind that key must
  * be a member; a key labelled with the agent's handle grants nothing by
- * itself (anyone could mint one).
+ * itself (anyone could mint one). A HIRED agent has its own identity
+ * (agents/principals.ts): its key is a member of the containers that carry
+ * its `agent:<handle>` tag, so any member can DM it and it reads the dm.
  */
 import { randomUUID } from "node:crypto";
 import type { ContextNode } from "@promptowl/contextnest-engine";
@@ -39,6 +41,7 @@ import { resolveMention } from "../shared/mentions.js";
 import { ValidationError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { resolveNestAccess } from "../shared/access.js";
+import { agentPrincipalOf } from "../agents/principals.js";
 
 export const CONVERSATION_FOLDER = "conversations";
 export const CONVERSATION_TAG = "conversation";
@@ -129,6 +132,15 @@ export async function nestMemberOf(nestId: string, userId: string): Promise<bool
  */
 export async function isContainerMember(nestId: string, container: string, userId: string): Promise<boolean> {
   if (!userId) return false;
+  // A hired agent's own identity (agents/principals.ts): a member of the
+  // containers that carry its `agent:<handle>` tag — the agent member
+  // mechanism this module already has — on its home nest only.
+  const agent = await agentPrincipalOf(userId);
+  if (agent) {
+    if (agent.nestId !== nestId.toLowerCase()) return false;
+    const tagged = await getDb().get("SELECT 1 AS hit FROM node_tag_index WHERE nest_id = ? AND node_id = ? AND tag_name = ?", [nestId, container, agentTag(agent.handle)]);
+    return !!tagged && (await nestMemberOf(nestId, userId));
+  }
   const row = await getDb().get("SELECT 1 AS hit FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document' AND target = ?", [
     nestId,
     userId,
@@ -141,6 +153,16 @@ export async function isContainerMember(nestId: string, container: string, userI
  *  they are a person added to the nest). */
 export async function memberContainers(nestId: string, userId: string): Promise<Set<string>> {
   if (!userId || !(await nestMemberOf(nestId, userId))) return new Set();
+  const agent = await agentPrincipalOf(userId);
+  if (agent) {
+    if (agent.nestId !== nestId.toLowerCase()) return new Set();
+    const tagged = (await getDb().all(
+      `SELECT node_id FROM node_tag_index WHERE nest_id = ? AND tag_name = ?
+          AND (node_id LIKE 'nodes/channels/%' OR node_id LIKE 'nodes/conversations/%')`,
+      [nestId, agentTag(agent.handle)],
+    )) as Array<{ node_id: string }>;
+    return new Set(tagged.map((r) => r.node_id));
+  }
   const rows = (await getDb().all(
     `SELECT target FROM grants WHERE nest_id = ? AND user_id = ? AND target_type = 'document'
         AND (target LIKE 'nodes/channels/%' OR target LIKE 'nodes/conversations/%')`,

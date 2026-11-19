@@ -9,10 +9,9 @@
  * handles belong to this caller's agents?", so those threads land in the
  * owner's My Work (`for_agent` names the agent).
  *
- * Until agent principals ship, nobody owns a handle: the default resolver
- * returns []. The identity work replaces `defaultResolver` below with a lookup
- * of the agents the caller owns (or registers one through
- * `setAgentMentionResolver` at startup) — nothing else changes. When it does,
+ * A hired agent principal (agents/principals.ts) owns its own handle: the
+ * default resolver below answers that, so the agent's My Work lists what tags
+ * it whatever label its client declares. A person owns no handle here. When it does,
  * an agent that is resolvable as an account at write time stops producing
  * NULL-user rows on its own, because the index resolves names through the
  * nest roster first.
@@ -31,7 +30,14 @@ export interface AgentMentionCaller {
 /** Lowercased handles (no "@") of the agents this caller owns. */
 export type AgentMentionResolver = (caller: AgentMentionCaller) => Promise<string[]>;
 
-const defaultResolver: AgentMentionResolver = async () => [];
+/** A hired agent's own identity (agents/principals.ts) owns its handle; a
+ *  person owns none here (a legacy key agent is found by its declared label,
+ *  mention-index actingAgentHandle). */
+const defaultResolver: AgentMentionResolver = async (caller) => {
+  const { agentPrincipalOf } = await import("../agents/principals.js");
+  const p = await agentPrincipalOf(caller.userId);
+  return p ? [p.handle] : [];
+};
 
 let resolver: AgentMentionResolver = defaultResolver;
 

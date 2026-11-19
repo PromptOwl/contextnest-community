@@ -432,6 +432,11 @@ export async function wakeMentionedAgents(params: {
     const client = deserializeClient(msg.client_json);
     const actor = await resolveActorLabel({ email: msg.author, client });
     const self = new Set([normHandle(actor.agent), ...writerHandles(client)].filter(Boolean));
+    // A hired agent writing under its own identity (agents/principals.ts):
+    // its handle is the writer, whatever it declared.
+    const { agentPrincipalOf } = await import("../agents/principals.js");
+    const writerAgent = writer ? await agentPrincipalOf(writer.id) : null;
+    if (writerAgent) self.add(writerAgent.handle);
 
     // A conversation (C2): in a 1:1 with an agent, a person's message is
     // addressed to that agent without an @mention (`agent.dm`); in a group
@@ -442,7 +447,7 @@ export async function wakeMentionedAgents(params: {
     // Agent-authored messages never wake an agent over a dm: a declared agent,
     // or a key labelled with an agent handle (a member of this conversation,
     // or one with a wake target).
-    const agentAuthored = dm ? await isAgentAuthored(nestId, client, dm.agents) : false;
+    const agentAuthored = dm ? !!writerAgent || (await isAgentAuthored(nestId, client, dm.agents)) : false;
 
     let channel: string | null | undefined;
     let nestName: string | undefined;

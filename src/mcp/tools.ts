@@ -4,6 +4,7 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { agentPrincipalOf, parseAgentPrincipalEmail } from "../agents/principals.js";
 import { approvedOnlyForSurfaceEdit, surfaceEditsHiddenFor, isHidden as isSurfaceHidden } from "../surfaces/draft-visibility.js";
 import { approvedReadableBody } from "../nodes/readable-body.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
@@ -536,6 +537,7 @@ export const MCP_READ_TOOLS = new Set<string>([
   // list (a read-only key is offered a list-only view; dismiss is refused).
   "context_hire_catalog",
   "context_hired_agents",
+  "context_agent_identity",
   "context_agent_recommendations",
   "context_versions",
   "context_pull_log",
@@ -1936,6 +1938,16 @@ async function resolveLlmBody(
   return body;
 }
 
+/** Is `nodeId` under the calling agent principal's own memory folder? The
+ *  address is checked first (pure), the identity only on a match. */
+async function isOwnAgentMemory(ctx: McpToolContext, nodeId: string): Promise<boolean> {
+  const who = parseAgentPrincipalEmail(ctx.userEmail);
+  if (!who || who.nestId !== String(ctx.nestId).toLowerCase()) return false;
+  if (!nodeId.startsWith(`nodes/agents/${who.handle}/memory/`)) return false;
+  const p = await agentPrincipalOf(ctx.userId);
+  return !!p && p.handle === who.handle && p.nestId === who.nestId;
+}
+
 async function resolveLlmBodyGated(
   ctx: McpToolContext,
   node: ContextNode,
@@ -1972,6 +1984,14 @@ async function resolveLlmBodyGated(
       }
     }
     // Ungoverned: the live body, which is the document's current version.
+    const live = Number(node.frontmatter?.version);
+    if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
+    return node.body || "";
+  }
+  // A hired agent's own memory (agents/principals.ts): the agent reads the
+  // whole working copy of what it was told, in review or not, under
+  // nodes/agents/<its handle>/memory/ — and nothing else unapproved.
+  if (await isOwnAgentMemory(ctx, node.id)) {
     const live = Number(node.frontmatter?.version);
     if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
     return node.body || "";

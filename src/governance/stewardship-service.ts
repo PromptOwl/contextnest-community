@@ -5,6 +5,7 @@
  * Resolution hierarchy: document(1) > tag(2) > nest(3).
  */
 
+import { isAgentPrincipalEmail } from "../agents/principals.js";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { isSuperAdmin } from "./access-service.js";
@@ -954,6 +955,15 @@ async function getPendingReviewRequester(
   return row?.requested_by ?? null;
 }
 
+/** An agent principal (agents/principals.ts) never approves or rejects a
+ *  review, whatever steward row or self-approve setting it meets: the gate
+ *  is a person's, so an agent can never approve its own card. */
+const AGENT_DECIDES_NOTHING: PermissionResult = {
+  allowed: false,
+  reason: "An agent can't approve or reject a review. A person decides.",
+  role: "viewer",
+};
+
 export async function canUserApprove(
   nestId: string,
   nodeId: string,
@@ -961,6 +971,7 @@ export async function canUserApprove(
   /** The latest pending review's requester, when the caller already loaded it. */
   opts: { requestedBy?: string; ignoreAdminFolders?: boolean } = {},
 ): Promise<PermissionResult> {
+  if (isAgentPrincipalEmail(userEmail)) return AGENT_DECIDES_NOTHING;
   const personal = await surfacesPersonalOwner(nestId);
   if (personal) return personalVerdict(personal, userEmail);
   // A seed's admin-only folders: nest admins only (S7-R2 L4). Rejecting
@@ -994,6 +1005,10 @@ export async function canUserApproveMany(
   const ids = [...new Set(nodeIds)];
   const out = new Map<string, PermissionResult>();
   if (ids.length === 0) return out;
+  if (isAgentPrincipalEmail(userEmail)) {
+    for (const id of ids) out.set(id, AGENT_DECIDES_NOTHING);
+    return out;
+  }
   const personal = await surfacesPersonalOwner(nestId);
   if (personal) {
     for (const id of ids) out.set(id, personalVerdict(personal, userEmail));

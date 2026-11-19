@@ -16,6 +16,8 @@ type Tool = { name: string; annotations?: Record<string, unknown> };
 
 /** Only reads: nothing in the nest or the server changes. */
 const READ_ONLY = [
+  // Agent principal (PO-1425): a hired agent's own handle, nest and owner.
+  "context_agent_identity",
   "context_public_links",
   "nest_index",
   "context_onboarding",

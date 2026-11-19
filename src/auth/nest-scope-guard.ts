@@ -1,4 +1,5 @@
 import { createMiddleware } from "hono/factory";
+import { isAgentPrincipalEmail } from "../agents/principals.js";
 import { getDb } from "../db/client.js";
 import { hashApiKey, parseBearerToken } from "./keys.js";
 import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
@@ -144,15 +145,21 @@ async function bearerKeyScope(
   const key = parseBearerToken(authorization);
   if (!key) return null;
   const row = (await getDb().get(
-    `SELECT k.id, k.nest_id, u.is_service,
+    `SELECT k.id, k.nest_id, u.is_service, u.email,
             (SELECT 1 FROM system_accounts sa WHERE sa.user_id = k.user_id) AS is_system
        FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
       WHERE k.key_hash = ?`,
     [hashApiKey(key)],
   )) as
-    | { id: string; nest_id: string | null; is_service: number | null; is_system: number | null }
+    | { id: string; nest_id: string | null; is_service: number | null; is_system: number | null; email: string | null }
     | undefined;
   if (!row) return null;
+  // An agent principal's key (agents/principals.ts) is an ordinary nest key,
+  // fenced to its ONE nest — never a headless reader, never user-level: a key
+  // that somehow lost its scope fails closed (an empty scope matches no nest).
+  if (row.is_service && isAgentPrincipalEmail(row.email)) {
+    return { kind: "nest", scope: row.nest_id ?? "", headless: false, keyId: row.id };
+  }
   // A named system (CU-wdqcq0538g) is a service identity too, but NOT a
   // headless reader: it gets its own fence, never the headless allowlist.
   if (row.is_system) return { kind: "system", keyId: row.id };

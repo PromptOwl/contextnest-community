@@ -4,6 +4,7 @@
  * notifier needs it, and sharing-service sits on the teams-service →
  * notify-service import chain.
  */
+import { isAgentPrincipalEmail } from "../agents/principals.js";
 import { getDb } from "../db/client.js";
 import type { SqlParam } from "../db/adapter.js";
 import {
@@ -58,25 +59,25 @@ export async function listNestPeople(nestId: string): Promise<NestPerson[]> {
       { shared_teams: string | null } | undefined
     >,
     db.all(
-      `SELECT 0 AS rank, u.id AS user_id, u.email AS email, u.name AS name
+      `SELECT 0 AS rank, u.id AS user_id, u.email AS email, u.name AS name, u.is_service AS is_service
          FROM nests n JOIN users u ON u.id = n.user_id
         WHERE n.id = ?
        UNION ALL
-       SELECT 1, u.id, u.email, u.name
+       SELECT 1, u.id, u.email, u.name, u.is_service
          FROM nest_collaborators nc JOIN users u ON u.id = nc.user_id
         WHERE nc.nest_id = ?
        UNION ALL
-       SELECT 3, u.id, s.user_email, u.name
+       SELECT 3, u.id, s.user_email, u.name, u.is_service
          FROM stewards s
          LEFT JOIN users u ON LOWER(u.email) = LOWER(s.user_email)
         WHERE s.nest_id = ? AND s.is_active = 1
        UNION ALL
-       SELECT 4, u.id, u.email, u.name
+       SELECT 4, u.id, u.email, u.name, u.is_service
          FROM grants g JOIN users u ON u.id = g.user_id
         WHERE g.nest_id = ?
        ORDER BY rank`,
       [nestId, nestId, nestId, nestId],
-    ) as Promise<Array<{ rank: number; user_id: string | null; email: string; name: string | null }>>,
+    ) as Promise<Array<{ rank: number; user_id: string | null; email: string; name: string | null; is_service?: number | null }>>,
   ]);
   if (!nest) return [];
 
@@ -97,6 +98,11 @@ export async function listNestPeople(nestId: string): Promise<NestPerson[]> {
     const email = (row.email || "").trim();
     const key = email.toLowerCase();
     if (!email || seen.has(key)) continue;
+    // A hired agent's identity is not a person: it is listed with the hired
+    // agents and reached by its @handle (agents/principals.ts).
+    // Only the service identity itself: a PERSON who registered such an
+    // address stays listed (never an invisible collaborator).
+    if ("is_service" in row && Number(row.is_service) && isAgentPrincipalEmail(email)) continue;
     seen.add(key);
     people.push({
       email,

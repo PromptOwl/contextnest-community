@@ -12,13 +12,17 @@
  *              owner/admin, like every metacognition action;
  *   webhook  → stream/agent-webhooks putAgentWebhook: owner/admin, the same
  *              URL fence (public https only), the secret returned once;
- *   key      → auth/keys insertApiKey: a WRITE key scoped to this nest,
- *              labelled with the handle, owned by the hirer and returned
- *              once, plus a `hired_agents` marker row carrying the key's id.
- *              A key agent is one that was HIRED: a member's personal key is
- *              never inferred from its label (security review). The
- *              underlying route lets any member mint one; hiring asks for a
- *              writer (stricter, never looser).
+ *   key      → an AGENT PRINCIPAL (agents/principals.ts): the agent's own
+ *              no-login service identity (a `users` row, as a named system
+ *              is), an editor row on this nest, and one WRITE key scoped to
+ *              this nest owned by that identity (auth/keys insertApiKey),
+ *              returned once, plus a `hired_agents` marker row carrying the
+ *              key's id; the marker's `hired_by` is the agent's owner.
+ *              `config.url` adds the wake webhook in the same hire (the
+ *              webhook's own owner/admin gate). A key agent is one that was
+ *              HIRED: a member's personal key is never inferred from its
+ *              label (security review). Keys hired before principals existed
+ *              (owned by the hirer) keep working and read `legacy: true`.
  *
  * The hired list is DERIVED from those rows (agent_webhooks, api_keys,
  * metacognition_agents, hired_agents) — nothing is copied. What a member
@@ -28,7 +32,9 @@
  * panel itself. Letting go goes through the same delete paths.
  *
  * Idempotent on (kind, handle): hiring what exists returns it with
- * `created: false` and no secret or key. `announce` posts one welcome line
+ * `created: false` and no secret or key. One @handle answers to one agent:
+ * a key and a webhook pair on a handle (the agent's identity and its wake
+ * target); any other second kind is refused. `announce` posts one welcome line
  * per channel AS THE HIRING PERSON through the ordinary thread path (so it
  * fans out like any message of theirs) — never model text.
  *
@@ -44,7 +50,9 @@ import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 import { permissionLevel, resolveNestAccess, type NestAccess } from "../shared/access.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { isSystemUser } from "../auth/systems.js";
-import { insertApiKey, verifyKeyRequest } from "../auth/keys.js";
+import { insertApiKey } from "../auth/keys.js";
+import { NO_PASSWORD } from "../auth/systems.js";
+import { agentPrincipalEmail, agentPrincipalOf, type AgentPrincipal } from "../agents/principals.js";
 import { createNode } from "../nodes/service.js";
 import { createThread } from "../annotations/service.js";
 import { fanOutPostedMessage } from "../channels/post-message.js";
@@ -85,6 +93,21 @@ export interface HiredAgentView {
   channels: string[];
   /** Where the underlying thing is managed in the app. */
   manage: string;
+  /** key: the agent's own identity, or null for a legacy key agent (a
+   *  person's key labelled with the handle). Absent for other kinds. */
+  principal?: PrincipalView | null;
+  /** key: hired before agent principals — the key belongs to the hirer. */
+  legacy?: boolean;
+}
+
+export interface PrincipalView {
+  id: string;
+  /** Its unroutable address (*.contextnest.invalid): how its messages are attributed. */
+  email: string;
+  name: string;
+  nest_id: string;
+  /** Who owns it: the person who hired it (an email); null for a caller who may not see the roster. */
+  owner: string | null;
 }
 
 export interface HireResult {
@@ -95,6 +118,8 @@ export interface HireResult {
   /** key: the plaintext key, only when minted. */
   api_key?: string;
   announced: Array<{ channel: string; thread_id: string }>;
+  /** key with config.url: the agent was hired but its wake webhook was refused. */
+  wake_error?: string;
   /** The hire took but a welcome post failed (the channel changed under it):
    *  the credential above is still the only copy, so it is returned anyway. */
   announce_error?: string;
@@ -249,26 +274,38 @@ export interface KeyAgentRow {
   handle: string;
   /** The api_keys id. */
   id: string;
-  /** The key's owner (the hirer). */
+  /** The key's owner: the agent principal, or the hirer for a legacy key. */
   user_id: string;
   hired_by: string;
   created_at: string;
   last_used_at: string | null;
+  user_email: string | null;
+  user_name: string | null;
+  is_service: number | null;
 }
 
 /** The nest's key agents: the hire markers joined to the keys they minted.
  *  A marker whose key was revoked elsewhere (DELETE /auth/keys) is dropped. */
 export async function keyAgentRows(nestId: string): Promise<KeyAgentRow[]> {
   return (await getDb().all(
-    `SELECT h.handle, k.id, k.user_id, h.hired_by, h.created_at, k.last_used_at
+    `SELECT h.handle, k.id, k.user_id, h.hired_by, h.created_at, k.last_used_at,
+            u.email AS user_email, u.name AS user_name, u.is_service
        FROM hired_agents h JOIN api_keys k ON k.id = h.ref AND k.nest_id = h.nest_id
+       LEFT JOIN users u ON u.id = k.user_id
       WHERE h.nest_id = ? AND h.kind = 'key'
       ORDER BY h.created_at ASC`,
     [nestId],
   )) as KeyAgentRow[];
 }
 
-function keyView(r: KeyAgentRow): HiredAgentView {
+/** The principal behind a key agent row, or null for a legacy (personal) key. */
+function principalOfRow(nestId: string, r: KeyAgentRow): PrincipalView | null {
+  if (!Number(r.is_service) || !r.user_email || r.user_email.toLowerCase() !== agentPrincipalEmail(nestId, r.handle)) return null;
+  return { id: r.user_id, email: r.user_email.toLowerCase(), name: r.user_name?.trim() || r.handle, nest_id: nestId, owner: r.hired_by };
+}
+
+function keyView(nestId: string, r: KeyAgentRow): HiredAgentView {
+  const principal = principalOfRow(nestId, r);
   return {
     kind: "key",
     handle: r.handle,
@@ -278,6 +315,8 @@ function keyView(r: KeyAgentRow): HiredAgentView {
     detail: null,
     channels: [],
     manage: catalogEntry("key").manage,
+    principal,
+    legacy: !principal,
   };
 }
 
@@ -292,6 +331,7 @@ export async function listHiredAgents(caller: HireCaller): Promise<{ hired: Hire
     hired: hired.map((h) => ({
       ...h,
       hired_by: roster ? h.hired_by : null,
+      ...(h.principal ? { principal: { ...h.principal, owner: roster ? h.principal.owner : null } } : {}),
       status: h.kind === "webhook" ? "active" : h.status,
       detail: h.kind === "webhook" ? null : h.detail,
     })),
@@ -310,7 +350,7 @@ async function listHiredAgentsUnchecked(nestId: string): Promise<{ hired: HiredA
       ...(hootie ? [hootieView(hootie)] : []),
       ...(await watcherViews(nestId)),
       ...(await webhookViews(nestId)),
-      ...(await keyAgentRows(nestId)).map(keyView),
+      ...(await keyAgentRows(nestId)).map((r) => keyView(nestId, r)),
     ],
   };
 }
@@ -320,6 +360,8 @@ async function listHiredAgentsUnchecked(nestId: string): Promise<{ hired: HiredA
 export interface HireInput {
   kind: unknown;
   handle?: unknown;
+  /** key: the agent's display name (also accepted as config.name). */
+  name?: unknown;
   config?: unknown;
   channels?: unknown;
   announce?: unknown;
@@ -331,6 +373,19 @@ function parseChannels(raw: unknown): string[] {
     throw new ValidationError("channels must be a list of channel names (at most 20).");
   }
   return [...new Set(raw.map((c: string) => c.trim().toLowerCase().replace(/^#/, "")))];
+}
+
+/** Most key agents (agent principals) one nest may hold: they are not seats,
+ *  so the hire is bounded rather than open-ended. */
+export const MAX_KEY_AGENTS_PER_NEST = 25;
+const MAX_DISPLAY_NAME = 60;
+
+function parseDisplayName(raw: unknown, handle: string): string {
+  if (raw === undefined || raw === null || raw === "") return handle;
+  if (typeof raw !== "string" || raw.trim().length > MAX_DISPLAY_NAME || /[\r\n]/.test(raw)) {
+    throw new ValidationError(`name must be one line of at most ${MAX_DISPLAY_NAME} characters.`);
+  }
+  return raw.trim() || handle;
 }
 
 function parseConfigObject(raw: unknown): Record<string, unknown> {
@@ -382,9 +437,12 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
   let created = false;
   let secret: string | undefined;
   let apiKey: string | undefined;
+  let wakeError: string | undefined;
   const nestId = caller.nestId;
   // One @handle answers to one agent: a handle hired as another kind is taken.
-  const taken = (await listHiredAgentsUnchecked(nestId)).hired.find((h) => h.handle === handle && h.kind !== kind);
+  // A key and a webhook pair: the agent's identity and its wake target.
+  const pairs = (a: HireKind, b: HireKind) => (a === "key" && b === "webhook") || (a === "webhook" && b === "key");
+  const taken = (await listHiredAgentsUnchecked(nestId)).hired.find((h) => h.handle === handle && h.kind !== kind && !pairs(h.kind, kind));
   if (taken) throw new ConflictError(`@${handle} is already hired here as a ${taken.kind} agent.`);
 
   if (kind === "hootie") {
@@ -447,12 +505,26 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
       }
     }
   } else {
-    // key: the marker and the key in ONE transaction, the marker carrying the
-    // key's id from the start. The marker's primary key serialises two hires
-    // of one handle (the loser sees "already hired" and mints nothing), and
-    // a crash can't leave a marker without a key.
+    // key: the agent principal, its access and its key in ONE transaction
+    // with the marker, the marker carrying the key's id from the start. The
+    // marker's primary key serialises two hires of one handle (the loser sees
+    // "already hired" and mints nothing), and a crash can't leave a marker
+    // without a key. The optional webhook is checked up front (its own
+    // owner/admin gate) and written after, through its own service.
     const db = getDb();
-    const check = await verifyKeyRequest(db, caller.userId, { action: "generate", label: handle });
+    const name = parseDisplayName(cfg.name ?? input.name, handle);
+    // An agent never wears a person's name: its messages show its name.
+    if (name !== handle) {
+      const clash = (await listNestPeople(nestId)).some(
+        (p) => p.email.toLowerCase() === name.toLowerCase() || (p.name ?? "").trim().toLowerCase() === name.toLowerCase(),
+      );
+      if (clash) throw new ValidationError("That name belongs to a person on this nest. Give the agent its own name.");
+    }
+    const wantsWake = cfg.url !== undefined && cfg.url !== null && cfg.url !== "";
+    if (wantsWake) {
+      if (!isAdminLike(access)) throw new ForbiddenError(OWNER_ADMIN_ONLY("an agent with a wake webhook"));
+      await assertCanManageAgentWebhooks(nestId, caller.userId, { write: true });
+    }
     const stale = (await db.get("SELECT ref FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle])) as
       | { ref: string | null }
       | undefined;
@@ -461,19 +533,61 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
     if (stale && (!stale.ref || !(await db.get("SELECT 1 AS ok FROM api_keys WHERE id = ?", [stale.ref])))) {
       await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
     }
+    const email = agentPrincipalEmail(nestId, handle);
+    const existingUser = (await db.get("SELECT id, is_service FROM users WHERE LOWER(email) = ?", [email])) as
+      | { id: string; is_service: number | null }
+      | undefined;
+    // A person who registered the address is a person: never adopted.
+    if (existingUser && !(await agentPrincipalOf(existingUser.id))) {
+      throw new ConflictError(`@${handle} can't be hired here: its agent address is taken by an account that is not an agent.`);
+    }
+    const alreadyHired = stale?.ref && (await db.get("SELECT 1 AS ok FROM api_keys WHERE id = ?", [stale.ref]));
+    if (!alreadyHired) {
+      const count = (await db.get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM hired_agents WHERE nest_id = ? AND kind = 'key'", [nestId])) as { n: number | string };
+      if (Number(count.n) >= MAX_KEY_AGENTS_PER_NEST) {
+        throw new ConflictError(`This nest already has ${MAX_KEY_AGENTS_PER_NEST} key agents, the most it can hold. Let one go first.`);
+      }
+    }
     const keyId = uuid();
+    const principalId = existingUser?.id ?? uuid();
     const minted = await db.transaction(async (tx) => {
       const marker = await tx.run(
         insertOrIgnore(db, "INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, ?, ?, ?, ?, ?)"),
         [nestId, "key", handle, caller.userEmail, new Date().toISOString(), keyId],
       );
       if (!marker.changes) return null; // already hired
-      if (!check.ok) throw new AppError(check.status, check.error); // rolls the marker back
-      return insertApiKey(tx, { id: keyId, userId: caller.userId, nestId, label: check.label, capability: "write", origin: "manual" });
+      if (existingUser) {
+        // Re-hire: the same identity, its name refreshed, no key or access left over.
+        await tx.run("UPDATE users SET name = ? WHERE id = ? AND is_service = 1", [name, principalId]);
+        await tx.run("DELETE FROM api_keys WHERE user_id = ?", [principalId]);
+        await tx.run("DELETE FROM nest_collaborators WHERE user_id = ?", [principalId]);
+      } else {
+        await tx.run("INSERT INTO users (id, email, name, password_hash, is_service) VALUES (?, ?, ?, ?, 1)", [principalId, email, name, NO_PASSWORD]);
+      }
+      await tx.run("INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, 'write', ?)", [
+        uuid(),
+        nestId,
+        principalId,
+        caller.userId,
+      ]);
+      return insertApiKey(tx, { id: keyId, userId: principalId, nestId, label: handle, capability: "write", origin: "service" });
     });
     if (minted) {
       apiKey = minted.apiKey;
       created = true;
+    }
+    if (wantsWake && !(await listAgentWebhooks(nestId)).some((w) => w.handle === handle)) {
+      try {
+        const r = await putAgentWebhook(nestId, handle, { url: cfg.url }, caller.userEmail);
+        secret = r.secret;
+        created ||= !!r.secret;
+      } catch (err) {
+        // The identity is committed and its key is in this response; a
+        // webhook refused here (an address that isn't public) is reported.
+        if (!apiKey) throw err;
+        console.warn("[hire] webhook not added for a key agent", nestId, handle, err instanceof Error ? err.message : err);
+        wakeError = err instanceof Error ? err.message : "The wake webhook was not added.";
+      }
     }
   }
 
@@ -505,6 +619,72 @@ export async function hireAgent(caller: HireCaller, input: HireInput): Promise<H
     ...(apiKey ? { api_key: apiKey } : {}),
     announced,
     ...(announceError ? { announce_error: announceError } : {}),
+    ...(wakeError ? { wake_error: wakeError } : {}),
+  };
+}
+
+async function userIdByEmail(email: string): Promise<string | null> {
+  const row = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0", [email])) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+// ─── Who am I (an agent principal) ───────────────────────────────────────
+
+export interface AgentIdentityView {
+  agent: boolean;
+  handle?: string;
+  name?: string;
+  email?: string;
+  nest?: { id: string; name: string | null };
+  /** The person who hired it: its owner. */
+  owner?: { email: string; name: string | null } | null;
+  hired_at?: string;
+  /** A legacy key agent: the key is a person's, labelled with the handle. */
+  legacy?: boolean;
+  /** A wake webhook is set for the handle. */
+  webhook?: boolean;
+  /** What it may do, in plain words. */
+  can?: string[];
+  /** For agent:false — why. */
+  detail?: string;
+}
+
+/**
+ * Who the caller is as an agent: its handle, name, nest and owner — the
+ * agent principal behind the key, or a legacy hired key (a person's key
+ * labelled with a hired handle). Anyone else is `agent: false`.
+ */
+export async function agentIdentity(caller: HireCaller & { apiKeyId?: string | null }): Promise<AgentIdentityView> {
+  await memberAccess(caller);
+  const db = getDb();
+  const nest = (await db.get("SELECT name FROM nests WHERE id = ?", [caller.nestId])) as { name: string | null } | undefined;
+  const rows = await keyAgentRows(caller.nestId);
+  const p: AgentPrincipal | null = await agentPrincipalOf(caller.userId);
+  const row = p ? rows.find((r) => r.user_id === p.id) : caller.apiKeyId ? rows.find((r) => r.id === caller.apiKeyId) : undefined;
+  if (!row) {
+    return { agent: false, detail: "This credential is a person's, not a hired agent's. Hire one with context_hire_agent { kind: \"key\", handle }." };
+  }
+  const owner = (await db.get("SELECT email, name FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0", [row.hired_by])) as
+    | { email: string; name: string | null }
+    | undefined;
+  return {
+    agent: true,
+    handle: row.handle,
+    name: p?.name ?? row.handle,
+    email: p?.email ?? row.user_email ?? undefined,
+    nest: { id: caller.nestId, name: nest?.name ?? null },
+    owner: owner ? { email: owner.email.toLowerCase(), name: owner.name } : { email: row.hired_by, name: null },
+    hired_at: row.created_at,
+    legacy: !p,
+    webhook: (await listAgentWebhooks(caller.nestId)).some((w) => w.handle === row.handle),
+    can: p
+      ? [
+          "read and write in this nest as an editor (drafts go to review)",
+          "read and post in the conversations and private channels it is a member of",
+          "read the full text of its own memory under nodes/agents/" + row.handle + "/memory/, in review or not",
+          "never approve or reject a review, mint keys, hire, sign in, or reach another nest",
+        ]
+      : ["acts with the permission of the person whose key it is (legacy)"],
   };
 }
 
@@ -530,18 +710,32 @@ export async function letAgentGo(caller: HireCaller, rawKind: unknown, rawHandle
   } else {
     const row = (await keyAgentRows(nestId)).find((k) => k.handle === handle);
     if (!row) throw new NotFoundError("No key agent with that handle.");
+    const principal = principalOfRow(nestId, row);
+    // Its owner: the person who hired it (a legacy key: the key's own person).
+    const ownerId = principal ? await userIdByEmail(row.hired_by) : row.user_id;
     // The key's own route lets only its owner revoke it; the nest's owner or
     // an admin may too — the key is fenced to the nest they administer. An
-    // admin still can't touch the nest OWNER's credentials.
-    if (row.user_id !== caller.userId && !isAdminLike(access)) {
+    // admin still can't let go what the nest OWNER hired.
+    if (ownerId !== caller.userId && !isAdminLike(access)) {
       throw new ForbiddenError("Only the person who hired this agent, or a nest owner or admin, can let it go.");
     }
-    if (row.user_id !== caller.userId && row.user_id === access.ownerId && config.AUTH_MODE !== "open") {
+    if (ownerId !== caller.userId && ownerId === access.ownerId && config.AUTH_MODE !== "open") {
       throw new ForbiddenError("Only the nest owner can let go an agent the owner hired.");
     }
     const db = getDb();
-    await db.run("DELETE FROM api_keys WHERE id = ?", [row.id]);
-    await db.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
+    await db.transaction(async (tx) => {
+      if (principal) {
+        // Every credential and every grant of access goes; the identity stays
+        // (no key, no access) so a re-hire reuses it.
+        await tx.run("DELETE FROM api_keys WHERE user_id = ?", [principal.id]);
+        await tx.run("DELETE FROM nest_collaborators WHERE user_id = ?", [principal.id]);
+        await tx.run("DELETE FROM sessions WHERE user_id = ?", [principal.id]);
+        await tx.run("DELETE FROM stewards WHERE user_id = ? OR LOWER(user_email) = LOWER(?)", [principal.id, principal.email]);
+      } else {
+        await tx.run("DELETE FROM api_keys WHERE id = ?", [row.id]);
+      }
+      await tx.run("DELETE FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ?", [nestId, handle]);
+    });
   }
   return { deleted: true };
 }

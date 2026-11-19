@@ -17,6 +17,7 @@ import {
 import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
+import { isAgentPrincipalEmail } from "../agents/principals.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { STREAM_TOOL, streamToolEnabled } from "./stream-tool.js";
 import { AGENT_TOOL_DEFINITIONS } from "./agent-tools.js";
@@ -58,7 +59,9 @@ async function getCaller(
     email: user?.email || "anonymous@localhost",
     // A named system (CU-wdqcq0538g) is a service identity but not a headless
     // reader — it gets its collaborator-row access, not the reader clamp.
-    headless: !!user?.is_service && !user?.is_system,
+    // Nor is a hired agent's own identity (agents/principals.ts): an editor
+    // of its one nest, offered the tools an editor is.
+    headless: !!user?.is_service && !user?.is_system && !isAgentPrincipalEmail(user?.email),
     person: !user?.is_service,
   };
 }
