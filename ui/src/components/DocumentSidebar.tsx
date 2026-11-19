@@ -300,7 +300,7 @@ export function DocumentSidebar({
                     <Plus className="h-3.5 w-3.5" />
                   </button>
                 )}
-                <NestPinButton nestId={n.id} variant="rail" />
+                <NestPinButton nestId={n.id} nest={n} variant="rail" />
               </div>
               {open && onOpenChat && nestChat(chat.data, n.id) && (
                 <div className="ml-2 border-l border-border/60 pl-1">

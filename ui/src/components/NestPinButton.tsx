@@ -15,18 +15,23 @@ import { cn } from "@/lib/utils";
 
 interface Props {
   nestId: string;
+  /** The row already holds the nest (the rail): pass it, and the button
+   *  skips its own lookup in the cached list. */
+  nest?: { name: string; pinned?: boolean };
   /** "rail": a small row control — shown while pinned, on hover/focus
    *  otherwise. "header": always shown beside the nest name. */
   variant: "rail" | "header";
   className?: string;
 }
 
-export function NestPinButton({ nestId, variant, className }: Props) {
-  const list = useQuery({ ...reads.nestList() });
+export function NestPinButton({ nestId, nest: given, variant, className }: Props) {
+  const list = useQuery({ ...reads.nestList(), enabled: !given });
   const { toggle, busy } = useNestPin();
-  const nest = (list.data?.nests ?? []).find((n: any) => n.id === nestId) as
-    | { id: string; name: string; pinned?: boolean }
-    | undefined;
+  const nest =
+    given ??
+    ((list.data?.nests ?? []).find((n: any) => n.id === nestId) as
+      | { name: string; pinned?: boolean }
+      | undefined);
   if (!nest) return null;
   const pinned = !!nest.pinned;
   const rail = variant === "rail";

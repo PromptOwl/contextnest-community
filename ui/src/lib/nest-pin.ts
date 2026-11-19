@@ -86,17 +86,24 @@ export async function toggleNestPin({
   }
 }
 
+/** Nests with a pin write in flight, across EVERY control: the rail row and
+ *  the header both toggle the same nest, so the guard can't be per instance
+ *  (a rollback from one would overwrite the other's optimistic state). */
+const inFlight = new Set<string>();
+
 /**
  * The pin toggle every control uses (All nests card, rail row, nest header).
  * It patches the live nest list the rail and the grid both read; the write's
  * own invalidation (`/pin` → nestList, queries.ts) then reconciles it. A second
- * click on the same nest while the first is in flight is ignored.
+ * click on the same nest, from any control, while the first is in flight is
+ * ignored. `busy` is this control's own in-flight set, for disabling it.
  */
 export function useNestPin() {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   const toggle = async (nestId: string, pinned: boolean) => {
-    if (busy.has(nestId)) return;
+    if (inFlight.has(nestId)) return;
+    inFlight.add(nestId);
     setBusy((prev) => new Set(prev).add(nestId));
     try {
       await toggleNestPin({
@@ -109,6 +116,7 @@ export function useNestPin() {
           toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`),
       });
     } finally {
+      inFlight.delete(nestId);
       setBusy((prev) => {
         const next = new Set(prev);
         next.delete(nestId);

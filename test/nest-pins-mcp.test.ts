@@ -122,6 +122,15 @@ describe("nest_pin / nest_index (PO-1441)", () => {
     expect((await pinnedIn(bob.apiKey))[bobsId]).toBe(false);
   });
 
+  it("rejects a missing nest or a non-boolean pinned, and changes nothing", async () => {
+    const empty = await call(alice.apiKey, "nest_pin", { nest: "  " });
+    expect(empty.isError).toBe(true);
+    expect(empty.data.code).toBe("INVALID_INPUT");
+    const bad = await call(alice.apiKey, "nest_pin", { nest: notesId, pinned: "yes" });
+    expect(bad.isError).toBe(true);
+    expect((await pinnedIn(alice.apiKey))[notesId]).toBe(false);
+  });
+
   it("refuses a read-only key", async () => {
     const ro = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pin", nest_id: notesId, capability: "read" }, alice.apiKey);
     expect(ro.status).toBeLessThan(300);
