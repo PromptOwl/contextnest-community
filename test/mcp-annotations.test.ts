@@ -141,6 +141,8 @@ const DESTRUCTIVE = [
   "context_channel_watch",
   // Agent profiles (team chat C7): a description replaces the earlier one.
   "context_agents",
+  // Agent principal (PO-1425): a hired agent's own handle, nest and owner.
+  "context_agent_identity",
   // Hire (PO-1201): let_go deletes a webhook, a key or a metacognition config.
   "context_hire_agent",
 ];
