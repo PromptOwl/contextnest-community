@@ -55,6 +55,7 @@ import {
 import hootieIcon from "./assets/hootie.svg";
 import { ReaderBrandFooter } from "./components/ReaderBrandFooter";
 import { brandingToCssVars, isBranded, type NestBranding } from "./lib/branding";
+import { RAIL_IDLE_TEXT } from "./lib/nav-color";
 import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound, Settings } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
@@ -1588,7 +1589,7 @@ export default function App() {
                           type="button"
                           onClick={() => setView({ page: "docs" })}
                           title="API, MCP & CLI docs for agents"
-                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-[hsl(var(--foreground)/var(--rail-idle,0.8))] hover:bg-muted hover:text-foreground"
+                          className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm ${RAIL_IDLE_TEXT} hover:bg-muted hover:text-foreground`}
                           data-testid="document-sidebar-docs"
                         >
                           <BookOpen className="h-4 w-4 shrink-0" />

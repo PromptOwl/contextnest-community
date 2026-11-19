@@ -30,7 +30,7 @@ import { reads } from "../lib/queries";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { useAuth } from "../auth/AuthContext";
-import { navRail, navRailStyle } from "../lib/nav-color";
+import { RAIL_IDLE_TEXT, navRail, navRailStyle } from "../lib/nav-color";
 import {
   folderAncestors,
   groupNodesByFolder,
@@ -73,8 +73,7 @@ interface Props {
 /* One row style for both rails (app pages and a nest's views / tree) so the
    sidebar reads the same wherever you are: same text size, icon, height. */
 const ROW = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted";
-// Idle text at 80% (--rail-idle: 1 on a mid-tone custom rail, PO-1430).
-const ROW_IDLE = "text-[hsl(var(--foreground)/var(--rail-idle,0.8))] hover:text-foreground";
+const ROW_IDLE = `${RAIL_IDLE_TEXT} hover:text-foreground`;
 const ROW_ACTIVE = "bg-muted font-medium text-foreground";
 const ROW_ICON = "h-4 w-4 shrink-0";
 /* Group / nest-name headings above a set of rows. */

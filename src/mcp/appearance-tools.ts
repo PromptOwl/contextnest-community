@@ -15,8 +15,7 @@
  * inline schema literal (lint:mcp-schemas, no baseline raise). Community-only:
  * server settings are this edition's state, which the engine does not model.
  */
-import { config } from "../config.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { serverAdminAllowed } from "../shared/access.js";
 import {
   AppearanceReadInput,
   AppearanceUpdateInput,
@@ -64,8 +63,8 @@ export async function handleAppearanceTool(
     return { text: describe(a), data: a };
   }
   if (name === APPEARANCE_UPDATE_TOOL) {
-    // The same gate as PATCH /admin/settings (serverAdminAllowed in app.ts).
-    const admin = config.AUTH_MODE === "open" || (await isServerAdminUserId(ctx.userId));
+    // The same gate as PATCH /admin/settings.
+    const admin = await serverAdminAllowed(ctx.userId);
     if (!admin || ctx.nestScope)
       return toolError("Only a server admin can change the navigation color, with a credential that isn't scoped to one nest.", "UNAUTHORIZED_ACTION");
     if (typeof args.nav_color !== "string")

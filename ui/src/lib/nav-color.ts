@@ -56,6 +56,10 @@ export const NAV_PALETTE: { name: string; hex: string | null }[] = [
   { name: "Butter", hex: "#fde68a" },
 ];
 
+/** An idle rail row's text: the rail foreground at --rail-idle opacity (80%,
+ *  or full strength on a mid-tone rail). Used by every row in the rail. */
+export const RAIL_IDLE_TEXT = "text-[hsl(var(--foreground)/var(--rail-idle,0.8))]";
+
 export const NAV_COLOR_ERROR = "Use a hex color like #1e40af, or leave it empty for the default.";
 
 /** Inline error for the settings field: null when fine (empty = default). */

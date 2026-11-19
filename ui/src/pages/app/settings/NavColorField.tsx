@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { normalizeHex } from "../../../lib/branding";
-import { DEFAULT_NAV_COLOR, NAV_PALETTE, navColorError, navRail, navRailStyle } from "../../../lib/nav-color";
+import { DEFAULT_NAV_COLOR, NAV_PALETTE, RAIL_IDLE_TEXT, navColorError, navRail, navRailStyle } from "../../../lib/nav-color";
 
 export function NavColorField({
   value,
@@ -164,7 +164,7 @@ function PreviewRow({
     <div
       className={cn(
         "flex items-center gap-2 rounded-md px-2.5 py-1.5",
-        active ? "bg-muted font-medium text-foreground" : "text-[hsl(var(--foreground)/var(--rail-idle,0.8))]",
+        active ? "bg-muted font-medium text-foreground" : RAIL_IDLE_TEXT,
       )}
     >
       <Icon className="h-4 w-4 shrink-0" />

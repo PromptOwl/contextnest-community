@@ -178,6 +178,7 @@ import {
   isNestArchived,
   permissionLevel,
   isServerAdminUserId,
+  serverAdminAllowed as serverAdminAllowedFor,
   type NestPermission,
 } from "./shared/access.js";
 import {
@@ -1030,9 +1031,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Server-admin guard shared by the /admin/* operator surfaces: open mode,
   // the license admin, or a superadmin (access.yaml ∪ DB grants).
-  const serverAdminAllowed = async (c: any) =>
-    config.AUTH_MODE === "open" ||
-    (await isServerAdminUserId(c.get("userId")));
+  const serverAdminAllowed = (c: any) => serverAdminAllowedFor(c.get("userId"));
 
   // /admin/settings — server-wide settings the admin edits from the Settings
   // page. Each setting takes effect live (config getters read process.env) and
