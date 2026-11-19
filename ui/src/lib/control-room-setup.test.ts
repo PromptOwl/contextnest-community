@@ -276,3 +276,25 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     expect(membersToAdd(preview())).toEqual([]);
   });
 });
+
+describe("po-1432 review: shared-deployment cause and capped name lists", () => {
+  const ctx = { channel: "testnest", nest: "PO - Engineering Ops" };
+  const people = (over: Partial<NonNullable<SurfacesBindingPreview["people"]>>) => ({ absent_readers: [], members_not_readers: [], universe_cause: null, ...over });
+
+  it("a nest visible to every organization on a shared server says so, not 'revoke the link'", () => {
+    const p = { ...preview({ would_bind: false, detail: { universe: true } }), people: people({ universe_cause: "shared_deployment" }) };
+    expect(guardView(p, ctx).note).toBe(
+      "PO - Engineering Ops is visible to every organization on this shared server, so anything saved from #testnest would be too. Make the nest private or pick another nest.",
+    );
+  });
+
+  it("when the server names fewer readers than are absent, the note adds how many more", () => {
+    const p = {
+      ...preview({ would_bind: false, detail: { readers_total: 312, readers_absent: 22 } }),
+      people: people({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }),
+    };
+    expect(guardView(p, ctx).note).toBe(
+      "Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again. 21 more readers aren't in #testnest either.",
+    );
+  });
+});

@@ -186,11 +186,17 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
     else if (d.universe && cause === "public") note = `${ctx.nest} is public, so anything saved from ${ch} would be readable by anyone.`;
     else if (d.universe && cause === "link") {
       note = `${ctx.nest} has a live public link, so anything saved from ${ch} could be read by anyone with it. Revoke the link or pick another nest.`;
+    } else if (d.universe && cause === "shared_deployment") {
+      note = `${ctx.nest} is visible to every organization on this shared server, so anything saved from ${ch} would be too. Make the nest private or pick another nest.`;
     } else if (d.universe) note = `${ctx.nest} can be read by anyone with the link, so anything saved from ${ch} would be public.`;
     else if (d.non_user_principals.length) {
       note = `${ctx.nest} is also read by ${d.non_user_principals.map((k) => NON_USER[k] ?? k).join(", ")}, which aren't in ${ch}.`;
     } else if (d.org_wide) note = `${ctx.nest} is readable by everyone on this server, and only ${plural(d.members_total, "person", "people")} ${d.members_total === 1 ? "is" : "are"} in ${ch}.`;
-    else if (absent.length) note = absentNote(absent, ctx.nest, ch);
+    else if (absent.length) {
+      // The server names at most 20; the counts say how many more there are.
+      const more = d.readers_absent - absent.length;
+      note = absentNote(absent, ctx.nest, ch) + (more > 0 ? ` ${plural(more, "more reader")} ${more === 1 ? "isn't" : "aren't"} in ${ch} either.` : "");
+    }
     else note = `${ctx.nest} is readable by ${plural(d.readers_total, "person", "people")}, and ${d.readers_absent} of them ${d.readers_absent === 1 ? "isn't" : "aren't"} in ${ch}.`;
     return { state: "refused", label: "Can't listen here", note };
   }

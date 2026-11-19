@@ -361,6 +361,8 @@ export async function previewBinding(input: BindInput) {
  * name (po-1432). Preview only: its caller already sees the nest's readers
  * (nest admin) and the conversation (assertMayInspect). Never stored.
  */
+const PEOPLE_CAP = 20;
+
 async function previewPeople(nestId: string, ev: Evaluation) {
   const db = getDb();
   const { readers, install } = ev;
@@ -370,8 +372,11 @@ async function previewPeople(nestId: string, ev: Evaluation) {
 
   const people = ev.mapped.filter((m) => !m.is_bot && !m.is_guest && !m.is_external);
   const present = new Set(people.map((m) => m.community_user_id).filter(Boolean));
-  const absentIds = readers.users.filter((u) => !present.has(u));
-  const outsiders = people.filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id)));
+  // At most PEOPLE_CAP names per list; guard.detail keeps the full counts.
+  const absentIds = readers.users.filter((u) => !present.has(u)).slice(0, PEOPLE_CAP);
+  const outsiders = people
+    .filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id)))
+    .slice(0, PEOPLE_CAP);
   const ids = [...absentIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
   const users = new Map(
     (ids.length

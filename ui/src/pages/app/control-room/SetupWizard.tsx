@@ -591,6 +591,15 @@ function AddToNest({ members, nestId, nestName, channel, onAdded }: { members: M
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  // Re-check only once the dialog closes: a re-check unmounts this row's popup.
+  const [addedSome, setAddedSome] = useState(false);
+  const close = (o: boolean) => {
+    setOpen(o);
+    if (!o && addedSome) {
+      setAddedSome(false);
+      onAdded();
+    }
+  };
   const addable = members.filter((m) => m.addable);
   if (!addable.length) return null;
   const show = () => {
@@ -602,18 +611,25 @@ function AddToNest({ members, nestId, nestName, channel, onAdded }: { members: M
     const ids = [...picked];
     const results = await Promise.allSettled(ids.map((user_id) => addCollaborator(nestId, { user_id, permission: "read" })));
     setBusy(false);
-    const failed = results.filter((r) => r.status === "rejected").length;
-    if (failed) toast.error(`Couldn't add ${failed} of ${ids.length} to ${nestName}.`);
-    else toast.success(`Added ${ids.length} to ${nestName} with read access.`);
-    setOpen(false);
-    onAdded();
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    if (failed.length) {
+      // Keep the dialog open with only the ones that failed ticked, so a retry is one click.
+      toast.error(`Couldn't add ${failed.length} of ${ids.length} to ${nestName}.`);
+      setPicked(new Set(failed));
+      if (failed.length < ids.length) setAddedSome(true);
+    } else {
+      toast.success(`Added ${ids.length} to ${nestName} with read access.`);
+      setOpen(false);
+      setAddedSome(false);
+      onAdded();
+    }
   };
   return (
     <>
       <Button variant="outline" size="sm" className="self-start" onClick={show} data-testid={`add-to-nest-${channel}`}>
         Add to nest…
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={close}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add channel members to {nestName}?</DialogTitle>
@@ -644,7 +660,7 @@ function AddToNest({ members, nestId, nestName, channel, onAdded }: { members: M
             ))}
           </ul>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
+            <Button variant="ghost" onClick={() => close(false)} disabled={busy}>
               Cancel
             </Button>
             <Button onClick={add} disabled={busy || !picked.size}>

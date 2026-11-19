@@ -916,3 +916,20 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(stored).not.toMatch(/carol|Carol|people/);
   });
 });
+
+describe("po-1432 review: the people lists are capped", () => {
+  it("names at most 20 absent readers while guard.detail keeps the full count", async () => {
+    const n = await newNest(alice);
+    for (let i = 0; i < 22; i++) {
+      const id = randomUUID();
+      const email = `cap-${i}-${id.slice(0, 6)}@surf.test`;
+      await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, 'x')", [id, email, `Cap ${i}`]);
+      const r = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email, permission: "read" }, alice.apiKey);
+      expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    }
+    setConv("C-1432-CAP", ["SA"]);
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-1432-CAP", nest_id: n }, alice.apiKey);
+    expect(r.data.guard.detail.readers_absent).toBe(22);
+    expect(r.data.people.absent_readers).toHaveLength(20);
+  });
+});
