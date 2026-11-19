@@ -134,12 +134,18 @@ export function useNestPin() {
   const busy = useSyncExternalStore(pinGuard.subscribe, pinGuard.snapshot, pinGuard.snapshot);
   const toggle = async (nestId: string, pinned: boolean) => {
     if (!pinGuard.claim(nestId)) return;
+    const key = reads.nestList().queryKey;
     try {
+      // A list refetch already in flight would land after the optimistic patch
+      // and flip the row back; the write's own invalidation refetches anyway.
+      await qc.cancelQueries({ queryKey: key });
       await toggleNestPin({
         nestId,
         pinned,
-        patch: (value) =>
-          qc.setQueryData(reads.nestList().queryKey, (prev: any) => withNestPinned(prev, nestId, value)),
+        // Patch this nest only, both ways: a snapshot restore would also undo
+        // any unrelated change that reached the list meanwhile. The guard
+        // allows one write per nest at a time, so the inverse is exact.
+        patch: (value) => qc.setQueryData(key, (prev: any) => withNestPinned(prev, nestId, value)),
         request: setNestPinned,
         onError: (err: any) =>
           toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`),

@@ -53,8 +53,11 @@ export function NestPinButton({ nestId, nest: given, variant, className }: Props
           ? cn(
               "p-0.5 hover:bg-muted",
               // Pinned rows keep the mark, so the pinned group reads as one;
-              // the rest offer it on hover or keyboard focus.
-              pinned ? "text-amber-400" : "opacity-0 group-hover:opacity-100 focus:opacity-100",
+              // the rest offer it on hover or keyboard focus — and always on a
+              // touch screen (the phone drawer), which has no hover.
+              pinned
+                ? "text-amber-400"
+                : "opacity-0 group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-60",
             )
           : cn(
               "p-1.5",

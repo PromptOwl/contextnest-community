@@ -39,14 +39,20 @@ test.describe('Sidebar rail — pinned nests', () => {
     // The pin endpoint: held open until the test releases it, so the
     // optimistic move is observable; `refuse` answers 500 instead.
     let refuse = false;
-    let release = null;
+    // One gate per request: the test waits for the request to ARRIVE before
+    // releasing it, so a slow handler can't leave `release` stale or unset.
+    let arrived;
+    let held = new Promise((r) => (arrived = r));
+    const nextRequest = async () => {
+      const release = await held;
+      held = new Promise((r) => (arrived = r));
+      return release;
+    };
     await page.route(
       (url) => /^\/nests\/stub-pin-[a-z]+\/pin$/.test(new URL(url).pathname),
       async (route, request) => {
         const id = new URL(request.url()).pathname.split('/')[2];
-        await new Promise((r) => {
-          release = r;
-        });
+        await new Promise((r) => arrived(r));
         if (refuse) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Pin failed (stub)' }) });
         const value = request.method() === 'POST';
         if (value) pinned.add(id);
@@ -68,7 +74,7 @@ test.describe('Sidebar rail — pinned nests', () => {
     // Pin Echo from its rail row: it joins the pinned group before the server answers.
     await sidebar.getByRole('button', { name: 'Pin nest Echo' }).click();
     await expect.poll(() => railNames(sidebar)).toEqual(['Bravo', 'Delta', 'Echo', 'Alpha', 'Charlie']);
-    release();
+    (await nextRequest())();
     await expect(sidebar.getByRole('button', { name: 'Unpin nest Echo' })).toBeVisible();
     await expect.poll(() => railNames(sidebar)).toEqual(['Bravo', 'Delta', 'Echo', 'Alpha', 'Charlie']);
 
@@ -76,7 +82,7 @@ test.describe('Sidebar rail — pinned nests', () => {
     refuse = true;
     await sidebar.getByRole('button', { name: 'Unpin nest Bravo' }).click();
     await expect.poll(() => railNames(sidebar)).toEqual(['Delta', 'Echo', 'Alpha', 'Bravo', 'Charlie']);
-    release();
+    (await nextRequest())();
     await expect.poll(() => railNames(sidebar)).toEqual(['Bravo', 'Delta', 'Echo', 'Alpha', 'Charlie']);
     await expect(page.getByText('Pin failed (stub)')).toBeVisible();
 
