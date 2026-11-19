@@ -778,3 +778,161 @@ describe("N6: Surfaces edits never reach configuration documents", () => {
     for (const q of reqs) expect(JSON.stringify(q)).not.toContain(newDraft);
   });
 });
+
+// ═══ po-1407: a judge failure says why ═══════════════════════════════════════
+describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, log)", () => {
+  async function ledgerCall(path: string, name: string, args: Record<string, unknown>) {
+    const res = await app.request(path, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, Authorization: `Bearer ${alice.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const body = await res.json();
+    return JSON.parse(body?.result?.content?.[0]?.text ?? "null");
+  }
+  // A nest of its own: earlier cases give N an agent reader, which the
+  // binding guard (rightly) refuses.
+  let F: string;
+  beforeAll(async () => {
+    F = (await jsonRequest(app, "POST", "/nests", { name: "Ops judge failures" }, alice.apiKey)).data.nest.id;
+  });
+  const range = () => ({ from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 86_400_000).toISOString() });
+
+  /** Bind a fresh channel, fail its window's model call twice, return the window. */
+  async function failWindow(channel: string, fail: () => never) {
+    setChannel(channel, ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: channel, nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    modelImpl = () => submit(noop());
+    await tick(30); // flush other open windows first
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" ")));
+    try {
+      modelImpl = fail;
+      await say(channel, "U_BOB", "we agreed the cutover moves to friday after the review meeting PLATYPUSCHAT");
+      await tick(21); // first failure: the claim is released for one retry
+      const first = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+      expect(first.status).toBe("closing");
+      expect(first.reason_code).toBeNull();
+      await tick(21); // second failure: final
+    } finally {
+      spy.mockRestore();
+      modelImpl = () => submit(noop());
+    }
+    const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+    return { w, bindingId: b.data.binding.id as string, logged };
+  }
+
+  it("a model key refused (401) twice: window error/model_auth, a failed run with the same code, and REST, trace and MCP all say model_auth", async () => {
+    const { w, bindingId, logged } = await failWindow("C407", () => {
+      throw Object.assign(new Error("invalid x-api-key sk-ant-SECRET0000"), { status: 401 });
+    });
+    expect(w.status).toBe("judged");
+    expect(w.verdict).toBe("error");
+    expect(w.reason_code).toBe("model_auth");
+    expect(w.run_id).toBeTruthy();
+
+    // A run for the ledger trace to follow: failed, verdict error, the code.
+    const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    expect(run.status).toBe("failed");
+    expect(run.verdict).toBe("error");
+    expect(run.reason_code).toBe("model_auth");
+    expect(run.triggered_by).toBe("surfaces:window");
+    expect(JSON.parse(run.trace)).toMatchObject({ kind: "surfaces_judge", verdict: "error", reason_code: "model_auth", http_status: 401 });
+    expect(JSON.stringify(run)).not.toMatch(/SECRET|sk-ant|PLATYPUS/);
+
+    // The server log: name, code, status — never the message or the chat.
+    const lines = logged.filter((l) => l.includes(w.id));
+    expect(lines.length).toBe(2);
+    for (const l of lines) expect(l).toMatch(/failed: \w+ reason=model_auth status=401/);
+    expect(logged.join("\n")).not.toMatch(/SECRET|sk-ant|PLATYPUS/);
+
+    // REST ledger and trace.
+    const q = new URLSearchParams({ ...range(), binding: bindingId }).toString();
+    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${q}`, undefined, alice.apiKey);
+    expect(led.status).toBe(200);
+    const e = led.data.entries.find((x: any) => x.entry_id === `win_${w.id}`);
+    expect(e.verdict).toMatchObject({ code: "error", reason_code: "model_auth" });
+    expect(e.run).toMatchObject({ id: w.run_id, outcome: "failed" });
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${w.id}`, undefined, alice.apiKey);
+    expect(tr.status).toBe(200);
+    expect(tr.data.chain.run).toMatchObject({ id: w.run_id, status: "failed" });
+    expect(tr.data.chain.verdict.reason_code).toBe("model_auth");
+    expect(tr.data.gaps).not.toContain("run");
+    expect(JSON.stringify(tr.data)).not.toMatch(/SECRET|sk-ant|PLATYPUS/);
+
+    // MCP parity: the same code from the nest, trace and org tools.
+    const m = await ledgerCall(`/nests/${F}/mcp`, "context_agent_ledger", { ...range(), binding: bindingId });
+    expect(m.entries.find((x: any) => x.entry_id === `win_${w.id}`).verdict.reason_code).toBe("model_auth");
+    const mt = await ledgerCall(`/nests/${F}/mcp`, "context_agent_ledger_trace", { entry_id: `win_${w.id}` });
+    expect(mt.chain.verdict.reason_code).toBe("model_auth");
+    const mo = await ledgerCall("/mcp", "context_agent_ledger_org", { ...range(), nest_id: F, binding: bindingId });
+    expect(mo.entries.find((x: any) => x.entry_id === `win_${w.id}`).verdict.reason_code).toBe("model_auth");
+  });
+
+  it("an out-of-credit model account (LiteLLM 400 'credit balance is too low') ends as model_billing and alerts admins once a day, counts only", async () => {
+    const credit = () => {
+      throw Object.assign(
+        new Error('400 litellm.BadRequestError: AnthropicException - {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}'),
+        { status: 400 },
+      );
+    };
+    const before = (await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F])).length;
+    const a = await failWindow("C410", credit);
+    expect(a.w.reason_code).toBe("model_billing");
+    expect((await one("SELECT reason_code FROM runs WHERE id = ?", [a.w.run_id])).reason_code).toBe("model_billing");
+    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400$/.test(l))).toBe(true);
+    // A second window the same day: same code, no second alert.
+    const b = await failWindow("C411", credit);
+    expect(b.w.reason_code).toBe("model_billing");
+    const notices = await all("SELECT * FROM surface_notices WHERE kind = 'model_billing' AND nest_id = ?", [F]);
+    expect(notices.length - before).toBe(1);
+    const n = notices[notices.length - 1];
+    expect(n.audience).toBe("admins");
+    expect(JSON.parse(n.detail)).toEqual({ windows: 1 });
+    expect(JSON.stringify(notices)).not.toMatch(/credit balance|Anthropic|litellm|PLATYPUS/i);
+    expect(sentEmails.some((m) => /out of credit/i.test(m.subject))).toBe(true);
+    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: a.bindingId })}`, undefined, alice.apiKey);
+    expect(led.data.entries.find((x: any) => x.entry_id === `win_${a.w.id}`).verdict.reason_code).toBe("model_billing");
+  });
+
+  it("a throw after the run is recorded (commit stage) adds no failed run: the window keeps its succeeded run", async () => {
+    setChannel("C412", ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C412", nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    modelImpl = () => submit(noop());
+    await tick(30); // flush other open windows first
+    const failedBefore = (await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length;
+    // Both attempts' commit finalize throws; the error handler's finalize then succeeds.
+    let reads = 0;
+    Object.defineProperty(S.judge.judgeTestHooks, "failPurge", { configurable: true, get: () => reads++ < 2 });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await say("C412", "U_BOB", "we agreed the cutover moves to friday after the review meeting today");
+      await tick(21);
+      await tick(21);
+    } finally {
+      delete (S.judge.judgeTestHooks as { failPurge?: boolean }).failPurge;
+      spy.mockRestore();
+    }
+    const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+    expect(reads).toBe(3);
+    expect(w.verdict).toBe("error");
+    expect((await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length).toBe(failedBefore);
+    expect((await one("SELECT status FROM runs WHERE id = ?", [w.run_id])).status).toBe("succeeded");
+  });
+
+  it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {
+    const limited = await failWindow("C408", () => {
+      throw Object.assign(new Error("rate limited"), { status: 429 });
+    });
+    expect(limited.w.reason_code).toBe("model_rate_limited");
+    const timedOut = await failWindow("C409", () => {
+      throw Object.assign(new Error("Request timed out."), { name: "APIConnectionTimeoutError" });
+    });
+    expect(timedOut.w.reason_code).toBe("model_timeout");
+    const run = await one("SELECT status, trace FROM runs WHERE id = ?", [timedOut.w.run_id]);
+    expect(run.status).toBe("failed");
+    expect(JSON.parse(run.trace).timeout).toBe(true);
+  });
+});
