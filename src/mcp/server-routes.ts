@@ -53,6 +53,7 @@ import {
   listSharedNests,
   listPublicNests,
   createNest,
+  pinnedNestIds,
 } from "../nests/service.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
@@ -68,6 +69,7 @@ import {
 } from "./tools.js";
 import { toolAnnotations, toolTitle } from "./annotations.js";
 import { STREAM_TOOL, streamToolEnabled, streamToolResult } from "./stream-tool.js";
+import { NEST_PIN_TOOL, NEST_PIN_TOOL_DEFINITION, nestPinToolResult } from "./nest-pin-tool.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
@@ -88,6 +90,7 @@ import { nestWebUrl } from "../shared/web-links.js";
 // suspended/unlicensed, matching the REST policy.
 const SERVER_WRITE_TOOLS = new Set([
   "nest_create",
+  NEST_PIN_TOOL,
   "context_onboarding_update",
   "context_distill",
   "context_create",
@@ -196,6 +199,8 @@ export interface IndexedNest {
   visibility: string;
   permission: NestPermission | "owner";
   document_count: number | null;
+  /** The caller pinned this nest (PO-1441) — GET /nests `pinned`. */
+  pinned: boolean;
   /** The nest's page in the web app — the link for a person (PO-1336).
    *  Absent when the server's public address is unknown. */
   web_url?: string;
@@ -212,10 +217,11 @@ export async function buildNestIndex(
   /** Public origin for `web_url`; omitted = no web links. */
   baseUrl?: string,
 ): Promise<IndexedNest[]> {
-  const [owned, shared, publicExtras] = await Promise.all([
+  const [owned, shared, publicExtras, pinned] = await Promise.all([
     listNests(userId),
     listSharedNests(userId),
     listPublicNests(userId),
+    pinnedNestIds(userId),
   ]);
   const seen = new Set<string>();
   const rows: Nest[] = [];
@@ -273,6 +279,7 @@ export async function buildNestIndex(
         permission,
         // No version rows = an empty nest, so 0; null only when the count failed.
         document_count: docsByNest ? (docsByNest.get(n.id) ?? 0) : null,
+        pinned: pinned.has(n.id),
         ...(webUrl ? { web_url: webUrl } : {}),
       };
     }),
@@ -297,6 +304,7 @@ export function renderNestIndexMarkdown(
     lines.push(`## ${n.name}`);
     lines.push("");
     lines.push(`- id: \`${n.id}\``);
+    if (n.pinned) lines.push("- pinned: yes");
     if (n.description) lines.push(`- description: ${n.description}`);
     lines.push(`- permission: ${n.permission} · visibility: ${n.visibility}`);
     if (n.document_count !== null)
@@ -403,6 +411,8 @@ export const SERVER_TOOL_DEFINITIONS = [
       required: ["name"],
     },
   },
+  // Pin a nest for the caller (PO-1441); nest_index is the list side.
+  NEST_PIN_TOOL_DEFINITION,
   ...SERVER_NEST_TOOLS.map((name) => {
     const tool = TOOL_DEFINITIONS.find((t) => t.name === name);
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
@@ -551,6 +561,17 @@ async function handleServerToolCall(
       if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
     }
+  }
+
+  if (toolName === NEST_PIN_TOOL) {
+    return nestPinToolResult(args ?? {}, {
+      userId,
+      nestScope,
+      resolveNest: async (ref) => {
+        const nest = await resolveNestRef(ref, userId);
+        return nest && (await canRead(nest.id, userId)) ? nest : null;
+      },
+    });
   }
 
   // ─── The document stream across nests (po-1214) ────────────────────────
@@ -976,6 +997,7 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_request_access\` (ask for write access when a write is refused),
     \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)
+  - Yours: \`nest_pin\` (pin or unpin a nest for yourself; \`nest_index\` shows \`pinned\`)
   - Feed: \`context_stream\` (every document version across your nests, people and agents)
   - First run: \`context_onboarding\`, \`context_onboarding_update\`, \`context_distill\` (fill a nest from a public site or repo)
   - Control room (workflow plane on): \`context_agent_ledger_org\`, \`context_agent_rollups_org\`

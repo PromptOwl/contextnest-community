@@ -35,8 +35,8 @@ describe("railNestRows — the rail's nest order", () => {
   });
 
   it("filters by name and never filters out the current nest", () => {
-    expect(ids(railNestRows(list, "a", "ch"))).toEqual(["a", "c"]);
-    expect(ids(railNestRows(list, null, "o"))).toEqual(["b", "e", "a"]);
+    expect(ids(railNestRows(list, "a", "arl"))).toEqual(["a", "c"]);
+    expect(ids(railNestRows(list, null, "o"))).toEqual(["b", "e"]);
   });
 
   it("does not reorder the cached list it was given", () => {

@@ -33,6 +33,7 @@ import {
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
 import { filterAndSortArchivedNests } from "../../../lib/archived-nests";
 import { pendingInviteNestIds } from "../../../lib/pending-invites";
+import { useNestPin } from "../../../lib/nest-pin";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -266,8 +267,10 @@ export default function NestsPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
-  // Nest ids with a pin write in flight — one click at a time per card.
-  const [pinBusy, setPinBusy] = useState<Set<string>>(new Set());
+  // Pin or unpin, optimistically — the same toggle the left rail and the nest
+  // header use (PO-1441), so the card, the rail and the header move together.
+  // `pinBusy`: nest ids with a pin write in flight, one click at a time.
+  const { toggle: togglePin, busy: pinBusy } = useNestPin();
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -384,46 +387,6 @@ export default function NestsPage() {
       setCreateError(
         e instanceof Error ? e.message : "Failed to create nest",
       );
-    }
-  };
-
-  /**
-   * Pin or unpin, optimistically. A pin is a one-click reordering of the grid
-   * the user is looking at, so waiting a round trip to see the card move reads
-   * as a dropped click. The cached row is patched first and the write's own
-   * invalidation reconciles it; on failure the patch is rolled back and the
-   * error surfaces, since a silently-unpinned nest is worse than a toast.
-   */
-  const togglePin = async (nestId: string, pinned: boolean) => {
-    // Ignore a second click while the first is in flight. Both would read the
-    // same `pinned` off the current render and send the SAME request rather
-    // than a pin/unpin pair — the server is idempotent about that now, but
-    // firing it at all is just a wasted round trip.
-    if (pinBusy.has(nestId)) return;
-    setPinBusy((prev) => new Set(prev).add(nestId));
-    const patch = (value: boolean) =>
-      qc.setQueryData(reads.nestList().queryKey, (prev: any) =>
-        prev
-          ? {
-            ...prev,
-            nests: prev.nests.map((n: any) =>
-              n.id === nestId ? { ...n, pinned: value } : n,
-            ),
-          }
-          : prev,
-      );
-    patch(pinned);
-    try {
-      await api.setNestPinned(nestId, pinned);
-    } catch (err: any) {
-      patch(!pinned);
-      toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`);
-    } finally {
-      setPinBusy((prev) => {
-        const next = new Set(prev);
-        next.delete(nestId);
-        return next;
-      });
     }
   };
 
@@ -677,6 +640,7 @@ export default function NestsPage() {
                 <option value="shared">Shared with me</option>
                 <option value="org">Organization</option>
                 <option value="public">Public</option>
+                <option value="pinned">Pinned</option>
                 {/* Sync scopes are only meaningful while a folder is actually
                     waiting to sync — otherwise "Synced only" just restates
                     "All nests". Kept mounted when selected so the Select never

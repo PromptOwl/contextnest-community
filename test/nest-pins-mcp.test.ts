@@ -69,7 +69,8 @@ describe("nest_pin / nest_index (PO-1441)", () => {
     const tool = res.result.tools.find((t: any) => t.name === "nest_pin");
     expect(tool).toBeDefined();
     expect(tool.inputSchema.required).toEqual(["nest"]);
-    expect(Object.keys(tool.inputSchema.properties).sort()).toEqual(["nest", "pinned"]);
+    // Every tool also takes the optional attribution `client`.
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(expect.arrayContaining(["nest", "pinned"]));
     expect(tool.annotations?.readOnlyHint).toBe(false);
   });
 
@@ -88,7 +89,8 @@ describe("nest_pin / nest_index (PO-1441)", () => {
     expect(rest.data.nests.find((n: any) => n.id === notesId).pinned).toBe(true);
     // The markdown index says so too, for chat clients.
     const { text } = await call(alice.apiKey, "nest_index");
-    expect(text).toMatch(/## Field Notes\n\n- pinned: yes/);
+    expect(text).toMatch(/## Field Notes\n\n- id: `[^`]+`\n- pinned: yes/);
+    expect(text).not.toMatch(/## Deal Brain\n\n- id: `[^`]+`\n- pinned/);
   });
 
   it("unpins with pinned:false, idempotently", async () => {
@@ -121,10 +123,13 @@ describe("nest_pin / nest_index (PO-1441)", () => {
   });
 
   it("refuses a read-only key", async () => {
-    const ro = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pin", capability: "read" }, alice.apiKey);
+    const ro = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pin", nest_id: notesId, capability: "read" }, alice.apiKey);
     expect(ro.status).toBeLessThan(300);
+    // A read-only key is not even offered the tool; calling it anyway fails.
+    const listed = await mcp(ro.data.api_key, "tools/list");
+    expect(listed.result.tools.map((t: any) => t.name)).not.toContain("nest_pin");
     const res = await call(ro.data.api_key, "nest_pin", { nest: notesId });
-    expect(res.text).toMatch(/read-only/i);
+    expect(res.isError).toBe(true);
     expect((await pinnedIn(alice.apiKey))[notesId]).toBe(false);
   });
 
