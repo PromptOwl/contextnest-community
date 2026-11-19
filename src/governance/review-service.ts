@@ -604,6 +604,16 @@ async function mirrorPublished(p: {
   await versions.setApprovedVersion(p.nestId, p.nodeId, p.engineVersion, p.approvedBy);
 }
 
+/** Wake the agent whose approve card this review is, if any (stream/agent-wake.ts). */
+async function wakeProposer(nestId: string, nodeId: string, reviewId: string, status: "approved" | "rejected", decidedBy: string): Promise<void> {
+  try {
+    const { wakeOnProposalDecided } = await import("../stream/agent-wake.js");
+    await wakeOnProposalDecided({ nestId, nodeId, reviewId, status, decidedBy });
+  } catch (err) {
+    console.error("[review] decision wake failed", nestId, nodeId, err instanceof Error ? err.message : err);
+  }
+}
+
 /** The verdict fan-out for one approval. Runs outside any lock. */
 async function notifyApproved(p: {
   nestId: string;
@@ -624,6 +634,10 @@ async function notifyApproved(p: {
     actor: p.approvedBy,
     message: `*${ctx.label}* v${p.version} ${verdict} by ${p.approvedBy}`,
   });
+
+  // An agent's approve card (chat as orchestration): the decision wakes the
+  // agent that filed it. Fire-and-forget; never fails the approval.
+  void wakeProposer(p.nestId, p.nodeId, p.pending.id, "approved", p.approvedBy);
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
   await notifyReviewResolved({
@@ -763,6 +777,8 @@ export async function reject(params: {
       note: params.note || null,
     }, { nestId: params.nestId });
   }
+
+  void wakeProposer(params.nestId, params.nodeId, pending.id, "rejected", params.rejectedBy);
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
   await notifyReviewResolved({

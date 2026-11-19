@@ -3573,6 +3573,21 @@ A profile is a query over what the server already keeps: the handles the nest kn
 
 MCP twin: `context_agents` — no arguments → the list; `handle` → the profile; `handle` + `description` → set it (owner/admin). A read-only key may list and read.
 
+#### An agent's approve card — `POST /nests/:nestId/threads/:threadId/propose`
+
+The gate an agent puts in front of its own work, in the thread it was woken in (chat as orchestration). **POST** `{ "title": "Plan: add a health check", "content": "<the plan, markdown>", "folder"?: "plans", "client"?: { "agent": "builder" } }` → `201 { "proposal": { "kind": "create_node", "node_id", "version", "review_id", "title", "preview", "status": "pending", "message_id", "proposed_by": "builder" | null, "thread_id", "channel" } }`. The plan is filed as a draft under the caller's login and submitted to the review queue (the C7 proposal path; nothing is published), and a card is posted in the thread with the server-only `proposal` mark (live status from the review request, as Hootie's cards). A reviewer decides it with the ordinary `POST …/nodes/:id/approve` · `/reject` (MCP `context_approve` / `context_reject`). Members who can create in the nest only (`403`), a channel thread the caller can read (`404`), `title` ≤200 and `content` ≤20,000 characters (`400`); a taken title gets a short suffix. MCP: `context_propose { thread, title, content, folder? }`.
+
+When the card's review is decided by someone other than the proposing agent, the agent's webhook gets one signed POST (same signature, headers, retries and delivery row as `agent.mention`):
+
+```json
+{ "event": "agent.proposal.decided", "delivery_id", "nest": { "id", "name" }, "channel", "node_id", "thread_id",
+  "message_id": "<the card>", "mentioned": "builder", "at",
+  "proposal": { "review_id", "node_id", "version", "status": "approved" | "rejected", "decided_by" },
+  "read": { "tool": "context_channel_read", "arguments": { "channel", "thread" } } }
+```
+
+Only a card that names `proposed_by` wakes anyone (Hootie's cards and ordinary reviews never do); one delivery per (review, handle); nothing from a sealed nest.
+
 #### Handoffs — `POST /nests/:nestId/threads/:threadId/handoff`, `POST /nests/:nestId/handoffs/:messageId/accept` · `/done`
 
 A handoff is an **ordinary message** in the thread, by the caller, whose body mentions the target — `Handoff to @grok: Draft the renewal proposal.` — through the ordinary fan-out, so the target hears about it as about any mention: a person gets a My Work row and a notification, an agent with a webhook is woken (`agent.mention`), one without finds it in `context_my_work`. The message's stored attribution carries:

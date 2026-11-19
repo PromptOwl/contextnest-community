@@ -62,7 +62,7 @@ export interface HandoffCaller {
   client?: ClientMetadata;
 }
 
-async function readableChannelThread(caller: HandoffCaller, threadId: string): Promise<{ nodeId: string }> {
+export async function readableChannelThread(caller: HandoffCaller, threadId: string): Promise<{ nodeId: string }> {
   const row = (await getDb().get("SELECT id, node_id FROM annotation_threads WHERE id = ? AND nest_id = ?", [threadId, caller.nestId])) as
     | { id: string; node_id: string }
     | undefined;

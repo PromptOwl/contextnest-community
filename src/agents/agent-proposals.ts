@@ -1,0 +1,180 @@
+/**
+ * An agent's approve card (chat as orchestration, epic
+ * recipes-and-the-central-harness): the gate an agent puts in front of its
+ * own work, in the thread it was woken in.
+ *
+ * Reuses what C7 already has for "a write that waits on a person" (see
+ * proposals.ts): the plan is filed as a draft, never published
+ * (`alwaysDraft`), and submitted to the ordinary review queue — here under
+ * the CALLER's own login (the agent's key), not Hootie's. The card is an
+ * ordinary message in the thread carrying the server-only `proposal` mark
+ * (agents/reserved.ts SERVER_CLIENT_KEYS, so no caller can forge one through
+ * context_comment), with `proposed_by` naming the agent handle. The timeline
+ * reads its live status from the review request (channel-service
+ * proposalStatuses), a writer decides it with the ordinary approve / reject
+ * (REST `…/nodes/:id/approve`, MCP `context_approve`), and the decision wakes
+ * the agent (stream/agent-wake.ts wakeOnProposalDecided).
+ *
+ * No table: the review request is the record, the draft's
+ * `metadata.source_thread` links it to the thread, and the card names both.
+ *
+ * Guards: members only and a channel thread the caller can read (the handoff
+ * rule, handoffs.ts readableChannelThread + channelPostRefusal); the caller
+ * must be able to create in the nest (a draft under review pages reviewers,
+ * so a reader can't make one); bounded title and plan; the card's text is
+ * model text and goes through inertAnswer like Hootie's cards.
+ */
+import { randomBytes } from "node:crypto";
+import { getDb } from "../db/client.js";
+import { addComment, syncAnnotationsNode } from "../annotations/service.js";
+import { createNode } from "../nodes/service.js";
+import { submitForReview } from "../governance/review-service.js";
+import { canCreateInNest } from "../governance/stewardship-service.js";
+import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
+import { ConflictError, ForbiddenError, ValidationError } from "../shared/errors.js";
+import { channelPostRefusal } from "../channels/channel-service.js";
+import { callerSafeClient, normHandle } from "../channels/message-meta.js";
+import { justWritten } from "../mentions/mention-index.js";
+import { inertAnswer } from "../hootie/inert.js";
+import { readableChannelThread, type HandoffCaller } from "./handoffs.js";
+import { isReservedHandle } from "./reserved.js";
+
+export const MAX_PROPOSAL_TITLE = 200;
+export const MAX_PROPOSAL_CONTENT = 20_000;
+const PREVIEW_MAX = 1200;
+const FOLDER_RE = /^[a-z0-9][a-z0-9-]*(?:\/[a-z0-9][a-z0-9-]*)*$/;
+/** Where a plan lands when the agent names no folder. */
+export const DEFAULT_PROPOSAL_FOLDER = "plans";
+
+export interface AgentProposalView {
+  kind: "create_node";
+  node_id: string;
+  version: number;
+  review_id: string;
+  title: string;
+  preview: string;
+  status: "pending";
+  reason: null;
+  /** The card message. */
+  message_id: string;
+  /** The agent handle that filed it: the one the decision wakes. Null when
+   *  the caller declared no agent (a person's card wakes nobody). */
+  proposed_by: string | null;
+  thread_id: string;
+  channel: string | null;
+}
+
+function text(raw: unknown, name: string, max: number): string {
+  if (typeof raw !== "string" || !raw.trim()) throw new ValidationError(`${name} is required`);
+  const v = raw.trim();
+  if (v.length > max) throw new ValidationError(`${name} is at most ${max.toLocaleString("en-US")} characters`);
+  return v;
+}
+
+function previewOf(content: string): string {
+  const flat = content.replace(/\r/g, "").trim();
+  return flat.length > PREVIEW_MAX ? `${flat.slice(0, PREVIEW_MAX - 1)}…` : flat;
+}
+
+/** The handle a caller's attribution names, if it is one an agent may have. */
+export function proposerHandle(client: ClientMetadata | undefined): string | null {
+  const c = (client ?? {}) as Record<string, unknown>;
+  const h = normHandle(c.agent) || normHandle(c.key_label);
+  return h && !isReservedHandle(h) && /^[a-z0-9][a-z0-9._-]{0,62}$/.test(h) ? h : null;
+}
+
+export async function proposeInThread(
+  caller: HandoffCaller,
+  rawThreadId: unknown,
+  input: { title: unknown; content: unknown; folder?: unknown },
+): Promise<{ proposal: AgentProposalView }> {
+  const threadId = typeof rawThreadId === "string" ? rawThreadId.trim() : "";
+  if (!threadId) throw new ValidationError("thread is required");
+  let title = text(input.title, "title", MAX_PROPOSAL_TITLE);
+  const content = text(input.content, "content", MAX_PROPOSAL_CONTENT);
+  let folder = DEFAULT_PROPOSAL_FOLDER;
+  if (input.folder !== undefined && input.folder !== null && input.folder !== "") {
+    if (typeof input.folder !== "string" || input.folder.length > 80 || !FOLDER_RE.test(input.folder)) {
+      throw new ValidationError('folder is a path under nodes/ in lowercase words and dashes, e.g. "plans" or "features/plans"');
+    }
+    folder = input.folder;
+  }
+
+  // NotFound for a thread the caller can't read, a non-member, a document thread.
+  const { nodeId } = await readableChannelThread(caller, threadId);
+  const refusal = await channelPostRefusal(caller.nestId, nodeId, caller.userId, caller.userEmail);
+  if (refusal) throw refusal.status === 409 ? new ConflictError(refusal.error) : new ForbiddenError(refusal.error);
+  if (!(await canCreateInNest(caller.nestId, caller.userEmail))) {
+    throw new ForbiddenError("You can read this nest but not create in it, so you can't file an approve card here.");
+  }
+
+  const client = callerSafeClient(caller.client);
+  const proposedBy = proposerHandle(client);
+  const channel = nodeId.split("/").pop() ?? null;
+  const note = `Proposed${proposedBy ? ` by @${proposedBy}` : ""} in #${channel} for approval.`;
+
+  // The plan: a draft under review, linked to the thread it came from.
+  // An agent re-plans under the same title across sessions: a taken one gets
+  // a short suffix instead of refusing the card, so context_approve /
+  // context_reject (which find a document by title) still name exactly one.
+  const opts = { alwaysDraft: true, creatorReviews: false, notifyMentions: false };
+  const make = (t: string) =>
+    createNode(
+      caller.nestId,
+      { title: t, content, type: "document", folder, sourceThread: { node_id: nodeId, thread_id: threadId }, ...(client ? { client } : {}) },
+      caller.userEmail,
+      opts,
+    );
+  let created: Awaited<ReturnType<typeof createNode>>;
+  try {
+    created = await make(title);
+  } catch (err) {
+    if (!(err instanceof ConflictError)) throw err;
+    title = `${title} (${randomBytes(3).toString("hex")})`;
+    created = await make(title);
+  }
+  const review = await submitForReview({
+    nestId: caller.nestId,
+    nodeId: created.node.id,
+    version: created.version,
+    requestedBy: caller.userEmail,
+    note,
+    baseUrl: caller.baseUrl ?? "",
+  });
+
+  const preview = previewOf(content);
+  // The card: model text, made inert like Hootie's (no live links, escaped).
+  const body = inertAnswer(`Approval needed — ${title}\n\n${preview}`);
+  const thread = await addComment(caller.nestId, nodeId, threadId, caller.userEmail, body, client);
+  const messageId = justWritten(thread, caller.userEmail);
+  if (!messageId) throw new Error("proposal card not written");
+  const proposal: AgentProposalView = {
+    kind: "create_node",
+    node_id: created.node.id,
+    version: created.version,
+    review_id: review.id,
+    title,
+    preview,
+    status: "pending",
+    reason: null,
+    message_id: messageId,
+    proposed_by: proposedBy,
+    thread_id: threadId,
+    channel,
+  };
+  // The server-only mark, written after the message exists (the handoff path).
+  await getDb().run("UPDATE annotation_comments SET client_json = ? WHERE id = ?", [
+    serializeClient({ ...(client ?? {}), proposal } as unknown as ClientMetadata),
+    messageId,
+  ]);
+  await syncAnnotationsNode(caller.nestId, nodeId, caller.userEmail).catch(() => {});
+  return { proposal };
+}
+
+export function proposalCardText(p: AgentProposalView): string {
+  return (
+    `Approve card ${p.message_id} in #${p.channel} thread ${p.thread_id}: "${p.title}" — pending review ${p.review_id} of ${p.node_id} v${p.version}. ` +
+    `A reviewer approves it with context_approve { title: "${p.title}" } or rejects it with context_reject (REST: POST …/nodes/${p.node_id}/approve | /reject); ` +
+    (p.proposed_by ? `the decision wakes @${p.proposed_by}.` : "no agent was declared, so the decision wakes nobody.")
+  );
+}
