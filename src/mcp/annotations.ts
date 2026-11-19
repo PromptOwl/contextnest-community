@@ -108,6 +108,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_ask_nest: addOutside("Ask the nest", "Runs a Hootie turn as the caller: the question, the thread's text and retrieved documents go to the configured model provider (outside); with post, adds messages and files hootie-authored drafts for review — never publishes or edits what exists."),
   context_agents: overwrite("Agent profiles", "Lists and reads agent profiles (a query over existing data); with a description, replaces the agent's earlier description. A read-only key gets a list/read-only view."),
   context_handoff: add("Hand off a thread", "Adds a handoff message (which mentions the target, so it notifies or wakes them like any comment) or a status update; nothing is edited or removed."),
+  context_propose: add("Propose for approval", "Files your plan as a draft in the review queue and posts an approve card in the thread; nothing is published until a person approves it."),
   // Hire agents and recommend them (PO-1201, team chat C10).
   context_hire_catalog: read("View agent catalog", "Lists the kinds of agent this server can offer the nest, with availability."),
   context_hired_agents: read("List hired agents", "Lists the nest's hired agents, derived from existing rows."),
