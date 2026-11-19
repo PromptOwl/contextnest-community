@@ -33,7 +33,7 @@ export const APPEARANCE_TOOL_DEFINITIONS = [
   {
     name: APPEARANCE_READ_TOOL,
     description:
-      "Reads this server's appearance: the navigation rail color (`nav_color`, null when it is the default), the default, the color in effect, and the text color (black or white) the app draws on it for contrast. Anyone signed in can read it.",
+      "Reads this server's appearance: the navigation rail color (`nav_color`, null when it is the default), the default, the color in effect, and the text color (black or white) the app draws on it for contrast. Any credential can read it; the color is also public on GET /health (`nav_color`).",
     inputSchema: mcpInputSchema(AppearanceReadInput),
   },
   {
