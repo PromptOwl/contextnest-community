@@ -843,3 +843,76 @@ describe("po-1431: server webhook and nest connectors vs Slack binding", () => {
     expect(sent(SLACK)[0].body).not.toMatch(/secret/i);
   });
 });
+
+describe("po-1432: the preview names who blocks a pair and who can't read the nest", () => {
+  let erin: { userId: string; email: string };
+  beforeAll(async () => {
+    // A Community user with no Slack link and no Slack profile in the workspace.
+    erin = { userId: randomUUID(), email: "erin@surf.test" };
+    await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, 'Erin', 'x')", [erin.userId, erin.email]);
+    fake.profiles.set("SX", { ...(await import("./surfaces-fake-connector.js")).profile("SX"), display_name: "Xavier" });
+  });
+
+  async function preview(conv: string, n: string, key = alice.apiKey) {
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: conv, nest_id: n }, key);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    return r.data;
+  }
+
+  it("AC 1-3, 5: absent readers carry a reason; channel members who can't read are listed with or without an account", async () => {
+    const n = await newNest(alice);
+    await share(n, bob, "read");
+    const er = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: erin.email, permission: "read" }, alice.apiKey);
+    expect(er.status, JSON.stringify(er.data)).toBeLessThan(300);
+    setConv("C-1432-A", ["SA", "SC", "SX"]);
+    const p = await preview("C-1432-A", n);
+    expect(p.would_bind).toBe(false);
+    const absent = Object.fromEntries(p.people.absent_readers.map((r: any) => [r.email, r]));
+    expect(absent[bob.email]).toMatchObject({ user_id: bob.userId, name: "Bob", reason: "not_in_channel" });
+    expect(absent[erin.email]).toMatchObject({ user_id: erin.userId, name: "Erin", reason: "no_slack_link" });
+    expect(absent[alice.email]).toBeUndefined();
+    const members = Object.fromEntries(p.people.members_not_readers.map((m: any) => [m.surface_user_id, m]));
+    expect(members.SC).toMatchObject({ community_user_id: carol.userId, name: "Carol", email: carol.email });
+    expect(members.SX).toMatchObject({ community_user_id: null, name: "Xavier", email: null });
+    expect(members.SA).toBeUndefined();
+  });
+
+  it("AC 6: a world-readable nest names its cause", async () => {
+    const pub = await newNest(alice);
+    await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);
+    const linked = await newNest(alice);
+    await S.db.getDb().run(
+      "INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by, created_at) VALUES (?, ?, 'nodes/x', ?, 'public', ?, '2026-10-30T00:00:00.000Z')",
+      [randomUUID(), linked, `s-${randomUUID()}`, alice.userId],
+    );
+    setConv("C-1432-B", ["SA"]);
+    expect((await preview("C-1432-B", pub)).people.universe_cause).toBe("public");
+    expect((await preview("C-1432-B", linked)).people.universe_cause).toBe("link");
+    expect((await preview("C-1432-B", await newNest(alice))).people.universe_cause).toBeNull();
+  });
+
+  it("AC 7: the MCP preview returns the same people block", async () => {
+    const n = await newNest(alice);
+    await share(n, bob, "read");
+    setConv("C-1432-C", ["SA", "SC"]);
+    const rest = await preview("C-1432-C", n);
+    const out = await mcp(
+      `/nests/${n}/mcp`,
+      "tools/call",
+      { name: "context_surfaces_binding_preview", arguments: { install_id: installId, conversation_id: "C-1432-C" } },
+      alice.apiKey,
+    );
+    expect(out.result?.isError).toBeFalsy();
+    expect(rest.people.absent_readers.map((r: any) => r.email)).toEqual([bob.email]);
+    expect(out.result.structuredContent.people).toEqual(rest.people);
+  });
+
+  it("AC 8: a stored binding and its guard detail carry no names", async () => {
+    const n = await newNest(alice);
+    setConv("C-1432-D", ["SA", "SC"]);
+    const r = await bind({ conversation_id: "C-1432-D", nest_id: n });
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const stored = JSON.stringify(await row(r.data.binding.id)) + JSON.stringify(r.data.binding);
+    expect(stored).not.toMatch(/carol|Carol|people/);
+  });
+});
