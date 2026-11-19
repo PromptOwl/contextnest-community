@@ -170,8 +170,13 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   // A sealed personal nest: no server-wide or per-nest connector delivery
   // (re-review R3-H1b).
   {
-    const { sealedNest } = await import("../surfaces/sealed.js");
+    const { sealedNest, boundNest } = await import("../surfaces/sealed.js");
     if (await sealedNest(ev.nestId)) return;
+    // A nest bound to a Slack/Teams conversation: content-free posts (po-1431).
+    if (await boundNest(ev.nestId)) {
+      const what = ev.kind.charAt(0).toUpperCase() + ev.kind.slice(1).replace(/_/g, " ");
+      ev = { ...ev, message: `${what} — open ContextNest`, subjectId: undefined };
+    }
   }
   const db = getDb();
   const nestName = await resolveNestName(ev.nestId);

@@ -3,7 +3,7 @@
  * model (§4.10, §4.17, §12 R1, binding state machine §12 R3), over REST, MCP
  * and the services. The connector is the in-memory fake; no network.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { randomUUID } from "crypto";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
 import { createFakeConnector, conversation, member, type FakeConnector } from "./surfaces-fake-connector.js";
@@ -232,7 +232,9 @@ describe("guard against the real permission model", () => {
     expect(again.capture_ok).toBe(1);
   });
 
-  it("AC-GRD-06: an enabled outbound connector on N → capture_ok false with connector", async () => {
+  // po-1431 replaces the old AC-GRD-06 (connector → refused): a bound nest's
+  // connector posts carry no content, so a connector is not a reader.
+  it("AC-GRD-06 (po-1431): an enabled outbound connector on N no longer blocks the bind", async () => {
     for (const channel of ["slack", "teams", "webhook"]) {
       const n = await newNest(alice);
       const url = channel === "slack" ? "https://hooks.slack.com/services/T/B/X" : "https://example.com/hook";
@@ -240,8 +242,8 @@ describe("guard against the real permission model", () => {
       expect(cr.status, JSON.stringify(cr.data)).toBeLessThan(300);
       setConv("C-06", ["SA"]);
       const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-06", nest_id: n }, alice.apiKey);
-      expect(r.data.guard.capture_ok, channel).toBe(false);
-      expect(r.data.guard.detail.non_user_principals).toContain("connector");
+      expect(r.data.guard.capture_ok, channel).toBe(true);
+      expect(r.data.guard.detail.non_user_principals).not.toContain("connector");
     }
   });
 
@@ -532,18 +534,7 @@ describe("guard re-checks (§4.17)", () => {
       await expectRecomputed("agent deleted");
     });
 
-    it("AC-GRD-17: outbound connector created / disabled / deleted", async () => {
-      await freshBinding();
-      const cr = await jsonRequest(app, "POST", `/nests/${n}/connectors`, { channel: "webhook", url: "https://example.com/h", events: ["*"] }, alice.apiKey);
-      await expectRecomputed("connector created");
-      const cid = cr.data.connector?.id ?? ((await S.db.getDb().get("SELECT id FROM connectors WHERE nest_id = ?", [n])) as any).id;
-      await jsonRequest(app, "PATCH", `/nests/${n}/connectors/${cid}`, { enabled: false }, alice.apiKey);
-      await expectRecomputed("connector disabled");
-      await jsonRequest(app, "PATCH", `/nests/${n}/connectors/${cid}`, { enabled: true }, alice.apiKey);
-      await expectRecomputed("connector enabled");
-      await jsonRequest(app, "DELETE", `/nests/${n}/connectors/${cid}`, undefined, alice.apiKey);
-      await expectRecomputed("connector deleted");
-    });
+    // Outbound connectors are not readers since po-1431, so a connector change needs no re-check.
 
     it("AC-GRD-17: identity link created / revoked", async () => {
       await freshBinding();
@@ -733,5 +724,121 @@ describe("MCP parity for bindings", () => {
     const del = await mcp(`/nests/${n}/mcp`, "tools/call", { name: "context_surfaces_binding_delete", arguments: { binding_id: bid.id } }, alice.apiKey);
     expect(del.result?.isError).toBeFalsy();
     expect((await row(bid.id)).status).toBe("removed");
+  });
+});
+
+describe("po-1431: server webhook and nest connectors vs Slack binding", () => {
+  const SLACK = "https://hooks.slack.com/services/T/B/po1431";
+  const HOOK = "https://example.com/hook-po1431";
+  const SECRET = "Secret Plan Q3";
+  const posts: Array<{ url: string; body: string }> = [];
+  const sent = (url: string) => posts.filter((p) => p.url === url);
+
+  beforeAll(() => {
+    process.env.SLACK_WEBHOOK_URL = SLACK;
+    process.env.NOTIFY_DEBOUNCE_MS = "50";
+    vi.stubGlobal("fetch", async (url: unknown, init?: { body?: unknown }) => {
+      posts.push({ url: String(url), body: String(init?.body ?? "") });
+      return new Response("ok");
+    });
+  });
+  afterAll(() => {
+    delete process.env.SLACK_WEBHOOK_URL;
+    delete process.env.NOTIFY_DEBOUNCE_MS;
+    vi.unstubAllGlobals();
+  });
+  beforeEach(() => {
+    posts.length = 0;
+  });
+
+  /** A nest only Alice reads, with a webhook connector, optionally bound to a channel. */
+  async function nestWithConnector(bound: boolean, conv: string) {
+    const n = await newNest(alice);
+    const cr = await jsonRequest(app, "POST", `/nests/${n}/connectors`, { channel: "webhook", url: HOOK, events: ["*"] }, alice.apiKey);
+    expect(cr.status, JSON.stringify(cr.data)).toBeLessThan(300);
+    setConv(conv, ["SA"]);
+    let bindingId: string | null = null;
+    if (bound) {
+      const { createBindingWithListener } = await import("../src/surfaces/services/listener-service.js");
+      bindingId = (await createBindingWithListener({ actorUserId: alice.userId, installId, conversationId: conv, nestId: n })).binding.id;
+    }
+    return { n, bindingId };
+  }
+
+  it("AC 1: with SLACK_WEBHOOK_URL set, a nest whose readers are all in the channel can bind", async () => {
+    const n = await newNest(alice);
+    setConv("C-1431-A", ["SA"]);
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-1431-A", nest_id: n }, alice.apiKey);
+    expect(r.data.guard.capture_ok).toBe(true);
+    expect(r.data.guard.detail.non_user_principals).not.toContain("connector");
+  });
+
+  it("AC 3: a bound nest's event reaches the server webhook and its connector with no title, text or subject", async () => {
+    const { n } = await nestWithConnector(true, "C-1431-B");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed`, subjectId: "nodes/secret-plan-q3", actor: alice.email });
+    await vi.waitFor(() => {
+      expect(sent(SLACK)).toHaveLength(1);
+      expect(sent(HOOK)).toHaveLength(1);
+    });
+    for (const p of [...sent(SLACK), ...sent(HOOK)]) {
+      expect(p.body).not.toMatch(/secret/i);
+      expect(p.body).toContain("open ContextNest");
+    }
+    const raw = JSON.parse(sent(HOOK)[0].body);
+    expect(raw.kind).toBe("run_failed");
+    expect(raw.subject_id).toBeNull();
+  });
+
+  it("AC 4: a bound nest's digest carries a count only", async () => {
+    const { n } = await nestWithConnector(true, "C-1431-C");
+    const { notifyNestEvent } = await import("../src/notify/notify.js");
+    await notifyNestEvent(n, `Alice approved ${SECRET}`);
+    await notifyNestEvent(n, `Bob requested review of ${SECRET}`);
+    await vi.waitFor(() => expect(sent(SLACK)).toHaveLength(1));
+    expect(sent(SLACK)[0].body).not.toMatch(/secret|alice|bob/i);
+    expect(sent(SLACK)[0].body).toMatch(/2 updates/);
+  });
+
+  it("AC 5: an unbound nest's messages are unchanged", async () => {
+    const { n } = await nestWithConnector(false, "C-1431-D");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed`, subjectId: "nodes/secret-plan-q3" });
+    await vi.waitFor(() => {
+      expect(sent(SLACK)).toHaveLength(1);
+      expect(sent(HOOK)).toHaveLength(1);
+    });
+    expect(sent(SLACK)[0].body).toContain(SECRET);
+    expect(JSON.parse(sent(HOOK)[0].body).subject_id).toBe("nodes/secret-plan-q3");
+  });
+
+  it("AC 6: adding or removing the server webhook does not change a bound nest's readers or pause it", async () => {
+    const { n, bindingId } = await nestWithConnector(true, "C-1431-E");
+    const { effectiveReaders } = await import("../src/surfaces/services/readers.js");
+    const b = await row(bindingId!);
+    const opts = { listenerAgentNodeId: b.listener_agent_node_id, bindingId: b.id };
+    const withHook = (await effectiveReaders(n, opts)).fingerprint;
+    delete process.env.SLACK_WEBHOOK_URL;
+    try {
+      expect((await effectiveReaders(n, opts)).fingerprint).toBe(withHook);
+    } finally {
+      process.env.SLACK_WEBHOOK_URL = SLACK;
+    }
+    await S.bindings.recheckBinding(b.id);
+    expect((await row(b.id)).status).toBe("active");
+  });
+
+  it("AC 7: when the bound-nest lookup fails, the event is redacted (fail closed)", async () => {
+    const { n } = await nestWithConnector(false, "C-1431-F");
+    const { sealedTestHooks } = await import("../src/surfaces/sealed.js");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    sealedTestHooks.failBound = true;
+    try {
+      await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed` });
+      await vi.waitFor(() => expect(sent(SLACK)).toHaveLength(1));
+    } finally {
+      sealedTestHooks.failBound = false;
+    }
+    expect(sent(SLACK)[0].body).not.toMatch(/secret/i);
   });
 });
