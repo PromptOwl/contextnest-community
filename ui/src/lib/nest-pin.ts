@@ -33,13 +33,13 @@ export function railNestRows<T extends RailNest>(
 ): T[] {
   const q = filter.trim().toLowerCase();
   return list
-    .filter((n) => !q || n.id === currentNestId || String(n.name).toLowerCase().includes(q))
+    .filter((n) => !q || n.id === currentNestId || String(n.name ?? "").toLowerCase().includes(q))
     .sort((a, b) => {
       const pin = Number(!!b.pinned) - Number(!!a.pinned);
       if (pin !== 0) return pin;
       if (a.id === currentNestId) return -1;
       if (b.id === currentNestId) return 1;
-      return String(a.name).localeCompare(String(b.name));
+      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
     });
 }
 

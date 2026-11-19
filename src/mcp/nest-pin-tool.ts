@@ -44,12 +44,18 @@ export async function nestPinToolResult(
     resolveNest: (ref: string) => Promise<{ id: string; name: string } | null>;
   },
 ): Promise<ToolResult> {
-  const ref = typeof args.nest === "string" ? args.nest.trim() : "";
-  if (!ref) return failure("`nest` is required: a nest id, name or slug.", "INVALID_INPUT");
-  if (args.pinned !== undefined && typeof args.pinned !== "boolean") {
-    return failure("`pinned` must be true or false.", "INVALID_INPUT");
+  // The advertised schema is the one validator (tools/call does not apply it).
+  const parsed = NestPinInput.safeParse(args);
+  if (!parsed.success) {
+    const field = String(parsed.error.issues[0]?.path[0] ?? "nest");
+    return failure(
+      field === "pinned" ? "`pinned` must be true or false." : "`nest` is required: a nest id, name or slug.",
+      "INVALID_INPUT",
+    );
   }
-  const pinned = args.pinned !== false;
+  const ref = parsed.data.nest.trim();
+  if (!ref) return failure("`nest` is required: a nest id, name or slug.", "INVALID_INPUT");
+  const pinned = parsed.data.pinned !== false;
   const nest = await ctx.resolveNest(ref);
   // One answer for "no such nest", "can't read it" and "outside this key's
   // scope", like REST's 404: the tool must not confirm that a nest id exists.

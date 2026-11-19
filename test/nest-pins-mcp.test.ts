@@ -131,6 +131,16 @@ describe("nest_pin / nest_index (PO-1441)", () => {
     expect((await pinnedIn(alice.apiKey))[notesId]).toBe(false);
   });
 
+  it("refuses an archived nest, as every listing leaves it out", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Old Vault" }, alice.apiKey);
+    const archived = await jsonRequest(app, "POST", `/nests/${data.nest.id}/archive`, {}, alice.apiKey);
+    expect(archived.status).toBe(200);
+    const res = await call(alice.apiKey, "nest_pin", { nest: data.nest.id });
+    expect(res.isError).toBe(true);
+    expect(res.data.code).toBe("NOT_FOUND");
+    expect((await pinnedIn(alice.apiKey))[data.nest.id]).toBeUndefined();
+  });
+
   it("refuses a read-only key", async () => {
     const ro = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pin", nest_id: notesId, capability: "read" }, alice.apiKey);
     expect(ro.status).toBeLessThan(300);
