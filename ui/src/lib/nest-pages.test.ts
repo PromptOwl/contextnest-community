@@ -48,4 +48,10 @@ describe("nest page registry", () => {
     expect(visibleNestPages(base).map((p) => p.id)).not.toContain("channels");
     expect(visibleNestPages({ ...base, isMember: true, agentStreamEnabled: false }).map((p) => p.id)).not.toContain("channels");
   });
+
+  it("AC-C3-13 the nest's own chat answer wins: its owner turned chat off, members see no Chat", () => {
+    const base = { isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled: true, agentStreamEnabled: true, isMember: true };
+    expect(visibleNestPages({ ...base, chatOn: false }).map((p) => p.id)).not.toContain("channels");
+    expect(visibleNestPages({ ...base, chatOn: true }).map((p) => p.id)).toContain("channels");
+  });
 });

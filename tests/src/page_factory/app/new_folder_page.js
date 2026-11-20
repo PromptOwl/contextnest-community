@@ -3,17 +3,21 @@
  *
  * Page under test: the "New folder" dialog on the nest page
  * (ui/src/components/NestView.tsx), opened by the New Folder button beside the
- * nest's tabs, and where a new folder shows up: the Overview's Contents tree
- * (ui/src/components/nest/OverviewTab.tsx) and the Documents tab.
+ * nest's tabs, and where a new folder shows up: the Documents tree
+ * (ui/src/components/nest/DocumentsTab.tsx), the nest's home since po-1213
+ * retired the Overview tab.
  *
  * The dialog checks the typed path as you type (ui/src/lib/folder-path.ts): a
  * blocking problem shows as an inline error and disables Create folder, and a
  * name that will be stored differently shows a "Will be created as …" preview.
- * In the Contents tree a folder with documents expands in place; an empty one
- * opens in the Documents tab instead.
+ * In the Documents tree a folder header shows its name and, when it holds
+ * documents, their count; a header with documents expands when clicked. An
+ * empty folder's header does not expand: it opens as a card in the grid view
+ * (⋯ → Show as grid), which scopes the list to it.
  */
 
 import logger from '../../helper/logger/logger.js';
+import { openMoreActions } from '../../lib/more_actions_menu.js';
 
 class NewFolderPage {
   /**
@@ -28,7 +32,7 @@ class NewFolderPage {
     // ── Nest page ─────────────────────────────────────────────────────────
     this.newFolderButton = this.main.getByRole('button', { name: 'New Folder', exact: true });
     this.selectedTab = page.getByRole('tab', { selected: true }).first();
-    this.contents = page.getByRole('navigation', { name: 'Contents' });
+    this.search = this.main.getByPlaceholder('Search title, tags, content…');
 
     // ── "New folder" dialog ───────────────────────────────────────────────
     this.dialog = page.getByRole('dialog', { name: 'New folder' });
@@ -48,14 +52,14 @@ class NewFolderPage {
 
   // ── Navigation ──────────────────────────────────────────────────────────
 
-  /** Open a nest's page on the Overview and wait for its Contents tree. */
+  /** Open a nest's page on Documents and wait for its search box. */
   async gotoNest(nestId) {
     this._log(`Opening nest ${nestId}`);
     await this.page.goto(`/nest/${nestId}`);
-    await this.contents.waitFor({ state: 'visible' });
+    await this.search.waitFor({ state: 'visible', timeout: 60_000 });
   }
 
-  /** A nest tab by its label (Overview, Documents, …). */
+  /** A nest tab by its label (Documents, Instructions, …). */
   tab(name) {
     return this.page.getByRole('tab', { name, exact: true });
   }
@@ -83,25 +87,37 @@ class NewFolderPage {
     await this.dialog.waitFor({ state: 'hidden', timeout: 60_000 });
   }
 
-  // ── Contents tree ───────────────────────────────────────────────────────
+  // ── Documents tree ──────────────────────────────────────────────────────
 
-  /** A folder's row in the Contents tree, by the name the tree shows. */
-  folderRow(label) {
-    return this.contents.getByRole('button', { name: label, exact: true });
+  /** A folder's header in the Documents tree, by its path ("team-notes", "alpha/sub"). */
+  folderHeader(path) {
+    return this.main.getByTestId(`folder-header-${path}`);
   }
 
-  /** The row's document count ("0 documents", "1 document"). */
-  folderCount(label) {
-    return this.folderRow(label).locator('xpath=..').locator('[aria-label$=" document"], [aria-label$=" documents"]');
+  /** How many documents the header counts under the folder (0 when it shows no count). */
+  async folderTotal(path) {
+    const m = (await this.folderHeader(path).innerText()).match(/(\d+)\s*$/);
+    return m ? Number(m[1]) : 0;
   }
 
-  /**
-   * Expand a folder that holds documents. Only those rows expand; an empty
-   * folder's row opens it in the Documents tab instead.
-   */
-  async expandFolder(label) {
-    const row = this.folderRow(label);
-    if ((await row.getAttribute('aria-expanded')) !== 'true') await row.click();
+  /** A document's row by its id ("nodes/alpha/alpha-one"). */
+  row(id) {
+    return this.main.getByTestId(`document-row-${id}`);
+  }
+
+  /** Click a folder header that holds documents, so its documents and subfolders show. */
+  async expandFolder(path) {
+    this._log(`Expanding ${path}`);
+    await this.folderHeader(path).click();
+  }
+
+  /** Open a folder in the Documents tab (⋯ → Show as grid → its card), scoping the list to it. */
+  async openFolder(label) {
+    this._log(`Opening ${label}`);
+    const grid = this.page.getByTestId('nest-view-grid');
+    await openMoreActions(this.page, grid);
+    await grid.click();
+    await this.main.locator(`button[title="Open ${label}"]`).click();
   }
 
   /** A toast carrying `text`. */

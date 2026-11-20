@@ -41,6 +41,7 @@ import {
   type HootieNode,
   type HootieTurn,
 } from "@/lib/api";
+import { useSidePanel } from "@/lib/side-panel";
 import { MentionTextarea } from "./MentionTextarea";
 import { HootieAnswerMarkdown } from "./HootieAnswer";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
@@ -108,7 +109,9 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
   const name = hootieBrand.name;
   const logo = hootieBrand.logo_url || hootieIcon;
   const accent = hootieAccentStyle(hootieBrand.accent_color);
-  const [open, setOpen] = useState(false);
+  // One side panel at a time: opening the chat closes Hootie and the other
+  // way round (lib/side-panel.ts, PO-1200).
+  const [open, setOpen] = useSidePanel("hootie");
   const [width, setWidth] = useState<number>(() => readPanelWidth());
   const [viewport, setViewport] = useState<number>(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,

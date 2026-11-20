@@ -24,9 +24,12 @@ import {
   Plus,
   Search,
   Users,
+  MessagesSquare,
 } from "lucide-react";
 import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
 import { reads } from "../lib/queries";
+import { nestChat, railChatTarget } from "../lib/chat-harness";
+import { ChatCount, useChatSummary } from "./chat/ChatEntry";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
 import { useAuth } from "../auth/AuthContext";
@@ -66,6 +69,11 @@ interface Props {
   onNewDocument?: (folder?: string) => void;
   /** Pinned to the bottom of the rail: Docs and the account menu. */
   footer?: ReactNode;
+  /** Team chat (PO-1200): open a nest's chat. Its rows show only where chat
+   *  is on and I am a member. */
+  onOpenChat?: (target: SidebarNestTarget) => void;
+  /** The nest whose chat is on screen, for the active row. */
+  chatNestId?: string | null;
 }
 
 /* One row style for both rails (app pages and a nest's views / tree) so the
@@ -98,7 +106,10 @@ export function DocumentSidebar({
   onOpenDashboardTab,
   onNewDocument,
   footer,
+  onOpenChat,
+  chatNestId = null,
 }: Props) {
+  const chat = useChatSummary();
   // One rail everywhere: the nest list is the same on the dashboard as inside
   // a nest. Only the current nest is unfolded.
   const nests = useQuery({ ...reads.nestList() });
@@ -189,6 +200,31 @@ export function DocumentSidebar({
         <LayoutGrid className={ROW_ICON} />
         All nests
       </button>
+      {/* Chat across nests: when chat is on and I am in it somewhere, one row
+          into the nest on screen, or where my mentions wait. */}
+      {onOpenChat &&
+        (() => {
+          const target = railChatTarget(chat.data, nestId);
+          if (!target) return null;
+          const n = (nests.data?.nests ?? []).find((x: any) => x.id === target.nestId);
+          return (
+            <button
+              type="button"
+              onClick={() => onOpenChat(n ? nestTarget(n) : { nestId: target.nestId, nestName: target.nestName, isOwner: false, isAnonOwned: false })}
+              className={cn(ROW, ROW_IDLE, "mx-2 mt-0.5 w-auto")}
+              title={`Chat in ${target.nestName}`}
+              data-testid="document-sidebar-chat"
+            >
+              <MessagesSquare className={ROW_ICON} />
+              Chat
+              {/* The sum of the per-nest numbers, so it always agrees with the rows below. */}
+              <ChatCount
+                counts={chat.data ? chat.data.nests.reduce((t, x) => ({ unread: t.unread + x.unread, mentions: t.mentions + x.mentions }), { unread: 0, mentions: 0 }) : null}
+                className="ml-auto"
+              />
+            </button>
+          );
+        })()}
       {(nests.data?.nests?.length ?? 0) > 1 && (
         <div className="relative mx-2 mt-1 mb-2">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -269,6 +305,22 @@ export function DocumentSidebar({
                   </button>
                 )}
               </div>
+              {open && onOpenChat && nestChat(chat.data, n.id) && (
+                <div className="ml-2 border-l border-border/60 pl-1">
+                  <button
+                    type="button"
+                    onClick={() => onOpenChat(nestTarget(n))}
+                    aria-current={chatNestId === n.id ? "page" : undefined}
+                    className={cn(ROW, chatNestId === n.id ? ROW_ACTIVE : ROW_IDLE)}
+                    title={`Chat in ${n.name}`}
+                    data-testid="document-sidebar-nest-chat"
+                  >
+                    <MessagesSquare className={ROW_ICON} />
+                    <span className="truncate">Chat</span>
+                    <ChatCount counts={nestChat(chat.data, n.id)} className="ml-auto" />
+                  </button>
+                </div>
+              )}
               {open && (
                 <NestTree
                   nestId={n.id}
