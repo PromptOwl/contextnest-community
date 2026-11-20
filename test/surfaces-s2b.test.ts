@@ -3277,7 +3277,9 @@ describe("po-1186 control room: the decision ledger over real listener windows",
     await click("U_ERIN", "nest_approve", p.id);
     const c = await one("SELECT * FROM surface_commits WHERE window_id = ?", [p.window_id]);
     expect(c).toBeTruthy();
-    const tr = await jsonRequest(app, "GET", `/ledger/win_${p.window_id}`, undefined, alice.apiKey);
+    // po-1406: the REST read serves the superadmin-only Control room; the nest's owner reads it with a key scoped to the nest.
+    const nestKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "ledger-reader", nest_id: N }, alice.apiKey)).data.api_key;
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${p.window_id}`, undefined, nestKey);
     expect(tr.status).toBe(200);
     for (const hop of ["run", "verdict", "proposal", "review", "version", "source"]) expect(tr.data.chain[hop], hop).toBeTruthy();
     expect(tr.data.chain.run.id).toBe((await one("SELECT run_id FROM surface_windows WHERE id = ?", [p.window_id])).run_id);
@@ -3310,7 +3312,8 @@ describe("po-1186 control room: the decision ledger over real listener windows",
     expect(w).toMatchObject({ status: "judged", verdict: "no_op", reason_code: "chatter" });
     const from = new Date(Date.parse(w.judged_at) - 1000).toISOString();
     const to = new Date(Date.parse(w.judged_at) + 1000).toISOString();
-    const page = await jsonRequest(app, "GET", `/nests/${N}/ledger?verdict=no_op&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, undefined, alice.apiKey);
+    const nestKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "ledger-reader-2", nest_id: N }, alice.apiKey)).data.api_key;
+    const page = await jsonRequest(app, "GET", `/nests/${N}/ledger?verdict=no_op&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, undefined, nestKey);
     expect(page.status).toBe(200);
     const row = page.data.entries.find((e: any) => e.entry_id === `win_${w.id}`);
     expect(row).toBeTruthy();

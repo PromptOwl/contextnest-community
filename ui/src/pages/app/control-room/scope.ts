@@ -1,7 +1,7 @@
 /**
  * Control room (po-1186 CR2): what every tab reads — the nest picker, the
- * range, and the nests the reader may see (decision 3: a server admin sees
- * every nest; anyone else the nests they own or administer).
+ * range, and the nests the reader may see. The reader is a superadmin
+ * (po-1406).
  */
 import { useEffect, useState } from "react";
 import { rangeFor, type RangeDays } from "../../../lib/control-room-overview";
@@ -17,7 +17,6 @@ export interface ControlRoomScope {
   days: RangeDays;
   range: { from: string; to: string; days: string[] };
   nests: NestRef[];
-  isServerAdmin: boolean;
   nestName: (id: string) => string;
   /** Bumped by "Refresh" and when the tab comes back into view, so reads re-run. */
   tick: number;

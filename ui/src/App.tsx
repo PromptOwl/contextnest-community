@@ -45,7 +45,6 @@ import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-hi
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
 import { appPageIdFromPath, appPath, appRail, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
-import { useAdministersNest } from "./lib/administers-nest";
 import { SettingsShell } from "./components/SettingsShell";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, crumbLabelClass, tabTitle, type Crumb } from "./lib/breadcrumb";
@@ -294,13 +293,8 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  // Does the person administer any nest (the Control room, po-1186 CR2)?
-  // Only asked while Surfaces is on; unknown counts as yes here so a
-  // /control-room link isn't bounced before the nest list arrives — the rail
-  // (DocumentSidebar) waits for the answer instead.
-  const administersNest = useAdministersNest(authenticated && surfacesEnabled && !isAdmin);
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled, administersNest: administersNest ?? true };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled, surfacesEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.

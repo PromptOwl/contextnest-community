@@ -847,14 +847,14 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     for (const l of lines) expect(l).toMatch(/failed: \w+ reason=model_auth status=401/);
     expect(logged.join("\n")).not.toMatch(/SECRET|sk-ant|PLATYPUS/);
 
-    // REST ledger and trace.
+    // REST ledger and trace (the Control room's reads: superadmin only, po-1406).
     const q = new URLSearchParams({ ...range(), binding: bindingId }).toString();
-    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${q}`, undefined, alice.apiKey);
+    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${q}`, undefined, root.apiKey);
     expect(led.status).toBe(200);
     const e = led.data.entries.find((x: any) => x.entry_id === `win_${w.id}`);
     expect(e.verdict).toMatchObject({ code: "error", reason_code: "model_auth" });
     expect(e.run).toMatchObject({ id: w.run_id, outcome: "failed" });
-    const tr = await jsonRequest(app, "GET", `/ledger/win_${w.id}`, undefined, alice.apiKey);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${w.id}`, undefined, root.apiKey);
     expect(tr.status).toBe(200);
     expect(tr.data.chain.run).toMatchObject({ id: w.run_id, status: "failed" });
     expect(tr.data.chain.verdict.reason_code).toBe("model_auth");
@@ -892,7 +892,7 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(JSON.parse(n.detail)).toEqual({ windows: 1 });
     expect(JSON.stringify(notices)).not.toMatch(/credit balance|Anthropic|litellm|PLATYPUS/i);
     expect(sentEmails.some((m) => /out of credit/i.test(m.subject))).toBe(true);
-    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: a.bindingId })}`, undefined, alice.apiKey);
+    const led = await jsonRequest(app, "GET", `/nests/${F}/ledger?${new URLSearchParams({ ...range(), binding: a.bindingId })}`, undefined, root.apiKey);
     expect(led.data.entries.find((x: any) => x.entry_id === `win_${a.w.id}`).verdict.reason_code).toBe("model_billing");
   });
 
