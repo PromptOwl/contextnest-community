@@ -877,6 +877,21 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(members.SA).toBeUndefined();
   });
 
+  it("po-1445: an unmatched member carries the email Slack confirmed; an unconfirmed one carries none; a matched one never", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    fake.profiles.set("SX", profile("SX", { display_name: "Xavier", email: "xavier@elsewhere.test" }));
+    fake.profiles.set("SY", profile("SY", { display_name: "Yusuf", email: "yusuf@elsewhere.test", email_confirmed: false }));
+    const { getDb } = S.db;
+    await getDb().run("DELETE FROM surface_users_cache WHERE surface_user_id IN ('SX', 'SY')");
+    const n = await newNest(alice);
+    setConv("C-1445-A", ["SA", "SC", "SX", "SY"]);
+    const p = await preview("C-1445-A", n);
+    const members = Object.fromEntries(p.people.members_not_readers.map((m: any) => [m.surface_user_id, m]));
+    expect(members.SX).toMatchObject({ community_user_id: null, slack_email: "xavier@elsewhere.test" });
+    expect(members.SY).toMatchObject({ community_user_id: null, slack_email: null });
+    expect(members.SC).toMatchObject({ community_user_id: carol.userId, slack_email: null });
+  });
+
   it("AC 6: a world-readable nest names its cause", async () => {
     const pub = await newNest(alice);
     await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);
