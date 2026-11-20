@@ -662,7 +662,6 @@ import { parseOr422 } from "../workflow/agent-event-schema.js";
 
 surfacesRoutes.get("/cold-start", async (c) => {
   try {
-    // Serves the Control room page only: superadmins (po-1406).
     await assertControlRoomReader(c);
     const q = parseOr422(ColdStartQuery, c.req.query());
     const scope = c.get("nestScope");

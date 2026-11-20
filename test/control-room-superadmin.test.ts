@@ -125,4 +125,11 @@ describe("po-1406: the Control room's page-only reads are superadmin-only", () =
     // The owner's own MCP session on the nest reads it too: MCP is the agent surface.
     expect((await mcp(N, olive.apiKey, "context_agent_ledger", {})).isError).toBe(false);
   });
+
+  it("AC-5: a key scoped to one nest cannot read another nest's ledger or rollups", async () => {
+    const M = (await jsonRequest(app, "POST", "/nests", { name: "Olive's other nest" }, olive.apiKey)).data.nest.id;
+    for (const path of [`/nests/${M}/ledger`, `/nests/${M}/ledger/export?format=csv`, `/nests/${M}/rollups`]) {
+      expect((await req("GET", path, undefined, agentKey)).status, `GET ${path} with nest N's key`).toBe(403);
+    }
+  });
 });

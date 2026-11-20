@@ -20,9 +20,14 @@ export const CONTROL_ROOM_DENIED =
   "Only a superadmin can open the Control room. An agent reads its own nest's ledger with a key scoped to that nest, or over MCP.";
 
 export async function mayReadControlRoom(userId: string | undefined | null, keyNestScope: string | null | undefined): Promise<boolean> {
-  if (config.AUTH_MODE === "open" || !userId) return false;
+  if (!userId) return false;
+  // Scope check first: an agent's nest key reads its nest in open mode too.
   if (keyNestScope) return true;
-  return isServerAdminUserId(userId).catch(() => false);
+  if (config.AUTH_MODE === "open") return false;
+  return isServerAdminUserId(userId).catch((err) => {
+    console.warn("[control-room] superadmin check failed:", err instanceof Error ? err.message : err);
+    return false;
+  });
 }
 
 /** Throws 403 unless the caller may read the Control room's page-only routes. */

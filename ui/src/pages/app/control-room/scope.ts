@@ -17,7 +17,6 @@ export interface ControlRoomScope {
   days: RangeDays;
   range: { from: string; to: string; days: string[] };
   nests: NestRef[];
-  isServerAdmin: boolean;
   nestName: (id: string) => string;
   /** Bumped by "Refresh" and when the tab comes back into view, so reads re-run. */
   tick: number;
