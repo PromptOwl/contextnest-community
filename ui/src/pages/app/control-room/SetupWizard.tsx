@@ -274,10 +274,7 @@ export function ReadinessChecklist({ readiness, here }: { readiness: Readiness; 
       fix: wrong && (
         <>
           You&apos;re using this server at {wrong}, but its public base URL is {base}. Slack sends you back to the public base URL after approval, so the install can only finish there.
-          <ol className="mt-1 list-decimal space-y-0.5 pl-5">
-            <li>If {base} is this server, open it at that address, sign in, and come back to Setup.</li>
-            <li>If it is a different server, set Server settings → Basic → Public base URL to this server&apos;s own public https address.</li>
-          </ol>
+          <div className="mt-1">Set Server settings → Basic → Public base URL to this server&apos;s own public https address.</div>
           <SettingsLink />
         </>
       ),

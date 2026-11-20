@@ -98,10 +98,7 @@ export function originMismatch(baseUrl: string, requestHost: string | null): Pub
   if (base.host.toLowerCase() === requestHost.trim().toLowerCase()) return null;
   return {
     problem: `You opened this server at ${requestHost}, but its public base URL is ${baseUrl}. Slack sends you back to the public base URL after approval, so the install can only finish there.`,
-    steps: [
-      `If ${baseUrl} is this server, open it at that address, sign in, and start again from Control room → Setup.`,
-      `If it is a different server, open ${PUBLIC_URL_SETTING}, enter this server's own public https address and click Save.`,
-    ],
+    steps: [`Open ${PUBLIC_URL_SETTING}, enter this server's own public https address and click Save.`],
   };
 }
 
