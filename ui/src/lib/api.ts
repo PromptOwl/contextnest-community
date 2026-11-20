@@ -5614,7 +5614,8 @@ export interface SurfacesBindingPreview {
   /** po-1432: names for the preview caller only (absent on older servers). */
   people?: {
     absent_readers: Array<{ user_id: string | null; name: string | null; email: string | null; reason: "not_in_channel" | "no_slack_link" | "no_account" }>;
-    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null }>;
+    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). */
+    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
   };
 }

@@ -222,12 +222,13 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
   it("AC 1: a reader no Slack user is linked to is named with the email", () => {
     const v = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" }] }), ctx);
     expect(v.state).toBe("refused");
-    expect(v.note).toBe("Misha (misha@promptowl.ai) can read PO - Engineering Ops, but no Slack user in this workspace is linked to that email.");
+    expect(v.note).toBe("1 person who can read PO - Engineering Ops can't be found in #testnest.");
+    expect(v.groups).toEqual([{ heading: "No Slack user in this workspace has the same email:", people: ["Misha (misha@promptowl.ai)"] }]);
   });
 
   it("AC 2: readers not in the channel are named, with a message only", () => {
     const one = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }), ctx);
-    expect(one.note).toBe("Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again.");
+    expect(one.groups).toEqual([{ heading: "Not in #testnest. Add them in Slack, then check again:", people: ["Sam"] }]);
     expect(fixOptions(one)).toEqual(["create_nest", "other_nest", "leave_off"]);
     const many = guardView(
       refused({
@@ -239,12 +240,58 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
       }),
       ctx,
     );
-    expect(many.note).toBe("Sam, taimur@x.ai and Qaish can read PO - Engineering Ops but aren't in #testnest. Add them in Slack, then check again.");
+    // A list, not one sentence per person (po-1440).
+    expect(many.groups).toEqual([{ heading: "Not in #testnest. Add them in Slack, then check again:", people: ["Sam", "taimur@x.ai", "Qaish"] }]);
   });
 
   it("a reader without an account is named by email", () => {
     const v = guardView(refused({ absent_readers: [{ user_id: null, name: null, email: "new@x.ai", reason: "no_account" }] }), ctx);
-    expect(v.note).toBe("new@x.ai can read PO - Engineering Ops but has no account on this server yet.");
+    expect(v.groups).toEqual([{ heading: "No account on this server yet:", people: ["new@x.ai"] }]);
+  });
+
+  it("po-1440: mixed reasons give one summary and one list per reason, never a repeated sentence", () => {
+    const v = guardView(
+      refused(
+        {
+          absent_readers: [
+            { user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" },
+            { user_id: "u2", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" },
+            { user_id: "u3", name: "Ana", email: "ana@x.ai", reason: "no_slack_link" },
+            { user_id: null, name: null, email: "new@x.ai", reason: "no_account" },
+          ],
+        },
+        { readers_total: 9, readers_absent: 4 },
+      ),
+      ctx,
+    );
+    expect(v.note).toBe("4 people who can read PO - Engineering Ops can't be found in #testnest.");
+    expect(v.groups!.map((g) => g.heading)).toEqual([
+      "Not in #testnest. Add them in Slack, then check again:",
+      "No Slack user in this workspace has the same email:",
+      "No account on this server yet:",
+    ]);
+    expect(v.groups![1].people).toEqual(["Misha (misha@promptowl.ai)", "Ana (ana@x.ai)"]);
+  });
+
+  it("po-1445: with a reader unmatched by email, the unmatched channel members show the email Slack has", () => {
+    const v = guardView(
+      refused({
+        absent_readers: [{ user_id: "u2", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" }],
+        members_not_readers: [
+          { surface_user_id: "SM", name: "Misha S", community_user_id: null, email: null, slack_email: "misha@promptowl.io" },
+          { surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null },
+          { surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" },
+        ],
+      }),
+      ctx,
+    );
+    expect(v.groups![1]).toEqual({
+      heading: "In #testnest but not matched to an account here:",
+      people: ["Misha S: Slack email misha@promptowl.io", "Quinn: Slack shares no confirmed email"],
+    });
+    // Without an email mismatch to explain, the members aren't listed.
+    const plain = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }], members_not_readers: [{ surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null }] }), ctx);
+    expect(plain.groups).toHaveLength(1);
   });
 
   it("AC 6: a public nest and a live public link name their cause", () => {
@@ -288,13 +335,11 @@ describe("po-1432 review: shared-deployment cause and capped name lists", () => 
     );
   });
 
-  it("when the server names fewer readers than are absent, the note adds how many more", () => {
+  it("when the server names fewer readers than are absent, the note gives the full count and says only the first are listed", () => {
     const p = {
       ...preview({ would_bind: false, detail: { readers_total: 312, readers_absent: 22 } }),
       people: people({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }),
     };
-    expect(guardView(p, ctx).note).toBe(
-      "Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again. 21 more readers aren't in #testnest either.",
-    );
+    expect(guardView(p, ctx).note).toBe("22 people who can read PO - Engineering Ops can't be found in #testnest. Only 1 is listed below.");
   });
 });

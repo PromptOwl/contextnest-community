@@ -405,8 +405,12 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const members_not_readers = [];
   for (const m of outsiders) {
     const u = m.community_user_id ? users.get(m.community_user_id) : undefined;
-    const name = u?.name ?? (await getProfile(install.id, m.surface_user_id).catch(() => null))?.display_name ?? null;
-    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null });
+    const profile = u?.name ? null : await getProfile(install.id, m.surface_user_id).catch(() => null);
+    const name = u?.name ?? profile?.display_name ?? null;
+    // po-1445: the email Slack has for someone with no account match, so the
+    // admin can spot a mismatch. Only a confirmed one; preview only, never stored.
+    const slack_email = !u && profile?.email_confirmed ? (profile.email ?? null) : null;
+    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email });
   }
   return { absent_readers, members_not_readers, universe_cause };
 }

@@ -813,6 +813,26 @@ function AddToNest({ members, nestId, nestName, channel, onAdded }: { members: M
   );
 }
 
+/** po-1440: the guard's short note, then who blocks the pair as one list per reason. */
+export function GuardNote({ view, className }: { view: GuardView; className?: string }) {
+  if (!view.note && !view.groups?.length) return null;
+  return (
+    <div className={className} data-testid="guard-note">
+      {view.note && <span>{view.note}</span>}
+      {view.groups?.map((g) => (
+        <div key={g.heading} className="mt-1.5">
+          <div className="font-medium text-foreground">{g.heading}</div>
+          <ul className="list-disc pl-5">
+            {g.people.map((p, i) => (
+              <li key={`${p}-${i}`}>{p}</li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function GuardCell({ view, channel, addTo }: { view: GuardView | "loading" | undefined; channel: SurfacesChannel; addTo?: ReactNode }) {
   if (view === "loading") return <span className="text-sm text-muted-foreground">Checking…</span>;
   if (!view) {
@@ -832,7 +852,7 @@ function GuardCell({ view, channel, addTo }: { view: GuardView | "loading" | und
           <Dot tone={view.state === "refused" ? "bad" : "off"} />
           {view.label}
         </span>
-        {view.note && <span className="text-muted-foreground">{view.note}</span>}
+        <GuardNote view={view} className="text-muted-foreground" />
         {addTo}
       </div>
     );
@@ -847,7 +867,7 @@ function GuardCell({ view, channel, addTo }: { view: GuardView | "loading" | und
         <Dot tone={view.state === "ok" ? "ok" : "warn"} />
         {view.label}
       </span>
-      {view.note && <span className="text-muted-foreground">{view.note}</span>}
+      <GuardNote view={view} className="text-muted-foreground" />
       {addTo}
     </div>
   );
@@ -920,6 +940,14 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
           </Button>
         </div>
       ) : (
+        <>
+        <div className="mb-2 flex justify-end">
+          {/* po-1445: a channel Nest was just invited to shows without a page reload. */}
+          <Button variant="ghost" className={small} onClick={load} disabled={loading} data-testid="setup-channels-refresh">
+            <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+            {loading ? "Refreshing…" : "Refresh list"}
+          </Button>
+        </div>
         <div className="rounded-lg border px-4" data-testid="setup-channels">
           {channels.map((ch) => {
             const p = pickOf(ch);
@@ -976,6 +1004,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
             );
           })}
         </div>
+        </>
       )}
       {truncated && <p className="mt-2 text-sm text-muted-foreground">Nest is in more channels than this list shows, so some may be missing here.</p>}
       <details className="mt-3 text-sm">
@@ -1056,8 +1085,8 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
             <Note key={p.channelId} tone={ext ? "warn" : "bad"} testId={`refusal-${p.channelId}`}>
               <b>
                 #{p.channelName} → {nestName(p.nestId)}: {ext ? "off by default" : "refused"}.
-              </b>{" "}
-              {v.note}
+              </b>
+              <GuardNote view={v} className="mt-1" />
               <div className="mt-2 flex flex-wrap gap-2">
                 {fixOptions(v).map((f) =>
                   f === "create_nest" ? (
