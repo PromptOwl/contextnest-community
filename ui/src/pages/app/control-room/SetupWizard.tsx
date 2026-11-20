@@ -228,9 +228,30 @@ const small = "h-8 px-3 text-sm";
 
 type Readiness = NonNullable<SurfacesStatus["readiness"]>;
 
+/**
+ * The address this page was opened at, when it differs from the public base
+ * URL Slack will send the browser back to (null = same, or unknown).
+ */
+export function wrongAddress(readiness: Readiness, here: string | null): string | null {
+  if (!here || !readiness.redirect_url || readiness.public_url) return null;
+  try {
+    return new URL(readiness.redirect_url).origin === new URL(here).origin ? null : here;
+  } catch {
+    return null;
+  }
+}
+
+const SettingsLink = () => (
+  <a href="/settings" className="mt-1 inline-block font-medium underline">
+    Open Server settings
+  </a>
+);
+
 /** po-1444: what this server needs before Slack can connect, each with its fix. */
-export function ReadinessChecklist({ readiness }: { readiness: Readiness }) {
+export function ReadinessChecklist({ readiness, here }: { readiness: Readiness; here: string | null }) {
   const url = readiness.public_url;
+  const wrong = wrongAddress(readiness, here);
+  const base = readiness.redirect_url ? new URL(readiness.redirect_url).origin : "";
   const lines: { ok: boolean; label: string; fix: ReactNode }[] = [
     {
       ok: !url,
@@ -243,9 +264,21 @@ export function ReadinessChecklist({ readiness }: { readiness: Readiness }) {
               <li key={s}>{s}</li>
             ))}
           </ol>
-          <a href="/settings" className="mt-1 inline-block font-medium underline">
-            Open Server settings
-          </a>
+          <SettingsLink />
+        </>
+      ),
+    },
+    {
+      ok: !wrong,
+      label: "You opened this server at its public address",
+      fix: wrong && (
+        <>
+          You&apos;re using this server at {wrong}, but its public base URL is {base}. Slack sends you back to the public base URL after approval, so the install can only finish there.
+          <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+            <li>If {base} is this server, open it at that address, sign in, and come back to Setup.</li>
+            <li>If it is a different server, set Server settings → Basic → Public base URL to this server&apos;s own public https address.</li>
+          </ol>
+          <SettingsLink />
         </>
       ),
     },
@@ -452,7 +485,8 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   const allCreds = CRED_FIELDS.every((f) => creds[f.key]);
   const readiness = state.status?.readiness;
   // The server refuses too; this keeps the admin from leaving for a Slack error page.
-  const urlBad = !!readiness?.public_url;
+  const here = typeof window === "undefined" ? null : window.location.origin;
+  const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
 
   const download = async () => {
@@ -523,7 +557,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
         lede={`This installs ${org ? `${org}'s` : "your"} own copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
       />
       <WillNever settings={state.settings} />
-      {readiness && !connected && <ReadinessChecklist readiness={readiness} />}
+      {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
@@ -616,7 +650,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
           </div>
           {urlBad && (
             <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
-              Slack can&apos;t reach this server yet. Fix the public base URL above first.
+              Slack can&apos;t connect from here yet. Fix the address problem above first.
             </p>
           )}
           {readiness?.redirect_url && !urlBad && (

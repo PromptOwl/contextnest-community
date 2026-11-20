@@ -99,6 +99,25 @@ describe("OAuth start refuses before Slack when Slack can't reach this server", 
     expect(new URL(r.headers.get("location")!).searchParams.get("redirect_uri")).toBe(`${BASE}/surfaces/slack/oauth/callback`);
   });
 
+  it("opened at another address (localhost, while the public URL is another domain): refused, nothing sent to Slack", async () => {
+    const before = await stateRows();
+    const r = await app.request(`/surfaces/slack/installs/${installId}/oauth/start`, { headers: { Cookie: cookie, Host: "localhost:3838", Accept: "text/html" } });
+    expect(r.status).toBe(422);
+    expect(r.headers.get("location")).toBeNull();
+    expect(await stateRows()).toBe(before);
+    const html = await r.text();
+    expect(html).toContain(`You opened this server at localhost:3838, but its public base URL is ${BASE}.`);
+    expect(html).toContain("Server settings → Basic → Public base URL");
+  });
+
+  it("opened at the public address, directly or through a proxy, goes on to Slack", async () => {
+    const host = new URL(BASE).host;
+    for (const headers of [{ Host: host }, { Host: "10.0.0.7:8080", "X-Forwarded-Host": host }]) {
+      const r = await app.request(`/surfaces/slack/installs/${installId}/oauth/start`, { headers: { Cookie: cookie, ...headers } });
+      expect(r.status, JSON.stringify(headers)).toBe(302);
+    }
+  });
+
   it("missing app credentials show a page in the browser, not raw JSON", async () => {
     const nest = (await jsonRequest(app, "POST", "/nests", { name: "No Creds Nest" }, root.apiKey)).data.nest.id;
     const bare = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: nest }, root.apiKey)).data.install_id;

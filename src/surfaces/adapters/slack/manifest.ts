@@ -81,6 +81,30 @@ export function publicUrlProblem(baseUrl: string): PublicUrlProblem | null {
   };
 }
 
+/**
+ * Null when the request reached this server at its public base URL. Slack
+ * sends the browser back to the public base URL, so starting from any other
+ * address (localhost, or another server's domain) can't finish here.
+ * `requestHost` is host[:port] as the request arrived; null = unknown, no check.
+ */
+export function originMismatch(baseUrl: string, requestHost: string | null): PublicUrlProblem | null {
+  if (!requestHost || !baseUrl) return null;
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  if (base.host.toLowerCase() === requestHost.trim().toLowerCase()) return null;
+  return {
+    problem: `You opened this server at ${requestHost}, but its public base URL is ${baseUrl}. Slack sends you back to the public base URL after approval, so the install can only finish there.`,
+    steps: [
+      `If ${baseUrl} is this server, open it at that address, sign in, and start again from Control room → Setup.`,
+      `If it is a different server, open ${PUBLIC_URL_SETTING}, enter this server's own public https address and click Save.`,
+    ],
+  };
+}
+
 export function slackUrls(baseUrl: string, installId: string | "hosted") {
   const base = baseUrl.replace(/\/+$/, "");
   const prefix = installId === "hosted" ? `${base}/surfaces/slack/hosted` : `${base}/surfaces/slack/${installId}`;

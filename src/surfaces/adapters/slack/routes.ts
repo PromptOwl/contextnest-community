@@ -31,7 +31,7 @@ import { isOrgAdmin, SERVER_ADMIN_DISCLOSURE } from "../../services/binding-serv
 import { ingest, count } from "../../services/ingest-service.js";
 import { uninstall } from "../../services/lifecycle-service.js";
 import { track } from "../../services/work.js";
-import { buildManifest, BOT_SCOPES, slackUrls, publicUrlProblem, PUBLIC_URL_SETTING } from "./manifest.js";
+import { buildManifest, BOT_SCOPES, slackUrls, publicUrlProblem, originMismatch, PUBLIC_URL_SETTING } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
 import { slackCall } from "./api.js";
@@ -438,7 +438,10 @@ function done(c: C, status: number, message: string, extra: Record<string, unkno
  * server. Otherwise Slack shows its own redirect_uri error and never returns.
  */
 function urlRefusal(c: C, admin = true): Response | null {
-  const p = publicUrlProblem(config.PUBLIC_BASE_URL);
+  // The address the browser used; a proxy's forwarded host wins. No header
+  // (in-process calls) means we can't tell, so only the URL itself is checked.
+  const host = c.req.header("x-forwarded-host")?.split(",")[0]?.trim() || c.req.header("host") || null;
+  const p = publicUrlProblem(config.PUBLIC_BASE_URL) ?? originMismatch(config.PUBLIC_BASE_URL, host);
   if (!p) return null;
   if (!admin) return done(c, 422, `Slack can't connect yet. ${p.problem} Ask a server admin to set ${PUBLIC_URL_SETTING}.`);
   return done(c, 422, `Slack can't connect yet. ${p.problem}`, {}, { steps: p.steps, link: SETTINGS_LINK });

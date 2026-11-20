@@ -1,7 +1,7 @@
 /** PO-1436: a connected Slack workspace offers Disconnect; a pending install does not. */
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConnectStep, type SetupState } from "./SetupWizard";
+import { ConnectStep, ReadinessChecklist, wrongAddress, type SetupState } from "./SetupWizard";
 import type { SurfacesInstallRef } from "../../../lib/api";
 
 const install = (status: SurfacesInstallRef["status"]): SurfacesInstallRef => ({ id: "i1", surface: "slack", mode: "hosted", status, home_nest_id: null });
@@ -54,5 +54,14 @@ describe("ConnectStep readiness", () => {
     expect(out).toContain(`href="/settings"`);
     expect(out).toContain("setup-url-blocked");
     expect(out).not.toContain("setup-redirect-url");
+  });
+
+  it("a page opened at another address than the public base URL is flagged", () => {
+    expect(wrongAddress(ready, "https://nest.acme.com")).toBeNull();
+    expect(wrongAddress(ready, "http://localhost:3838")).toBe("http://localhost:3838");
+    expect(wrongAddress(ready, null)).toBeNull();
+    const out = renderToStaticMarkup(<ReadinessChecklist readiness={ready} here="http://localhost:3838" />);
+    expect(out.match(/data-ok="false"/g)?.length).toBe(1);
+    expect(out).toContain("You&#x27;re using this server at http://localhost:3838, but its public base URL is https://nest.acme.com.");
   });
 });
