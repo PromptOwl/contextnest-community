@@ -131,7 +131,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   131->132 context_pull_log (po-1252) — twin of GET /nests/:id/pulls[/:pullId]; a read model over the Community-only
 //   access log (node_access_events, with migration 093's pull_id/seq/hop/via/bytes) the engine does not model, so no
 //   engine op exists. Community-only exception, same maintainer decision 2026-10-24, listed in docs/prds/api-convergence.md Phase 3.
-const BASELINE = 132;
+//   132->135 Nest Plugins trio (CU-wdqcq05raz, src/mcp/plugin-tools.ts): context_plugins, context_plugin_run,
+//   context_plugin_configure — twins of /nests/:id/plugins; the nest_plugins registry is stored per-nest config,
+//   while the engine's `sync` ops take settings per call.
+const BASELINE = 135;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -25,6 +25,17 @@ import {
 
 const KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
+/**
+ * Nest Plugin secrets share this table (src/plugins/registry.ts) but belong to
+ * the plugin's settings, which only a nest admin edits: they are listed here
+ * (masked) so the store has one inventory, never written or deleted through
+ * this route, and never handed to the runner.
+ */
+const PLUGIN_KEY_PREFIX = "PLUGIN__";
+const isPluginKey = (key: string) => key.startsWith(PLUGIN_KEY_PREFIX);
+const PLUGIN_KEY_REFUSAL =
+  "PLUGIN__ keys hold Nest Plugin secrets — change them in the nest's plugin settings (PUT /nests/:id/plugins/:name), not here.";
+
 interface EnvRow {
   key: string;
   value: string;
@@ -72,6 +83,7 @@ envRoutes.put("/", requireWorkflowPlane, async (c) => {
       "key must look like an env var: A-Z, digits, underscores (e.g. SLACK_TOKEN)",
     );
   }
+  if (isPluginKey(key)) throw new ValidationError(PLUGIN_KEY_REFUSAL);
   if (typeof body.value !== "string" || !body.value) {
     throw new ValidationError("value is required");
   }
@@ -97,6 +109,7 @@ envRoutes.put("/", requireWorkflowPlane, async (c) => {
 envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const key = c.req.param("key")!;
+  if (isPluginKey(key)) throw new ValidationError(PLUGIN_KEY_REFUSAL);
   const db = getDb();
   const row = await db.get(
     "SELECT key FROM nest_env WHERE nest_id = ? AND key = ?",
@@ -128,10 +141,12 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
  * and resolving again from that would take the gateway key for an own key.
  */
 export async function storedEnvValues(nestId: string): Promise<Record<string, string>> {
-  const rows = (await getDb().all(
-    "SELECT key, value FROM nest_env WHERE nest_id = ?",
-    [nestId],
-  )) as Array<{ key: string; value: string }>
+  const rows = (
+    (await getDb().all(
+      "SELECT key, value FROM nest_env WHERE nest_id = ?",
+      [nestId],
+    )) as Array<{ key: string; value: string }>
+  ).filter((r) => !isPluginKey(r.key));
   // An unopenable row is left out rather than passed to the runner as
   // ciphertext, which would fail further away with a stranger error.
   const stored = (

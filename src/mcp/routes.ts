@@ -18,6 +18,7 @@ import { toolAnnotations, toolTitle } from "./annotations.js";
 import { SERVICE_VERSION } from "../shared/version.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
+import { PLUGIN_TOOL_DEFINITIONS } from "./plugin-tools.js";
 import { STREAM_TOOL, streamToolEnabled } from "./stream-tool.js";
 import { AGENT_TOOL_DEFINITIONS } from "./agent-tools.js";
 import { METACOGNITION_TOOL_DEFINITIONS } from "./metacognition-tools.js";
@@ -102,6 +103,9 @@ function nestToolDefinitions() {
     // decision ledger always (document threads too); the channel knowledge
     // view and the watcher follow the channels switch.
     ...MEMORY_TOOL_DEFINITIONS.filter((t) => config.EXPERIMENTAL_AGENT_STREAM || !MEMORY_CHANNEL_TOOLS.has(t.name)),
+    // Nest Plugins (CU-wdqcq05raz): FEATURE_PLUGINS, as the REST routes 404
+    // when off — independent of the workflow plane.
+    ...(config.FEATURE_PLUGINS ? PLUGIN_TOOL_DEFINITIONS : []),
   ];
 }
 
