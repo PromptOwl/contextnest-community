@@ -5570,6 +5570,14 @@ export interface SurfacesStatus {
   org_name: string | null;
   slack_hosted: boolean;
   disclosure: string;
+  /** po-1444: server admins only. What Slack setup needs from this server. */
+  readiness?: {
+    /** null when Slack can reach the public base URL. */
+    public_url: { problem: string; steps: string[] } | null;
+    redirect_url: string | null;
+    buffer_key: boolean;
+    model_key: boolean;
+  };
 }
 
 export interface SurfacesBinding {

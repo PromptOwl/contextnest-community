@@ -922,8 +922,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     onChange={(v) => set({ public_base_url: v })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    This server's public address — used for share links and
-                    SSO redirects. Leave empty if unsure.
+                    This server's public https address, used for share links,
+                    SSO redirects and Slack. Slack can't reach localhost or a
+                    private network address.
                   </p>
                 </div>
                 <div className="space-y-1.5">

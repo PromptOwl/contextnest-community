@@ -43,6 +43,9 @@ import {
   revokeLink,
 } from "./services/identity-service.js";
 import { listInstalls } from "./services/install-store.js";
+import { bufferKeyConfigured } from "./services/buffer-crypto.js";
+import { publicUrlProblem, slackUrls } from "./adapters/slack/manifest.js";
+import { resolveModelCredential } from "../shared/model-credential.js";
 import { createBindingWithListener } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
@@ -135,6 +138,18 @@ surfacesRoutes.get("/status", async (c) => {
       org_name: config.SURFACES_ORG_NAME ?? null,
       slack_hosted: hostedEnabled(),
       disclosure: SERVER_ADMIN_DISCLOSURE,
+      // po-1444: what Slack setup needs from this server, for the admin's
+      // checklist. Booleans and the public URL only, never a secret.
+      ...(orgAdmin
+        ? {
+            readiness: {
+              public_url: publicUrlProblem(config.PUBLIC_BASE_URL),
+              redirect_url: config.PUBLIC_BASE_URL ? slackUrls(config.PUBLIC_BASE_URL, "hosted").redirect : null,
+              buffer_key: bufferKeyConfigured(),
+              model_key: resolveModelCredential({}) !== null,
+            },
+          }
+        : {}),
     });
   } catch (err) {
     return handleError(c, err);
