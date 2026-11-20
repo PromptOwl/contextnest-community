@@ -42,6 +42,7 @@ import { createTurn, estimateCostUsd, type Usage } from "./model.js";
 import { runTool, toolsFor, mcpTokenFrom, defang, type ToolContext } from "./tools.js";
 import { notifyOn } from "./config.js";
 import { McpPool } from "./mcp-client.js";
+import { classifyRunFailure } from "../surfaces/services/judge-failure.js";
 
 /** Runs in flight, so shutdown and tests can wait for them. */
 const inFlight = new Set<Promise<void>>();
@@ -73,7 +74,7 @@ export async function recoverOrphanedRuns(opts: { olderThanMs?: number; nodeId?:
       ...(await usageFromSteps(r.id)),
       stopped_by: "crashed",
       error: "The server stopped while this run was in progress (a restart or crash). Nothing it did after its last step was kept.",
-    });
+    }, "server_stopped");
     closed++;
   }
   return closed;
@@ -228,9 +229,9 @@ async function closedUnderUs(runId: string): Promise<boolean> {
   return !r || r.status !== "running";
 }
 
-async function finish(runId: string, status: "succeeded" | "failed" | "cancelled", trace: unknown): Promise<void> {
+async function finish(runId: string, status: "succeeded" | "failed" | "cancelled", trace: unknown, reasonCode?: string): Promise<void> {
   try {
-    await closeRun(runId, { status, trace });
+    await closeRun(runId, { status, trace, reasonCode });
   } catch (err) {
     if (!(err instanceof ConflictError)) throw err; // already closed by a person
   }
@@ -312,7 +313,7 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   } catch (err) {
     // Only a missing document is "no instructions"; a storage error fails the run.
     if (!(err instanceof DocumentNotFoundError)) {
-      await finish(runId, "failed", { persona, error: describe(err) });
+      await finish(runId, "failed", { persona, error: describe(err) }, "nest_read_failed");
       return;
     }
   }
@@ -489,14 +490,16 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
       await finish(runId, "failed", {
         ...traceOf(),
         error: `Stopped at its ${caps.max_seconds}s limit before it finished. Raise caps.max_seconds or narrow its instructions.`,
-      });
+      }, "model_timeout");
     } else if (cancelled || (err instanceof ConflictError && (await closedUnderUs(runId)))) {
       // Cancelled by a person mid-run: the row is already terminal, but the
       // tokens it spent still belong in the trace.
       await recordCancelledUsage(runId, traceOf());
     } else {
       console.error(`[metacognition] run ${runId} failed`, err);
-      await finish(runId, "failed", { ...traceOf(), error: describe(err) });
+      // po-1452: the ledger reads runs.reason_code, not the trace's error text.
+      const failure = classifyRunFailure(err);
+      await finish(runId, "failed", { ...traceOf(), error: describe(err), http_status: failure.status }, failure.code);
     }
   } finally {
     clearTimeout(timer);

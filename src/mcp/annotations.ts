@@ -75,6 +75,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
   context_my_work: read("View my work", "Returns the caller's queue: mentions, reviews and requests, assignments, notifications."),
   context_versions: read("View version history", "Returns a document's version history."),
+  context_pull_log: read("View context pulls", "Returns the recorded retrievals and the documents each handed over."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
   // ─── Documents ──────────────────────────────────────────────────────────
@@ -107,6 +108,11 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_ask_nest: addOutside("Ask the nest", "Runs a Hootie turn as the caller: the question, the thread's text and retrieved documents go to the configured model provider (outside); with post, adds messages and files hootie-authored drafts for review — never publishes or edits what exists."),
   context_agents: overwrite("Agent profiles", "Lists and reads agent profiles (a query over existing data); with a description, replaces the agent's earlier description. A read-only key gets a list/read-only view."),
   context_handoff: add("Hand off a thread", "Adds a handoff message (which mentions the target, so it notifies or wakes them like any comment) or a status update; nothing is edited or removed."),
+  // Hire agents and recommend them (PO-1201, team chat C10).
+  context_hire_catalog: read("View agent catalog", "Lists the kinds of agent this server can offer the nest, with availability."),
+  context_hired_agents: read("List hired agents", "Lists the nest's hired agents, derived from existing rows."),
+  context_agent_recommendations: add("Agent recommendations", "Lists rule-based recommendations; dismiss adds the caller's own mark and removes nothing shared."),
+  context_hire_agent: overwriteOutside("Hire or release agent", "Hire creates a metacognition agent, an agent webhook (the server then POSTs to that outside URL) or a nest-scoped key; let_go deletes one of those."),
   context_promote_thread: addOutside("Promote thread to node", "Creates a decision or task node from a thread and replies in it; a title already in use is refused. On a nest with a docs site, this can change a public page."),
   context_comment: add("Add comment", "Adds a comment; it never edits an existing one. Notifies nest members."),
   context_message: overwrite("Act on message", "Reacts to, pins or saves a channel message; edit replaces the caller's own text (history kept) and delete leaves a tombstone. Nothing leaves the nest."),

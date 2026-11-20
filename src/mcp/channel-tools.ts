@@ -161,7 +161,7 @@ const callerOf = (ctx: McpToolContext): ChannelCaller => ({
  */
 export async function channelsHint(ctx: McpToolContext): Promise<string> {
   if (!config.EXPERIMENTAL_AGENT_STREAM) return "";
-  const { channels } = await listChannels(callerOf(ctx)).catch(() => ({ channels: [] as ChannelView[] }));
+  const { channels } = await listChannels(callerOf(ctx), { recommendations: false }).catch(() => ({ channels: [] as ChannelView[] }));
   if (channels.length === 0) return "";
   return ` Channels here: ${channels.map((c) => `#${c.name}`).join(", ")}. Post with context_comment { channel: "<name>", body }.`;
 }

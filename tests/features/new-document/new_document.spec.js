@@ -3,8 +3,11 @@
  *
  * Page under test: the document editor opened for a new document
  * (ui/src/components/DocumentEditor.tsx) from the nest page
- * (ui/src/components/NestView.tsx) — the header's New Document button, the
- * Overview's "New document in <folder>" and the Documents tab's "New here".
+ * (ui/src/components/NestView.tsx) — the header's New Document button, a
+ * Documents folder's "New document in <folder>" and the Documents tab's
+ * "New here". Documents is the nest's home (po-1213); the cases that drove
+ * the retired Overview tab run against it (po-1224) and skip only while the
+ * server under test still has the Overview.
  * What the editor creates is read back through the REST API.
  *
  * Conventions
@@ -21,6 +24,7 @@
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { requireNestHome } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 
@@ -65,239 +69,228 @@ test.describe('New document', () => {
     return api.findDocument(nest.id, nodeId);
   }
 
-  // CN-CREATE-001 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-001: Verify that New Document opens a blank editor with a disabled Publish button', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-blank');
+  test('CN-CREATE-001: Verify that New Document opens a blank editor with a disabled Publish button', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-blank');
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
 
-  //   await expect(page.breadcrumb).toContainText(nest.name);
-  //   await expect(page.breadcrumb).toContainText('New document');
-  //   await expect(page.titleInput).toHaveValue('');
-  //   await expect(page.tagInput).toBeVisible();
-  //   expect(await page.folderPath()).toBe('Root');
-  //   await expect(page.publishButton).toBeDisabled();
-  // });
+    await expect(page.breadcrumb).toContainText(nest.name);
+    await expect(page.breadcrumb).toContainText('New document');
+    await expect(page.titleInput).toHaveValue('');
+    await expect(page.tagInput).toBeVisible();
+    expect(await page.folderPath()).toBe('Root');
+    await expect(page.publishButton).toBeDisabled();
+  });
 
-  // CN-CREATE-002 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-002: Verify that Publish stays disabled until both a title and content are entered', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-gate');
+  test('CN-CREATE-002: Verify that Publish stays disabled until both a title and content are entered', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-gate');
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await expect(page.publishButton).toBeDisabled();
-  //   expect(await page.saveHint()).toBe('Add a title and content first.');
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await expect(page.publishButton).toBeDisabled();
+    expect(await page.saveHint()).toBe('Add a title and content first.');
 
-  //   await page.titleInput.fill('Create Probe');
-  //   await expect(page.publishButton).toBeDisabled();
+    await page.titleInput.fill('Create Probe');
+    await expect(page.publishButton).toBeDisabled();
 
-  //   await page.typeBody('Probe body text.');
-  //   await expect(page.publishButton).toBeEnabled();
-  //   await expect.poll(() => page.saveHint()).toBe('Saves and publishes — it goes live now.');
-  // });
+    await page.typeBody('Probe body text.');
+    await expect(page.publishButton).toBeEnabled();
+    await expect.poll(() => page.saveHint()).toBe('Saves and publishes — it goes live now.');
+  });
 
-  // CN-CREATE-003 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-003: Verify that Publish stays disabled when the title or the body contains only spaces', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-spaces');
+  test('CN-CREATE-003: Verify that Publish stays disabled when the title or the body contains only spaces', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-spaces');
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
 
-  //   // A title of spaces, with a real body.
-  //   await page.titleInput.fill('   ');
-  //   await page.typeBody('Body text.');
-  //   await expect(page.publishButton).toBeDisabled();
+    // A title of spaces, with a real body.
+    await page.titleInput.fill('   ');
+    await page.typeBody('Body text.');
+    await expect(page.publishButton).toBeDisabled();
 
-  //   // A real title, with a body of spaces.
-  //   await page.titleInput.fill('Real title');
-  //   await expect(page.publishButton).toBeEnabled();
-  //   await page.body.click();
-  //   await page.page.keyboard.press('ControlOrMeta+a');
-  //   await page.page.keyboard.press('Backspace');
-  //   await page.page.keyboard.type('   ');
-  //   await expect(page.publishButton).toBeDisabled();
-  // });
+    // A real title, with a body of spaces.
+    await page.titleInput.fill('Real title');
+    await expect(page.publishButton).toBeEnabled();
+    await page.body.click();
+    await page.page.keyboard.press('ControlOrMeta+a');
+    await page.page.keyboard.press('Backspace');
+    await page.page.keyboard.type('   ');
+    await expect(page.publishButton).toBeDisabled();
+  });
 
-  // CN-CREATE-004 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-004: Verify that publishing a new document confirms it, returns to the nest and lists it as Published', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-publish');
+  test('CN-CREATE-004: Verify that publishing a new document confirms it, returns to the nest and lists it as Published', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-publish');
+    await requireNestHome(test, expect, api, commonFunction);
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.fillDocument('Create Probe', 'Probe body text.');
-  //   await page.publishButton.click();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.fillDocument('Create Probe', 'Probe body text.');
+    await page.publishButton.click();
 
-  //   await expect(page.toast(publishedToast('Create Probe'))).toBeVisible(WRITE);
-  //   await expect(page.selectedTab).toHaveText('Overview', WRITE);
-  //   const doc = await landed(api, nest, 'nodes/create-probe');
-  //   expect(doc.status).toBe('published');
+    await expect(page.toast(publishedToast('Create Probe'))).toBeVisible(WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
+    const doc = await landed(api, nest, 'nodes/create-probe');
+    expect(doc.status).toBe('published');
 
-  //   await page.tab('Documents').click();
-  //   const row = page.main.getByTestId('document-row-nodes/create-probe');
-  //   await expect(row).toContainText('Create Probe', WRITE);
-  //   await expect(row).toContainText('Published');
-  //   await expect(row).toContainText('v1');
-  //   await expect(
-  //     page.main.getByText('Total Documents', { exact: true }).locator('xpath=following-sibling::*[1]')
-  //   ).toHaveText('1');
-  // });
+    const row = page.main.getByTestId('document-row-nodes/create-probe');
+    await expect(row).toContainText('Create Probe', WRITE);
+    await expect(row).toContainText('Published');
+    await expect(row).toContainText('v1');
+    await expect(page.facts).toContainText('1 document');
+  });
 
-  // CN-CREATE-005 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-005: Verify that a tag added before publishing is saved with the document', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-tag');
+  test('CN-CREATE-005: Verify that a tag added before publishing is saved with the document', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-tag');
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.fillDocument('Tagged Probe', 'Tagged body.');
-  //   await page.addTag('probe-tag');
-  //   const tagToast = page.toast('Tag "probe-tag" added');
-  //   await expect(tagToast).toBeVisible();
-  //   await expect(tagToast).toContainText('Save the document to keep it.');
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.fillDocument('Tagged Probe', 'Tagged body.');
+    await page.addTag('probe-tag');
+    const tagToast = page.toast('Tag "probe-tag" added');
+    await expect(tagToast).toBeVisible();
+    await expect(tagToast).toContainText('Save the document to keep it.');
 
-  //   await page.publishButton.click();
-  //   await expect(page.toast(publishedToast('Tagged Probe'))).toBeVisible(WRITE);
-  //   const doc = await landed(api, nest, 'nodes/tagged-probe');
-  //   expect(doc.tags).toContain('#probe-tag');
+    await page.publishButton.click();
+    await expect(page.toast(publishedToast('Tagged Probe'))).toBeVisible(WRITE);
+    const doc = await landed(api, nest, 'nodes/tagged-probe');
+    expect(doc.tags).toContain('#probe-tag');
 
-  //   await page.tab('Documents').click();
-  //   await expect(page.main.getByTestId('document-row-nodes/tagged-probe')).toContainText('#probe-tag', WRITE);
-  // });
+    await page.tab('Documents').click();
+    await expect(page.main.getByTestId('document-row-nodes/tagged-probe')).toContainText('#probe-tag', WRITE);
+  });
 
-  // CN-CREATE-006 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-006: Verify that a title with special characters is kept as typed and the document gets a clean address', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-special');
-  //   const title = 'Q1 Plan: Draft!';
+  test('CN-CREATE-006: Verify that a title with special characters is kept as typed and the document gets a clean address', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-special');
+    const title = 'Q1 Plan: Draft!';
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.fillDocument(title, 'Plan body.');
-  //   await page.publishButton.click();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.fillDocument(title, 'Plan body.');
+    await page.publishButton.click();
 
-  //   await expect(page.toast(publishedToast(title))).toBeVisible(WRITE);
-  //   const doc = await landed(api, nest, 'nodes/q1-plan-draft');
-  //   expect(doc.title).toBe(title);
+    await expect(page.toast(publishedToast(title))).toBeVisible(WRITE);
+    const doc = await landed(api, nest, 'nodes/q1-plan-draft');
+    expect(doc.title).toBe(title);
 
-  //   await page.tab('Documents').click();
-  //   const row = page.main.getByTestId('document-row-nodes/q1-plan-draft');
-  //   await expect(row).toContainText(title, WRITE);
-  //   await row.getByText(title, { exact: true }).click();
-  //   await expect(page.page).toHaveURL(/q1-plan-draft/);
-  // });
+    await page.tab('Documents').click();
+    const row = page.main.getByTestId('document-row-nodes/q1-plan-draft');
+    await expect(row).toContainText(title, WRITE);
+    await row.getByText(title, { exact: true }).click();
+    await expect(page.page).toHaveURL(/q1-plan-draft/);
+  });
 
-  // CN-CREATE-007 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-007: Verify that "New document in <folder>" from the Overview creates the document inside that folder', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-overview-folder');
-  //   await seedAlpha(api, nest);
+  test('CN-CREATE-007: Verify that "New document in <folder>" on a Documents folder creates the document inside that folder', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-overview-folder');
+    await requireNestHome(test, expect, api, commonFunction);
+    await seedAlpha(api, nest);
 
-  //   await page.gotoNest(nest.id);
-  //   await expect(page.contents).toBeVisible();
-  //   await page.contentsFolderAction('Alpha', 'New document in Alpha');
-  //   await page.titleInput.waitFor({ state: 'visible' });
-  //   expect(await page.folderPath()).toBe('Root / Alpha');
+    await page.gotoNest(nest.id);
+    await expect(page.folderHeader('alpha')).toBeVisible(WRITE);
+    await page.folderAction('alpha', 'New document in Alpha');
+    await page.titleInput.waitFor({ state: 'visible' });
+    expect(await page.folderPath()).toBe('Root / Alpha');
 
-  //   await page.fillDocument('In Alpha', 'Folder body.');
-  //   await page.publishButton.click();
+    await page.fillDocument('In Alpha', 'Folder body.');
+    await page.publishButton.click();
 
-  //   await expect(page.toast(publishedToast('In Alpha'))).toBeVisible(WRITE);
-  //   await landed(api, nest, 'nodes/alpha/in-alpha');
-  //   // Back on the Overview, Alpha now holds both documents.
-  //   await expect(page.contents.getByLabel('2 documents')).toBeVisible(WRITE);
-  // });
+    await expect(page.toast(publishedToast('In Alpha'))).toBeVisible(WRITE);
+    await landed(api, nest, 'nodes/alpha/in-alpha');
+    // Back on Documents, Alpha now holds both documents.
+    await expect(page.folderHeader('alpha')).toHaveText(/Alpha\s*2/, WRITE);
+  });
 
-  // CN-CREATE-008 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-008: Verify that "New here" in a folder opened in the Documents tab starts the new document in that folder', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-new-here');
-  //   await seedAlpha(api, nest);
+  test('CN-CREATE-008: Verify that "New here" in a folder opened in the Documents tab starts the new document in that folder', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-new-here');
+    await requireNestHome(test, expect, api, commonFunction);
+    await seedAlpha(api, nest);
 
-  //   await page.gotoNest(nest.id);
-  //   await expect(page.contents).toBeVisible();
-  //   await page.contentsFolderAction('Alpha', 'Open Alpha in Documents');
-  //   await expect(page.selectedTab).toHaveText('Documents');
-  //   await expect(page.main.getByText('All documents', { exact: true })).toBeVisible();
+    await page.gotoNest(nest.id);
+    await page.openFolderInDocuments('Alpha');
+    await expect(page.selectedTab).toHaveText('Documents');
+    await expect(page.main.getByText('All documents', { exact: true })).toBeVisible();
 
-  //   await page.newHereButton.click();
-  //   await page.titleInput.waitFor({ state: 'visible' });
-  //   expect(await page.folderPath()).toBe('Root / Alpha');
+    await page.newHereButton.click();
+    await page.titleInput.waitFor({ state: 'visible' });
+    expect(await page.folderPath()).toBe('Root / Alpha');
 
-  //   await page.fillDocument('Here Doc', 'Here body.');
-  //   await page.publishButton.click();
-  //   await expect(page.toast(publishedToast('Here Doc'))).toBeVisible(WRITE);
-  //   await landed(api, nest, 'nodes/alpha/here-doc');
-  // });
+    await page.fillDocument('Here Doc', 'Here body.');
+    await page.publishButton.click();
+    await expect(page.toast(publishedToast('Here Doc'))).toBeVisible(WRITE);
+    await landed(api, nest, 'nodes/alpha/here-doc');
+  });
 
-  // CN-CREATE-009 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test("CN-CREATE-009: Verify that the editor's folder picker files the new document in an existing folder or a new subfolder", async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-picker');
-  //   await seedAlpha(api, nest);
+  test("CN-CREATE-009: Verify that the editor's folder picker files the new document in an existing folder or a new subfolder", async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-picker');
+    await seedAlpha(api, nest);
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
 
-  //   // An existing folder.
-  //   await page.openFolderPicker();
-  //   await expect(page.folderMenu).toContainText('Existing folders');
-  //   await page.folderMenu.getByRole('menuitem', { name: 'Alpha', exact: true }).click();
-  //   await expect.poll(() => page.folderPath()).toBe('Root / Alpha');
+    // An existing folder.
+    await page.openFolderPicker();
+    await expect(page.folderMenu).toContainText('Existing folders');
+    await page.folderMenu.getByRole('menuitem', { name: 'Alpha', exact: true }).click();
+    await expect.poll(() => page.folderPath()).toBe('Root / Alpha');
 
-  //   // A new subfolder under it.
-  //   await page.createSubfolder('Specs');
-  //   await expect.poll(() => page.folderPath()).toBe('Root / Alpha / Specs');
+    // A new subfolder under it.
+    await page.createSubfolder('Specs');
+    await expect.poll(() => page.folderPath()).toBe('Root / Alpha / Specs');
 
-  //   await page.fillDocument('Deep Spec', 'Spec body.');
-  //   await page.publishButton.click();
-  //   await expect(page.toast(publishedToast('Deep Spec'))).toBeVisible(WRITE);
-  //   await landed(api, nest, 'nodes/alpha/specs/deep-spec');
-  // });
+    await page.fillDocument('Deep Spec', 'Spec body.');
+    await page.publishButton.click();
+    await expect(page.toast(publishedToast('Deep Spec'))).toBeVisible(WRITE);
+    await landed(api, nest, 'nodes/alpha/specs/deep-spec');
+  });
 
-  // CN-CREATE-010 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-010: Verify that the Type picker offers Document, Artifact, Table, Task, View, Agent, Skill and Tool, and the chosen type is saved', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-type');
+  test('CN-CREATE-010: Verify that the Type picker offers Document, Artifact, Table, Task, View, Agent, Skill and Tool, and the chosen type is saved', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-type');
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   expect(await page.typeOptions()).toEqual(['Document', 'Artifact', 'Table', 'Task', 'View', 'Agent', 'Skill', 'Tool']);
-  //   expect(await page.selectedType()).toBe('Document');
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    expect(await page.typeOptions()).toEqual(['Document', 'Artifact', 'Table', 'Task', 'View', 'Agent', 'Skill', 'Tool']);
+    expect(await page.selectedType()).toBe('Document');
 
-  //   await page.fillDocument('Task Probe', 'Task body.');
-  //   await page.chooseType('Task');
-  //   await expect.poll(() => page.selectedType()).toBe('Task');
+    await page.fillDocument('Task Probe', 'Task body.');
+    await page.chooseType('Task');
+    await expect.poll(() => page.selectedType()).toBe('Task');
 
-  //   await page.publishButton.click();
-  //   await expect(page.toast(publishedToast('Task Probe'))).toBeVisible(WRITE);
-  //   const doc = await landed(api, nest, 'nodes/task-probe');
-  //   expect(doc.type).toBe('task');
-  // });
+    await page.publishButton.click();
+    await expect(page.toast(publishedToast('Task Probe'))).toBeVisible(WRITE);
+    const doc = await landed(api, nest, 'nodes/task-probe');
+    expect(doc.type).toBe('task');
+  });
 
   test('CN-CREATE-011: Verify that switching a document with content to Artifact asks for confirmation, and Cancel keeps it a Document', async ({
     primary_user,
@@ -320,50 +313,48 @@ test.describe('New document', () => {
     expect(await page.selectedType()).toBe('Document');
   });
 
-  // CN-CREATE-012 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-012: Verify that a document written in Markdown mode is saved exactly as typed', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-markdown');
-  //   const markdown = '# Heading One\n\n- item one\n- item two\n\n**bold text**';
+  test('CN-CREATE-012: Verify that a document written in Markdown mode is saved exactly as typed', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-markdown');
+    const markdown = '# Heading One\n\n- item one\n- item two\n\n**bold text**';
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.markdownButton.click();
-  //   await expect(page.markdownSource).toBeVisible();
-  //   await expect(page.richEditorButton).toBeVisible();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.markdownButton.click();
+    await expect(page.markdownSource).toBeVisible();
+    await expect(page.richEditorButton).toBeVisible();
 
-  //   await page.titleInput.fill('Markdown Made');
-  //   await page.markdownSource.fill(markdown);
-  //   await page.publishButton.click();
+    await page.titleInput.fill('Markdown Made');
+    await page.markdownSource.fill(markdown);
+    await page.publishButton.click();
 
-  //   await expect(page.toast(publishedToast('Markdown Made'))).toBeVisible(WRITE);
-  //   const doc = await landed(api, nest, 'nodes/markdown-made');
-  //   expect(doc.content.trim()).toBe(markdown);
-  // });
+    await expect(page.toast(publishedToast('Markdown Made'))).toBeVisible(WRITE);
+    const doc = await landed(api, nest, 'nodes/markdown-made');
+    expect(doc.content.trim()).toBe(markdown);
+  });
 
-  // CN-CREATE-013 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-013: Verify that a new document with the same title as an existing one is refused and the editor stays open', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-duplicate');
-  //   await api.createDocument(nest.id, { title: 'Create Probe', content: '# Create Probe\n\nOriginal body.\n' });
+  test('CN-CREATE-013: Verify that a new document with the same title as an existing one is refused and the editor stays open', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-duplicate');
+    await api.createDocument(nest.id, { title: 'Create Probe', content: '# Create Probe\n\nOriginal body.\n' });
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.fillDocument('Create Probe', 'Second body.');
-  //   await page.publishButton.click();
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.fillDocument('Create Probe', 'Second body.');
+    await page.publishButton.click();
 
-  //   await expect(page.errorAlert.filter({ hasText: 'A document already exists at nodes/create-probe.' })).toContainText(
-  //     'Update it, or create this one under a different folder or title.',
-  //     WRITE
-  //   );
-  //   await expect(page.titleInput).toHaveValue('Create Probe');
-  //   const docs = await api.listDocuments(nest.id);
-  //   expect(docs.map((d) => d.id)).toEqual(['nodes/create-probe']);
-  // });
+    await expect(page.errorAlert.filter({ hasText: 'A document already exists at nodes/create-probe.' })).toContainText(
+      'Update it, or create this one under a different folder or title.',
+      WRITE
+    );
+    await expect(page.titleInput).toHaveValue('Create Probe');
+    const docs = await api.listDocuments(nest.id);
+    expect(docs.map((d) => d.id)).toEqual(['nodes/create-probe']);
+  });
 
   test('CN-CREATE-014: Verify that leaving a new document with unsaved changes asks first, and Discard leaves without creating anything', async ({
     primary_user,
@@ -456,27 +447,27 @@ test.describe('New document', () => {
     await expect(page.leaveDialog).toBeHidden();
   });
 
-  // CN-CREATE-018 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
-  // test('CN-CREATE-018: Verify that a new document in a nest with stewardship ON is saved as a Draft', async ({
-  //   primary_user,
-  //   commonFunction,
-  // }) => {
-  //   const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-governed');
-  //   await api.requireReview(nest.id);
+  test('CN-CREATE-018: Verify that a new document in a nest with stewardship ON is saved as a Draft', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'newdoc-governed');
+    await requireNestHome(test, expect, api, commonFunction);
+    await api.requireReview(nest.id);
 
-  //   await page.gotoNest(nest.id);
-  //   await page.openNewDocument();
-  //   await page.fillDocument('Governed Draft', 'Governed body.');
+    await page.gotoNest(nest.id);
+    await page.openNewDocument();
+    await page.fillDocument('Governed Draft', 'Governed body.');
 
-  //   await expect(page.saveDraftButton).toBeEnabled();
-  //   await expect(page.publishButton).toHaveCount(0);
-  //   expect(await page.saveHint(page.saveDraftButton)).toBe(
-  //     "Saves your changes as a draft. Doesn't publish or submit for review."
-  //   );
+    await expect(page.saveDraftButton).toBeEnabled();
+    await expect(page.publishButton).toHaveCount(0);
+    expect(await page.saveHint(page.saveDraftButton)).toBe(
+      "Saves your changes as a draft. Doesn't publish or submit for review."
+    );
 
-  //   await page.saveDraftButton.click();
-  //   await expect(page.toast('"Governed Draft" saved as a draft.')).toBeVisible(WRITE);
-  //   await expect(page.selectedTab).toHaveText('Overview', WRITE);
-  //   await expect.poll(() => api.nodeStatus(nest.id, 'nodes/governed-draft'), WRITE).toBe('draft');
-  // });
+    await page.saveDraftButton.click();
+    await expect(page.toast('"Governed Draft" saved as a draft.')).toBeVisible(WRITE);
+    await expect(page.selectedTab).toHaveText('Documents', WRITE);
+    await expect.poll(() => api.nodeStatus(nest.id, 'nodes/governed-draft'), WRITE).toBe('draft');
+  });
 });

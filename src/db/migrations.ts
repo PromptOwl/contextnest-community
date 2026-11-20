@@ -2559,6 +2559,29 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("090_control_room_run_totals");
   }
 
+  // 093: context pull replay (po-1252). The access log already records one row
+  //   per document a read handed over; these columns let the rows of one call
+  //   be read back as one pull: pull_id groups them, seq is the document's
+  //   place in the payload, hop/via say how far from a match it was and which
+  //   document it was reached from (where the server ran the traversal), and
+  //   bytes is the size of what was handed over. All NULL on older rows.
+  if (!hasMigration("093_access_pull_trace")) {
+    const accessCols093 = new Set(
+      (db.prepare("PRAGMA table_info(node_access_events)").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (accessCols093.size) {
+      db.transaction(() => {
+        if (!accessCols093.has("pull_id")) db.exec("ALTER TABLE node_access_events ADD COLUMN pull_id TEXT");
+        if (!accessCols093.has("seq")) db.exec("ALTER TABLE node_access_events ADD COLUMN seq INTEGER");
+        if (!accessCols093.has("hop")) db.exec("ALTER TABLE node_access_events ADD COLUMN hop INTEGER");
+        if (!accessCols093.has("via")) db.exec("ALTER TABLE node_access_events ADD COLUMN via TEXT");
+        if (!accessCols093.has("bytes")) db.exec("ALTER TABLE node_access_events ADD COLUMN bytes INTEGER");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_node_access_pull ON node_access_events(nest_id, pull_id)");
+      })();
+    }
+    recordMigration("093_access_pull_trace");
+  }
+
   // 094: caller attribution on comment-thread messages (PO-1179, agent team
   //   stream channels). Nullable `client_json`, like the version rows (044):
   //   the "<agent>, on behalf of <human>" label. A label, never an identity.
@@ -2794,6 +2817,30 @@ export function runMigrations(db: Database.Database): void {
     // runner: a row saved before the rule would be woken by every @hootie.
     db.prepare("DELETE FROM agent_webhooks WHERE LOWER(handle) IN ('hootie', 'nest', 'channel', 'here', 'everyone')").run();
     recordMigration("099_agent_profiles");
+  }
+
+  // 100: hired agents (PO-1201, team chat C10). "Hire" creates the existing
+  //   thing underneath — a metacognition agent, an agent webhook, a nest-scoped
+  //   key — and the hired list is derived from those rows. Hootie is a server
+  //   switch with no per-nest row, so a nest that hired it gets ONE row here;
+  //   A key agent gets a row too, with `ref` = the api_keys id it minted: a
+  //   key agent is one that was HIRED, never a personal key inferred from its
+  //   label (security review). Nothing else is stored. Dismissed
+  //   recommendations are the caller's own `stream_marks` rows (kind
+  //   'recommendation'), no table of their own.
+  if (!hasMigration("100_hired_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS hired_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        hired_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        ref TEXT,
+        PRIMARY KEY (nest_id, kind, handle)
+      );
+    `);
+    recordMigration("100_hired_agents");
   }
 }
 

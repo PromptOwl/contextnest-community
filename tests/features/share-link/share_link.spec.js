@@ -79,6 +79,10 @@ test.describe('Share a document', () => {
    * resolve to the dying item and be detached mid-click.
    */
   async function openMoreMenu(page) {
+    // The item waits for the document (PO-1396). On a deployed server the menu
+    // is on the page while "Loading document..." still shows, so wait for the
+    // title, which renders only once the document has loaded.
+    await page.getByTestId('document-editor-title').first().waitFor({ state: 'visible', ...WRITE });
     const trigger = page.getByTestId('document-editor-more');
     await expect(page.getByRole('menu')).toHaveCount(0, WRITE);
     await trigger.click();

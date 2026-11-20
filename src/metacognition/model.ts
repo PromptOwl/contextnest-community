@@ -39,6 +39,9 @@ export interface TurnResult {
  */
 const plainModels = new Set<string>();
 
+/** Models (per endpoint) that refused a `temperature` and took the call without it. */
+const noTemperatureModels = new Set<string>();
+
 /**
  * Non-streaming on purpose: a turn is a bounded `max_tokens` (the loop caps
  * it), the loop needs the whole message before it can run tools, and nothing
@@ -67,7 +70,22 @@ export async function createTurn(params: {
     tools: request.tools,
   };
   if (request.temperature !== undefined) {
-    return (await client.messages.create({ ...base, temperature: request.temperature }, { signal })) as TurnResult;
+    // Current Claude models 400 on a non-default temperature (po-1407): retry once
+    // at the default and remember the model. Any other 400 is thrown.
+    if (!noTemperatureModels.has(key)) {
+      try {
+        return (await client.messages.create({ ...base, temperature: request.temperature }, { signal })) as TurnResult;
+      } catch (err) {
+        const e = err as { status?: number; error?: { error?: { message?: string } }; message?: string };
+        const msg = `${e?.error?.error?.message ?? ""} ${e?.message ?? ""}`.toLowerCase();
+        // The API's invalid_request_error names the parameter; gateways keep the wording.
+        if (e?.status !== 400 || !/temperature|sampling/.test(msg)) throw err;
+        const res = (await client.messages.create(base, { signal })) as TurnResult;
+        if (noTemperatureModels.size < 100) noTemperatureModels.add(key); // hard bound; one entry per configured model
+        return res;
+      }
+    }
+    return (await client.messages.create(base, { signal })) as TurnResult;
   }
   if (!plainModels.has(key)) {
     try {

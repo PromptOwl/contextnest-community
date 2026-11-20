@@ -83,6 +83,27 @@ describe("channel nodes are kept out of the document surfaces (PO-1189)", () => 
     expect(withoutChannelsInCensus(census, [ops, retired], 0).folders).toEqual([{ path: "channels", count: 1, total: 1 }]);
   });
 
+  it("AC-C3-15 takes conversation nodes out of their folder too (a dm is not a document)", () => {
+    const dm = doc("nodes/conversations/abc", ["#conversation", "#conversation:dm", "#private"]);
+    const census = {
+      total: 4,
+      folders: [
+        { path: "channels", count: 1, total: 1 },
+        { path: "conversations", count: 2, total: 2 },
+        { path: "decisions", count: 1, total: 1 },
+      ],
+      tags: { "#channel": 1, "#conversation": 2 },
+      types: { document: 4 },
+      statuses: { published: 4 },
+      authors: [],
+      editedLast7d: 0,
+      recent: [],
+    };
+    const gdm = doc("nodes/conversations/def", ["#conversation", "#conversation:group"]);
+    expect(isChannelDoc(dm)).toBe(true);
+    expect(withoutChannelsInCensus(census, [ops, dm, gdm], 0).folders).toEqual([{ path: "decisions", count: 1, total: 1 }]);
+  });
+
   it("leaves a census with no channels as it is", () => {
     const census = { total: 1, folders: [], tags: {}, types: { document: 1 }, statuses: { published: 1 }, authors: [], editedLast7d: 1, recent: [] };
     expect(withoutChannelsInCensus(census, [], 0)).toBe(census);

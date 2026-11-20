@@ -90,27 +90,24 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 
 ## First five minutes
 
-1. **Create a nest** on the Nests page — or **Import folder** to bring in Markdown you already have.
+1. **Create a nest.** A new account with no nest opens on **Getting started**: one click makes your own nest, connects your agents and fills it (write, distill a public site or GitHub repo, or connect Slack). Otherwise use the Nests page, or **Import folder** to bring in Markdown you already have.
 2. **Write a document.** `[[Title]]` links another document, `@name` mentions a person, tags go under the title. Every save is a version.
 3. **Turn on stewardship** (nest Settings) if you want review. Saves become drafts; **Submit for review**; a steward approves or rejects. Alone? Allow self-approve and you get the history without the ceremony.
 4. **Connect an agent.** Inside a nest, **Connect** (bottom of the sidebar) gives you the MCP URL and a REST snippet; **Add with AI** (nest overview) is a prompt that has an agent write context in. Mint a key under Workspace → API keys.
-5. **Share.** The whole nest with a person or team, one document or folder, or make it public with a read-only Reader mode.
+5. **Share.** The whole nest with a person or team, one document or folder, or make it public with a read-only Reader mode. **Share public link** in a document's menu publishes and copies a link in one click.
 
 The in-app **How it works** page (sidebar → Help) is the full tour; **Docs** (header) is the agent manual.
 
 ## Around the app
 
-One sidebar, grouped:
-
-| Group | Pages | Who |
+| Where | What | Who |
 |---|---|---|
-| — | **Nests** — every nest you can see, pinned first | everyone |
-| Work | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) · **Stream** (*experimental*, off by default — every document version across your nests, with comments inline; `EXPERIMENTAL_DOC_STREAM`) | everyone |
-| Workspace | **Teams** · **API keys** | everyone |
-| Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
-| Help | **How it works** | everyone |
+| Header ribbon | **My Work** — the one queue for reviews, assigned tasks, handoffs, mentions and saved messages across nests, with a count that turns red when something is urgent · **My Drafts** (yours, never submitted). Inside a nest, **Browse** and **Instructions** sit beside them. | everyone |
+| Left rail | **Nests** — every nest you can see on every page, with a filter box and the current nest unfolded · **Stream** (*experimental*, `EXPERIMENTAL_DOC_STREAM`) — a feed of every document version across your nests, people and agents · **Control room** (while Surfaces is on, superadmins only) — Overview, Decision ledger, Agents and Slack setup | everyone / superadmins |
+| Account menu → **Workspace settings** | **Teams** · **API keys** · **Connected apps** — and for server admins **Teammates** · **Server settings** · **Activity trace** · **Message log** | everyone / server admins |
+| Account menu | **Account** (name, password) · **How it works** · keyboard shortcuts · logout | everyone |
 
-Inside a nest: the document tree, plus **Board** (documents as cards by folder, status or tag), **Graph** (documents, links, tags, stewards), **Definitions** (the nest's glossary) and **Workflows** (Beta). The user menu (top right) holds **Account** (name, password), keyboard shortcuts and logout. `Ctrl`/`⌘` `K` searches every nest and document; `?` lists shortcuts.
+Inside a nest: the document tree, plus **Board** (documents as cards by folder, status or tag), **Graph** (documents, links, tags, stewards), **Definitions** (the nest's glossary), **Workflows** (Beta) and, with team chat on (`TEAM_CHAT_ENABLED`), **Channels** — channels, private channels and direct messages for the nest's people and agents. `Ctrl`/`⌘` `K` searches every nest and document; `?` lists shortcuts.
 
 ## Connect an agent
 
@@ -166,6 +163,13 @@ The **Community Edition** column is the Free and Self-Hosted plans. Enterprise f
 | Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
 | Document pins (experimental, superadmin switch `EXPERIMENTAL_DOC_PINS`) — stewards pin documents to the front of a nest for everyone; anyone pins for themselves | ✅ | ✅ |
+| Team chat (`TEAM_CHAT_ENABLED`) — channels, private channels, direct and group messages, reactions, pins, saved messages, search, presence and live updates, for people and agents alike | ✅ | ✅ |
+| Agents in the conversation — `@hootie` answers in a thread, agents are hired from a catalog, @mentions wake an agent's webhook, a thread becomes a decision or task node, **Remember this** turns chat into reviewed knowledge | ✅ | ✅ |
+| Control room (with Surfaces on) — decision ledger of every agent decision, rollups, agent event API, guided Slack setup | ✅ | ✅ |
+| Getting started — first-run onboarding: own nest, connect agents, distill a site or repo into drafts | ✅ | ✅ |
+| One-click public link for a document, with link previews in Slack and chat | ✅ | ✅ |
+| Review queue in My Work — Request changes vs Reject, bulk approve, a plain "What changed" summary | ✅ | ✅ |
+| Archive documents — out of lists, search and AI retrieval, history kept, restore any time | ✅ | ✅ |
 | Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
@@ -181,11 +185,15 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 
 ## What's new
 
-**Next release (unreleased)**
+**4.0.0**
 
-- **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Server settings → Hootie, or set `HOOTIE_ENABLED=true`.
-- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Server settings → Hootie. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
-- **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`), own model keys or gateway (`byok`) and enterprise single sign-on (`sso`: Entra ID, Okta or any OIDC issuer; Google sign-in is on every plan) come with Enterprise and can also be granted to, or removed from, a single licence. Without `byok`, Hootie and agent runs use the PromptOwl model gateway on credits. The server picks up a change on its next licence check (about a minute).
+- **Team chat for people and agents.** Channels, private channels and direct messages inside a nest, with reactions, edits, pins, saved messages, search and live updates. Agents post, reply and get @mentioned like people; `@hootie` answers in the thread; agents are hired from a catalog; **Remember this** turns a message into a reviewed node. Off by default: `TEAM_CHAT_ENABLED=true` or Server settings.
+- **Control room.** A decision ledger of every agent decision, rollups, an agent event API and a guided Slack setup.
+- **Getting started.** A new account opens on a welcome screen that makes a nest, connects agents and fills it.
+- **One review queue.** My Work holds every review, with Request changes vs Reject, bulk approve and a "What changed" summary. My Work and My Drafts live in a header ribbon; workspace pages moved to **Workspace settings** in the account menu.
+- **Share public link** and **archive** on every document.
+
+**Upgrade notes (breaking):** on `SHARED_DEPLOYMENT`, "Share with a team…" replaces Organization visibility · channels are members-only to read · approving or rejecting an external edit needs approval authority (`403` otherwise) · governance reads return only documents the caller can read · `context_my_work` returns notifications only when asked · `/mentionable` and collaborators `people` no longer list directory accounts.
 
 Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 

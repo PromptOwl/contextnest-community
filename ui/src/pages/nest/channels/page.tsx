@@ -1,10 +1,10 @@
-import { ChannelsPage } from "../../../components/channels/ChannelsPage";
+import { ChatPage } from "../../../components/chat/ChatPage";
 import { useNestPage } from "../../../lib/nest-page-context";
 
-export default function ChannelsNestPage() {
+export default function ChatNestPage() {
   const nest = useNestPage();
   return (
-    <ChannelsPage
+    <ChatPage
       // One mount per nest: drafts and open dialogs belong to the nest they were started in.
       key={nest.nestId}
       nestId={nest.nestId}
@@ -14,6 +14,7 @@ export default function ChannelsNestPage() {
       thread={nest.thread ?? null}
       onLocation={(loc, opts) => nest.setChannelLocation?.(loc, opts)}
       onOpenNode={nest.openDocument}
+      onOpenDocumentThread={nest.openDocumentThread}
     />
   );
 }

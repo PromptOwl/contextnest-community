@@ -58,6 +58,7 @@ import { promotedFromThreads, type PromotedRef } from "../stream/promote.js";
 import { knowledgeCounts } from "../memory/knowledge.js";
 import { relatedNodesForThreads, relatedNodesText, type RelatedNode } from "../memory/links.js";
 import { watchedChannels } from "../memory/watcher.js";
+import { recommendationCountsForChannels } from "../hire/recommend.js";
 import {
   ARCHIVED_TAG,
   CHANNEL_FOLDER,
@@ -264,6 +265,9 @@ export interface ChannelView {
   knowledge_count: number;
   /** A metacognition agent watches this channel (team chat C6). */
   watched: boolean;
+  /** Open agent recommendations that point at this channel (PO-1201), for a
+   *  quiet badge. Only the list carries a count; a single read says 0. */
+  recommendations_count: number;
 }
 
 interface Stats {
@@ -328,6 +332,7 @@ function toView(
     member: flags.member,
     knowledge_count: 0,
     watched: false,
+    recommendations_count: 0,
   };
 }
 
@@ -385,7 +390,7 @@ export interface ChannelList {
 
 export async function listChannels(
   caller: Caller,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; recommendations?: boolean } = {},
 ): Promise<ChannelList> {
   const { storage } = await engineCache.get(caller.nestId);
   const docs = (await storage.discoverDocuments()).filter(isChannelDoc);
@@ -405,6 +410,18 @@ export async function listChannels(
     ),
   );
   const live = all.filter((c) => !c.archived);
+  // The recommendations badge (PO-1201): rule-based, over the channels this
+  // caller can read; never fails the list.
+  // `recommendations: false` is for the recommendations read itself, which
+  // computes them once over this list rather than twice.
+  if (opts.recommendations !== false && live.length > 0) {
+    try {
+      const counts = await recommendationCountsForChannels(caller, live.map((c) => ({ id: c.id, name: c.name })));
+      for (const c of live) c.recommendations_count = counts.get(c.name) ?? 0;
+    } catch (err) {
+      console.error("[channels] recommendations badge", caller.nestId, err);
+    }
+  }
   const most = live
     .filter((c) => c.last_activity_at)
     .sort((a, b) => (a.last_activity_at! < b.last_activity_at! ? 1 : -1))[0];

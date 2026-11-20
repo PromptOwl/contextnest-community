@@ -43,6 +43,9 @@ import {
   revokeLink,
 } from "./services/identity-service.js";
 import { listInstalls } from "./services/install-store.js";
+import { bufferKeyConfigured } from "./services/buffer-crypto.js";
+import { publicUrlProblem, slackUrls } from "./adapters/slack/manifest.js";
+import { resolveModelCredential } from "../shared/model-credential.js";
 import { createBindingWithListener } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
@@ -135,6 +138,18 @@ surfacesRoutes.get("/status", async (c) => {
       org_name: config.SURFACES_ORG_NAME ?? null,
       slack_hosted: hostedEnabled(),
       disclosure: SERVER_ADMIN_DISCLOSURE,
+      // po-1444: what Slack setup needs from this server, for the admin's
+      // checklist. Booleans and the public URL only, never a secret.
+      ...(orgAdmin
+        ? {
+            readiness: {
+              public_url: publicUrlProblem(config.PUBLIC_BASE_URL),
+              redirect_url: config.PUBLIC_BASE_URL ? slackUrls(config.PUBLIC_BASE_URL, "hosted").redirect : null,
+              buffer_key: bufferKeyConfigured(),
+              model_key: resolveModelCredential({}) !== null,
+            },
+          }
+        : {}),
     });
   } catch (err) {
     return handleError(c, err);
@@ -652,13 +667,17 @@ surfacesRoutes.get("/seeds", async (c) => {
 // GET /surfaces/cold-start?nest_id=   one seeded nest, or every seeded nest the
 // caller administers (all for a server admin). Read-only, counts only; MCP twin
 // context_surfaces_cold_start; same zod query (src/surfaces/cold-start-schema.ts).
+// The REST route serves the Control room page, so it is superadmin-only since
+// po-1406 (nest-scoped keys never reach /surfaces); the MCP twin is unchanged.
 
 import { coldStart, coldStartAll } from "./services/cold-start-service.js";
 import { ColdStartQuery } from "./cold-start-schema.js";
+import { assertControlRoomReader } from "../governance/control-room-access.js";
 import { parseOr422 } from "../workflow/agent-event-schema.js";
 
 surfacesRoutes.get("/cold-start", async (c) => {
   try {
+    await assertControlRoomReader(c);
     const q = parseOr422(ColdStartQuery, c.req.query());
     const scope = c.get("nestScope");
     const nestId = q.nest_id ?? scope ?? undefined;

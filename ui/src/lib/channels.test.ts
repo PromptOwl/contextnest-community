@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChannelList, ChannelNewMessage, ChannelPost, ChannelSummary, PostedMention } from "./api";
 import {
   CHANNEL_POLL_MS,
+  PullGuard,
   appendPage,
   appendReplies,
   applyNewMessages,
@@ -236,5 +237,27 @@ describe("post-time mention outcome (toast)", () => {
         { name: "scout", kind: "agent", wake: "no_webhook" },
       ]),
     ).toBe("@Rita and @bo matched nobody in this nest. @scout has no wake-up webhook. It will see this when it next checks its work.");
+  });
+});
+
+describe("AC-C3-03 one pull per timeline (review of PR #552)", () => {
+  it("a pull asked for during a run on the same timeline makes it run once more", () => {
+    const g = new PullGuard();
+    const mark = g.start("ops")!;
+    expect(mark).toEqual({ again: false });
+    expect(g.start("ops")).toBeNull();
+    expect(g.shouldRepeat(mark)).toBe(true);
+    expect(g.shouldRepeat(mark)).toBe(false);
+    g.finish("ops");
+    expect(g.running("ops")).toBe(false);
+  });
+  it("a pull on another timeline runs on its own while the first is going", () => {
+    const g = new PullGuard();
+    const a = g.start("ops")!;
+    const b = g.start("launch");
+    expect(b).not.toBeNull();
+    expect(a.again).toBe(false);
+    g.finish("launch");
+    expect(g.running("ops")).toBe(true);
   });
 });
