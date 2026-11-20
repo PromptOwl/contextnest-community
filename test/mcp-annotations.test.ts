@@ -19,6 +19,7 @@ const READ_ONLY = [
   "context_public_links",
   "nest_index",
   "context_onboarding",
+  "context_recipes",
   "context_init",
   "context_instructions_history",
   "context_overview",

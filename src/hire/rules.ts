@@ -263,3 +263,47 @@ export function ruleIdleKeys(keys: KeyRow[], opts: { now: number; nestId: string
   }
   return out;
 }
+
+// ─── Rule 6: the nest's recipe suggests an agent nobody hired yet (PO-1411) ──
+
+/** One agent a recipe (a seed applied to this nest) suggests hiring. */
+export interface RecipeAgentRow {
+  kind: HireKind;
+  handle: string;
+  why: string;
+  /** watcher only: the channels it would read. */
+  channels: string[];
+}
+
+/**
+ * A suggestion the nest's recipe made, for every agent not yet answering to
+ * its handle. A watcher is suggested only once its channels exist (team chat
+ * on), and a kind the server can't offer right now is not suggested at all.
+ */
+export function ruleRecipeAgents(
+  agents: RecipeAgentRow[],
+  opts: { nestId: string; known: Set<string>; channels: Set<string>; available: (kind: HireKind) => boolean },
+): Recommendation[] {
+  const out: Recommendation[] = [];
+  for (const a of agents) {
+    if (opts.known.has(a.handle) || !opts.available(a.kind)) continue;
+    if (a.kind === "watcher" && (a.channels.length === 0 || !a.channels.every((c) => opts.channels.has(c)))) continue;
+    // A webhook needs its runner's URL, which a recipe can't know: no one-click hire.
+    const hire: HirePayload | null =
+      a.kind === "watcher" ? { kind: "watcher", handle: a.handle, channels: [...a.channels] } : a.kind === "webhook" ? null : a.kind === "hootie" ? { kind: "hootie" } : { kind: a.kind, handle: a.handle };
+    out.push({
+      id: `recipe:${a.handle}`,
+      action: "hire",
+      kind: a.kind,
+      handle_suggestion: a.handle,
+      title: a.kind === "watcher" ? `Hire a watcher for ${a.channels.map((c) => `#${c}`).join(", ")}` : `Hire @${a.handle}`,
+      reason: `This nest's recipe suggests it: ${a.why}`,
+      evidence: a.channels.map((c) => ({ label: `#${c}`, link: `/nest/${opts.nestId}/channels?${new URLSearchParams({ channel: c }).toString()}` })),
+      channels: [...a.channels],
+      hire,
+      let_go: null,
+      dismissible: true,
+    });
+  }
+  return out;
+}

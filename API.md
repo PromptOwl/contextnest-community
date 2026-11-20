@@ -330,9 +330,22 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 
 ### POST `/nests`
 ```json
-{ "name": "My Nest", "description": "optional" }
+{ "name": "My Nest", "description": "optional", "recipe": "product-factory" }
 ```
 Response (201): `{ "nest": { ... } }`
+
+`recipe` is optional: an id from `GET /recipes` (`blank` or none = an empty nest, as before). The recipe is checked before the nest exists, so an unknown one is `404` "Recipe not found" and nothing is created. It is then applied through the seed engine (the same as `POST /surfaces/seeds/apply`), and the response adds `recipe`: `{ id, status, items: [{ kind, target, action, note? }], drafts, suggested_agents }`. Items are folders, documents, CONTEXT.md, glossary definitions, boards, the nest's task stages and channels. Channels are created only where team chat is on; otherwise they are `skipped` with a note, and a later apply creates them. A failed apply never fails the create: `status: "failed"` with `error`. `POST /onboarding/nest` takes the same `recipe`.
+
+### GET `/recipes`
+The recipes a new nest can start from: the bundled ones (Product factory, GTM factory, Operations, Ideation) and any in seed-library nests the caller can read, in order, then Blank.
+```json
+{ "recipes": [{ "id": "product-factory", "name": "Product factory", "purpose": "...", "description": "...", "version": 1, "source": "bundled",
+  "gets": { "folders": ["specs/"], "documents": ["Runbook (start here)"], "instructions": true, "definitions": 4,
+            "boards": [{ "name": "Build pipeline", "stages": ["intent", "red-team", "..."] }],
+            "channels": [{ "name": "builds", "purpose": "..." }],
+            "agents": [{ "kind": "key", "handle": "builder", "why": "...", "channels": [] }], "distill": true } }] }
+```
+A recipe is a seed manifest with a `recipe` block; its `boards`, `channels`, `hire` and `distill` keys are described in `seeds/product-factory/seed.md`. Suggested agents are never hired automatically: until hired or dismissed they appear in `GET /nests/:id/agents/recommendations` as `recipe:<handle>`. MCP: `context_recipes`; `nest_create` and `context_onboarding_update` (`create_nest`) take `recipe`.
 
 With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
 

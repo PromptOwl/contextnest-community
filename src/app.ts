@@ -97,6 +97,7 @@ import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
+import { recipeRoutes } from "./nests/recipe-routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
@@ -2824,6 +2825,11 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/onboarding", flexAuthMiddleware);
   app.use("/onboarding/*", flexAuthMiddleware);
   app.route("/onboarding", onboardingRoutes);
+
+  // Recipes (PO-1411): the catalog the create-nest dialog and the welcome
+  // screen show. Global, read-only; POST /nests takes the chosen `recipe`.
+  app.use("/recipes", flexAuthMiddleware);
+  app.route("/recipes", recipeRoutes);
 
   app.use("/systems", flexAuthMiddleware);
   app.use("/systems/*", flexAuthMiddleware);

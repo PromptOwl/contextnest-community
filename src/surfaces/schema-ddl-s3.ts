@@ -13,6 +13,52 @@
  *    keyed by subject, so re-applying proposes nothing twice. Holds ids only.
  *  - surface_settings.default_seed / seed_library_nests.
  */
+/**
+ * What a seed can write (PO-1411 adds a recipe's board, channel and task
+ * stages to the S3 four). Widening this list needs migration 101 below.
+ */
+export const SEED_ITEM_KINDS = ["folder", "node", "context", "definition", "board", "channel", "task_rules"] as const;
+const SEED_ITEM_KINDS_SQL = SEED_ITEM_KINDS.map((k) => `'${k}'`).join(", ");
+
+/**
+ * Migration 101 (SQLite): rebuild surface_seed_items with the wider kind
+ * CHECK when the table still has the S3 one. SQLite can't alter a CHECK.
+ */
+export function seedItemKindsRebuildSqlite(now: string): string {
+  return `
+    CREATE TABLE surface_seed_items_new (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK(kind IN (${SEED_ITEM_KINDS_SQL})),
+      target TEXT NOT NULL,
+      seed_id TEXT NOT NULL,
+      item_key TEXT,
+      seed_origin TEXT NOT NULL,
+      seed_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${now},
+      updated_at TEXT NOT NULL DEFAULT ${now},
+      PRIMARY KEY (nest_id, kind, target)
+    );
+    INSERT INTO surface_seed_items_new (nest_id, kind, target, seed_id, item_key, seed_origin, seed_hash, created_at, updated_at)
+      SELECT nest_id, kind, target, seed_id, item_key, seed_origin, seed_hash, created_at, updated_at FROM surface_seed_items;
+    DROP TABLE surface_seed_items;
+    ALTER TABLE surface_seed_items_new RENAME TO surface_seed_items;
+  `;
+}
+
+/** Migration 101 (Postgres): swap the kind CHECK for the wider one, once. */
+export function seedItemKindsPostgres(): string {
+  return `
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'surface_seed_items'::regclass
+                  AND conname = 'surface_seed_items_kind_check'
+                  AND pg_get_constraintdef(oid) NOT LIKE '%task_rules%') THEN
+        ALTER TABLE surface_seed_items DROP CONSTRAINT surface_seed_items_kind_check;
+        ALTER TABLE surface_seed_items ADD CONSTRAINT surface_seed_items_kind_check CHECK (kind IN (${SEED_ITEM_KINDS_SQL}));
+      END IF;
+    END $$;
+  `;
+}
+
 export function surfacesS3Ddl(now: string): string {
   return `
     CREATE TABLE IF NOT EXISTS surface_seed_applications (
@@ -36,7 +82,7 @@ export function surfacesS3Ddl(now: string): string {
 
     CREATE TABLE IF NOT EXISTS surface_seed_items (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-      kind TEXT NOT NULL CHECK(kind IN ('folder', 'node', 'context', 'definition')),
+      kind TEXT NOT NULL CHECK(kind IN (${SEED_ITEM_KINDS_SQL})),
       target TEXT NOT NULL,
       seed_id TEXT NOT NULL,
       item_key TEXT,
