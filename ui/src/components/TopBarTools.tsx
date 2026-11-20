@@ -13,7 +13,7 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, FileDiff, Home, LayoutGrid, Plug, Plus } from "lucide-react";
+import { ChevronDown, FileDiff, Home, LayoutGrid, MessagesSquare, Plug, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -28,6 +28,8 @@ import { reads, useNestMeta } from "../lib/queries";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { useAuth } from "../auth/AuthContext";
 import { nestSidebarViews, type NestSidebarView } from "../lib/doc-page";
+import { nestChat } from "../lib/chat-harness";
+import { ChatCount, useChatSummary } from "./chat/ChatEntry";
 
 const MAX_PICKER = 12;
 
@@ -92,6 +94,7 @@ export function TopBarTools({
   // Channels are for people added to the nest; a share-only grantee or a
   // public reader gets no entry (GET /nests/:id `member`).
   const isMember = (meta.data as any)?.member === true;
+  const chatOn = meta.data?.chat;
   const views = useMemo(
     () =>
       caps
@@ -99,19 +102,23 @@ export function TopBarTools({
           workflowPlaneEnabled,
           agentStreamEnabled,
           isMember,
+          chatOn,
           stewardshipEnabled,
           hasPending: pending > 0,
         })
         : [],
-    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, stewardshipEnabled, pending],
+    [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, chatOn, stewardshipEnabled, pending],
   );
+  const chatSummary = useChatSummary();
   // Dashboard: the nests to pick from.
   const nestList = useQuery({ ...reads.nestList(), enabled: !nestId });
 
   if (nestId && caps?.isReaderView) return null;
 
   const review = views.find((v) => v.id === "review");
-  const grouped = views.filter((v) => v.group === "views");
+  // Chat is its own button beside My Work (PO-1200), not one of the Views.
+  const chatView = views.find((v) => v.id === "channels");
+  const grouped = views.filter((v) => v.group === "views" && v.id !== "channels");
   const viewActive =
     grouped.some((v) => v.id === activeView) ||
     activeView === "external-edits" ||
@@ -123,6 +130,25 @@ export function TopBarTools({
 
   return (
     <div className="flex shrink-0 items-center gap-0.5" data-testid="top-bar-tools">
+      {nestId && chatView && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "h-9 gap-1.5 px-2 text-sm font-normal text-muted-foreground hover:text-accent-foreground lg:px-2.5",
+            activeView === "channels" && "bg-accent font-medium text-accent-foreground",
+          )}
+          onClick={() => onOpen(chatView)}
+          aria-current={activeView === "channels" ? "page" : undefined}
+          aria-label="Chat"
+          title="Chat"
+          data-testid="top-bar-chat"
+        >
+          <MessagesSquare className="h-4 w-4 shrink-0" aria-hidden />
+          <span className="hidden whitespace-nowrap lg:inline">Chat</span>
+          <ChatCount counts={nestChat(chatSummary.data, nestId)} />
+        </Button>
+      )}
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
@@ -232,7 +258,8 @@ export function TopBarTools({
         data-testid="top-bar-connect"
       >
         <Plug className="h-4 w-4 shrink-0" aria-hidden />
-        <span className="hidden xl:inline">Connect</span>
+        {/* Inside a nest Chat takes the room; Connect keeps its icon and title. */}
+        <span className={cn("hidden", nestId && chatView ? "2xl:inline" : "xl:inline")}>Connect</span>
       </Button>
       {/* Same button on every screen. With no nest open it acts on the one you
           last had open. Hidden only where the open nest is read-only. */}

@@ -46,7 +46,9 @@ export function applyMentionPick(
 export type MentionRef =
   | { name: string; kind: "person"; display_name: string }
   | { name: string; kind: "agent"; wakeable: boolean }
-  | { name: string; kind: "nobody" };
+  | { name: string; kind: "nobody" }
+  /** `@channel` / `@here` (C1, PO-1196): everyone on the nest; reads as resolved. */
+  | { name: "channel" | "here"; kind: "everyone" };
 
 export type MentionSegment =
   | { kind: "text"; text: string }

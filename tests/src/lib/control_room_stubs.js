@@ -58,7 +58,15 @@ function previewFor(state, { conversation_id, nest_id, ext_capture_enabled }) {
   const refused = (d, ext = false) => ({ ...base, would_bind: false, is_ext_shared: ext, guard: { capture_ok: false, surface_ok: false, members_known: true, org_public: false, capture_basis: null, detail: detail(d) } });
   if (conversation_id === 'C_LEAD' && !state.createdNests.includes(nest_id)) return refused({ readers_total: 312, readers_absent: 306, members_total: 6 });
   if (conversation_id === 'C_SHARED') return ext_capture_enabled ? ok(false, { members_total: 9, members_not_readers: 4, externals: 4, ext_shared: true }) : refused({ members_total: 9, externals: 4, ext_shared: true }, true);
-  if (conversation_id === 'C_REVOPS') return ok(false, { members_total: 18, members_not_readers: 11 });
+  if (conversation_id === 'C_REVOPS') {
+    // po-1432: one outsider with an account (addable), one without.
+    if (state.added.includes('u_carol')) return ok(true, {});
+    const people = { absent_readers: [], universe_cause: null, members_not_readers: [
+      { surface_user_id: 'U_CAROL', name: 'Carol', community_user_id: 'u_carol', email: 'carol@example.test' },
+      { surface_user_id: 'U_XAVIER', name: 'Xavier', community_user_id: null, email: null },
+    ] };
+    return { ...ok(false, { members_total: 18, members_not_readers: 11 }), people };
+  }
   return ok(true, {});
 }
 
@@ -74,6 +82,7 @@ export async function stubSurfaces(page, initial = {}) {
     bindings: (initial.bindings ?? []).map((b, i) => ({ id: `bind_${i}`, install_id: 'inst_fake', status: 'active', conversation_kind: 'private_channel', conversation_name: null, ...b })),
     seeded: [...(initial.seeded ?? [])],
     createdNests: [],
+    added: [],
     calls: [],
   };
   const manifest = { display_information: { name: 'Nest' }, settings: { event_subscriptions: { request_url: 'https://example.test/surfaces/slack/inst_fake/events' } } };
@@ -89,6 +98,18 @@ export async function stubSurfaces(page, initial = {}) {
       const body = await res.json().catch(() => ({}));
       if (body?.nest?.id) state.createdNests.push(body.nest.id);
       await route.fulfill({ response: res, json: body });
+    }
+  );
+
+  // po-1432: "Add to nest" shares the nest with the fake channel members.
+  await page.route(
+    (url) => /^\/nests\/[^/]+\/collaborators$/.test(pathOf(url)),
+    async (route, request) => {
+      if (request.method() !== 'POST') return route.fallback();
+      const body = JSON.parse(request.postData() || '{}');
+      state.calls.push({ method: 'POST', path: pathOf(request.url()), body });
+      state.added.push(body.user_id);
+      return json(route, { collaborator: { id: `c_${body.user_id}`, user_id: body.user_id, permission: body.permission } }, 201);
     }
   );
 

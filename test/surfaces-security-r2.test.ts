@@ -345,7 +345,8 @@ describe("M3: the listener is never client-supplied", () => {
 });
 
 describe("M4: explicit_public_bind relaxes only the user-reader subset rule", () => {
-  it("M4: a world-readable, link-shared, connector-fed or key-read nest is never public-bound", async () => {
+  // po-1431: a connector-fed nest is no longer refused (a bound nest's connector posts carry no content).
+  it("M4: a world-readable, link-shared, key-read or agent-read nest is never public-bound", async () => {
     setConv("C-M4", ["SR"], { kind: "public_channel", is_private: false });
     const pub = await newNest(root);
     await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, root.apiKey);
@@ -353,15 +354,13 @@ describe("M4: explicit_public_bind relaxes only the user-reader subset rule", ()
     await S.db.getDb().run("INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by, created_at) VALUES (?, ?, 'nodes/x', ?, 'public', ?, '2026-10-30T00:00:00.000Z')", [
       randomUUID(), linked, `s-${randomUUID()}`, root.userId,
     ]);
-    const hooked = await newNest(root);
-    await jsonRequest(app, "POST", `/nests/${hooked}/connectors`, { channel: "webhook", url: "https://example.com/h", events: ["*"] }, root.apiKey);
     const keyed = await newNest(root);
     await jsonRequest(app, "POST", "/systems", { name: `M4-${randomUUID().slice(0, 4)}`, capability: "read", nest_ids: [keyed] }, root.apiKey);
     const agented = await newNest(root);
     await S.db.getDb().run("INSERT INTO metacognition_agents (nest_id, node_id, persona_user_id, created_by) VALUES (?, 'nodes/a', ?, ?)", [
       agented, randomUUID(), root.email,
     ]);
-    for (const n of [pub, linked, hooked, keyed, agented]) {
+    for (const n of [pub, linked, keyed, agented]) {
       const r = await bind({ conversation_id: "C-M4", nest_id: n, explicit_public_bind: true }, root.apiKey);
       expect(r.status, n).toBe(409);
     }

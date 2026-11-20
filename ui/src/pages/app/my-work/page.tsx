@@ -29,6 +29,7 @@ import { ReasonDialog, ReviewActions } from "../../../components/governance";
 import { MyWorkReviewPane } from "../../../components/MyWorkReviewPane";
 import { localToday } from "../../../lib/board-tasks";
 import { MentionRows } from "../../../components/my-work/MentionRows";
+import { keyOfConversationId } from "../../../lib/chat-live";
 import { AssignedTasks } from "../../../components/my-work/AssignedTasks";
 import { openTasks, type TaskStatusFilter } from "../../../lib/my-work-tasks";
 
@@ -155,6 +156,11 @@ export default function MyWorkPage() {
   // Jump to the thread: a channel post opens the channel timeline with the
   // thread open; a document comment opens the document with it focused.
   const openMention = (m: api.MentionItem) => {
+    const conv = m.kind === "conversation" ? keyOfConversationId(m.node_id) : null;
+    if (conv) {
+      openChannel(m.nest_id, m.nest_name, conv, m.thread_id);
+      return;
+    }
     if (m.kind === "channel" && m.channel) {
       // In-app, like every other row: no full page load (PO-1189).
       openChannel(m.nest_id, m.nest_name, m.channel, m.thread_id);

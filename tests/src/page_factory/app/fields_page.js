@@ -48,7 +48,10 @@ class FieldsPage {
     this.timeInStatusItem = page.getByRole('menuitem', { name: /Time in status/ });
 
     // New field / Edit dialog
-    this.fieldDialog = page.getByRole('dialog');
+    // Once Fields opens as a dialog from the nest's ⋯ menu (po-1213), that
+    // dialog stays open under this one; leave it out. A no-op where Fields is
+    // still a tab.
+    this.fieldDialog = page.locator('[role="dialog"]:not([data-testid="nest-fields-dialog"])');
     this.labelInput = page.locator('#field-label');
     this.keyInput = page.locator('#field-key');
     this.typeSelect = page.getByRole('combobox', { name: 'Type' });

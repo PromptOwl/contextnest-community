@@ -13,9 +13,16 @@
  *     /d/<key>/ (src/site/render.ts): "Documentation" navigation, the page and
  *     a "Pages" pager.
  * Owners, editors and reviewers keep the full nest page.
+ *
+ * Since po-1213 the Reader button is gone from the header: the switch is the
+ * "Reader mode: On / Off" item in the header's ⋯ menu, and a "Reader on" badge
+ * shows while it is on. Overview is folded into Documents. The suite sets
+ * `nestHome` (tests/src/lib/nest_home_probe.js) and the helpers below drive
+ * whichever build the server under test runs.
  */
 
 import logger from '../../helper/logger/logger.js';
+import { openMoreActions } from '../../lib/more_actions_menu.js';
 
 class ReaderModePage {
   /**
@@ -29,7 +36,7 @@ class ReaderModePage {
 
     // ── Nest page (the full view) ──────────────────────────────────────────
     this.backToNests = page.getByTitle('Back to nests');
-    this.overviewTab = page.getByRole('tab', { name: 'Documents', exact: true });
+    this.overviewTab = page.getByRole('tab', { name: 'Overview', exact: true });
     this.documentsTab = page.getByRole('tab', { name: 'Documents', exact: true });
     this.newDocumentButton = this.main.getByRole('button', { name: 'New Document', exact: true });
     this.noAccess = page.getByText(/doesn.t exist or you don.t have access/);
@@ -39,6 +46,12 @@ class ReaderModePage {
     this.readerDialog = page.getByRole('dialog', { name: 'Public Docs Reader Mode' });
     this.readerSwitch = page.getByRole('switch', { name: 'Toggle Public Docs Reader Mode' });
     this.readerDone = this.readerDialog.getByRole('button', { name: 'Done', exact: true });
+    // po-1213: the ⋯ menu item and the header badge that replace the button.
+    this.moreActions = page.locator('button[title="More actions"]').first();
+    this.readerMenuItem = page.getByTestId('nest-reader-mode');
+    this.readerBadge = page.getByTestId('nest-reader-badge');
+    /** Does the server under test ship po-1213? Set by the suite. */
+    this.nestHome = false;
 
     // ── In-app docs reader (signed in, read-only) ──────────────────────────
     this.readerSearch = page.getByRole('textbox', { name: 'Search pages by title or tag' });
@@ -71,21 +84,66 @@ class ReaderModePage {
     await this._open(`/nest/${nestId}`);
   }
 
-  /** Open the nest page and wait for the Reader button (owner, nest admin or server admin). */
-  async gotoAsManager(nestId) {
-    await this.gotoNest(nestId);
-    await this.readerButton.waitFor({ state: 'visible', timeout: 60_000 });
+  /** Close the ⋯ menu if it is open. */
+  async _closeMenu() {
+    const menu = this.page.locator('[role="menu"][data-state="open"]');
+    if (await menu.isVisible()) {
+      await this.page.keyboard.press('Escape');
+      await menu.waitFor({ state: 'hidden' });
+    }
   }
 
-  /** The Reader button's label: "Reader: On" or "Reader: Off". */
-  async readerLabel() {
-    return (await this.readerButton.innerText()).trim();
+  /**
+   * Open the nest page and wait for the Reader mode control (owner, nest admin
+   * or server admin): the header button, or since po-1213 the ⋯ menu item.
+   */
+  async gotoAsManager(nestId) {
+    await this.gotoNest(nestId);
+    if (!this.nestHome) {
+      await this.readerButton.waitFor({ state: 'visible', timeout: 60_000 });
+      return;
+    }
+    await this.moreActions.waitFor({ state: 'visible', timeout: 60_000 });
+    await openMoreActions(this.page, this.readerMenuItem);
+    await this._closeMenu();
+  }
+
+  /** Reader mode as the manager's control shows it: "On" or "Off". */
+  async readerState() {
+    if (!this.nestHome) {
+      const label = (await this.readerButton.innerText()).trim();
+      return label.replace(/^Reader:\s*/, '');
+    }
+    await openMoreActions(this.page, this.readerMenuItem);
+    const label = (await this.readerMenuItem.innerText()).trim();
+    await this._closeMenu();
+    return label.replace(/^Reader mode:\s*/, '');
+  }
+
+  /**
+   * How many Reader mode controls this person gets: the header button, or
+   * since po-1213 the ⋯ menu item and the "Reader on" badge.
+   */
+  async readerControlCount() {
+    if (!this.nestHome) return this.readerButton.count();
+    let count = await this.readerBadge.count();
+    if (await this.moreActions.isVisible()) {
+      await openMoreActions(this.page);
+      count += await this.readerMenuItem.count();
+      await this._closeMenu();
+    }
+    return count;
   }
 
   /** Open the dialog, flip the switch to `on`, wait for it to save and close the dialog. */
   async setReaderMode(on) {
     this._log(`Turning Reader mode ${on ? 'on' : 'off'}`);
-    await this.readerButton.click();
+    if (this.nestHome) {
+      await openMoreActions(this.page, this.readerMenuItem);
+      await this.readerMenuItem.click();
+    } else {
+      await this.readerButton.click();
+    }
     await this.readerDialog.waitFor({ state: 'visible' });
     if ((await this.readerSwitch.getAttribute('aria-checked')) !== String(on)) {
       await this.readerSwitch.click();

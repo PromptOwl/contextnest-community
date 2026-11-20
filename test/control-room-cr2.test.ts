@@ -27,6 +27,9 @@ import * as OV from "../ui/src/lib/control-room-overview.js";
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
 type U = { apiKey: string; userId: string; email: string };
+let rKey: string; // alice, scoped to R
+let pKey: string; // alice (admin, not owner), scoped to P
+let patKey: string; // pat (owner), scoped to P
 let root: U; // server admin
 let alice: U; // owner of the team nests
 let bob: U; // reads R only
@@ -173,6 +176,11 @@ beforeAll(async () => {
   P = (await jsonRequest(app, "POST", "/nests", { name: "Pat DM" }, pat.apiKey)).data.nest.id;
   await jsonRequest(app, "POST", `/nests/${R}/collaborators`, { email: bob.email, permission: "read" }, alice.apiKey);
   await jsonRequest(app, "POST", `/nests/${P}/collaborators`, { email: alice.email, permission: "admin" }, pat.apiKey);
+  // po-1406: the REST reads serve the superadmin-only Control room; a nest's
+  // owner or admin reads them as an agent, with a key scoped to the nest.
+  rKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "alice-on-r", nest_id: R }, alice.apiKey)).data.api_key;
+  pKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "alice-on-p", nest_id: P }, alice.apiKey)).data.api_key;
+  patKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "pat-on-p", nest_id: P }, pat.apiKey)).data.api_key;
   installId = `inst_${randomUUID()}`;
   await run(`INSERT INTO surface_installs (id, org_id, surface, mode, tenant_key, team_id, status) VALUES (?, 'org', 'slack', 'manifest', 'T0CR2', 'T0CR2', 'active')`, [installId]);
   await run("INSERT INTO surface_personal_nests (install_id, community_user_id, nest_id) VALUES (?, ?, ?)", [installId, pat.userId, P]);
@@ -233,7 +241,7 @@ beforeEach(async () => {
 describe("AC-CR-03: Overview tiles", () => {
   it("AC-CR-03: conversations reviewed, % no proposal, saved/edited/rejected/expired and spend — computed by the page's logic from the ledger — equal /surfaces/windows, /surfaces/proposals, /surfaces/commits and the budget", async () => {
     const range = OV.rangeFor(14, NOW);
-    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "none", grain: "day", source: "surfaces" })}`, undefined, alice.apiKey);
+    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "none", grain: "day", source: "surfaces" })}`, undefined, rKey);
     expect(roll.status).toBe(200);
     const bindings = (await req("GET", "/surfaces/bindings", undefined, alice.apiKey)).data.bindings as OV.BindingLite[];
     const budget = (await req("GET", `/surfaces/nests/${R}/budget`, undefined, alice.apiKey)).data.budget as OV.BudgetLite;
@@ -334,7 +342,7 @@ describe("AC-CR-04: cold start", () => {
   });
 
   it("AC-CR-04: coverage = seed folders with ≥ 1 approved document ÷ seed folders, excluding the seed's own documents and admin-only folders; time to first approved = first approval − applied_at; mirror people/areas", async () => {
-    const r = await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, alice.apiKey);
+    const r = await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, root.apiKey);
     expect(r.status, JSON.stringify(r.data)).toBe(200);
     const cs = r.data.nests[0];
     expect(cs).toMatchObject({ nest_id: R, nest_label: "Revenue", redacted: null, no_seed: false, seed: { id: "generic-team", version: 1 } });
@@ -351,23 +359,25 @@ describe("AC-CR-04: cold start", () => {
   });
 
   it("AC-CR-04: a nest with no seed says so (no_seed, empty figures)", async () => {
-    const r = await req("GET", `/surfaces/cold-start?nest_id=${E}`, undefined, alice.apiKey);
+    const r = await req("GET", `/surfaces/cold-start?nest_id=${E}`, undefined, root.apiKey);
     expect(r.status).toBe(200);
     expect(r.data.nests[0]).toMatchObject({ nest_id: E, no_seed: true, seed: null, folders: [], coverage: { covered: 0, total: 0 }, first_approved: null });
   });
 
-  it("AC-CR-04: owner/admin only — a reader is refused; listing all covers administered seeded nests, and a personal nest only for its owner (N1)", async () => {
-    expect((await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, bob.apiKey)).status).toBe(403);
-    const mine = await req("GET", "/surfaces/cold-start", undefined, alice.apiKey);
-    expect(mine.data.nests.map((n: any) => n.nest_id)).toEqual([R]);
-    const asAdminOfP = await req("GET", `/surfaces/cold-start?nest_id=${P}`, undefined, alice.apiKey);
-    expect(asAdminOfP.data.nests[0]).toMatchObject({ nest_label: "DM · private nest · title hidden", redacted: "n1" });
-    const owner = await req("GET", "/surfaces/cold-start", undefined, pat.apiKey);
-    expect(owner.data.nests.map((n: any) => n.nest_id)).toEqual([P]);
-    expect(owner.data.nests[0]).toMatchObject({ nest_label: "Pat DM", redacted: null });
+  it("AC-CR-04: the REST route is superadmin-only (po-1406); the MCP twin stays owner/admin — a reader is refused, an owner sees their seeded nests, and a personal nest only whole for its owner (N1)", async () => {
+    // REST serves the Control room page: superadmins only. Nest-scoped keys don't reach /surfaces at all.
+    for (const k of [bob.apiKey, alice.apiKey, pat.apiKey, rKey, patKey]) {
+      expect((await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, k)).status).toBe(403);
+      expect((await req("GET", "/surfaces/cold-start", undefined, k)).status).toBe(403);
+    }
     const server = await req("GET", "/surfaces/cold-start", undefined, root.apiKey);
     expect(server.data.nests.map((n: any) => n.nest_id)).toContain(R);
     expect(server.data.nests.map((n: any) => n.nest_id)).not.toContain(P);
+    // The MCP twin (the agent surface) is unchanged: owner/admin of the nest.
+    expect(JSON.stringify(await mcp(R, bob.apiKey, "context_surfaces_cold_start", {}).catch((e) => e))).not.toContain("Revenue");
+    expect(await mcp(R, alice.apiKey, "context_surfaces_cold_start", {})).toMatchObject({ nest_id: R, nest_label: "Revenue", redacted: null });
+    expect(await mcp(P, alice.apiKey, "context_surfaces_cold_start", {})).toMatchObject({ nest_label: "DM · private nest · title hidden", redacted: "n1" });
+    expect(await mcp(P, pat.apiKey, "context_surfaces_cold_start", {})).toMatchObject({ nest_id: P, nest_label: "Pat DM", redacted: null });
   });
 
   it("AC-CR-04 (N1): a sealed personal nest refuses a server admin (403, as trace reads do); a nest admin the owner invited sees it redacted", async () => {
@@ -376,14 +386,14 @@ describe("AC-CR-04: cold start", () => {
     expect(JSON.stringify(asServerAdmin.data)).not.toContain("Pat DM");
     const viaMcp = await mcp(P, root.apiKey, "context_surfaces_cold_start", {}).catch((e) => e);
     expect(JSON.stringify(viaMcp ?? "")).not.toContain("Pat DM");
-    const asInvitedAdmin = await req("GET", `/surfaces/cold-start?nest_id=${P}`, undefined, alice.apiKey);
-    expect(asInvitedAdmin.status).toBe(200);
-    expect(asInvitedAdmin.data.nests[0]).toMatchObject({ nest_label: "DM · private nest · title hidden", redacted: "n1" });
-    expect(JSON.stringify(asInvitedAdmin.data)).not.toContain("Pat DM");
+    // po-1406: the invited admin reads it over MCP (the REST route is superadmin-only).
+    const asInvitedAdmin = await mcp(P, alice.apiKey, "context_surfaces_cold_start", {});
+    expect(asInvitedAdmin).toMatchObject({ nest_label: "DM · private nest · title hidden", redacted: "n1" });
+    expect(JSON.stringify(asInvitedAdmin)).not.toContain("Pat DM");
   });
 
   it("AC-CR-04: the MCP twin context_surfaces_cold_start returns the same read model as REST", async () => {
-    const rest = (await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, alice.apiKey)).data.nests[0];
+    const rest = (await req("GET", `/surfaces/cold-start?nest_id=${R}`, undefined, root.apiKey)).data.nests[0];
     const viaMcp = await mcp(R, alice.apiKey, "context_surfaces_cold_start", {});
     expect(viaMcp).toEqual(rest);
   });
@@ -611,9 +621,9 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
   it("AC-CR-10: rollups by=reason over no-op listener windows sum to the ledger's no_op total, per reason as seeded", async () => {
     const range = OV.rangeFor(14, NOW);
     const f = { from: range.from, to: range.to, source: "surfaces", verdict: "no_op" };
-    const roll = await req("GET", `/nests/${R}/rollups?${qs({ ...f, by: "reason", grain: "week" })}`, undefined, alice.apiKey);
+    const roll = await req("GET", `/nests/${R}/rollups?${qs({ ...f, by: "reason", grain: "week" })}`, undefined, rKey);
     expect(roll.status).toBe(200);
-    const ledger = await req("GET", `/nests/${R}/ledger?${qs({ ...f, limit: "1" })}`, undefined, alice.apiKey);
+    const ledger = await req("GET", `/nests/${R}/ledger?${qs({ ...f, limit: "1" })}`, undefined, rKey);
     const breakdown = OV.reasonBreakdown(roll.data.rows);
     expect(breakdown.reduce((s, r) => s + r.count, 0)).toBe(ledger.data.totals.no_op);
     expect(ledger.data.totals.no_op).toBe(seeded.noop);
@@ -628,12 +638,12 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
     try {
       const range = OV.rangeFor(14, NOW);
       const f = { from: range.from, to: range.to };
-      const ledger = await req("GET", `/nests/${P}/ledger?${qs({ ...f, limit: "200" })}`, undefined, alice.apiKey);
+      const ledger = await req("GET", `/nests/${P}/ledger?${qs({ ...f, limit: "200" })}`, undefined, pKey);
       expect(ledger.status).toBe(200);
       const ats = new Set(ledger.data.entries.map((e: any) => e.at));
       const sources = new Set(ledger.data.entries.map((e: any) => e.agent?.source));
       for (const by of ["agent", "nest", "binding", "reason"]) {
-        const roll = await req("GET", `/nests/${P}/rollups?${qs({ ...f, by, grain: "day" })}`, undefined, alice.apiKey);
+        const roll = await req("GET", `/nests/${P}/rollups?${qs({ ...f, by, grain: "day" })}`, undefined, pKey);
         expect(roll.status).toBe(200);
         expect(roll.data.rows.length).toBeGreaterThan(0);
         expect(JSON.stringify(roll.data), by).not.toContain("Pat DM");
@@ -657,8 +667,8 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
     try {
       const range = OV.rangeFor(14, NOW);
       const f = { from: range.from, to: range.to, source: "surfaces", verdict: "no_op" };
-      const roll = await req("GET", `/nests/${R}/rollups?${qs({ ...f, by: "reason", grain: "week" })}`, undefined, alice.apiKey);
-      const ledger = await req("GET", `/nests/${R}/ledger?${qs({ ...f, limit: "1" })}`, undefined, alice.apiKey);
+      const roll = await req("GET", `/nests/${R}/rollups?${qs({ ...f, by: "reason", grain: "week" })}`, undefined, rKey);
+      const ledger = await req("GET", `/nests/${R}/ledger?${qs({ ...f, limit: "1" })}`, undefined, rKey);
       expect(ledger.data.totals.no_op).toBe(seeded.noop + 1);
       const sum = roll.data.rows.reduce((s: number, r: any) => s + Number(r.no_op || 0), 0);
       expect(sum).toBe(ledger.data.totals.no_op);
@@ -672,7 +682,7 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
 
   it("AC-CR-10: by=agent rows carry last_at (the latest ledger row) and source (its kind); the agents list sorts by last report", async () => {
     const range = OV.rangeFor(14, NOW);
-    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "agent", grain: "week" })}`, undefined, alice.apiKey);
+    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "agent", grain: "week" })}`, undefined, root.apiKey);
     const agents = OV.agentRows(roll.data.rows);
     const byNode = Object.fromEntries(agents.map((a) => [a.nodeId, a]));
     expect(byNode["nodes/agents/claude-code-priya"]).toMatchObject({ source: "external", lastAt: iso(NOW - 3 * 3_600_000) });
@@ -682,22 +692,22 @@ describe("AC-CR-10 (CR2): by=reason, last_at and source", () => {
     expect(agents.map((a) => a.id)).toEqual(sorted);
     // Each agent's runs equal the ledger total filtered to that agent.
     for (const a of agents) {
-      const l = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, agent: a.nodeId, limit: "1" })}`, undefined, alice.apiKey);
+      const l = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, agent: a.nodeId, limit: "1" })}`, undefined, root.apiKey);
       expect(l.data.totals.entries, a.nodeId).toBe(a.totals.entries);
-      const latest = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, agent: a.nodeId, limit: "1" })}`, undefined, alice.apiKey);
+      const latest = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, agent: a.nodeId, limit: "1" })}`, undefined, root.apiKey);
       expect(latest.data.entries[0].at).toBe(a.lastAt);
     }
   });
 
   it("AC-CR-10: the channel table's counts equal the ledger filtered to each binding", async () => {
     const range = OV.rangeFor(14, NOW);
-    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "binding", grain: "week", source: "surfaces" })}`, undefined, alice.apiKey);
+    const roll = await req("GET", `/rollups?${qs({ from: range.from, to: range.to, by: "binding", grain: "week", source: "surfaces" })}`, undefined, root.apiKey);
     const bindings = (await req("GET", "/surfaces/bindings", undefined, alice.apiKey)).data.bindings as OV.BindingLite[];
     const rows = OV.channelRows(bindings, roll.data.rows, 14);
     expect(rows.map((r) => r.name).sort()).toEqual(["acme-renewal", "onboarding", "revops"]);
     expect(rows[rows.length - 1]).toMatchObject({ name: "onboarding", status: "paused_guard", reviewed: 0 });
     for (const r of rows.filter((x) => x.status === "active")) {
-      const l = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, binding: r.bindingId, limit: "1" })}`, undefined, alice.apiKey);
+      const l = await req("GET", `/ledger?${qs({ from: range.from, to: range.to, binding: r.bindingId, limit: "1" })}`, undefined, root.apiKey);
       expect(r.reviewed).toBe(l.data.totals.entries);
       expect(r.noProposalPct).toBe(Math.round((l.data.totals.no_op / l.data.totals.entries) * 100));
       expect(r.lastAt).toBe(l.data.entries[0].at);

@@ -167,20 +167,25 @@ export async function hasAnyConnector(nestId: string, kind: string): Promise<boo
  * backgrounded and failure-proof by construction.
  */
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
-  // A sealed personal nest: no server-wide or per-nest connector delivery
-  // (re-review R3-H1b).
-  {
-    const { sealedNest } = await import("../surfaces/sealed.js");
-    if (await sealedNest(ev.nestId)) return;
-  }
-  const db = getDb();
-  const nestName = await resolveNestName(ev.nestId);
-  // Message-log context: who caused it, and the run when a run is the subject.
+  // Message-log context (internal): who caused it, and the run when a run is the subject.
   const logCtx = {
     nestId: ev.nestId,
     ...senderFor(ev.actor),
     runId: ev.runId ?? (ev.kind.startsWith("run_") ? (ev.subjectId ?? null) : null),
   };
+  // A sealed personal nest: no server-wide or per-nest connector delivery
+  // (re-review R3-H1b).
+  {
+    const { sealedNest, boundNest } = await import("../surfaces/sealed.js");
+    if (await sealedNest(ev.nestId)) return;
+    // A nest bound to a Slack/Teams conversation: content-free posts, no actor (po-1431).
+    if (await boundNest(ev.nestId)) {
+      const what = ev.kind.charAt(0).toUpperCase() + ev.kind.slice(1).replace(/_/g, " ");
+      ev = { ...ev, message: `${what} — open ContextNest`, subjectId: undefined, actor: undefined };
+    }
+  }
+  const db = getDb();
+  const nestName = await resolveNestName(ev.nestId);
   const serverWide = !DIGEST_DELIVERED_KINDS.has(ev.kind) && !NEST_ONLY_KINDS.has(ev.kind);
 
   // Implicit server-wide Slack + Microsoft Teams connectors (super-admin

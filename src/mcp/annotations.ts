@@ -75,6 +75,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_stream: read("Read the stream", "Lists recent document versions the caller can read (po-1214)."),
   context_my_work: read("View my work", "Returns the caller's queue: mentions, reviews and requests, assignments, notifications."),
   context_versions: read("View version history", "Returns a document's version history."),
+  context_pull_log: read("View context pulls", "Returns the recorded retrievals and the documents each handed over."),
   context_unsynced_list: read("List unsynced folders", "Lists server folders not yet synced to a nest."),
 
   // ─── Documents ──────────────────────────────────────────────────────────

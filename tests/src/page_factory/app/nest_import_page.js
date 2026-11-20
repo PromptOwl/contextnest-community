@@ -27,7 +27,6 @@ class NestImportPage {
 
     // ── Nest page ─────────────────────────────────────────────────────────
     this.importButton = page.getByTestId('top-bar-new-document');
-    this.contents = page.getByRole('navigation', { name: 'Contents' });
 
     // ── "Import into this nest" dialog ────────────────────────────────────
     this.dialog = page.getByRole('dialog', { name: 'Import into this nest' });
@@ -55,7 +54,7 @@ class NestImportPage {
     await this.tab('Documents').waitFor({ state: 'visible' });
   }
 
-  /** A nest tab by its label (Overview, Documents, …). */
+  /** A nest tab by its label (Documents, Instructions, …). */
   tab(name) {
     return this.page.getByRole('tab', { name, exact: true });
   }
@@ -100,9 +99,9 @@ class NestImportPage {
 
   // ── Results ─────────────────────────────────────────────────────────────
 
-  /** A folder's row in the Overview's Contents tree. */
-  folderRow(label) {
-    return this.contents.getByRole('button', { name: label, exact: true });
+  /** A folder's header in the Documents tree, by its path ("team-notes"). */
+  folderHeader(path) {
+    return this.main.getByTestId(`folder-header-${path}`);
   }
 
   /** A toast carrying `text`. */

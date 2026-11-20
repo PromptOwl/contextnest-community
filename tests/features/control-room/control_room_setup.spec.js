@@ -1,12 +1,15 @@
 /**
- * Control Room → Setup and How it works (po-1186 CR3) — CN-CR-001 … CN-CR-007
+ * Control Room → Setup and How it works (po-1186 CR3) — CN-CR-001 … CN-CR-007,
+ * and who may open it (po-1406) — CN-CR-015
  *
  * Page under test: ui/src/pages/app/control-room/ (route `/control-room`).
  * Each case names the acceptance criterion it checks (AC-CR-01, 02, 14, 15, 16).
  *
  * Conventions
  * -----------
- * - The primary account must be a server admin (installing is server-admin only).
+ * - The primary account must be a server admin: the Control room is for
+ *   superadmins only (po-1406, Misha 2026-11-18). CN-CR-015 also needs a
+ *   secondary account that is not one (it skips otherwise).
  * - Slack is a fake (tests/src/lib/control_room_stubs.js): every /surfaces call
  *   the page makes is answered in this browser, Slack OAuth included, and
  *   `/health` reports Surfaces on. Nests come from the real server.
@@ -25,6 +28,7 @@ import ControlRoomPage from '../../src/page_factory/app/control_room_page.js';
 import { stubSurfaces, stubSurfacesOn } from '../../src/lib/control_room_stubs.js';
 
 const primaryRole = samples.primary_user ?? null;
+const secondaryRole = samples.secondary_user ?? null;
 
 /** Does the server under test ship the Control room? Its /health then carries `surfaces_enabled`. */
 let deployed = false;
@@ -173,6 +177,31 @@ test.describe('Control room: setup', () => {
     await expect(page.getByTestId('setup-check-ok')).toContainText('#revops');
   });
 
+  test('CN-CR-008 / po-1432: channel members who cannot read the nest are offered "Add to nest"; adding them checks the channel again', async ({ primary_user }) => {
+    await primary_user.initialize();
+    const { page } = primary_user;
+    await stubSurfacesOn(page);
+    const fake = await stubSurfaces(page, { install: 'active' });
+    const cr = new ControlRoomPage(page);
+    await cr.goto('setup');
+    await expect(cr.stepPane(2)).toBeVisible();
+    await page.getByLabel('Listen in #revops').check();
+    const guard = page.getByTestId('guard-C_REVOPS');
+    await expect(guard).toContainText('Proposals only');
+
+    await guard.getByTestId('add-to-nest-revops').click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText("can't read");
+    await expect(dialog.getByRole('checkbox', { name: 'Add Carol' })).toBeChecked();
+    await expect(dialog.getByRole('checkbox', { name: 'Add Xavier' })).toBeDisabled();
+    await expect(dialog).toContainText('no account');
+    await dialog.getByRole('button', { name: 'Add to nest (1)' }).click();
+
+    await expect(guard).toContainText('Cards can show existing records');
+    const adds = fake.calls.filter((c) => c.method === 'POST' && /\/collaborators$/.test(c.path));
+    expect(adds.map((c) => c.body)).toEqual([{ user_id: 'u_carol', permission: 'read' }]);
+  });
+
   test('CN-CR-004 / AC-CR-02: "Create a nest for this channel" makes a nest the channel can save into', async ({ primary_user }) => {
     await primary_user.initialize();
     const { page } = primary_user;
@@ -228,6 +257,35 @@ test.describe('Control room: setup', () => {
     for (const n of [1, 2, 3]) await expect(cr.stepButton(n)).toHaveAttribute('data-done', 'true');
     for (const n of [4, 5]) await expect(cr.stepButton(n)).toHaveAttribute('data-done', 'false');
     await expect(cr.stepButton(4)).toHaveAttribute('aria-current', 'step');
+  });
+});
+
+test.describe('Control room: superadmins only', () => {
+  test('CN-CR-015 (po-1406): a nest owner who is not a superadmin has no rail row, lands on Nests from /control-room, and the page-only reads refuse them', async ({ secondary_user }) => {
+    test.skip(!secondaryRole, 'secondary_user is not configured. See tests/env.template.');
+    await secondary_user.initialize();
+    test.skip(await secondary_user.teammatesApi.isServerAdmin(), 'secondary_user is a server admin here.');
+    const { page, nestsPage } = secondary_user;
+    // A server from before po-1406 still answers its owners; say so instead of failing.
+    const probe = await secondary_user.dashboardApi.request('GET', '/rollups');
+    if (process.env.CN_EXPECT_CONTROL_ROOM === '1') {
+      expect(probe.status, 'the server under test predates po-1406 (GET /rollups is not refused)').toBe(403);
+    }
+    test.skip(probe.status !== 403, 'The server under test predates po-1406 (Control room superadmins only).');
+    expect(probe.data?.error).toContain('Only a superadmin can open the Control room.');
+    for (const path of ['/ledger', '/surfaces/cold-start']) {
+      const res = await secondary_user.dashboardApi.request('GET', path);
+      expect([403, 404], `GET ${path} as a non-superadmin`).toContain(res.status);
+    }
+
+    await stubSurfacesOn(page);
+    const cr = new ControlRoomPage(page);
+    await nestsPage.goto();
+    await expect(page.getByTestId('document-sidebar-dashboard-teams')).toBeVisible();
+    await expect(cr.railItem).toHaveCount(0);
+    await page.goto('/control-room');
+    await expect(page.getByTestId('page-title')).toContainText('Nests');
+    await expect(cr.root).toHaveCount(0);
   });
 });
 

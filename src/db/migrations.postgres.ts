@@ -119,6 +119,7 @@ export const HISTORICAL_MIGRATIONS = [
   "085_comment_mentions",
   "086_control_room_ledger",
   "090_control_room_run_totals",
+  "093_access_pull_trace",
   "094_annotation_comment_client",
   "095_agent_webhooks",
   "096_stream_marks",
@@ -743,6 +744,15 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS version INTEGER;
     ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS agent TEXT;
     CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id);
+    -- migration 093 (po-1252): the rows of one call read back as one pull —
+    -- pull_id groups them, seq is payload order, hop/via the traversal, bytes
+    -- the size handed over.
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS pull_id TEXT;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS seq INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS hop INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS via TEXT;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS bytes INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_node_access_pull ON node_access_events(nest_id, pull_id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,

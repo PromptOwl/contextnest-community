@@ -162,6 +162,8 @@ export function nestSidebarViews(
     agentStreamEnabled?: boolean;
     /** The caller is a person added to the nest (channels are members-only). */
     isMember?: boolean;
+    /** The nest's own chat answer (GET /nests/:id `chat`). */
+    chatOn?: boolean;
     /** The nest runs stewardship — the queue is a standing surface then. */
     stewardshipEnabled?: boolean;
     /** Something is already waiting (reviews, deletion flags) — the queue
@@ -175,12 +177,12 @@ export function nestSidebarViews(
   if (caps.isReaderView) return views;
   // Mirrors NestView's showReviewTab && !isReadOnly: an editor on an
   // ungoverned nest with nothing pending would otherwise get a row that
-  // lands on the overview.
+  // lands on Documents.
   if (!caps.isReadOnly && (opts.stewardshipEnabled || opts.hasPending))
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   // The registry pages, each gated by its own meta.visible (workflows: the
   // workflow-plane flag and write access).
-  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled, agentStreamEnabled: !!opts.agentStreamEnabled, isMember: opts.isMember === true }))
+  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled, agentStreamEnabled: !!opts.agentStreamEnabled, isMember: opts.isMember === true, chatOn: opts.chatOn }))
     views.push({ id: p.id, label: p.label, icon: p.icon, page: p.viewPage, group: "views" });
   return views;
 }
