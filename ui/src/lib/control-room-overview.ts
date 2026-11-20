@@ -152,6 +152,8 @@ const REASON_TEXT: Record<string, string> = {
   invalid_output: "The model's answer couldn't be read",
   db_error: "Database error",
   unknown_error: "Unexpected error (see server log)",
+  // An agent run the server stopped under (po-1452).
+  server_stopped: "The server stopped during the run",
 };
 
 export function reasonLabel(code: string | null | undefined): string {

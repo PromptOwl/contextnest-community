@@ -552,4 +552,39 @@ describe("SEC-C6-01: message bodies are untrusted data to the watcher", () => {
     expect(ran.data.result.verdict).toBe("error_schema");
     expect(ran.data.result.proposals).toHaveLength(0);
   });
+
+  it("po-1452: a model call that fails closes the run failed with a fixed reason code the ledger shows, and logs no message", async () => {
+    const apiError = (status: number, message: string) => Object.assign(new Error(message), { status });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const [status, code, label] of [
+        [400, "model_rejected", "The model refused the request"],
+        [402, "model_billing", "The model account is out of credit"],
+        [401, "model_auth", "The model key was refused"],
+      ] as const) {
+        await open(alice, `Another message long enough to pass the short-batch rule: the release train moved to Tuesdays at 10:00 after the ${status} retro, and the change board signed it off.`);
+        script = [() => { throw apiError(status, "secret-sk-abc123 invalid model gpt-4"); }];
+        const ran = await runWatch(owner);
+        expect(ran.status, JSON.stringify(ran.data)).toBe(200);
+        expect(ran.data.result.run_id, JSON.stringify(ran.data)).toBeTruthy();
+        const runId = ran.data.result.run_id;
+        const { getDb } = await import("../src/db/client.js");
+        const row = (await getDb().get("SELECT status, reason_code, trace FROM runs WHERE id = ?", [runId])) as { status: string; reason_code: string; trace: string };
+        expect(row.status).toBe("failed");
+        expect(row.reason_code).toBe(code);
+        expect(JSON.parse(row.trace)).toMatchObject({ reason_code: code, http_status: status });
+        expect(row.trace).not.toContain("secret-sk-abc123");
+        const ledger = await jsonRequest(app, "GET", `/ledger/${encodeURIComponent(runId)}`, undefined, owner.apiKey);
+        expect(ledger.status, JSON.stringify(ledger.data)).toBe(200);
+        expect(ledger.data.entry.verdict.reason_code).toBe(code);
+        const { reasonLabel } = await import("../ui/src/lib/control-room-overview.js");
+        expect(reasonLabel(ledger.data.entry.verdict.reason_code)).toBe(label);
+      }
+      const lines = warn.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("[watch]"));
+      expect(lines.some((l) => /reason=model_rejected status=400/.test(l))).toBe(true);
+      expect(lines.join("\n")).not.toContain("secret-sk-abc123");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
