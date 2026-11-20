@@ -105,6 +105,17 @@ export function classifyJudgeFailure(err: unknown, stage: JudgeStage): JudgeFail
   return out("unknown_error");
 }
 
+/**
+ * An agent run's failure (channel watcher, metacognition runner): an error
+ * with an HTTP status or a timeout came from the model; anything else keeps
+ * its own class (db_error, invalid_output, unknown_error).
+ */
+export function classifyRunFailure(err: unknown, timedOut = false): JudgeFailure {
+  if (timedOut) return { code: "model_timeout", name: nameOf(err), status: statusOf(err) };
+  const fromModel = statusOf(err) !== null || TIMEOUT_NAMES.has(nameOf(err));
+  return classifyJudgeFailure(err, fromModel ? "model" : "setup");
+}
+
 /** The one server-log line for a failure: name, code, status. No message, no chat. */
 export function judgeFailureLogLine(windowId: string, f: JudgeFailure): string {
   return `[surfaces] judging window ${windowId} failed: ${f.name} reason=${f.code}${f.status ? ` status=${f.status}` : ""}`;
