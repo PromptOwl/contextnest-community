@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   addCollaborator,
@@ -225,6 +226,86 @@ const Dot = ({ tone }: { tone: "ok" | "warn" | "bad" | "off" }) => (
 /** Small action buttons at 14px (the shadcn "sm" size drops to 12px). */
 const small = "h-8 px-3 text-sm";
 
+type Readiness = NonNullable<SurfacesStatus["readiness"]>;
+
+/**
+ * The address this page was opened at, when it differs from the public base
+ * URL Slack will send the browser back to (null = same, or unknown).
+ */
+export function wrongAddress(readiness: Readiness, here: string | null): string | null {
+  if (!here || !readiness.redirect_url || readiness.public_url) return null;
+  try {
+    return new URL(readiness.redirect_url).origin === new URL(here).origin ? null : here;
+  } catch {
+    return null;
+  }
+}
+
+const SettingsLink = () => (
+  <a href="/settings" className="mt-1 inline-block font-medium underline">
+    Open Server settings
+  </a>
+);
+
+/** po-1444: what this server needs before Slack can connect, each with its fix. */
+export function ReadinessChecklist({ readiness, here }: { readiness: Readiness; here: string | null }) {
+  const url = readiness.public_url;
+  const wrong = wrongAddress(readiness, here);
+  const base = readiness.redirect_url ? new URL(readiness.redirect_url).origin : "";
+  const lines: { ok: boolean; label: string; fix: ReactNode }[] = [
+    {
+      ok: !url,
+      label: "Slack can reach this server",
+      fix: url && (
+        <>
+          {url.problem}
+          <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+            {url.steps.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ol>
+          <SettingsLink />
+        </>
+      ),
+    },
+    {
+      ok: !wrong,
+      label: "You opened this server at its public address",
+      fix: wrong && (
+        <>
+          You&apos;re using this server at {wrong}, but its public base URL is {base}. Slack sends you back to the public base URL after approval, so the install can only finish there.
+          <div className="mt-1">Set Server settings → Basic → Public base URL to this server&apos;s own public https address.</div>
+          <SettingsLink />
+        </>
+      ),
+    },
+    {
+      ok: readiness.buffer_key,
+      label: "Message buffer key is set",
+      fix: "Without it Nest never proposes anything. Set the buffer key in Server settings → Surfaces.",
+    },
+    {
+      ok: readiness.model_key,
+      label: "A model key is set",
+      fix: "The judge needs a model to read conversations. Add a model key in Server settings → Hootie, or give each bound nest its own key.",
+    },
+  ];
+  return (
+    <ul className="mb-4 space-y-2 rounded-lg border p-4 text-sm" data-testid="setup-readiness">
+      {lines.map((l) => (
+        <li key={l.label} className="flex gap-2.5" data-ok={l.ok ? "true" : "false"}>
+          {l.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" aria-hidden /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-700" aria-hidden />}
+          <div className="min-w-0">
+            <span className="font-medium">{l.label}</span>
+            <span className="sr-only">{l.ok ? " (ready)" : " (not ready)"}</span>
+            {!l.ok && <div className="mt-0.5 text-foreground/80">{l.fix}</div>}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function WillNever({ settings }: { settings: SurfacesSettingsView | null }) {
   const s = settings ?? DEFAULT_SETTINGS_COPY;
   return (
@@ -399,6 +480,10 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   }, [inst, connected]);
 
   const allCreds = CRED_FIELDS.every((f) => creds[f.key]);
+  const readiness = state.status?.readiness;
+  // The server refuses too; this keeps the admin from leaving for a Slack error page.
+  const here = typeof window === "undefined" ? null : window.location.origin;
+  const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
 
   const download = async () => {
@@ -469,6 +554,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
         lede={`This installs ${org ? `${org}'s` : "your"} own copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
       />
       <WillNever settings={state.settings} />
+      {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
@@ -550,15 +636,29 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
           </ol>
           <div className="mt-3 flex flex-wrap gap-2">
             {!hosted && (
-              <Button variant="outline" onClick={download} disabled={busy || (!inst && !homeNest)}>
+              <Button variant="outline" onClick={download} disabled={busy || urlBad || (!inst && !homeNest)}>
                 <Download className="mr-1.5 h-4 w-4" aria-hidden />
                 Download manifest
               </Button>
             )}
-            <Button onClick={approve} disabled={busy || (hosted ? !homeNest : !inst || !allCreds)}>
+            <Button onClick={approve} disabled={busy || urlBad || (hosted ? !homeNest : !inst || !allCreds)}>
               Open Slack to approve
             </Button>
           </div>
+          {urlBad && (
+            <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
+              Slack can&apos;t connect from here yet. Fix the address problem above first.
+            </p>
+          )}
+          {readiness?.redirect_url && !urlBad && (
+            <div className="mt-3 text-sm" data-testid="setup-redirect-url">
+              <p className="text-muted-foreground">Your Slack app must list this exact address under OAuth &amp; Permissions → Redirect URLs:</p>
+              <div className="mt-1 flex min-w-0 items-center gap-2">
+                <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5">{readiness.redirect_url}</code>
+                <CopyButton text={readiness.redirect_url} toastMessage="Redirect URL copied" />
+              </div>
+            </div>
+          )}
           {!hosted && (
             <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
               The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
