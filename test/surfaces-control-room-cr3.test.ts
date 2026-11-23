@@ -284,7 +284,7 @@ describe("binding a channel: the one notice links the member explainer", () => {
     expect(notices[0].text).toContain(`<${BASE}/about/surfaces|How Nest handles your messages>`);
     const list = await jsonRequest(app, "GET", `/surfaces/slack/installs/${installId}/channels`, undefined, root.apiKey);
     const ops = list.data.channels.find((c: any) => c.id === "C_OPS");
-    expect(ops.binding).toEqual({ id: b.data.binding.id, nest_id: N, status: "active" });
+    expect(ops.binding).toEqual({ id: b.data.binding.id, nest_id: N, status: "active", paused_by_admin: false });
   });
 
   it("with no PUBLIC_BASE_URL the notice has no link (nothing to point at)", async () => {
@@ -366,11 +366,11 @@ describe("the notice never states a default retention it can't confirm", () => {
     slack.convs.set("C_AGAIN", { info: { id: "C_AGAIN", name: "again-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
     const first = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
     expect(first.data.notice).toBe("posted");
-    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, undefined, root.apiKey)).status).toBeLessThan(300);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, { reason: "test remove" }, root.apiKey)).status).toBeLessThan(300);
     const again = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
     expect(again.status).toBe(201);
     expect(again.data.notice).toBe("already_posted");
-    await jsonRequest(app, "DELETE", `/surfaces/bindings/${again.data.binding.id}`, undefined, root.apiKey);
+    await jsonRequest(app, "DELETE", `/surfaces/bindings/${again.data.binding.id}`, { reason: "test remove" }, root.apiKey);
     const viaMcp = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_binding_create", arguments: { install_id: installId, conversation_id: "C_AGAIN" } }, root.apiKey);
     const text = viaMcp.result?.content?.[0]?.text ?? "";
     expect(viaMcp.result?.isError, text).not.toBe(true);

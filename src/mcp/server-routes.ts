@@ -345,6 +345,7 @@ const SERVER_NEST_TOOLS = [
   "context_resolve",
   "context_comments",
   "context_versions",
+  "context_pull_log",
   "context_create",
   "context_upload",
   "context_update",
@@ -438,6 +439,7 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_resolve",
   "context_comments",
   "context_versions",
+  "context_pull_log",
   "context_boards",
   "context_board_items",
   STREAM_TOOL,
@@ -968,7 +970,7 @@ Streamable HTTP, stateless. Two endpoints:
   - Fan-out reads (omit \`nest\` to search/list ALL nests): \`context_search\`,
     \`context_list\`, \`context_query\`, \`context_overview\`
   - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`,
-    \`context_boards\`, \`context_board_items\`
+    \`context_boards\`, \`context_board_items\`, \`context_pull_log\` (recorded retrievals and what each handed over)
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_archive\`, \`context_unarchive\`, \`context_move\`, \`context_submit_review\`,
     \`context_request_access\` (ask for write access when a write is refused),
