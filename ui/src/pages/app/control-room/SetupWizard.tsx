@@ -994,6 +994,9 @@ export function BindingManage({
       await onChanged();
     } catch (e) {
       toast.error(errText(e, "That didn't work. Try again."));
+      // Part of it may have happened (a move that removed but couldn't re-bind): show what is true now.
+      await Promise.resolve(state.reload()).catch(() => {});
+      await Promise.resolve(onChanged()).catch(() => {});
     } finally {
       setBusy(false);
     }
@@ -1017,9 +1020,16 @@ export function BindingManage({
     } finally {
       setBusy(false);
     }
+    // ponytail: two calls, not one server-side move. If the second fails the channel is left unbound and the admin is told; add a /move route if that proves common.
     await act(async () => {
-      await removeSurfacesBinding(binding.id, why, nestName(target));
-      await createSurfacesBinding({ install_id: inst.id, conversation_id: channel.id, nest_id: target, reason: `Moved from ${nestName(binding.nest_id)}: ${why}` });
+      await removeSurfacesBinding(binding.id, why, target);
+      try {
+        await createSurfacesBinding({ install_id: inst.id, conversation_id: channel.id, nest_id: target, reason: `Moved from ${nestName(binding.nest_id)}: ${why}` });
+      } catch (e) {
+        throw new Error(
+          `${name} was removed from ${nestName(binding.nest_id)} but couldn't be bound to ${nestName(target)} (${errText(e, "unknown error")}). It isn't listening now. Turn it on again from this list.`,
+        );
+      }
     }, `${name} now saves into ${nestName(target)}.`);
   };
 

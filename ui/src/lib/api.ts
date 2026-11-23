@@ -5695,10 +5695,11 @@ const bindingAction = (id: string, action: "pause" | "resume", reason: string) =
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
 export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
 export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
-export const removeSurfacesBinding = (id: string, reason: string, movedTo?: string) =>
+/** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
+export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    body: JSON.stringify({ reason, ...(movedTo ? { moved_to: movedTo } : {}) }),
+    body: JSON.stringify({ reason, ...(movedToNestId ? { moved_to_nest_id: movedToNestId } : {}) }),
   });
 export interface SurfacesBindingHistoryEntry {
   action: "started" | "paused" | "resumed" | "removed" | "moved";

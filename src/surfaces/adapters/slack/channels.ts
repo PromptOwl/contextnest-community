@@ -13,6 +13,7 @@ import { getDb } from "../../../db/client.js";
 import type { InstallRow } from "../../services/install-store.js";
 import { botToken, NO_BOT_TOKEN } from "./connector.js";
 import { slackCall, SlackApiError } from "./api.js";
+import { ADMIN_PAUSE } from "../../services/binding-service.js";
 import { SurfaceRateLimited } from "../../contract.js";
 
 export const MAX_CHANNEL_PAGES = 10;
@@ -73,7 +74,7 @@ export async function listInstallChannels(install: InstallRow): Promise<{ channe
         is_private: !!(ch.is_private || ch.is_group),
         is_ext_shared: !!(ch.is_ext_shared || ch.is_shared || ch.is_pending_ext_shared),
         num_members: typeof ch.num_members === "number" ? ch.num_members : null,
-        binding: b ? { id: b.id, nest_id: b.nest_id, status: b.status, paused_by_admin: b.pause_reason === "admin" } : null,
+        binding: b ? { id: b.id, nest_id: b.nest_id, status: b.status, paused_by_admin: b.pause_reason === ADMIN_PAUSE } : null,
       };
     })
     .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));

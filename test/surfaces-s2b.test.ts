@@ -3413,6 +3413,8 @@ describe("audit, parity, disconnect", () => {
     process.env.SMTP_URL = "smtps://u:p@smtp.test:465";
     process.env.NOTIFY_EMAIL_FROM = "nest@surf.test";
     sentMail.length = 0;
+    // po-1437 review: a display name is not Slack markup.
+    await S.db.getDb().run("UPDATE users SET name = ? WHERE email = ?", ["<!channel> <https://evil.test|Nest>", root.email]);
     const r = await jsonRequest(app, "DELETE", `/surfaces/installs/${installId}`, undefined, root.apiKey);
     expect(r.status).toBe(200);
     const order = slack.calls.map((c) => c.method);
@@ -3440,6 +3442,9 @@ describe("audit, parity, disconnect", () => {
     const told = slack.calls.findIndex((c) => c.method === "chat.postMessage" && c.params.channel === "C1" && /disconnected from this Slack workspace by/i.test(String(c.params.text)));
     expect(told).toBeGreaterThan(-1);
     expect(told).toBeLessThan(firstRevoke);
+    const toldText = String(slack.calls[told].params.text);
+    expect(toldText).toContain("&lt;!channel&gt; &lt;https://evil.test|Nest&gt;");
+    expect(toldText).not.toContain("<!channel>");
     expect(r.data.told).toBeGreaterThan(0);
     const c1 = await one("SELECT id FROM surface_bindings WHERE install_id = ? AND conversation_id = 'C1'", [installId]);
     const h = await one("SELECT action, reason, actor_user_id, actor_email FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", [c1.id]);

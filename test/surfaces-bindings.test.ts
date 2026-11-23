@@ -531,6 +531,25 @@ describe("guard re-checks (§4.17)", () => {
     expect(moved.data.binding).toMatchObject({ nest_id: n2, status: "active" });
   });
 
+  it("po-1437 review: a second stop is 409 with no extra history row; a move names the nest from the server; history stays per nest", async () => {
+    const n1 = await newNest(alice, "Old Nest");
+    const n2 = await newNest(alice, "New Nest");
+    setConv("C-1437r", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1437r", nest_id: n1 })).data.binding.id;
+    // moved_to_nest_id is resolved server-side; a free-text moved_to is ignored.
+    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "new team", moved_to_nest_id: n2, moved_to: "<!channel>" }, alice.apiKey);
+    expect(del.status, JSON.stringify(del.data)).toBe(200);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "double click" }, alice.apiKey)).status).toBe(409);
+    const old = (await S.db.getDb().all("SELECT action, reason, nest_id FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at", [id])) as any[];
+    expect(old.map((h) => h.action)).toEqual(["started", "moved"]);
+    expect(old[1].reason).toBe("new team (moved to New Nest)");
+
+    // Re-bound to the new nest (same row): its admins see only the new nest's history.
+    expect((await bind({ conversation_id: "C-1437r", nest_id: n2 })).status).toBe(201);
+    const h = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey)).data.history;
+    expect(h.map((e: any) => e.action)).toEqual(["started"]);
+  });
+
   it("resume refuses while the guard still fails", async () => {
     const n = await newNest(alice);
     await share(n, dave);

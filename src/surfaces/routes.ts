@@ -238,8 +238,8 @@ surfacesRoutes.delete("/bindings/:id", async (c) => {
   try {
     await scopedRow(c, c.req.param("id"));
     const b = await readBody(c);
-    const movedTo = typeof b.moved_to === "string" && b.moved_to.trim() ? b.moved_to.trim() : null;
-    return c.json(await removeBinding(c.req.param("id"), c.get("userId"), requireReason(b.reason), movedTo));
+    const movedToNestId = typeof b.moved_to_nest_id === "string" && b.moved_to_nest_id.trim() ? b.moved_to_nest_id.trim() : null;
+    return c.json(await removeBinding(c.req.param("id"), c.get("userId"), requireReason(b.reason), movedToNestId));
   } catch (err) {
     return handleError(c, err);
   }

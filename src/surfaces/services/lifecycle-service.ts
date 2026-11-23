@@ -21,6 +21,7 @@ import { handleSurfaceSignal } from "./guard-runner.js";
 import { markRemoved, recordBindingHistory, type BindingRow } from "./binding-service.js";
 import { getInstall } from "./install-store.js";
 import { getConnector } from "../registry.js";
+import { escapeMrkdwn } from "../../notify/slack.js";
 import { runFetchQueue } from "./fetch-queue.js";
 import { track } from "./work.js";
 import { recordPurge } from "./purge-audit.js";
@@ -180,6 +181,14 @@ export function stopSurfacesIngestLoops(): void {
  * buffer, drafts and identity links go (the uninstall path); 4. approved
  * nodes, surface_commits and the audit history stay.
  */
+const NOTICE_CONCURRENCY = 5;
+const NOTICE_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  return Promise.race([p, new Promise<T>((_, reject) => (t = setTimeout(() => reject(new Error("timeout")), ms)))]).finally(() => clearTimeout(t));
+}
+
 export async function disconnectInstall(installId: string, actorUserId: string | null = null): Promise<{ withdrawn: number; told: number }> {
   const db = getDb();
   const { withdrawBindingCards } = await import("./expiry-service.js");
@@ -195,14 +204,22 @@ export async function disconnectInstall(installId: string, actorUserId: string |
     const install = await getInstall(installId);
     const connector = install ? getConnector(install.surface) : null;
     const { bindingRef } = await import("./card-service.js");
-    for (const b of bindings.filter((x) => x.status !== "removed")) {
-      if (b.conversation_kind !== "dm" && connector?.postNotice) {
-        const text = `Nest was disconnected from this Slack workspace by ${who?.name || label}. It no longer reads or saves anything from this channel. Notes already approved stay in the nest.`;
-        await connector
-          .postNotice(bindingRef(b), text)
-          .then(() => told++)
-          .catch((err) => console.warn(`[surfaces] disconnect notice not posted for binding ${b.id}: ${err instanceof Error ? err.name : "error"}`));
+    // A person's name is not Slack markup: escaped, so "<!channel>" or "<url|Nest>" in it stays plain text.
+    const byName = escapeMrkdwn(who?.name || label);
+    const live = bindings.filter((x) => x.status !== "removed");
+    const post = async (b: BindingRow) => {
+      if (b.conversation_kind === "dm" || !connector?.postNotice) return;
+      const text = `Nest was disconnected from this Slack workspace by ${byName}. It no longer reads or saves anything from this channel. Notes already approved stay in the nest.`;
+      try {
+        await withTimeout(connector.postNotice(bindingRef(b), text), NOTICE_TIMEOUT_MS);
+        told++;
+      } catch (err) {
+        console.warn(`[surfaces] disconnect notice not posted for binding ${b.id}: ${err instanceof Error ? err.name : "error"}`);
       }
+    };
+    // Bounded: a few at a time, each capped, so a slow Slack can't stall the disconnect.
+    for (let i = 0; i < live.length; i += NOTICE_CONCURRENCY) await Promise.all(live.slice(i, i + NOTICE_CONCURRENCY).map(post));
+    for (const b of live) {
       await markRemoved(b, null);
       await recordBindingHistory(b, "removed", `Slack disconnected by ${label}`, actorUserId);
     }
