@@ -1037,6 +1037,22 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(members.SC).toMatchObject({ community_user_id: carol.userId, slack_email: null });
   });
 
+  it("po-1467: a reader whose email a channel member has, but whose link is refused, is not_linked with the reason; never not_in_channel", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    // Same email in Community and Slack, but the Community email is not verified.
+    const hank = { userId: randomUUID(), email: "hank@surf.test" };
+    await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, 'Hank', 'x')", [hank.userId, hank.email]);
+    fake.profiles.set("SH", profile("SH", { display_name: "Hank F", email: "Hank@surf.test" }));
+    await S.db.getDb().run("DELETE FROM surface_users_cache WHERE surface_user_id = 'SH'");
+    const n = await newNest(alice);
+    const r = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: hank.email, permission: "read" }, alice.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    setConv("C-1467-A", ["SA", "SH"]);
+    const p = await preview("C-1467-A", n);
+    const absent = Object.fromEntries(p.people.absent_readers.map((a: any) => [a.email, a]));
+    expect(absent[hank.email]).toMatchObject({ user_id: hank.userId, reason: "not_linked", match_reason: "unverified" });
+  });
+
   it("AC 6: a world-readable nest names its cause", async () => {
     const pub = await newNest(alice);
     await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);
