@@ -159,14 +159,18 @@ export async function versionHistoryScope(
   nodeId: string,
   userId: string,
   userEmail: string,
-  opts: { readOnlyKey?: boolean; liveVersion?: number | null } = {},
+  /** `liveVersion` is the live working copy's version, or a function that
+   *  reads it — called only for a visibility-only reader, so a member's
+   *  request does not pay for the document read. */
+  opts: { readOnlyKey?: boolean; liveVersion?: number | null | (() => Promise<number | null>) } = {},
 ): Promise<VersionHistoryScope> {
   const publicReader = await isPublicReader(nestId, userId);
   const identities = !publicReader && !opts.readOnlyKey && !(await isHeadlessIdentity(userId));
   if (!publicReader) return { approvedOnly: false, approvedVersion: null, ownDraftVersion: null, identities };
   const approvedVersion = await getApprovedVersion(nestId, nodeId);
+  const liveVersion = typeof opts.liveVersion === "function" ? await opts.liveVersion() : opts.liveVersion;
   const ownDraftVersion =
-    opts.liveVersion != null && (await seesOwnDraft(nestId, nodeId, userId, userEmail)) ? opts.liveVersion : null;
+    liveVersion != null && (await seesOwnDraft(nestId, nodeId, userId, userEmail)) ? liveVersion : null;
   return { approvedOnly: true, approvedVersion, ownDraftVersion, identities };
 }
 
@@ -197,7 +201,7 @@ export async function canReadVersionNumber(
   storage: Parameters<typeof liveVersionOf>[0],
 ): Promise<boolean> {
   const scope = await versionHistoryScope(nestId, nodeId, userId, userEmail, {
-    liveVersion: await liveVersionOf(storage, nodeId),
+    liveVersion: () => liveVersionOf(storage, nodeId),
   });
   if (!scope.approvedOnly) return true;
   const row = await getVersion(nestId, nodeId, version);

@@ -769,7 +769,7 @@ async function callerVersionScope(
 ): Promise<VersionHistoryScope> {
   return versionHistoryScope(nestId, nodeId, userId, userEmail, {
     readOnlyKey: c.get("keyCapability") === "read",
-    liveVersion: await liveVersionOf(storage, nodeId),
+    liveVersion: () => liveVersionOf(storage, nodeId),
   });
 }
 
