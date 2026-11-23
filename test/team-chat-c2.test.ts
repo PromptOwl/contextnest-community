@@ -1074,6 +1074,16 @@ describe("AC-C2-15: GET /me/chat/unread and the chat section of My Work", () => 
     // Nobody outside: a share grantee has nothing.
     expect((await jsonRequest(app, "GET", "/me/chat/unread", undefined, bob.apiKey)).data).toMatchObject({ total: 0, nests: [] });
   });
+
+  it("concurrent polls share one build instead of each starting their own", async () => {
+    const { chatUnreadSummary, _resetUnreadCache } = await import("../src/chat/unread.js");
+    _resetUnreadCache();
+    const p = { userId: sam.userId, email: sam.email };
+    const [a, b] = await Promise.all([chatUnreadSummary(p), chatUnreadSummary(p)]);
+    // Two builds would return two objects; a shared build returns the same one.
+    expect(a).toBe(b);
+    expect(a.nests.map((n) => n.nest_id)).toContain(nestId);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
