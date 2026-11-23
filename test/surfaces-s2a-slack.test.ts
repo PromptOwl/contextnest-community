@@ -1165,7 +1165,7 @@ describe("purge", () => {
     await say("C3", "U_ALICE", "message in the channel that will be unbound");
     expect((await bufferRows(b3)).length).toBe(1);
     const calls = modelCalls.length;
-    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${b3}`, undefined, alice.apiKey)).status).toBe(200);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${b3}`, { reason: "test remove" }, alice.apiKey)).status).toBe(200);
     await S.work.waitForSurfacesWork();
     expect((await bufferRows(b3)).length).toBe(0);
     expect((await one("SELECT status, close_reason FROM surface_windows WHERE binding_id = ?", [b3]))).toMatchObject({ status: "discarded", close_reason: "discarded" });

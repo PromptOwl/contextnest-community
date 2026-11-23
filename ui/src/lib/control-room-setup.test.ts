@@ -294,6 +294,27 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     expect(plain.groups).toHaveLength(1);
   });
 
+  it("po-1467: a same-email member whose link was refused shows once, with the reason, not as both absent and unmatched", () => {
+    const v = guardView(
+      refused({
+        absent_readers: [
+          { user_id: "u1", name: "Hiren", email: "hiren@promptowl.ai", reason: "not_linked", match_reason: "unverified" },
+          { user_id: "u2", name: null, email: "temp_a@gmail.com", reason: "no_slack_link" },
+        ],
+        members_not_readers: [
+          { surface_user_id: "SH", name: "Hiren F", community_user_id: null, email: null, slack_email: "Hiren@promptowl.ai" },
+          { surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null },
+        ],
+      }),
+      ctx,
+    );
+    expect(v.groups).toEqual([
+      { heading: "In #testnest with the same email, but not linked to their account:", people: ["Hiren: their email here is not verified"] },
+      { heading: "No Slack user in this workspace has the same email:", people: ["temp_a@gmail.com"] },
+      { heading: "In #testnest but not matched to an account here:", people: ["Quinn: Slack shares no confirmed email"] },
+    ]);
+  });
+
   it("AC 6: a public nest and a live public link name their cause", () => {
     expect(guardView(refused({ universe_cause: "public" }, { universe: true }), ctx).note).toBe(
       "PO - Engineering Ops is public, so anything saved from #testnest would be readable by anyone.",
@@ -341,5 +362,66 @@ describe("po-1432 review: shared-deployment cause and capped name lists", () => 
       people: people({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }),
     };
     expect(guardView(p, ctx).note).toBe("22 people who can read PO - Engineering Ops can't be found in #testnest. Only 1 is listed below.");
+  });
+});
+
+describe("po-1448: Server settings → Surfaces helpers", () => {
+  it("generateBufferKey makes 32 random bytes in base64, different every time", async () => {
+    const { generateBufferKey } = await import("./control-room-setup");
+    const a = generateBufferKey();
+    const b = generateBufferKey();
+    expect(a).toHaveLength(44);
+    expect(Uint8Array.from(atob(a), (c) => c.charCodeAt(0))).toHaveLength(32);
+    expect(a).not.toBe(b);
+  });
+
+  it("hostedSlackUrls builds the four Slack URLs from the public base URL, and nothing without one", async () => {
+    const { hostedSlackUrls } = await import("./control-room-setup");
+    expect(hostedSlackUrls("https://nest.acme.com/")).toEqual({
+      redirect: "https://nest.acme.com/surfaces/slack/oauth/callback",
+      events: "https://nest.acme.com/surfaces/slack/hosted/events",
+      interactions: "https://nest.acme.com/surfaces/slack/hosted/interactions",
+      commands: "https://nest.acme.com/surfaces/slack/hosted/commands",
+    });
+    expect(hostedSlackUrls("")).toBeNull();
+    expect(hostedSlackUrls(null)).toBeNull();
+  });
+});
+
+describe("po-1446: channel activity in plain words", () => {
+  const base = { days: 7, since: "", received: 0, buffered: 0, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 0 }, cards: { posted: 0, queued: 0, held: 0 } };
+
+  it("names what arrived, what was skipped and why, what is waiting, what was judged, and the cards", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(
+      { ...base, received: 14, buffered: 9, skipped: { too_short: 3, bot_or_system: 2 }, waiting: 1, judged: { proposed: 1, nothing_kept: 4, failed: 0 }, cards: { posted: 1, queued: 1, held: 0 } },
+      20,
+    );
+    expect(lines).toEqual([
+      "14 messages received · 9 kept for judging · 5 skipped (3 too short, 2 from bots or Slack itself)",
+      "1 thread waiting for the 20-minute quiet window",
+      "5 threads judged: 1 proposed, 4 with nothing worth keeping. The Decision ledger says why for each.",
+      "1 card posted · 1 queued for tomorrow (daily limit)",
+    ]);
+  });
+
+  it("says where to look when nothing arrived", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(base, 20);
+    expect(lines).toContain("No thread judged yet.");
+    expect(lines[lines.length - 1]).toMatch(/Nothing arrived/);
+  });
+});
+
+describe("po-1446 review: failed, held and singular wording", () => {
+  it("says failed and held, and uses the singular for one", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(
+      { days: 7, since: "", received: 1, buffered: 1, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 1 }, cards: { posted: 0, queued: 0, held: 1 } },
+      20,
+    );
+    expect(lines[0]).toBe("1 message received · 1 kept for judging · 0 skipped");
+    expect(lines[1]).toBe("1 thread judged: 0 proposed, 0 with nothing worth keeping, 1 failed. The Decision ledger says why for each.");
+    expect(lines[2]).toBe("0 cards posted · 1 held (no eligible reviewer in the channel)");
   });
 });

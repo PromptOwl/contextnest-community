@@ -4418,6 +4418,11 @@ export interface AssignedItem {
   assigned_at: string | null;
   /** Open blockers (task relations); absent when nothing open blocks it. */
   open_blockers?: number;
+  /** Lowercase tags without `#` — the stage (`stage:doing`) among them. */
+  tags?: string[];
+  /** True on a finished task; only present when Done tasks were asked for. */
+  done?: true;
+  completed_at?: string | null;
 }
 
 /**
@@ -4460,8 +4465,15 @@ export async function markMentionDone(threadId: string) {
   );
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
+export async function getMyWork(opts?: {
+  limit?: number;
+  offset?: number;
+  mentionsOffset?: number;
+  /** Also list finished tasks in `assigned` (the Done / All task filter). */
+  doneTasks?: boolean;
+}) {
   const q = new URLSearchParams();
+  if (opts?.doneTasks) q.set("assigned_done", "1");
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
   if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));
@@ -5587,6 +5599,8 @@ export interface SurfacesBinding {
   conversation_id: string;
   conversation_name?: string | null;
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  /** A nest admin paused it on purpose (po-1437). */
+  paused_by_admin?: boolean;
   [k: string]: unknown;
 }
 
@@ -5613,7 +5627,14 @@ export interface SurfacesBindingPreview {
   disclosure: string;
   /** po-1432: names for the preview caller only (absent on older servers). */
   people?: {
-    absent_readers: Array<{ user_id: string | null; name: string | null; email: string | null; reason: "not_in_channel" | "no_slack_link" | "no_account" }>;
+    /** `not_linked` (po-1467): a channel member has their email but the link was refused; `match_reason` says why. */
+    absent_readers: Array<{
+      user_id: string | null;
+      name: string | null;
+      email: string | null;
+      reason: "not_in_channel" | "no_slack_link" | "no_account" | "not_linked";
+      match_reason?: string | null;
+    }>;
     /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). */
     members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
@@ -5626,7 +5647,7 @@ export interface SurfacesChannel {
   is_private: boolean;
   is_ext_shared: boolean;
   num_members: number | null;
-  binding: { id: string; nest_id: string; status: string } | null;
+  binding: { id: string; nest_id: string; status: string; paused_by_admin?: boolean } | null;
 }
 
 export interface SurfacesSeedRef {
@@ -5679,7 +5700,7 @@ export const putSlackCredentials = (id: string, creds: { client_id?: string; cli
   });
 /** Admin disconnect: revokes the token, drops bindings; approved nodes and the audit stay. */
 export const disconnectSurfacesInstall = (id: string) =>
-  request<{ disconnected: boolean; withdrawn: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  request<{ disconnected: boolean; withdrawn: number; told?: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
 /** Browser navigations (the server answers with a redirect to Slack). */
 export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
 export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
@@ -5687,7 +5708,41 @@ export const listSlackChannels = (installId: string) =>
   request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
 export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
   request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
-export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+/** po-1437: manage an existing channel → nest binding (nest owner/admin). */
+// Pause, resume and remove need a reason (3–500 characters); it goes on the binding's history.
+const bindingAction = (id: string, action: "pause" | "resume", reason: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
+export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
+export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+/** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
+export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason, ...(movedToNestId ? { moved_to_nest_id: movedToNestId } : {}) }),
+  });
+export interface SurfacesBindingHistoryEntry {
+  action: "started" | "paused" | "resumed" | "removed" | "moved";
+  reason: string | null;
+  at: string;
+  /** null = Nest itself (a reader check, a member's /nest leave, a disconnect). */
+  by: { user_id: string; email: string | null; name: string | null } | null;
+}
+export const getSurfacesBindingHistory = (id: string) =>
+  request<{ history: SurfacesBindingHistoryEntry[] }>(`/surfaces/bindings/${encodeURIComponent(id)}/history`).then((r) => r.history);
+/** po-1446: counts only, over `days`. `skipped` is keyed by the gate's reason (too_short, bot_or_system, …). */
+export interface SurfacesBindingActivity {
+  days: number;
+  since: string;
+  received: number;
+  buffered: number;
+  skipped: Record<string, number>;
+  waiting: number;
+  judged: { proposed: number; nothing_kept: number; failed: number };
+  cards: { posted: number; queued: number; held: number };
+}
+export const getSurfacesBindingActivity = (id: string) =>
+  request<SurfacesBindingActivity>(`/surfaces/bindings/${encodeURIComponent(id)}/activity`);
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean; reason?: string }) =>
   request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>
   request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);

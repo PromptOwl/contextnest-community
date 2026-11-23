@@ -5,7 +5,7 @@
  * in S2a/S2b; they register here, so the binding state machine (S1) never
  * has to know about them.
  */
-export type PauseReason = "guard" | "member_boot" | "removed";
+export type PauseReason = "guard" | "member_boot" | "removed" | "admin";
 
 export interface PausedBinding {
   id: string;

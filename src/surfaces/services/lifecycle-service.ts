@@ -18,6 +18,10 @@ import { withdrawForBinding, retryWithdrawals } from "./proposal-service.js";
 import { removeListener } from "./listener-service.js";
 import { deleteSecrets } from "./secret-store.js";
 import { handleSurfaceSignal } from "./guard-runner.js";
+import { markRemoved, recordBindingHistory, type BindingRow } from "./binding-service.js";
+import { getInstall } from "./install-store.js";
+import { getConnector } from "../registry.js";
+import { escapeMrkdwn } from "../../notify/slack.js";
 import { runFetchQueue } from "./fetch-queue.js";
 import { track } from "./work.js";
 import { recordPurge } from "./purge-audit.js";
@@ -177,12 +181,49 @@ export function stopSurfacesIngestLoops(): void {
  * buffer, drafts and identity links go (the uninstall path); 4. approved
  * nodes, surface_commits and the audit history stay.
  */
-export async function disconnectInstall(installId: string): Promise<{ withdrawn: number }> {
+const NOTICE_CONCURRENCY = 5;
+const NOTICE_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  return Promise.race([p, new Promise<T>((_, reject) => (t = setTimeout(() => reject(new Error("timeout")), ms)))]).finally(() => clearTimeout(t));
+}
+
+export async function disconnectInstall(installId: string, actorUserId: string | null = null): Promise<{ withdrawn: number; told: number }> {
   const db = getDb();
   const { withdrawBindingCards } = await import("./expiry-service.js");
-  const bindings = (await db.all("SELECT id FROM surface_bindings WHERE install_id = ?", [installId])) as Array<{ id: string }>;
+  const bindings = (await db.all("SELECT * FROM surface_bindings WHERE install_id = ?", [installId])) as BindingRow[];
   let withdrawn = 0;
   for (const b of bindings) withdrawn += await withdrawBindingCards(b.id);
+  // po-1437: while the token still works, tell each channel who disconnected
+  // Slack, and put "Slack disconnected by <email>" on its history as that person.
+  let told = 0;
+  if (actorUserId) {
+    const who = (await db.get("SELECT name, email FROM users WHERE id = ?", [actorUserId])) as { name: string | null; email: string } | undefined;
+    const label = who?.email ?? "an administrator";
+    const install = await getInstall(installId);
+    const connector = install ? getConnector(install.surface) : null;
+    const { bindingRef } = await import("./card-service.js");
+    // A person's name is not Slack markup: escaped, so "<!channel>" or "<url|Nest>" in it stays plain text.
+    const byName = escapeMrkdwn(who?.name || label);
+    const live = bindings.filter((x) => x.status !== "removed");
+    const post = async (b: BindingRow) => {
+      if (b.conversation_kind === "dm" || !connector?.postNotice) return;
+      const text = `Nest was disconnected from this Slack workspace by ${byName}. It no longer reads or saves anything from this channel. Notes already approved stay in the nest.`;
+      try {
+        await withTimeout(connector.postNotice(bindingRef(b), text), NOTICE_TIMEOUT_MS);
+        told++;
+      } catch (err) {
+        console.warn(`[surfaces] disconnect notice not posted for binding ${b.id}: ${err instanceof Error ? err.name : "error"}`);
+      }
+    };
+    // Bounded: a few at a time, each capped, so a slow Slack can't stall the disconnect.
+    for (let i = 0; i < live.length; i += NOTICE_CONCURRENCY) await Promise.all(live.slice(i, i + NOTICE_CONCURRENCY).map(post));
+    for (const b of live) {
+      await markRemoved(b, null);
+      await recordBindingHistory(b, "removed", `Slack disconnected by ${label}`, actorUserId);
+    }
+  }
   // Round 9 (R5-L1): linked sealed-nest owners are told before the bot token
   // (their alert channel) is revoked — by DM while it still works, and email.
   {
@@ -201,5 +242,5 @@ export async function disconnectInstall(installId: string): Promise<{ withdrawn:
     new Date().toISOString(),
     installId,
   ]);
-  return { withdrawn };
+  return { withdrawn, told };
 }

@@ -65,3 +65,64 @@ describe("ConnectStep readiness", () => {
     expect(out).toContain("You&#x27;re using this server at http://localhost:3838, but its public base URL is https://nest.acme.com.");
   });
 });
+
+/** po-1437: a bound channel says how it is paused and offers Manage. */
+describe("bound channel", () => {
+  it("names who paused it", async () => {
+    const { boundLabel } = await import("./SetupWizard");
+    expect(boundLabel({ status: "active" }).text).toBe("Listening");
+    expect(boundLabel({ status: "paused_guard", paused_by_admin: true }).text).toBe("Paused by an admin");
+    expect(boundLabel({ status: "paused_guard" }).text).toBe("Paused: the reader check failed");
+    expect(boundLabel({ status: "paused_by_member" }).text).toBe("Paused: a member removed Nest");
+  });
+
+  it("renders the status and a Manage button", async () => {
+    const { BindingManage } = await import("./SetupWizard");
+    const out = renderToStaticMarkup(
+      <BindingManage
+        channel={{ id: "C1", name: "ops", is_private: false, is_ext_shared: false, num_members: 3, binding: null }}
+        binding={{ id: "b1", nest_id: "n1", status: "paused_guard", paused_by_admin: true }}
+        state={state(install("active"))}
+        onChanged={() => {}}
+      />,
+    );
+    expect(out).toContain("Paused by an admin");
+    expect(out).toContain('aria-label="Manage #ops"');
+  });
+});
+
+/** po-1437: the history shows the actual person (email), or Nest, with the reason. */
+describe("binding history", () => {
+  it("lists who, what and why, newest first", async () => {
+    const { BindingHistoryList } = await import("./SetupWizard");
+    const out = renderToStaticMarkup(
+      <BindingHistoryList
+        entries={[
+          { action: "paused", reason: "launch week", at: "2026-11-23T10:00:00.000Z", by: { user_id: "u1", email: "sam@acme.com", name: "Sam" } },
+          { action: "paused", reason: "Paused by Nest: someone who can read the nest isn't in the channel.", at: "2026-11-22T10:00:00.000Z", by: null },
+        ]}
+      />,
+    );
+    expect(out).toContain("Sam · sam@acme.com");
+    expect(out).toContain("launch week");
+    expect(out).toContain("Nest (automatic)");
+    expect(out.indexOf("sam@acme.com")).toBeLessThan(out.indexOf("Nest (automatic)"));
+    expect(renderToStaticMarkup(<BindingHistoryList entries={[]} />)).toContain("No changes recorded yet.");
+  });
+});
+
+/** po-1437: the disconnect confirm names every channel that stops, and says members are told. */
+describe("disconnect confirm", () => {
+  it("lists live channels (not DMs, not removed) and the message each one gets", async () => {
+    const { DisconnectChannels } = await import("./SetupWizard");
+    const b = (id: string, status: string, kind = "public_channel") => ({ id, install_id: "i1", nest_id: "n1", conversation_id: id, conversation_name: id.toLowerCase(), conversation_kind: kind, status }) as any;
+    const out = renderToStaticMarkup(<DisconnectChannels bindings={[b("OPS", "active"), b("SALES", "paused_guard"), b("OLD", "removed"), b("DM1", "active", "dm")]} />);
+    expect(out).toContain("These 2 channels stop");
+    expect(out).toContain("#ops");
+    expect(out).toContain("#sales");
+    expect(out).not.toContain("#old");
+    expect(out).not.toContain("#dm1");
+    expect(out).toContain("Nest posts one message in each");
+    expect(renderToStaticMarkup(<DisconnectChannels bindings={[]} />)).toContain("isn&#x27;t listening in any channel");
+  });
+});
