@@ -29,6 +29,7 @@ import {
   removeBinding,
   pauseBinding,
   bindingHistory,
+  bindingActivity,
   requireReason,
   resumeBinding,
   updateBinding,
@@ -256,6 +257,16 @@ surfacesRoutes.post("/bindings/:id/recheck", async (c) => {
 });
 
 /** po-1437: who started, paused, resumed, moved or removed it, when and why (nest owner/admin). */
+/** po-1446: counts of what Nest did in this channel lately (nest owner/admin). */
+surfacesRoutes.get("/bindings/:id/activity", async (c) => {
+  try {
+    await scopedRow(c, c.req.param("id"));
+    return c.json(await bindingActivity(c.req.param("id"), c.get("userId")));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
 surfacesRoutes.get("/bindings/:id/history", async (c) => {
   try {
     await scopedRow(c, c.req.param("id"));
