@@ -5710,6 +5710,19 @@ export interface SurfacesBindingHistoryEntry {
 }
 export const getSurfacesBindingHistory = (id: string) =>
   request<{ history: SurfacesBindingHistoryEntry[] }>(`/surfaces/bindings/${encodeURIComponent(id)}/history`).then((r) => r.history);
+/** po-1446: counts only, over `days`. `skipped` is keyed by the gate's reason (too_short, bot_or_system, …). */
+export interface SurfacesBindingActivity {
+  days: number;
+  since: string;
+  received: number;
+  buffered: number;
+  skipped: Record<string, number>;
+  waiting: number;
+  judged: { proposed: number; nothing_kept: number; failed: number };
+  cards: { posted: number; queued: number; held: number };
+}
+export const getSurfacesBindingActivity = (id: string) =>
+  request<SurfacesBindingActivity>(`/surfaces/bindings/${encodeURIComponent(id)}/activity`);
 export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean; reason?: string }) =>
   request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>

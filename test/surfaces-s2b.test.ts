@@ -3402,6 +3402,27 @@ describe("audit, parity, disconnect", () => {
     }
   });
 
+  it("po-1446: channel activity counts what Nest did (received, kept, skipped by reason, judged, cards); counts only; nest admins only", async () => {
+    const b = await one("SELECT * FROM surface_bindings WHERE conversation_id = 'C1' AND status = 'active'");
+    const url = `/surfaces/bindings/${b.id}/activity`;
+    expect((await jsonRequest(app, "GET", url, undefined, bob.apiKey)).status).toBe(403);
+    const before = (await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data;
+    await say("C1", "U_BOB", "the release moved to Thursday because QA needs another day, everyone agreed in standup");
+    await say("C1", "U_BOB", "ok");
+    const after = await jsonRequest(app, "GET", url, undefined, alice.apiKey);
+    expect(after.status, JSON.stringify(after.data)).toBe(200);
+    const a = after.data;
+    expect(a.days).toBe(7);
+    expect(a.received - before.received).toBe(2);
+    expect(a.buffered - before.buffered).toBe(1);
+    expect((a.skipped.too_short ?? 0) - (before.skipped.too_short ?? 0)).toBe(1);
+    expect(a.received).toBe(a.buffered + Object.values(a.skipped as Record<string, number>).reduce((x, y) => x + y, 0));
+    expect(a.cards.posted).toBeGreaterThan(0);
+    expect(Object.keys(a.judged).sort()).toEqual(["failed", "nothing_kept", "proposed"]);
+    // Counts only: never message text.
+    expect(JSON.stringify(a)).not.toMatch(/Thursday|standup/);
+  });
+
   it("AC-EXP-04 + CF-5 (AC-INS-09): disconnect updates pending cards to Withdrawn BEFORE auth.revoke; afterwards secrets, bindings, buffer, drafts and links are gone; approved nodes and surface_commits remain", async () => {
     await jsonRequest(app, "PATCH", "/surfaces/settings", { reviewer_daily_cards: 10, conversation_daily_cards: 20 }, root.apiKey);
     const p = await makeProposal("C1");
