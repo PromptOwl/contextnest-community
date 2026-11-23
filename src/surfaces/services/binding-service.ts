@@ -812,7 +812,6 @@ export async function recordBindingHistory(
   );
 }
 
-/** Newest first, with the person's current name when they still have an account. */
 export const ACTIVITY_DAYS = 7;
 const FAILED_VERDICTS = new Set(["error", "error_schema", "budget_exhausted"]);
 
@@ -825,8 +824,12 @@ export async function bindingActivity(id: string, actorUserId: string) {
   const row = await rowOrThrow(id);
   await assertNestAdmin(row.nest_id, actorUserId);
   const db = getDb();
-  const sinceMs = Date.now() - ACTIVITY_DAYS * 86_400_000;
-  const since = new Date(sinceMs).toISOString();
+  // One boundary for all three sources: the start of the UTC day ACTIVITY_DAYS - 1 days ago
+  // (counters are kept per UTC day, so threads and cards use the same edge).
+  const start = new Date();
+  start.setUTCHours(0, 0, 0, 0);
+  start.setUTCDate(start.getUTCDate() - (ACTIVITY_DAYS - 1));
+  const since = start.toISOString();
   const counters = (await db.all("SELECT metric, SUM(value) AS n FROM surface_counters WHERE binding_id = ? AND day >= ? GROUP BY metric", [
     id,
     since.slice(0, 10),
@@ -863,6 +866,7 @@ export async function bindingActivity(id: string, actorUserId: string) {
   return { days: ACTIVITY_DAYS, since, received: buffered + dropped, buffered, skipped, waiting, judged, cards };
 }
 
+/** Newest first, with the person's current name when they still have an account. */
 export async function bindingHistory(id: string, actorUserId: string) {
   const row = await rowOrThrow(id);
   await assertNestAdmin(row.nest_id, actorUserId);

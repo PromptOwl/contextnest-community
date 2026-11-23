@@ -3417,8 +3417,10 @@ describe("audit, parity, disconnect", () => {
     expect(a.buffered - before.buffered).toBe(1);
     expect((a.skipped.too_short ?? 0) - (before.skipped.too_short ?? 0)).toBe(1);
     expect(a.received).toBe(a.buffered + Object.values(a.skipped as Record<string, number>).reduce((x, y) => x + y, 0));
-    expect(a.cards.posted).toBeGreaterThan(0);
-    expect(Object.keys(a.judged).sort()).toEqual(["failed", "nothing_kept", "proposed"]);
+    // The new message waits for its quiet window; nothing was judged or posted by it yet.
+    expect(a.waiting).toBeGreaterThanOrEqual(1);
+    expect(a.cards.posted - before.cards.posted).toBe(0);
+    expect(a.judged).toEqual(before.judged);
     // Counts only: never message text.
     expect(JSON.stringify(a)).not.toMatch(/Thursday|standup/);
   });

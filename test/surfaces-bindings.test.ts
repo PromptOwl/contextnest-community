@@ -550,6 +550,54 @@ describe("guard re-checks (§4.17)", () => {
     expect(h.map((e: any) => e.action)).toEqual(["started"]);
   });
 
+  it("po-1446: activity maps verdicts and card states, and counts only the last 7 UTC days", async () => {
+    const n = await newNest(alice);
+    setConv("C-1446", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1446", nest_id: n })).data.binding.id;
+    const db = S.db.getDb();
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    const counter = (day: string, metric: string, value: number) =>
+      db.run("INSERT INTO surface_counters (org_id, nest_id, binding_id, day, metric, value, created_at) VALUES ('default', ?, ?, ?, ?, ?, ?)", [n, id, day, metric, value, now]);
+    await counter(now.slice(0, 10), "buffered", 4);
+    await counter(now.slice(0, 10), "drop_too_short", 2);
+    await counter(old.slice(0, 10), "buffered", 50); // outside the window
+    const win = (status: string, verdict: string | null, judgedAt: string | null) =>
+      db.run(
+        "INSERT INTO surface_windows (id, binding_id, nest_id, thread_key, opened_at, last_message_at, status, verdict, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [randomUUID(), id, n, randomUUID(), now, now, status, verdict, judgedAt],
+      );
+    await win("open", null, null);
+    await win("judged", "propose", now);
+    await win("judged", "no_op", now);
+    await win("judged", "filtered", now);
+    await win("judged", "error", now);
+    await win("judged", "budget_exhausted", now);
+    await win("judged", "propose", old); // outside the window
+    await win("discarded", "discarded", now); // never counted
+    const card = (state: string, postedAt: string | null, createdAt: string) =>
+      db.run(
+        "INSERT INTO surface_proposals (id, window_id, binding_id, nest_id, card_kind, state, posted_at, expires_at, created_at) VALUES (?, ?, ?, ?, 'single', ?, ?, ?, ?)",
+        [randomUUID(), randomUUID(), id, n, state, postedAt, now, createdAt],
+      );
+    await card("held", null, now);
+    await card("queued", null, now);
+    await card("decided", now, now); // reached the channel
+    await card("expired", null, now); // expired while held: never posted
+    await card("posted", old, old); // outside the window
+
+    const a = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/activity`, undefined, alice.apiKey)).data;
+    expect(a).toMatchObject({
+      days: 7,
+      received: 6,
+      buffered: 4,
+      skipped: { too_short: 2 },
+      waiting: 1,
+      judged: { proposed: 1, nothing_kept: 2, failed: 2 },
+      cards: { posted: 1, queued: 1, held: 1 },
+    });
+  });
+
   it("resume refuses while the guard still fails", async () => {
     const n = await newNest(alice);
     await share(n, dave);

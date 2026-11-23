@@ -368,3 +368,16 @@ describe("po-1446: channel activity in plain words", () => {
     expect(lines[lines.length - 1]).toMatch(/Nothing arrived/);
   });
 });
+
+describe("po-1446 review: failed, held and singular wording", () => {
+  it("says failed and held, and uses the singular for one", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(
+      { days: 7, since: "", received: 1, buffered: 1, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 1 }, cards: { posted: 0, queued: 0, held: 1 } },
+      20,
+    );
+    expect(lines[0]).toBe("1 message received · 1 kept for judging · 0 skipped");
+    expect(lines[1]).toBe("1 thread judged: 0 proposed, 0 with nothing worth keeping, 1 failed. The Decision ledger says why for each.");
+    expect(lines[2]).toBe("0 cards posted · 1 held (no eligible reviewer in the channel)");
+  });
+});

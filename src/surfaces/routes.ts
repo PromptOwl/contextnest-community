@@ -256,7 +256,6 @@ surfacesRoutes.post("/bindings/:id/recheck", async (c) => {
   }
 });
 
-/** po-1437: who started, paused, resumed, moved or removed it, when and why (nest owner/admin). */
 /** po-1446: counts of what Nest did in this channel lately (nest owner/admin). */
 surfacesRoutes.get("/bindings/:id/activity", async (c) => {
   try {
@@ -267,6 +266,7 @@ surfacesRoutes.get("/bindings/:id/activity", async (c) => {
   }
 });
 
+/** po-1437: who started, paused, resumed, moved or removed it, when and why (nest owner/admin). */
 surfacesRoutes.get("/bindings/:id/history", async (c) => {
   try {
     await scopedRow(c, c.req.param("id"));
