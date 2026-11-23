@@ -39,6 +39,8 @@ import {
   removeSurfacesBinding,
   resumeSurfacesBinding,
   getSurfacesBindingHistory,
+  getSurfacesBindingActivity,
+  type SurfacesBindingActivity,
   type SurfacesBindingHistoryEntry,
   putSlackCredentials,
   slackHostedOAuthStartUrl,
@@ -53,6 +55,7 @@ import {
 } from "../../../lib/api";
 import {
   DEFAULT_SETTINGS_COPY,
+  activityLines,
   SETUP_STEPS,
   deriveProgress,
   dryRunSummary,
@@ -911,6 +914,22 @@ export function boundLabel(b: { status: string; paused_by_admin?: boolean }): { 
 
 type ManageAction = "pause" | "resume" | "move" | "remove";
 
+/** po-1446: the activity summary, then how to get a card fast while testing. */
+export function ChannelActivity({ activity, quietMinutes }: { activity: SurfacesBindingActivity; quietMinutes: number }) {
+  return (
+    <div className="space-y-3 text-sm" data-testid="channel-activity">
+      <ul className="list-disc space-y-1 pl-5">
+        {activityLines(activity, quietMinutes).map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
+      <Note tone="info">
+        <b>Testing?</b> Lower the quiet window to 5 minutes in Server settings → Surfaces, or react 🧠 to a message to have that thread judged right away.
+      </Note>
+    </div>
+  );
+}
+
 const HISTORY_VERB: Record<SurfacesBindingHistoryEntry["action"], string> = {
   started: "Started listening",
   paused: "Paused",
@@ -978,6 +997,17 @@ export function BindingManage({
     } catch (e) {
       setHistory(null);
       toast.error(errText(e, "Couldn't load the history."));
+    }
+  };
+  // po-1446: "why no card?" — counts for the last few days.
+  const [activity, setActivity] = useState<SurfacesBindingActivity | "loading" | null>(null);
+  const showActivity = async () => {
+    setActivity("loading");
+    try {
+      setActivity(await getSurfacesBindingActivity(binding.id));
+    } catch (e) {
+      setActivity(null);
+      toast.error(errText(e, "Couldn't load the activity."));
     }
   };
   const name = `#${channel.name ?? channel.id}`;
@@ -1058,9 +1088,23 @@ export function BindingManage({
           <DropdownMenuItem className="text-red-700" onSelect={() => openAction("remove")}>
             Stop listening
           </DropdownMenuItem>
+          <DropdownMenuItem onSelect={showActivity}>Activity</DropdownMenuItem>
           <DropdownMenuItem onSelect={showHistory}>History</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      <Dialog open={activity !== null} onOpenChange={(o) => !o && setActivity(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Activity in {name}</DialogTitle>
+            <DialogDescription>What Nest did here in the last {activity && activity !== "loading" ? activity.days : 7} days. Counts only: no message text.</DialogDescription>
+          </DialogHeader>
+          {activity === "loading" || activity === null ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : (
+            <ChannelActivity activity={activity} quietMinutes={state.settings?.quiet_minutes ?? DEFAULT_SETTINGS_COPY.quiet_minutes} />
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog open={history !== null} onOpenChange={(o) => !o && setHistory(null)}>
         <DialogContent>
           <DialogHeader>

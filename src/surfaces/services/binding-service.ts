@@ -812,6 +812,60 @@ export async function recordBindingHistory(
   );
 }
 
+export const ACTIVITY_DAYS = 7;
+const FAILED_VERDICTS = new Set(["error", "error_schema", "budget_exhausted"]);
+
+/**
+ * po-1446: what Nest did in one channel over the last ACTIVITY_DAYS days, so
+ * an admin can answer "why no card?". Counts only, from tables that already
+ * exist (counters, windows, proposals): never text, names or Slack ids.
+ */
+export async function bindingActivity(id: string, actorUserId: string) {
+  const row = await rowOrThrow(id);
+  await assertNestAdmin(row.nest_id, actorUserId);
+  const db = getDb();
+  // One boundary for all three sources: the start of the UTC day ACTIVITY_DAYS - 1 days ago
+  // (counters are kept per UTC day, so threads and cards use the same edge).
+  const start = new Date();
+  start.setUTCHours(0, 0, 0, 0);
+  start.setUTCDate(start.getUTCDate() - (ACTIVITY_DAYS - 1));
+  const since = start.toISOString();
+  const counters = (await db.all("SELECT metric, SUM(value) AS n FROM surface_counters WHERE binding_id = ? AND day >= ? GROUP BY metric", [
+    id,
+    since.slice(0, 10),
+  ])) as Array<{ metric: string; n: number | string }>;
+  let buffered = 0;
+  const skipped: Record<string, number> = {};
+  for (const c of counters) {
+    if (c.metric === "buffered") buffered += Number(c.n);
+    else if (c.metric.startsWith("drop_")) skipped[c.metric.slice(5)] = Number(c.n);
+  }
+  const windows = (await db.all(
+    `SELECT status, verdict, COUNT(*) AS n FROM surface_windows
+      WHERE binding_id = ? AND (status <> 'judged' OR judged_at >= ?) AND status <> 'discarded' GROUP BY status, verdict`,
+    [id, since],
+  )) as Array<{ status: string; verdict: string | null; n: number | string }>;
+  const judged = { proposed: 0, nothing_kept: 0, failed: 0 };
+  let waiting = 0;
+  for (const w of windows) {
+    const n = Number(w.n);
+    if (w.status !== "judged") waiting += n;
+    else if (w.verdict === "propose") judged.proposed += n;
+    else if (w.verdict && FAILED_VERDICTS.has(w.verdict)) judged.failed += n;
+    else judged.nothing_kept += n;
+  }
+  const cards = { posted: 0, queued: 0, held: 0 };
+  for (const p of (await db.all(
+    "SELECT state, CASE WHEN posted_at IS NULL THEN 0 ELSE 1 END AS was_posted, COUNT(*) AS n FROM surface_proposals WHERE binding_id = ? AND created_at >= ? GROUP BY state, was_posted",
+    [id, since],
+  )) as Array<{ state: string; was_posted: number | string; n: number | string }>) {
+    if (Number(p.was_posted)) cards.posted += Number(p.n);
+    else if (p.state === "queued" || p.state === "held") cards[p.state] += Number(p.n);
+  }
+  const dropped = Object.values(skipped).reduce((a, b) => a + b, 0);
+  return { days: ACTIVITY_DAYS, since, received: buffered + dropped, buffered, skipped, waiting, judged, cards };
+}
+
 /** Newest first, with the person's current name when they still have an account. */
 export async function bindingHistory(id: string, actorUserId: string) {
   const row = await rowOrThrow(id);

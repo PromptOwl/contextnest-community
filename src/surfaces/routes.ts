@@ -29,6 +29,7 @@ import {
   removeBinding,
   pauseBinding,
   bindingHistory,
+  bindingActivity,
   requireReason,
   resumeBinding,
   updateBinding,
@@ -250,6 +251,16 @@ surfacesRoutes.post("/bindings/:id/recheck", async (c) => {
     const row = await scopedRow(c, c.req.param("id"));
     if (!(await canAdministerNest(row.nest_id, c.get("userId")))) throw new ForbiddenError("Only an owner or admin of this nest can re-check it.");
     return c.json({ binding: await bindingView(await recheckBinding(row.id)) });
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** po-1446: counts of what Nest did in this channel lately (nest owner/admin). */
+surfacesRoutes.get("/bindings/:id/activity", async (c) => {
+  try {
+    await scopedRow(c, c.req.param("id"));
+    return c.json(await bindingActivity(c.req.param("id"), c.get("userId")));
   } catch (err) {
     return handleError(c, err);
   }
