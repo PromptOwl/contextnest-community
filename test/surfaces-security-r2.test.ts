@@ -197,7 +197,7 @@ describe("H1: every status transition is a compare-and-set", () => {
     hooks().beforeResumeCommit = async () => {
       await S.bindings.bootBinding({ bindingId: id, surfaceUserId: "SC" });
     };
-    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(res.status).toBe(409);
     expect((await row(id)).status).toBe("paused_by_member");
   });

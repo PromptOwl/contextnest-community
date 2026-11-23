@@ -43,6 +43,8 @@ export interface BindingRow {
   bound_by_user_id: string | null;
   status: BindingStatus;
   status_changed_at: string | null;
+  /** Why a paused binding is paused when it isn't the guard: ADMIN_PAUSE, 'dm_off', 'dm_optout'. */
+  pause_reason?: string | null;
   booted_by_surface_user_id: string | null;
   booted_at: string | null;
   boot_consent_at: string | null;
@@ -253,6 +255,8 @@ export async function bindingView(row: BindingRow) {
     is_ext_shared: !!row.is_ext_shared,
     ext_capture_enabled: !!row.ext_capture_enabled,
     status: row.status,
+    /** po-1437: a nest admin paused it on purpose. A member's boot never carries a reason (AC-BOOT-03). */
+    paused_by_admin: row.pause_reason === ADMIN_PAUSE,
     status_changed_at: row.status_changed_at,
     booted_by: bootedBy,
     booted_at: row.booted_at,
@@ -286,6 +290,8 @@ export interface BindInput {
   nestId: string;
   explicitPublicBind?: boolean;
   extCaptureEnabled?: boolean;
+  /** po-1437: optional note for the binding's history ("started"). */
+  reason?: string | null;
   /**
    * SERVER-SIDE ONLY: the listener agent Surfaces created for this binding
    * (S2/S3 call createBinding with it). Routes and MCP tools never pass it —
@@ -507,10 +513,17 @@ export async function createBinding(input: BindInput) {
   }
   await writeMembersSnapshot(id, ev);
   const row = await rowOrThrow(id);
+  await recordBindingHistory(row, "started", input.reason?.trim().slice(0, 500) || null, input.actorUserId);
   return { binding: await bindingView(row), guard: ev.guard, disclosure: SERVER_ADMIN_DISCLOSURE };
 }
 
 async function pause(row: BindingRow, to: BindingStatus, reason: PauseReason, extra: Record<string, unknown> = {}): Promise<void> {
+  // po-1437: pauses nobody chose still go on the binding's history, as Nest.
+  if (reason === "guard") {
+    await recordBindingHistory(row, "paused", "Paused by Nest: someone who can read the nest isn't in the channel, or the channel's members couldn't be checked.", null);
+  } else if (reason === "member_boot") {
+    await recordBindingHistory(row, "paused", "Paused by Nest: a channel member removed Nest from the channel.", null);
+  }
   await runPauseHooks({ id: row.id, install_id: row.install_id, nest_id: row.nest_id, conversation_id: row.conversation_id }, reason);
   if (reason === "guard") {
     let detail: Record<string, unknown> = {};
@@ -666,7 +679,7 @@ export async function recheckBinding(id: string): Promise<BindingRow> {
 }
 
 /** Admin Resume (paused_guard) or re-bind after a boot (paused_by_member). */
-export async function resumeBinding(id: string, actorUserId: string) {
+export async function resumeBinding(id: string, actorUserId: string, reason: string) {
   const row = await rowOrThrow(id);
   await assertNestAdmin(row.nest_id, actorUserId);
   const fresh = await recheckBinding(id);
@@ -698,11 +711,12 @@ export async function resumeBinding(id: string, actorUserId: string) {
   // passing and no pending invalidation. Anything newer wins (H1).
   const r = await getDb().run(
     `UPDATE surface_bindings SET status = 'active', status_changed_at = ?, booted_by_surface_user_id = NULL, booted_at = NULL,
-       boot_consent_at = NULL, version = version + 1, updated_at = ?
+       boot_consent_at = NULL, pause_reason = CASE WHEN pause_reason = '${ADMIN_PAUSE}' THEN NULL ELSE pause_reason END, version = version + 1, updated_at = ?
      WHERE id = ? AND status = ? AND version = ? AND capture_ok = 1 AND guard_dirty = 0`,
     [now, now, id, fresh.status, fresh.version],
   );
   if (r.changes === 0) throw new ConflictError("The binding changed while it was being resumed. Re-check it and try again.");
+  await recordBindingHistory(row, "resumed", reason, actorUserId);
   return { binding: await bindingView(await rowOrThrow(id)) };
 }
 
@@ -768,22 +782,109 @@ export async function consentToReturn(input: { bindingId: string; surfaceUserId:
 }
 
 /** Admin unbind → removed (hooks purge + withdraw). */
-export async function removeBinding(id: string, actorUserId: string) {
+/** po-1437: pause_reason of a pause a nest admin chose. */
+export const ADMIN_PAUSE = "admin";
+
+export type HistoryAction = "started" | "paused" | "resumed" | "removed" | "moved";
+
+/** For a caller with no reason field (the MCP tools): the history still says who and when. */
+export const NO_REASON_MCP = "(via MCP, no reason given)";
+
+/** po-1437: a person's reason for pausing, resuming, moving or removing: required, 3–500 characters. */
+export function requireReason(reason: unknown): string {
+  const r = typeof reason === "string" ? reason.trim() : "";
+  if (r.length < 3) throw new UnprocessableError("Say why, so the rest of the team knows (at least 3 characters).");
+  return r.slice(0, 500);
+}
+
+/** One history row: the actual person (id + their email now), or Nest itself when actorUserId is null. */
+export async function recordBindingHistory(
+  row: Pick<BindingRow, "id" | "nest_id">,
+  action: HistoryAction,
+  reason: string | null,
+  actorUserId: string | null,
+): Promise<void> {
+  const db = getDb();
+  const actor = actorUserId ? ((await db.get("SELECT email FROM users WHERE id = ?", [actorUserId])) as { email: string } | undefined) : undefined;
+  await db.run(
+    "INSERT INTO surface_binding_history (id, binding_id, nest_id, action, reason, actor_user_id, actor_email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [uuid(), row.id, row.nest_id, action, reason, actorUserId, actor?.email ?? null, nowIso()],
+  );
+}
+
+/** Newest first, with the person's current name when they still have an account. */
+export async function bindingHistory(id: string, actorUserId: string) {
   const row = await rowOrThrow(id);
   await assertNestAdmin(row.nest_id, actorUserId);
-  await markRemoved(row);
+  const rows = (await getDb().all(
+    `SELECT h.action, h.reason, h.actor_user_id, h.actor_email, h.created_at, u.name AS actor_name
+       FROM surface_binding_history h LEFT JOIN users u ON u.id = h.actor_user_id
+      WHERE h.binding_id = ? AND h.nest_id = ? ORDER BY h.created_at DESC, h.id DESC LIMIT 200`,
+    // A moved channel reuses its binding row: the new nest's admins see only that nest's history.
+    [id, row.nest_id],
+  )) as Array<{ action: string; reason: string | null; actor_user_id: string | null; actor_email: string | null; created_at: string; actor_name: string | null }>;
+  return {
+    history: rows.map((h) => ({
+      action: h.action,
+      reason: h.reason,
+      at: h.created_at,
+      by: h.actor_user_id ? { user_id: h.actor_user_id, email: h.actor_email, name: h.actor_name } : null,
+    })),
+  };
+}
+
+/**
+ * po-1437: a nest admin pauses listening on purpose. Same state the guard uses
+ * (paused_guard), told apart by pause_reason 'admin', so ingest stops and only
+ * an admin Resume (which re-runs the guard) brings it back. Buffer purged and
+ * pending cards withdrawn by the pause hooks, as for any pause.
+ */
+export async function pauseBinding(id: string, actorUserId: string, reason: string) {
+  const row = await rowOrThrow(id);
+  await assertNestAdmin(row.nest_id, actorUserId);
+  if (row.status !== "active") throw new ConflictError("Only a binding that is listening can be paused.");
+  const now = nowIso();
+  const r = await getDb().run(
+    `UPDATE surface_bindings SET status = 'paused_guard', pause_reason = '${ADMIN_PAUSE}', status_changed_at = ?, version = version + 1, updated_at = ?
+      WHERE id = ? AND status = 'active' AND version = ?`,
+    [now, now, id, row.version],
+  );
+  if (r.changes === 0) throw new ConflictError("The binding changed while it was being paused. Try again.");
+  await recordBindingHistory(row, "paused", reason, actorUserId);
+  await pause(row, "paused_guard", "admin");
   return { binding: await bindingView(await rowOrThrow(id)) };
 }
 
-/** Remove without an actor (uninstall, bot removed, channel deleted). */
-export async function markRemoved(row: BindingRow): Promise<void> {
+/** `moved_to`: the nest name the channel is moving to (recorded as "moved", not "removed"). */
+/** movedToNestId: the nest the channel moves to. Its name is looked up here, never taken from the client, and only for a nest the caller administers. */
+export async function removeBinding(id: string, actorUserId: string, reason: string, movedToNestId?: string | null) {
+  const row = await rowOrThrow(id);
+  await assertNestAdmin(row.nest_id, actorUserId);
+  // A double click, a retry or a stale Move must not add a second "stopped" row to the history.
+  if (row.status === "removed") throw new ConflictError("Nest has already stopped listening in this channel.");
+  let movedTo: string | null = null;
+  if (movedToNestId && (await canAdministerNest(movedToNestId, actorUserId))) {
+    movedTo = ((await getDb().get("SELECT name FROM nests WHERE id = ?", [movedToNestId])) as { name: string } | undefined)?.name ?? null;
+  }
+  await markRemoved(row, null);
+  await recordBindingHistory(row, movedTo ? "moved" : "removed", movedTo ? `${reason} (moved to ${movedTo.slice(0, 100)})` : reason, actorUserId);
+  return { binding: await bindingView(await rowOrThrow(id)) };
+}
+
+const SYSTEM_REMOVED = "Removed by Nest: Slack was disconnected, or the channel was archived or deleted, or Nest was removed from it.";
+
+/** Remove without an actor (uninstall, bot removed, channel deleted). A person's removal passes `systemWhy` null and records its own row. */
+export async function markRemoved(row: BindingRow, systemWhy: string | null = SYSTEM_REMOVED): Promise<void> {
   const now = nowIso();
   const r = await getDb().run(
     `UPDATE surface_bindings SET status = 'removed', status_changed_at = ?, capture_ok = 0, surface_ok = 0, guard_dirty = 0,
        version = version + 1, updated_at = ? WHERE id = ? AND status <> 'removed'`,
     [now, now, row.id],
   );
-  if (r.changes > 0) await pause(row, "removed", "removed");
+  if (r.changes > 0) {
+    if (systemWhy) await recordBindingHistory(row, "removed", systemWhy, null);
+    await pause(row, "removed", "removed");
+  }
 }
 
 export async function updateBinding(

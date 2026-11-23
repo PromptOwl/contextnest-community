@@ -427,7 +427,7 @@ describe("enable notice", () => {
     expect(notices[0].text).toMatch(/🧠/);
     expect(notices[0].text).toMatch(/@Nest skip me/);
     // Remove and re-create the same binding: no second notice.
-    await jsonRequest(app, "DELETE", `/surfaces/bindings/${bound.C1}`, undefined, alice.apiKey);
+    await jsonRequest(app, "DELETE", `/surfaces/bindings/${bound.C1}`, { reason: "test remove" }, alice.apiKey);
     const again = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C1", nest_id: N }, alice.apiKey);
     expect(again.status).toBe(201);
     bound.C1 = again.data.binding.id;
@@ -1275,13 +1275,13 @@ describe("member boot", () => {
   });
 
   it("AC-BOOT-04: re-binding is refused while the booting member is present without consent; they get a one-tap 'Allow Nest back'; after consent it is allowed", async () => {
-    const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, {}, alice.apiKey);
+    const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(r.status).toBe(409);
     const prompt = slack.posted.filter((p) => p.channel === "D_U_BOB" && /Allow Nest back/.test(p.blocks ?? "")).pop()!;
     expect(prompt).toBeTruthy();
     const btn = JSON.parse(prompt.blocks).find((b: any) => b.type === "actions").elements[0];
     await interact(actionPayload("U_BOB", btn.action_id, btn.value, { channel: "D_U_BOB" }));
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
     expect(ok.data.binding.status).toBe("active");
   });
@@ -1949,7 +1949,7 @@ describe("security round", () => {
     await submitView("U_BOB", lastView(), {});
     slack.openFail = true;
     try {
-      const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB2}/resume`, {}, alice.apiKey);
+      const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB2}/resume`, { reason: "test resume" }, alice.apiKey);
       expect(r.status).toBe(409);
       expect(r.data.consent_prompt).toBe("failed");
       expect(r.data.error).toMatch(/couldn't send/i);
@@ -3413,6 +3413,8 @@ describe("audit, parity, disconnect", () => {
     process.env.SMTP_URL = "smtps://u:p@smtp.test:465";
     process.env.NOTIFY_EMAIL_FROM = "nest@surf.test";
     sentMail.length = 0;
+    // po-1437 review: a display name is not Slack markup.
+    await S.db.getDb().run("UPDATE users SET name = ? WHERE email = ?", ["<!channel> <https://evil.test|Nest>", root.email]);
     const r = await jsonRequest(app, "DELETE", `/surfaces/installs/${installId}`, undefined, root.apiKey);
     expect(r.status).toBe(200);
     const order = slack.calls.map((c) => c.method);
@@ -3436,6 +3438,18 @@ describe("audit, parity, disconnect", () => {
     const node = await jsonRequest(app, "GET", `/nests/${N}/nodes/${approved.node_id}`, undefined, alice.apiKey);
     expect(node.status).toBe(200);
     expect((await one("SELECT status FROM surface_installs WHERE id = ?", [installId])).status).toBe("disconnected");
+    // po-1437: each channel is told who disconnected, BEFORE the token is revoked, and its history names that person.
+    const told = slack.calls.findIndex((c) => c.method === "chat.postMessage" && c.params.channel === "C1" && /disconnected from this Slack workspace by/i.test(String(c.params.text)));
+    expect(told).toBeGreaterThan(-1);
+    expect(told).toBeLessThan(firstRevoke);
+    const toldText = String(slack.calls[told].params.text);
+    expect(toldText).toContain("&lt;!channel&gt; &lt;https://evil.test|Nest&gt;");
+    expect(toldText).not.toContain("<!channel>");
+    expect(r.data.told).toBeGreaterThan(0);
+    const c1 = await one("SELECT id FROM surface_bindings WHERE install_id = ? AND conversation_id = 'C1'", [installId]);
+    const h = await one("SELECT action, reason, actor_user_id, actor_email FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", [c1.id]);
+    expect(h).toMatchObject({ action: "removed", reason: `Slack disconnected by ${root.email}`, actor_email: root.email });
+    expect(h.actor_user_id).toBeTruthy();
     delete process.env.SMTP_URL;
     delete process.env.NOTIFY_EMAIL_FROM;
   });

@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CopyButton } from "@/components/ui/copy-button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   addCollaborator,
@@ -34,6 +35,11 @@ import {
   listSurfacesBindings,
   listSurfacesSeeds,
   previewSurfacesBinding,
+  pauseSurfacesBinding,
+  removeSurfacesBinding,
+  resumeSurfacesBinding,
+  getSurfacesBindingHistory,
+  type SurfacesBindingHistoryEntry,
   putSlackCredentials,
   slackHostedOAuthStartUrl,
   slackOAuthStartUrl,
@@ -448,6 +454,27 @@ function downloadJson(name: string, data: unknown) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** po-1437: the channels a disconnect stops, named, and what each channel is told. */
+export function DisconnectChannels({ bindings }: { bindings: SurfacesBinding[] }) {
+  const live = bindings.filter((b) => b.status !== "removed" && b.conversation_kind !== "dm");
+  if (!live.length) return <p className="text-sm text-muted-foreground">Nest isn&apos;t listening in any channel right now.</p>;
+  return (
+    <div className="text-sm" data-testid="disconnect-channels">
+      <p className="font-medium">
+        {live.length === 1 ? "This channel stops" : `These ${live.length} channels stop`}:
+      </p>
+      <ul className="mt-1 max-h-40 list-disc overflow-y-auto pl-5">
+        {live.map((b) => (
+          <li key={b.id}>#{b.conversation_name ?? b.conversation_id}</li>
+        ))}
+      </ul>
+      <p className="mt-2 text-muted-foreground">
+        Nest posts one message in each, saying Slack was disconnected and by you, so its members know. Each channel&apos;s history records &quot;Slack disconnected by&quot; your email.
+      </p>
+    </div>
+  );
+}
+
 export function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
   const inst = state.install;
   const connected = inst?.status === "active";
@@ -537,7 +564,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
     setBusy(true);
     try {
       const r = await disconnectSurfacesInstall(inst.id);
-      toast.success(r.withdrawn ? `Disconnected Slack. ${r.withdrawn} pending item(s) withdrawn.` : "Disconnected Slack.");
+      toast.success(`Disconnected Slack.${r.told ? ` ${r.told} channel(s) were told.` : ""}${r.withdrawn ? ` ${r.withdrawn} pending item(s) withdrawn.` : ""}`);
       setConfirmOff(false);
       await state.reload();
     } catch (e) {
@@ -571,6 +598,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
                   Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. You can connect again later.
                 </DialogDescription>
               </DialogHeader>
+              <DisconnectChannels bindings={state.bindings} />
               <DialogFooter>
                 <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
                   Cancel
@@ -873,6 +901,248 @@ function GuardCell({ view, channel, addTo }: { view: GuardView | "loading" | und
   );
 }
 
+/** How a bound channel's status reads (po-1437 adds the admin pause). */
+export function boundLabel(b: { status: string; paused_by_admin?: boolean }): { tone: "ok" | "warn"; text: string } {
+  if (b.status === "active") return { tone: "ok", text: "Listening" };
+  if (b.paused_by_admin) return { tone: "warn", text: "Paused by an admin" };
+  if (b.status === "paused_by_member") return { tone: "warn", text: "Paused: a member removed Nest" };
+  return { tone: "warn", text: "Paused: the reader check failed" };
+}
+
+type ManageAction = "pause" | "resume" | "move" | "remove";
+
+const HISTORY_VERB: Record<SurfacesBindingHistoryEntry["action"], string> = {
+  started: "Started listening",
+  paused: "Paused",
+  resumed: "Resumed",
+  removed: "Stopped listening",
+  moved: "Moved to another nest",
+};
+
+/** po-1437: the channel's history, newest first: when, who (the actual person, or Nest), what, why. */
+export function BindingHistoryList({ entries }: { entries: SurfacesBindingHistoryEntry[] }) {
+  if (!entries.length) return <p className="text-sm text-muted-foreground">No changes recorded yet.</p>;
+  return (
+    <ol className="max-h-[50vh] space-y-3 overflow-y-auto text-sm" data-testid="binding-history">
+      {entries.map((h, i) => (
+        <li key={`${h.at}-${i}`} className="border-b pb-2 last:border-b-0">
+          <div className="flex flex-wrap justify-between gap-x-3">
+            <span className="font-medium">{HISTORY_VERB[h.action] ?? h.action}</span>
+            <time className="text-muted-foreground" dateTime={h.at}>
+              {new Date(h.at).toLocaleString()}
+            </time>
+          </div>
+          <div className="text-muted-foreground">
+            {h.by ? `${h.by.name ? `${h.by.name} · ` : ""}${h.by.email ?? h.by.user_id}` : "Nest (automatic)"}
+          </div>
+          {h.reason && <p className="mt-0.5">{h.reason}</p>}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/**
+ * po-1437: pause / resume / move / stop listening on a bound channel. Move
+ * checks the new pair first and only then removes and re-binds, so a refused
+ * move changes nothing.
+ */
+export function BindingManage({
+  channel,
+  binding,
+  state,
+  onChanged,
+}: {
+  channel: SurfacesChannel;
+  binding: NonNullable<SurfacesChannel["binding"]>;
+  state: SetupState;
+  onChanged: () => Promise<void> | void;
+}) {
+  const [open, setOpen] = useState<ManageAction | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [target, setTarget] = useState("");
+  const [refusal, setRefusal] = useState<GuardView | null>(null);
+  // po-1437: every change needs a reason; it goes on the channel's history for the team.
+  const [reason, setReason] = useState("");
+  const [history, setHistory] = useState<SurfacesBindingHistoryEntry[] | null>(null);
+  const why = reason.trim();
+  const openAction = (a: ManageAction) => {
+    setReason("");
+    setRefusal(null);
+    setOpen(a);
+  };
+  const showHistory = async () => {
+    setHistory([]);
+    try {
+      setHistory(await getSurfacesBindingHistory(binding.id));
+    } catch (e) {
+      setHistory(null);
+      toast.error(errText(e, "Couldn't load the history."));
+    }
+  };
+  const name = `#${channel.name ?? channel.id}`;
+  const nestName = (id: string) => state.nests.find((n) => n.id === id)?.name ?? "that nest";
+  const label = boundLabel(binding);
+
+  const act = async (fn: () => Promise<unknown>, ok: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      toast.success(ok);
+      setOpen(null);
+      await state.reload();
+      await onChanged();
+    } catch (e) {
+      toast.error(errText(e, "That didn't work. Try again."));
+      // Part of it may have happened (a move that removed but couldn't re-bind): show what is true now.
+      await Promise.resolve(state.reload()).catch(() => {});
+      await Promise.resolve(onChanged()).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const move = async () => {
+    const inst = state.install;
+    if (!inst || !target) return;
+    setBusy(true);
+    setRefusal(null);
+    try {
+      const p = await previewSurfacesBinding({ install_id: inst.id, conversation_id: channel.id, nest_id: target });
+      const v = guardView(p, { channel: channel.name ?? channel.id, nest: nestName(target), orgName: state.status?.org_name });
+      if (v.state === "refused" || v.state === "external") {
+        setRefusal(v);
+        return;
+      }
+    } catch (e) {
+      toast.error(errText(e, "Couldn't check that nest."));
+      return;
+    } finally {
+      setBusy(false);
+    }
+    // ponytail: two calls, not one server-side move. If the second fails the channel is left unbound and the admin is told; add a /move route if that proves common.
+    await act(async () => {
+      await removeSurfacesBinding(binding.id, why, target);
+      try {
+        await createSurfacesBinding({ install_id: inst.id, conversation_id: channel.id, nest_id: target, reason: `Moved from ${nestName(binding.nest_id)}: ${why}` });
+      } catch (e) {
+        throw new Error(
+          `${name} was removed from ${nestName(binding.nest_id)} but couldn't be bound to ${nestName(target)} (${errText(e, "unknown error")}). It isn't listening now. Turn it on again from this list.`,
+        );
+      }
+    }, `${name} now saves into ${nestName(target)}.`);
+  };
+
+  const others = state.nests.filter((n) => n.id !== binding.nest_id);
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm" data-testid={`bound-${channel.id}`}>
+      <span className="flex items-center gap-1.5">
+        <Dot tone={label.tone} />
+        {label.text}
+      </span>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" className="h-7 px-2 text-sm" disabled={busy} aria-label={`Manage ${name}`}>
+            Manage
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {binding.status === "active" ? (
+            <DropdownMenuItem onSelect={() => openAction("pause")}>Pause listening</DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem onSelect={() => openAction("resume")}>Resume listening</DropdownMenuItem>
+          )}
+          <DropdownMenuItem disabled={!others.length} onSelect={() => { setTarget(others[0]?.id ?? ""); openAction("move"); }}>
+            Move to another nest
+          </DropdownMenuItem>
+          <DropdownMenuItem className="text-red-700" onSelect={() => openAction("remove")}>
+            Stop listening
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={showHistory}>History</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Dialog open={history !== null} onOpenChange={(o) => !o && setHistory(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>History of {name}</DialogTitle>
+            <DialogDescription>Who started, paused, resumed, moved or removed listening here, when, and why. Newest first.</DialogDescription>
+          </DialogHeader>
+          <BindingHistoryList entries={history ?? []} />
+        </DialogContent>
+      </Dialog>
+      <Dialog open={open !== null} onOpenChange={(o) => !busy && !o && setOpen(null)}>
+        <DialogContent>
+          {open === "move" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Move {name} to another nest</DialogTitle>
+                <DialogDescription>
+                  Nest checks the new nest first. If it passes, pending cards from {name} are withdrawn and new notes save into the nest you pick. Notes already approved stay in {nestName(binding.nest_id)}.
+                </DialogDescription>
+              </DialogHeader>
+              <NestSelect label={`New nest for ${name}`} value={target} nests={others} onChange={(v) => { setTarget(v); setRefusal(null); }} className="w-full" />
+              {refusal && (
+                <Note tone="bad" testId="move-refused">
+                  <b>{refusal.label}.</b> Nothing changed.
+                  <GuardNote view={refusal} className="mt-1" />
+                </Note>
+              )}
+            </>
+          ) : (
+            <DialogHeader>
+              <DialogTitle>{open === "pause" ? `Pause listening in ${name}?` : open === "resume" ? `Resume listening in ${name}?` : `Stop listening in ${name}?`}</DialogTitle>
+              <DialogDescription>
+                {open === "pause"
+                  ? "Nest stops reading new messages here. Messages it was holding are deleted and pending cards are withdrawn. Approved notes stay. Resume any time; Nest checks who can read again first."
+                  : open === "resume"
+                    ? "Nest checks who can read the nest first, then starts reading new messages here again."
+                    : `Nest stops listening and ${name} is no longer tied to ${nestName(binding.nest_id)}. Messages it was holding are deleted and pending cards are withdrawn. Approved notes stay. You can turn it on again later.`}
+              </DialogDescription>
+            </DialogHeader>
+          )}
+          <div className="space-y-1.5">
+            <Label htmlFor={`why-${channel.id}`}>Why? The team sees this in the channel&apos;s history.</Label>
+            <textarea
+              id={`why-${channel.id}`}
+              className="min-h-[72px] w-full rounded-md border bg-background px-3 py-2 text-sm"
+              maxLength={500}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="For example: launch week, too much noise in this channel"
+              data-testid="manage-reason"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(null)} disabled={busy}>
+              Cancel
+            </Button>
+            {open === "move" ? (
+              <Button onClick={move} disabled={busy || !target || why.length < 3}>
+                Check and move
+              </Button>
+            ) : (
+              <Button
+                variant={open === "remove" ? "destructive" : "default"}
+                disabled={busy || why.length < 3}
+                data-testid="manage-confirm"
+                onClick={() =>
+                  open === "pause"
+                    ? act(() => pauseSurfacesBinding(binding.id, why), `Paused listening in ${name}.`)
+                    : open === "resume"
+                      ? act(() => resumeSurfacesBinding(binding.id, why), `Nest is listening in ${name} again.`)
+                      : act(() => removeSurfacesBinding(binding.id, why), `Nest stopped listening in ${name}.`)
+                }
+              >
+                {open === "pause" ? "Pause" : open === "resume" ? "Resume" : "Stop listening"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function channelMeta(ch: SurfacesChannel) {
   const kind = ch.is_ext_shared ? "Slack Connect" : ch.is_private ? "Private" : "Public";
   return ch.num_members === null ? kind : `${kind} · ${ch.num_members} ${ch.num_members === 1 ? "member" : "members"}`;
@@ -984,10 +1254,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
                 </div>
                 <div className="col-start-2 min-[801px]:col-start-auto">
                   {bound ? (
-                    <span className="flex items-center gap-1.5 text-sm">
-                      <Dot tone={bound.status === "active" ? "ok" : "warn"} />
-                      {bound.status === "active" ? "Listening" : "Paused"}
-                    </span>
+                    <BindingManage channel={ch} binding={bound} state={state} onChanged={load} />
                   ) : (
                     <GuardCell
                       view={p?.on ? viewFor(p) : undefined}

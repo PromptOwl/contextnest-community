@@ -5587,6 +5587,8 @@ export interface SurfacesBinding {
   conversation_id: string;
   conversation_name?: string | null;
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  /** A nest admin paused it on purpose (po-1437). */
+  paused_by_admin?: boolean;
   [k: string]: unknown;
 }
 
@@ -5626,7 +5628,7 @@ export interface SurfacesChannel {
   is_private: boolean;
   is_ext_shared: boolean;
   num_members: number | null;
-  binding: { id: string; nest_id: string; status: string } | null;
+  binding: { id: string; nest_id: string; status: string; paused_by_admin?: boolean } | null;
 }
 
 export interface SurfacesSeedRef {
@@ -5679,7 +5681,7 @@ export const putSlackCredentials = (id: string, creds: { client_id?: string; cli
   });
 /** Admin disconnect: revokes the token, drops bindings; approved nodes and the audit stay. */
 export const disconnectSurfacesInstall = (id: string) =>
-  request<{ disconnected: boolean; withdrawn: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  request<{ disconnected: boolean; withdrawn: number; told?: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
 /** Browser navigations (the server answers with a redirect to Slack). */
 export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
 export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
@@ -5687,7 +5689,28 @@ export const listSlackChannels = (installId: string) =>
   request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
 export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
   request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
-export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+/** po-1437: manage an existing channel → nest binding (nest owner/admin). */
+// Pause, resume and remove need a reason (3–500 characters); it goes on the binding's history.
+const bindingAction = (id: string, action: "pause" | "resume", reason: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
+export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
+export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+/** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
+export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason, ...(movedToNestId ? { moved_to_nest_id: movedToNestId } : {}) }),
+  });
+export interface SurfacesBindingHistoryEntry {
+  action: "started" | "paused" | "resumed" | "removed" | "moved";
+  reason: string | null;
+  at: string;
+  /** null = Nest itself (a reader check, a member's /nest leave, a disconnect). */
+  by: { user_id: string; email: string | null; name: string | null } | null;
+}
+export const getSurfacesBindingHistory = (id: string) =>
+  request<{ history: SurfacesBindingHistoryEntry[] }>(`/surfaces/bindings/${encodeURIComponent(id)}/history`).then((r) => r.history);
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean; reason?: string }) =>
   request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>
   request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);
