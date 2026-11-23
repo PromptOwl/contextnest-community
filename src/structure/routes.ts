@@ -28,6 +28,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { ForbiddenError, ValidationError } from "../shared/errors.js";
 import { readsWholeNest, resolveCallerEmail } from "../governance/access-guard.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
+import { getDb } from "../db/client.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { ACCEPTED_NODE_TYPES, derivedNodeId, FIRST_GENERATED_NAME, folderToSegments } from "../nodes/service.js";
 
@@ -140,7 +141,14 @@ structureRoutes.put("/", async (c) => {
   if ("error" in compiled) return c.json({ error: compiled.error, fieldErrors: compiled.fieldErrors }, 400);
   const ctx = await context(c, nestId);
   if (!(await ctx.storage.readConfig())) {
-    throw new ValidationError("This nest has no settings file to keep rules in yet. Re-import or recreate the nest, then try again.");
+    // TEMPORARY: nests that came in by import (or an older create) can lack
+    // `.context/config.yaml`, and the engine's `setStructure` refuses to
+    // create it (docs/prds/structure-rules.md §6, item 2). Until the engine
+    // does, write the same minimal file `NestStorage.init` writes, through
+    // the engine's own storage method — only the file, no folders, so an
+    // imported folder is left as it was. Remove once the engine ships it.
+    const row = (await getDb().get("SELECT name FROM nests WHERE id = ?", [nestId])) as { name: string } | undefined;
+    await ctx.storage.writeConfig({ version: 1, name: row?.name ?? "Nest" } as Parameters<typeof ctx.storage.writeConfig>[0]);
   }
   await setStructure(ctx.storage, rules);
   // The rules are saved: a count that fails now must not read as a failed save.

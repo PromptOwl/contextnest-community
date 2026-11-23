@@ -147,7 +147,7 @@ export function CollaboratorManager({
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inviteReviewer, setInviteReviewer] = useState(false);
-  // The Stewards tab's read (shared cache) — backs each row's Reviewer switch.
+  // The steward roster's read (shared cache) — backs each row's Reviewer switch.
   const stewardsQuery = useQuery({ ...reads.stewards(nestId), enabled: reviewers });
   const stewards = stewardsQuery.data?.stewards ?? [];
   const [reviewerBusy, setReviewerBusy] = useState<string | null>(null);
@@ -568,7 +568,7 @@ export function CollaboratorManager({
                     key={r}
                     variant="outline"
                     className="text-[10px] px-1.5 py-0 capitalize"
-                    title="Steward role — manage in the Stewards tab"
+                    title="Steward role — manage under Stewards, further down this tab"
                   >
                     {r}
                   </Badge>
@@ -578,7 +578,7 @@ export function CollaboratorManager({
                     className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
                     title={
                       reviewer.kind === "other"
-                        ? `Has a nest steward role (${reviewer.role}) — change it on the Stewards tab`
+                        ? `Has a nest steward role (${reviewer.role}) — change it under Stewards, further down this tab`
                         : "Reviewers approve documents across this nest"
                     }
                   >

@@ -311,6 +311,8 @@ interface MarkdownEditorProps {
    *  only appears while the editor has focus; inline formatting comes from
    *  the selection bubble. */
   variant?: "boxed" | "page";
+  /** Read-only previews: grow to the text instead of reserving a screen of blank space. */
+  compact?: boolean;
   /** Rendered at the toolbar's right end — the document page puts its
    *  document-level switches (source view, Turn into) there. */
   toolbarEnd?: React.ReactNode;
@@ -339,6 +341,7 @@ export const MarkdownEditor = forwardRef<
     className,
     autofocus = "end",
     variant = "boxed",
+    compact = false,
     toolbarEnd,
     toolbarHidden = false,
   }: MarkdownEditorProps,
@@ -675,7 +678,9 @@ export const MarkdownEditor = forwardRef<
       attributes: {
         class: isPage
           ? "prose dark:prose-invert max-w-none focus:outline-none min-h-[40vh] py-2"
-          : "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
+          : compact
+            ? "prose prose-sm dark:prose-invert max-w-none focus:outline-none px-6 py-4"
+            : "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
       // CSV/TSV paste → markdown table. Deliberately conservative: only
       // fires on plain-text clipboards that look unambiguously tabular
@@ -1678,7 +1683,7 @@ export const MarkdownEditor = forwardRef<
         ref={scrollRef}
         editor={editor}
         className={cn(
-          isPage ? "min-h-[40vh]" : "min-h-[60vh] max-h-[60vh] overflow-y-auto",
+          isPage ? "min-h-[40vh]" : compact ? "max-h-[60vh] overflow-y-auto" : "min-h-[60vh] max-h-[60vh] overflow-y-auto",
           previewing && "hidden",
         )}
         // Click the empty area below the last block → caret to doc end.

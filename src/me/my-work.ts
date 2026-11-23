@@ -138,6 +138,9 @@ export async function buildMyWork(params: {
   sectionLimit?: number | null;
   /** The agent handle this call is acting as (mention-index actingAgentHandle). */
   actingAs?: string | null;
+  /** Also list the caller's finished tasks in `assigned` (marked `done`).
+   *  Off by default: the badge, the MCP twin and every count want open work. */
+  includeDoneTasks?: boolean;
 }) {
   const { userId, limit, offset, mentionsLimit, mentionsOffset, onlyNestId } = params;
   const sections = params.sections?.length ? params.sections : null;
@@ -363,7 +366,7 @@ export async function buildMyWork(params: {
   // Best-effort: a failure here must not take the reviews inbox down with it.
   const assigned = !want("assigned")
     ? []
-    : await listAssignedTo(me, userId, nestName).catch((err) => {
+    : await listAssignedTo(me, userId, nestName, { includeDone: !!params.includeDoneTasks }).catch((err) => {
         console.error("[me/work] assigned list failed", err);
         return [];
       });

@@ -42,6 +42,18 @@ export function nextReviewNodeId(
   return queue[i + 1]?.nodeId ?? queue[i - 1]?.nodeId ?? null;
 }
 
+/** Skip: the item after this one, wrapping to the top, so a reviewer can go
+ *  through the whole queue and come back to what they passed over. Nothing to
+ *  skip to when this is the only item (or it is not in the queue). */
+export function skipReviewNodeId(
+  queue: ReadonlyArray<{ nodeId: string }>,
+  currentNodeId: string,
+): string | null {
+  const i = queue.findIndex((r) => r.nodeId === currentNodeId);
+  if (i === -1 || queue.length < 2) return null;
+  return queue[(i + 1) % queue.length]!.nodeId;
+}
+
 /** The changes in the order the queue shows them, so "next" is the row the
  *  reviewer sees below. The feed views list newest first (same tie-break as
  *  the server's feed merge); the Changes chip keeps the server's order. */

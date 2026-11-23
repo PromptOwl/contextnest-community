@@ -1,5 +1,5 @@
 /**
- * Stewards tab — who governs what. Owns its read (reads.stewards) and its
+ * Stewards — who governs what. Sits under Collaborators on the nest page. Owns its read (reads.stewards) and its
  * loader; every /stewards write already drops that key (queries.ts), so the
  * roster refreshes itself after the assign / edit / remove dialogs NestView
  * still hosts (assign is also reachable from the nest's overflow menu).

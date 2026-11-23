@@ -17,6 +17,7 @@ export function MyWorkReviewPane({
   nodeId,
   currentUser,
   onDecided,
+  onSkip,
   onOpenDocument,
   onClose,
 }: {
@@ -25,6 +26,8 @@ export function MyWorkReviewPane({
   currentUser?: string;
   /** After an approve or send-back, so the list can move on. */
   onDecided: () => void;
+  /** Open the next review without deciding this one. Omit when there is none. */
+  onSkip?: () => void;
   onOpenDocument: (nodeId: string) => void;
   onClose: () => void;
 }) {
@@ -86,6 +89,7 @@ export function MyWorkReviewPane({
         toast.success("Rejected");
         onDecided();
       }}
+      onSkip={onSkip}
       onEditDraft={() => onOpenDocument(nodeId)}
       onOpenDocument={onOpenDocument}
       onClose={onClose}

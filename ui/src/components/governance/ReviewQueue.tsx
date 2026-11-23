@@ -229,6 +229,22 @@ export function ReviewQueue({
         </CardHeader>
       )}
       <CardContent>
+        {/* The two numbers a reviewer scans first: everything waiting in the
+            nest, and the part of it that is theirs to decide. */}
+        <div className="mb-3 grid grid-cols-2 gap-2" data-testid="review-queue-counts">
+          <div className="rounded-lg border px-3 py-2">
+            <p className="text-xs text-muted-foreground">Pending approvals</p>
+            <p className="text-2xl font-semibold text-amber-600" data-testid="review-queue-pending-count">
+              {requests.length}
+            </p>
+          </div>
+          <div className="rounded-lg border px-3 py-2">
+            <p className="text-xs text-muted-foreground">Your review queue</p>
+            <p className="text-2xl font-semibold text-blue-600" data-testid="review-queue-mine-count">
+              {requests.filter((r) => r.canReview !== false).length}
+            </p>
+          </div>
+        </div>
         {rows.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-center">
             <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />

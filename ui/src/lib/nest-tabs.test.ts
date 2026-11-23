@@ -32,6 +32,15 @@ describe("NestView tab slugs", () => {
     expect(nestTabFromParam("nope")).toBeUndefined();
     expect(nestTabFromParam(null)).toBeUndefined();
   });
+
+  it("folds Overview into Documents and Stewards into Collaborators, keeping the old links", () => {
+    expect(NEST_TABS).not.toContain("overview");
+    expect(NEST_TABS).not.toContain("stewards");
+    expect(nestTabFromParam("overview")).toBe("documents");
+    expect(nestTabFromParam("stewards")).toBe("collaborators");
+    expect(nestTabFromParam("documents")).toBe("documents");
+    expect(nestTabFromParam("collaborators")).toBe("collaborators");
+  });
 });
 
 // po-1213: Documents is the nest's one home.
