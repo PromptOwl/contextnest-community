@@ -20,7 +20,7 @@ import { ORG_ID } from "../flags.js";
 import { getInstall, homeTenant, installRef, type InstallRow } from "./install-store.js";
 import { safeMembers } from "./members.js";
 import { effectiveReaders } from "./readers.js";
-import { getProfile, resolveIdentity } from "./identity-service.js";
+import { evaluateAutoMatch, getProfile, resolveIdentity } from "./identity-service.js";
 import { runPauseHooks, runSurfaceOkLostHooks, type PauseReason } from "./pause-hooks.js";
 import { recordNotice } from "./notices.js";
 
@@ -391,23 +391,6 @@ async function previewPeople(nestId: string, ev: Evaluation) {
     ).map((u) => [u.id, u]),
   );
 
-  const absent_readers = [];
-  for (const id of absentIds) {
-    if (id.includes(":")) {
-      // team:<id>:<email> / email:<email> — a reader with no account here.
-      const email = id.split(":").pop()!;
-      if (email.includes("@")) absent_readers.push({ user_id: null, name: null, email, reason: "no_account" as const });
-      continue;
-    }
-    const u = users.get(id);
-    const known = await db.get(
-      `SELECT 1 AS hit FROM surface_identity_links WHERE install_id = ? AND community_user_id = ? AND status = 'active'
-       UNION SELECT 1 AS hit FROM surface_users_cache WHERE install_id = ? AND LOWER(email) = LOWER(?) AND deleted = 0`,
-      [install.id, id, install.id, u?.email ?? ""],
-    );
-    absent_readers.push({ user_id: id, name: u?.name ?? null, email: u?.email ?? null, reason: known ? ("not_in_channel" as const) : ("no_slack_link" as const) });
-  }
-
   const members_not_readers = [];
   for (const m of outsiders) {
     const u = m.community_user_id ? users.get(m.community_user_id) : undefined;
@@ -417,6 +400,34 @@ async function previewPeople(nestId: string, ev: Evaluation) {
     // admin can spot a mismatch. Only a confirmed one; preview only, never stored.
     const slack_email = !u && profile?.email_confirmed ? (profile.email ?? null) : null;
     members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email });
+  }
+  // po-1467: an unmatched member whose confirmed Slack email is a reader's is in
+  // the channel; the identity rules refused the link. Say why, not "not in channel".
+  const sameEmail = new Map(
+    members_not_readers.filter((m) => !m.community_user_id && m.slack_email).map((m) => [m.slack_email!.trim().toLowerCase(), m.surface_user_id]),
+  );
+
+  const absent_readers = [];
+  for (const id of absentIds) {
+    if (id.includes(":")) {
+      // team:<id>:<email> / email:<email> — a reader with no account here.
+      const email = id.split(":").pop()!;
+      if (email.includes("@")) absent_readers.push({ user_id: null, name: null, email, reason: "no_account" as const });
+      continue;
+    }
+    const u = users.get(id);
+    const member = u?.email ? sameEmail.get(u.email.trim().toLowerCase()) : undefined;
+    if (member) {
+      const v = await evaluateAutoMatch(install.id, member);
+      absent_readers.push({ user_id: id, name: u?.name ?? null, email: u?.email ?? null, reason: "not_linked" as const, match_reason: v.ok ? null : v.reason });
+      continue;
+    }
+    const known = await db.get(
+      `SELECT 1 AS hit FROM surface_identity_links WHERE install_id = ? AND community_user_id = ? AND status = 'active'
+       UNION SELECT 1 AS hit FROM surface_users_cache WHERE install_id = ? AND LOWER(email) = LOWER(?) AND deleted = 0`,
+      [install.id, id, install.id, u?.email ?? ""],
+    );
+    absent_readers.push({ user_id: id, name: u?.name ?? null, email: u?.email ?? null, reason: known ? ("not_in_channel" as const) : ("no_slack_link" as const) });
   }
   return { absent_readers, members_not_readers, universe_cause };
 }

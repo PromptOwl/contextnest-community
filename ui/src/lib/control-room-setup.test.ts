@@ -294,6 +294,27 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     expect(plain.groups).toHaveLength(1);
   });
 
+  it("po-1467: a same-email member whose link was refused shows once, with the reason, not as both absent and unmatched", () => {
+    const v = guardView(
+      refused({
+        absent_readers: [
+          { user_id: "u1", name: "Hiren", email: "hiren@promptowl.ai", reason: "not_linked", match_reason: "unverified" },
+          { user_id: "u2", name: null, email: "temp_a@gmail.com", reason: "no_slack_link" },
+        ],
+        members_not_readers: [
+          { surface_user_id: "SH", name: "Hiren F", community_user_id: null, email: null, slack_email: "Hiren@promptowl.ai" },
+          { surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null },
+        ],
+      }),
+      ctx,
+    );
+    expect(v.groups).toEqual([
+      { heading: "In #testnest with the same email, but not linked to their account:", people: ["Hiren: their email here is not verified"] },
+      { heading: "No Slack user in this workspace has the same email:", people: ["temp_a@gmail.com"] },
+      { heading: "In #testnest but not matched to an account here:", people: ["Quinn: Slack shares no confirmed email"] },
+    ]);
+  });
+
   it("AC 6: a public nest and a live public link name their cause", () => {
     expect(guardView(refused({ universe_cause: "public" }, { universe: true }), ctx).note).toBe(
       "PO - Engineering Ops is public, so anything saved from #testnest would be readable by anyone.",

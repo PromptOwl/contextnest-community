@@ -152,6 +152,17 @@ type Member = NonNullable<SurfacesBindingPreview["people"]>["members_not_readers
  * reader has no Slack match, the unmatched channel members are listed with the
  * email Slack has (po-1445), so a .com/.io mismatch shows at a glance.
  */
+/** po-1467: why the identity rules refused a same-email link, in plain words. */
+const MATCH_REASON: Record<string, string> = {
+  unverified: "their email here is not verified",
+  domain: "their email domain is not on this server's sign-in list",
+  ambiguous: "their account is already linked to another Slack user, or more than one account has this email",
+  email_unconfirmed: "Slack has not confirmed their email",
+  home_team: "their Slack user is from another workspace",
+  not_a_member: "their Slack user is a guest or deactivated",
+  blocked: "automatic matching is turned off for their Slack user",
+};
+
 function absentGroups(absent: AbsentReader[], members: Member[], ch: string): PeopleGroup[] {
   const groups: PeopleGroup[] = [];
   const add = (heading: string, people: string[]) => people.length && groups.push({ heading, people });
@@ -159,6 +170,14 @@ function absentGroups(absent: AbsentReader[], members: Member[], ch: string): Pe
     `Not in ${ch}. Add them in Slack, then check again:`,
     absent.filter((r) => r.reason === "not_in_channel").map((r) => r.name ?? r.email ?? "Someone"),
   );
+  const notLinked = absent.filter((r) => r.reason === "not_linked");
+  add(
+    `In ${ch} with the same email, but not linked to their account:`,
+    notLinked.map((r) => `${r.name ?? r.email ?? "Someone"}: ${MATCH_REASON[r.match_reason ?? ""] ?? "the link could not be made"}`),
+  );
+  // Those members are explained above; don't list them again as unmatched.
+  const linkedEmails = new Set(notLinked.map((r) => (r.email ?? "").toLowerCase()));
+  members = members.filter((m) => !m.slack_email || !linkedEmails.has(m.slack_email.toLowerCase()));
   const noLink = absent.filter((r) => r.reason === "no_slack_link");
   add(
     "No Slack user in this workspace has the same email:",
